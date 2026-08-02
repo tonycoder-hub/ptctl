@@ -39,7 +39,7 @@ type decodeLimits struct {
 	maxString int
 }
 
-var defaultDecodeLimits = decodeLimits{maxDepth: 64, maxNodes: 1_000_000, maxString: 16 << 20}
+var defaultDecodeLimits = decodeLimits{maxDepth: 64, maxNodes: 250_000, maxString: 16 << 20}
 
 type decoder struct {
 	data   []byte

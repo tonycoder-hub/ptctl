@@ -2,14 +2,14 @@
 
 `ptctl` is a conservative, content-first CLI for private BitTorrent trackers.
 It treats a tracker website, a downloader, and a filesystem as separate trust
-domains and reconciles them around verifiable torrent metadata.
+domains and is designed to reconcile them around verifiable torrent metadata.
 
-> Status: early preview. The implemented surface is intentionally read-only.
+> Status: `v0.1.0-alpha`. The implemented surface is intentionally read-only.
 > `seed plan` verifies and explains a layout but does not apply it.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、实际文件、
 下载器任务和站点记录这四本账为核心，先精确校验，再生成清晰、可审计的计划。
-TJU PT 是首个只读站点适配器，而不是写死在核心里的唯一站点。
+TJU PT 是首个实验性只读站点适配器，而不是写死在核心里的唯一站点。
 
 ## Why this shape?
 
@@ -30,7 +30,9 @@ capabilities at the edge, not assumptions in the core domain model.
 
 - strict, bounded bencode parsing;
 - exact v1 infohash calculation from the original `info` byte slice;
-- v1, v2, and hybrid metafile inspection;
+- exact whole-metafile SHA-256 variant identity, kept distinct from infohashes;
+- structurally validated v1 and v2 inspection, including v2 piece layers;
+- hybrid inspection that parses both layouts and rejects disagreements;
 - exact v1 piece verification across multi-file boundaries (hybrid verification
   is labeled v1-only and is not accepted for seed planning yet);
 - virtual zero handling for padding files;
@@ -38,16 +40,21 @@ capabilities at the edge, not assumptions in the core domain model.
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
 - read-only storage probing and explicit host-to-client path mapping;
-- a zero-write `seed plan` backed by exact piece verification;
-- TJUPT session check, account/bonus snapshot, torrent search, and bonus catalog
-  parsing through single-request, rate-limited, same-origin HTTPS reads;
-- qBittorrent status and torrent-list reads over HTTPS (or explicit loopback
+- a zero-write, `layout_only` seed plan bound to a verified source snapshot,
+  with explicit blockers and apply-time re-verification requirements;
+- typed, capability-checked site ports instead of a mandatory monolithic driver;
+- an experimental TJUPT session check, torrent search, and bonus catalog parser
+  through one bounded, same-origin HTTPS GET per invocation, with fail-closed
+  page recognition and no retry;
+- qBittorrent status and torrent-list reads over HTTPS (or explicit numeric-loopback
   HTTP), with passwords accepted only through stdin;
-- stable JSON envelopes (`ptctl.dev/v1`) and human-readable tables.
+- versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
+  human-readable tables.
 
-Not implemented yet: v2 Merkle verification, metafile download, journaled plan
-application, deletion, automatic cross-seeding, site writes, browser login,
-third-party executable plugins, ratio manipulation, or Cloudflare bypass.
+Not implemented yet: v2 Merkle content verification, metafile download,
+journaled plan application, deletion, automatic cross-seeding, site writes,
+browser login, third-party executable plugins, ratio manipulation, or
+Cloudflare bypass.
 
 ## Install
 
@@ -91,7 +98,7 @@ ptctl storage map \
   "D:\PT\Release"
 ```
 
-Generate a verified, zero-write materialization plan:
+Generate a source-verified, zero-write, layout-only materialization plan:
 
 ```bash
 ptctl seed plan \
@@ -103,7 +110,9 @@ ptctl seed plan \
 
 Read TJUPT without putting a cookie in shell history. The value supplied on
 stdin is the complete `Cookie` request-header value from a session you already
-control. Do not paste it into issues, logs, or chat.
+control. Interactive TTY secret input is refused: use a pipe. Do not paste the
+value into issues, logs, or chat. Search terms are positional arguments and may
+remain in shell history.
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
@@ -122,6 +131,11 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client status \
 
 Run `ptctl help` for the complete command surface.
 
+Exit code `0` means success, `1` an operational failure, `2` invalid usage,
+and `3` an integrity mismatch. `torrent verify` still prints the complete
+verification result before returning `3`, so automation can retain the
+evidence without mistaking damaged content for success.
+
 ## Security model in one paragraph
 
 A private `.torrent` is a secret-bearing artifact: its announce URL often
@@ -129,8 +143,9 @@ contains a personal passkey. Site cookies and downloader credentials are also
 secrets, while filesystem access can damage irreplaceable data. `ptctl` keeps
 credentials in memory, rejects secret arguments, emits no request bodies,
 blocks site redirects across origins or down to HTTP, performs no automatic
-retry, limits response sizes, defaults conflicts to failure, and has no delete
-or apply command in this preview. See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
+retry, limits response sizes, escapes terminal controls in human output,
+defaults conflicts to failure, and has no delete or apply command in this
+preview. See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Architecture
 
@@ -151,6 +166,10 @@ and cost must be established explicitly.
 The detailed design is in [ARCHITECTURE.md](docs/ARCHITECTURE.md), and the
 site-specific boundary is documented in
 [TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md).
+
+Metafile behavior is grounded in [BEP 3](https://www.bittorrent.org/beps/bep_0003.html),
+[BEP 47 padding files](https://www.bittorrent.org/beps/bep_0047.html), and
+[BEP 52 v2/hybrid torrents](https://www.bittorrent.org/beps/bep_0052.html).
 
 ## Project principles
 

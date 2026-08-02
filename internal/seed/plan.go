@@ -15,25 +15,29 @@ import (
 )
 
 type Operation struct {
-	Kind   string `json:"kind"`
-	Source string `json:"source,omitempty"`
-	Target string `json:"target"`
-	Bytes  int64  `json:"bytes"`
+	Kind               string                       `json:"kind"`
+	Source             string                       `json:"source,omitempty"`
+	SourcePrecondition *metafile.SourcePrecondition `json:"source_precondition,omitempty"`
+	Target             string                       `json:"target"`
+	Bytes              int64                        `json:"bytes"`
 }
 
 type Plan struct {
-	ID             string                      `json:"id"`
-	TorrentName    string                      `json:"torrent_name"`
-	InfoHashV1     string                      `json:"info_hash_v1"`
-	Evidence       string                      `json:"evidence"`
-	SourceRoot     string                      `json:"source_root"`
-	TargetRoot     string                      `json:"target_root"`
-	Strategy       string                      `json:"strategy"`
-	EstimatedRead  int64                       `json:"estimated_read_bytes"`
-	EstimatedWrite int64                       `json:"estimated_write_bytes"`
-	Operations     []Operation                 `json:"operations"`
-	Verification   metafile.VerificationResult `json:"verification"`
-	Warnings       []string                    `json:"warnings,omitempty"`
+	ID                string                      `json:"id"`
+	TorrentName       string                      `json:"torrent_name"`
+	InfoHashV1        string                      `json:"info_hash_v1"`
+	MetafileVariantID string                      `json:"metafile_variant_id"`
+	Evidence          string                      `json:"evidence"`
+	Readiness         string                      `json:"readiness"`
+	SourceRoot        string                      `json:"source_root"`
+	TargetRoot        string                      `json:"target_root"`
+	Strategy          string                      `json:"strategy"`
+	EstimatedRead     int64                       `json:"estimated_read_bytes"`
+	EstimatedWrite    int64                       `json:"estimated_write_bytes"`
+	Operations        []Operation                 `json:"operations"`
+	Verification      metafile.VerificationResult `json:"verification"`
+	Warnings          []string                    `json:"warnings,omitempty"`
+	Blockers          []string                    `json:"blockers"`
 }
 
 // BuildMaterializePlan is read-only. It performs exact piece verification and
@@ -46,7 +50,7 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 		strategy = "copy"
 	}
 	if strategy != "copy" {
-		return Plan{}, fmt.Errorf("v0.1 supports only the safe copy strategy; hardlink and symlink remain opt-in future capabilities")
+		return Plan{}, fmt.Errorf("the alpha supports only the safe copy strategy; hardlink and symlink remain opt-in future capabilities")
 	}
 	verification, err := metafile.VerifyV1(ctx, meta, sourceRoot)
 	if err != nil {
@@ -70,18 +74,27 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 	}
 
 	plan := Plan{
-		TorrentName:  meta.Name,
-		InfoHashV1:   meta.InfoHashV1,
-		Evidence:     "verified",
-		SourceRoot:   sourceRoot,
-		TargetRoot:   targetProbe.ResolvedPath,
-		Strategy:     strategy,
-		Verification: verification,
+		TorrentName:       meta.Name,
+		InfoHashV1:        meta.InfoHashV1,
+		MetafileVariantID: meta.MetafileVariantID,
+		Evidence:          "source_snapshot:v1_piece_verified",
+		Readiness:         "layout_only",
+		SourceRoot:        sourceRoot,
+		TargetRoot:        targetProbe.ResolvedPath,
+		Strategy:          strategy,
+		Verification:      verification,
 		Warnings: []string{
 			"plan only: no filesystem changes were made",
-			"apply is intentionally absent in v0.1; review paths and use a trusted copier or future journaled apply command",
+			"apply is intentionally absent in this alpha; review paths and use a trusted copier or future journaled apply command",
+		},
+		Blockers: []string{
+			"target filesystem semantics were inferred from the host OS, not measured for this storage root",
+			"no host-to-downloader path mapping or downloader job was reconciled",
+			"no site release identity was bound to the local metafile artifact",
+			"any future apply must repeat exact piece verification immediately before copying",
 		},
 	}
+	plan.Warnings = append(plan.Warnings, targetProbe.Warnings...)
 	for _, file := range meta.Files {
 		target, err := storage.PlannedJoin(targetProbe.ResolvedPath, targetComponents(meta, file), semantics)
 		if err != nil {
@@ -104,6 +117,11 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 				return Plan{}, err
 			}
 			operation.Source = source
+			precondition, err := verification.MatchSourceSnapshot(source)
+			if err != nil {
+				return Plan{}, err
+			}
+			operation.SourcePrecondition = &precondition
 			plan.EstimatedRead += file.Length
 		}
 		plan.EstimatedWrite += file.Length
@@ -164,11 +182,11 @@ func rejectSymlinkPrefix(root, target string) error {
 
 func planID(plan Plan) string {
 	lines := make([]string, 0, len(plan.Operations)+3)
-	lines = append(lines, plan.InfoHashV1, plan.SourceRoot, plan.TargetRoot)
+	lines = append(lines, plan.InfoHashV1, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceRoot, plan.TargetRoot, plan.Readiness)
 	for _, operation := range plan.Operations {
 		lines = append(lines, operation.Kind+"\x00"+operation.Source+"\x00"+operation.Target+"\x00"+fmt.Sprint(operation.Bytes))
 	}
-	sort.Strings(lines[3:])
+	sort.Strings(lines[6:])
 	digest := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return hex.EncodeToString(digest[:12])
 }

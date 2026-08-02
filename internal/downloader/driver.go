@@ -23,6 +23,8 @@ func NewCredential(username, password string) (Credential, error) {
 
 func (c Credential) UsernameValue() string { return c.username }
 func (c Credential) PasswordValue() string { return c.password }
+func (c Credential) String() string        { return "[REDACTED]" }
+func (c Credential) GoString() string      { return "downloader.Credential{[REDACTED]}" }
 
 type Status struct {
 	Driver        string    `json:"driver"`

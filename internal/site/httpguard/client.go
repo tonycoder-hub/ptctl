@@ -124,7 +124,11 @@ func (c *Client) Get(ctx context.Context, relativePath string, query url.Values)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("site read failed: %s", security.Redact(err.Error()))
+		message := err.Error()
+		if urlErr, ok := err.(*url.Error); ok {
+			message = urlErr.Err.Error()
+		}
+		return nil, nil, fmt.Errorf("site read failed: %s", security.Redact(message))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {

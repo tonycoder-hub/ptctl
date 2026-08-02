@@ -43,8 +43,13 @@ func TestBuildMaterializePlanIsVerifiedAndZeroWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.ID == "" || plan.Evidence != "verified" || len(plan.Operations) != 2 || !plan.Verification.Verified {
+	if plan.ID == "" || plan.Evidence != "source_snapshot:v1_piece_verified" || plan.Readiness != "layout_only" || len(plan.Operations) != 2 || !plan.Verification.Verified || len(plan.Blockers) == 0 {
 		t.Fatalf("unexpected plan: %#v", plan)
+	}
+	for _, operation := range plan.Operations {
+		if operation.SourcePrecondition == nil {
+			t.Fatalf("operation lacks source precondition: %#v", operation)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(target, "bundle")); !os.IsNotExist(err) {
 		t.Fatalf("plan wrote to target: %v", err)

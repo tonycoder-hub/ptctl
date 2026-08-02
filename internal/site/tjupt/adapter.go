@@ -29,12 +29,13 @@ func New(baseURL string) *Adapter {
 
 func (a *Adapter) Descriptor() domain.SiteDescriptor {
 	return domain.SiteDescriptor{
-		ID:      "tjupt",
-		Name:    "TJUPT / 北洋园PT",
-		BaseURL: a.baseURL,
+		ID:          "tjupt",
+		Name:        "TJUPT / 北洋园PT",
+		BaseURL:     a.baseURL,
+		Stability:   "experimental",
+		AuthMethods: []domain.AuthMethod{domain.AuthMethodCookieHeader},
 		Capabilities: []domain.Capability{
 			domain.CapabilityAuthCheck,
-			domain.CapabilityAccountRead,
 			domain.CapabilitySearch,
 			domain.CapabilityBonusRead,
 		},
@@ -46,28 +47,8 @@ func (a *Adapter) CheckSession(ctx context.Context, credential site.Credential) 
 	if err != nil {
 		return domain.SessionStatus{}, err
 	}
-	status := domain.SessionStatus{ObservedAt: time.Now().UTC()}
-	status.Authenticated = !isLoginPage(finalURL, body)
-	if status.Authenticated {
-		status.Username = parseUsername(body)
-	}
-	return status, nil
-}
-
-func (a *Adapter) Account(ctx context.Context, credential site.Credential) (domain.AccountSnapshot, error) {
-	body, finalURL, err := a.get(ctx, credential, "mybonusapps.php", nil)
-	if err != nil {
-		return domain.AccountSnapshot{}, err
-	}
-	if isLoginPage(finalURL, body) {
-		return domain.AccountSnapshot{}, fmt.Errorf("TJUPT session is not authenticated")
-	}
-	return domain.AccountSnapshot{
-		SiteID:     "tjupt",
-		Username:   parseUsername(body),
-		Bonus:      parseBonusBalance(body),
-		ObservedAt: time.Now().UTC(),
-	}, nil
+	state, username := classifyBonusPage(finalURL, body)
+	return domain.SessionStatus{State: state, Username: username, ObservedAt: time.Now().UTC()}, nil
 }
 
 func (a *Adapter) Search(ctx context.Context, credential site.Credential, query string) ([]domain.TorrentSummary, error) {
@@ -79,8 +60,11 @@ func (a *Adapter) Search(ctx context.Context, credential site.Credential, query 
 	if err != nil {
 		return nil, err
 	}
-	if isLoginPage(finalURL, body) {
+	switch classifySearchPage(finalURL, body) {
+	case domain.AuthenticationUnauthenticated:
 		return nil, fmt.Errorf("TJUPT session is not authenticated")
+	case domain.AuthenticationIndeterminate:
+		return nil, fmt.Errorf("TJUPT returned an unrecognized search page; refusing to treat it as an empty result")
 	}
 	return parseSearch(body), nil
 }
@@ -90,19 +74,30 @@ func (a *Adapter) BonusCatalog(ctx context.Context, credential site.Credential) 
 	if err != nil {
 		return domain.BonusCatalog{}, err
 	}
-	if isLoginPage(finalURL, body) {
+	state, _ := classifyBonusPage(finalURL, body)
+	if state == domain.AuthenticationUnauthenticated {
 		return domain.BonusCatalog{}, fmt.Errorf("TJUPT session is not authenticated")
+	}
+	if state != domain.AuthenticationAuthenticated {
+		return domain.BonusCatalog{}, fmt.Errorf("TJUPT returned an unrecognized bonus page; parser is fail-closed")
+	}
+	rows := parseBonusRows(body)
+	if len(rows) == 0 {
+		return domain.BonusCatalog{}, fmt.Errorf("TJUPT bonus page structure was not recognized; refusing an empty catalog")
 	}
 	return domain.BonusCatalog{
 		SiteID:     "tjupt",
 		Balance:    parseBonusBalance(body),
-		Rows:       parseBonusRows(body),
+		Rows:       rows,
 		ObservedAt: time.Now().UTC(),
 	}, nil
 }
 
 func (a *Adapter) get(ctx context.Context, credential site.Credential, path string, query url.Values) ([]byte, *url.URL, error) {
-	client, err := httpguard.New(a.baseURL, credential.CookieValue(), 2*time.Second)
+	if credential.Method() != domain.AuthMethodCookieHeader {
+		return nil, nil, fmt.Errorf("TJUPT requires cookie_header authentication")
+	}
+	client, err := httpguard.New(a.baseURL, credential.SecretValue(), 2*time.Second)
 	if err != nil {
 		return nil, nil, err
 	}

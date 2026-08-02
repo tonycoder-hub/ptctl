@@ -3,8 +3,10 @@ package storage
 import (
 	"encoding/base64"
 	"fmt"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -19,7 +21,7 @@ type PathSemantics struct {
 func CurrentSemantics() PathSemantics {
 	switch runtime.GOOS {
 	case "windows":
-		return PathSemantics{Windows: true, CaseSensitive: false, UnicodeNormalization: true}
+		return PathSemantics{Windows: true, CaseSensitive: false}
 	case "darwin":
 		return PathSemantics{CaseSensitive: false, UnicodeNormalization: true}
 	default:
@@ -38,6 +40,11 @@ func ValidateComponents(components [][]byte, semantics PathSemantics) error {
 		if strings.IndexByte(string(raw), 0) >= 0 || strings.ContainsAny(string(raw), "/\\") {
 			return fmt.Errorf("path component %d contains a separator or NUL", index)
 		}
+		for _, ch := range raw {
+			if ch < 0x20 || ch == 0x7f {
+				return fmt.Errorf("path component %d contains a control character", index)
+			}
+		}
 		if string(raw) == "." || string(raw) == ".." {
 			return fmt.Errorf("path component %d is %q", index, raw)
 		}
@@ -46,8 +53,8 @@ func ValidateComponents(components [][]byte, semantics PathSemantics) error {
 				return fmt.Errorf("Windows path component %d is not valid UTF-8 (raw base64 %s)", index, base64.StdEncoding.EncodeToString(raw))
 			}
 			component := string(raw)
-			if strings.Contains(component, ":") || strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") {
-				return fmt.Errorf("Windows path component %d has a forbidden colon or trailing dot/space", index)
+			if strings.ContainsAny(component, `<>:"|?*`) || strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") {
+				return fmt.Errorf("Windows path component %d has a forbidden character or trailing dot/space", index)
 			}
 			if windowsReserved(component) {
 				return fmt.Errorf("Windows path component %d uses a reserved device name", index)
@@ -66,6 +73,11 @@ func ValidateComponents(components [][]byte, semantics PathSemantics) error {
 
 func ValidateManifestPaths(paths [][][]byte, semantics PathSemantics) error {
 	seen := make(map[string]int, len(paths))
+	type indexedKey struct {
+		key   string
+		index int
+	}
+	keys := make([]indexedKey, 0, len(paths))
 	for index, components := range paths {
 		if err := ValidateComponents(components, semantics); err != nil {
 			return fmt.Errorf("file %d: %w", index, err)
@@ -82,6 +94,13 @@ func ValidateManifestPaths(paths [][][]byte, semantics PathSemantics) error {
 			return fmt.Errorf("files %d and %d collide under target path semantics", previous, index)
 		}
 		seen[key] = index
+		keys = append(keys, indexedKey{key: key, index: index})
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].key < keys[j].key })
+	for i := 1; i < len(keys); i++ {
+		if strings.HasPrefix(keys[i].key, keys[i-1].key+"\x00") {
+			return fmt.Errorf("files %d and %d collide because one path is a prefix of the other", keys[i-1].index, keys[i].index)
+		}
 	}
 	return nil
 }
@@ -150,6 +169,10 @@ type PathMapping struct {
 }
 
 func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) (PathMapping, error) {
+	cleanClientRoot, err := validateClientRoot(clientRoot, clientWindows)
+	if err != nil {
+		return PathMapping{}, err
+	}
 	root, err := filepath.Abs(hostRoot)
 	if err != nil {
 		return PathMapping{}, fmt.Errorf("resolve host root: %w", err)
@@ -165,16 +188,75 @@ func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) 
 	if rel == "." {
 		rel = ""
 	}
-	var clientPath string
-	if clientWindows {
-		clientPath = windowsJoin(clientRoot, strings.Split(filepath.ToSlash(rel), "/")...)
-	} else {
-		clientPath = strings.TrimRight(strings.ReplaceAll(clientRoot, "\\", "/"), "/")
-		if rel != "" {
-			clientPath += "/" + strings.TrimLeft(filepath.ToSlash(rel), "/")
+	relParts := []string{}
+	if rel != "" {
+		relParts = strings.Split(filepath.ToSlash(rel), "/")
+		rawParts := make([][]byte, len(relParts))
+		for i, part := range relParts {
+			rawParts[i] = []byte(part)
+		}
+		if err := ValidateComponents(rawParts, PathSemantics{Windows: clientWindows, CaseSensitive: !clientWindows}); err != nil {
+			return PathMapping{}, fmt.Errorf("host-relative path cannot be represented by the client: %w", err)
 		}
 	}
-	return PathMapping{HostRoot: root, ClientRoot: clientRoot, HostPath: path, ClientPath: clientPath}, nil
+	var clientPath string
+	if clientWindows {
+		clientPath = windowsJoin(cleanClientRoot, relParts...)
+	} else {
+		clientPath = cleanClientRoot
+		if len(relParts) > 0 {
+			clientPath = pathpkg.Join(append([]string{cleanClientRoot}, relParts...)...)
+		}
+	}
+	return PathMapping{HostRoot: root, ClientRoot: cleanClientRoot, HostPath: path, ClientPath: clientPath}, nil
+}
+
+func validateClientRoot(root string, windows bool) (string, error) {
+	if root == "" || strings.IndexByte(root, 0) >= 0 {
+		return "", fmt.Errorf("client root is empty or contains NUL")
+	}
+	if !windows {
+		if strings.Contains(root, "\\") {
+			return "", fmt.Errorf("POSIX client root must not contain backslashes")
+		}
+		clean := pathpkg.Clean(root)
+		if !strings.HasPrefix(clean, "/") || clean != root {
+			return "", fmt.Errorf("POSIX client root must be a clean absolute path")
+		}
+		return clean, nil
+	}
+	normalized := strings.ReplaceAll(root, "/", "\\")
+	isDriveAbsolute := len(normalized) >= 3 && ((normalized[0] >= 'A' && normalized[0] <= 'Z') || (normalized[0] >= 'a' && normalized[0] <= 'z')) && normalized[1] == ':' && normalized[2] == '\\'
+	isUNC := strings.HasPrefix(normalized, "\\\\")
+	if !isDriveAbsolute && !isUNC {
+		return "", fmt.Errorf("Windows client root must be drive-absolute or UNC")
+	}
+	if isDriveAbsolute && len(normalized) == 3 {
+		return normalized, nil
+	}
+	clean := strings.TrimSuffix(normalized, "\\")
+	var parts []string
+	if isUNC {
+		parts = strings.Split(strings.TrimPrefix(clean, "\\\\"), "\\")
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return "", fmt.Errorf("UNC client root requires non-empty server and share components")
+		}
+	} else {
+		parts = strings.Split(strings.TrimPrefix(clean[3:], "\\"), "\\")
+	}
+	rawParts := make([][]byte, len(parts))
+	for i, part := range parts {
+		if part == "" {
+			return "", fmt.Errorf("Windows client root contains an empty path component")
+		}
+		rawParts[i] = []byte(part)
+	}
+	if len(rawParts) > 0 {
+		if err := ValidateComponents(rawParts, PathSemantics{Windows: true, CaseSensitive: false}); err != nil {
+			return "", fmt.Errorf("invalid Windows client root: %w", err)
+		}
+	}
+	return clean, nil
 }
 
 func windowsReserved(component string) bool {
@@ -187,19 +269,28 @@ func windowsReserved(component string) bool {
 	case "CON", "PRN", "AUX", "NUL", "CLOCK$":
 		return true
 	}
-	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {
-		return true
+	if strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT") {
+		suffix := []rune(base[3:])
+		if len(suffix) == 1 && ((suffix[0] >= '1' && suffix[0] <= '9') || suffix[0] == '¹' || suffix[0] == '²' || suffix[0] == '³') {
+			return true
+		}
 	}
 	return false
 }
 
 func windowsJoin(root string, components ...string) string {
-	result := strings.TrimRight(strings.ReplaceAll(root, "/", "\\"), "\\")
+	result := strings.ReplaceAll(root, "/", "\\")
+	if !(len(result) == 3 && result[1] == ':' && result[2] == '\\') {
+		result = strings.TrimRight(result, "\\")
+	}
 	for _, component := range components {
 		if component == "" || component == "." {
 			continue
 		}
-		result += "\\" + strings.ReplaceAll(component, "/", "\\")
+		if !strings.HasSuffix(result, "\\") {
+			result += "\\"
+		}
+		result += strings.ReplaceAll(component, "/", "\\")
 	}
 	return result
 }

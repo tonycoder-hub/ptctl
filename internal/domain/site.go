@@ -6,6 +6,12 @@ import "time"
 // never be emulated by guessing a site's HTML.
 type Capability string
 
+type AuthMethod string
+
+const (
+	AuthMethodCookieHeader AuthMethod = "cookie_header"
+)
+
 const (
 	CapabilityAuthCheck   Capability = "auth.check"
 	CapabilityAccountRead Capability = "account.read"
@@ -19,13 +25,41 @@ type SiteDescriptor struct {
 	ID           string       `json:"id"`
 	Name         string       `json:"name"`
 	BaseURL      string       `json:"base_url"`
+	Stability    string       `json:"stability"`
+	AuthMethods  []AuthMethod `json:"auth_methods"`
 	Capabilities []Capability `json:"capabilities"`
 }
 
+func (d SiteDescriptor) Supports(capability Capability) bool {
+	for _, candidate := range d.Capabilities {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func (d SiteDescriptor) SupportsAuth(method AuthMethod) bool {
+	for _, candidate := range d.AuthMethods {
+		if candidate == method {
+			return true
+		}
+	}
+	return false
+}
+
+type AuthenticationState string
+
+const (
+	AuthenticationAuthenticated   AuthenticationState = "authenticated"
+	AuthenticationUnauthenticated AuthenticationState = "unauthenticated"
+	AuthenticationIndeterminate   AuthenticationState = "indeterminate"
+)
+
 type SessionStatus struct {
-	Authenticated bool      `json:"authenticated"`
-	Username      string    `json:"username,omitempty"`
-	ObservedAt    time.Time `json:"observed_at"`
+	State      AuthenticationState `json:"state"`
+	Username   string              `json:"username,omitempty"`
+	ObservedAt time.Time           `json:"observed_at"`
 }
 
 type AccountSnapshot struct {

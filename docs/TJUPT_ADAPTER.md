@@ -1,15 +1,18 @@
 # TJUPT adapter
 
-TJUPT is the first site implementation, not a special case embedded in the
-content core. The adapter currently declares four read capabilities:
+TJUPT is the first experimental site implementation, not a special case
+embedded in the content core. It has not had a credentialed live smoke test in
+this repository. The adapter currently declares three read capabilities:
 
 - session check;
-- account/bonus snapshot;
 - torrent search;
 - bonus catalog inspection.
 
 Each command performs one bounded GET, uses the configured TJUPT HTTPS origin,
-does not retry, refuses cross-origin redirects, and never submits a form.
+does not retry, refuses cross-origin redirects, and never submits a form. Page
+recognition is fail-closed: a login page is unauthenticated, a positively
+recognized bonus/search page is accepted, and maintenance, challenge, or
+unknown HTML is indeterminate/an error rather than a successful empty result.
 
 ## Why the bonus catalog remains site-defined
 
@@ -38,13 +41,15 @@ stdin for one process:
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
 ```
 
-The value is held in memory and not persisted. A future credential provider
+The value is held in memory and not persisted. Direct interactive terminal
+input is refused to avoid echoing secrets; callers must use a pipe. A future credential provider
 must use an OS keyring or an audited pipe-based helper; plaintext fallback will
 not be automatic.
 
 ## Fixtures
 
-Parser tests use synthetic HTML with fictitious users and values. Captured
+Parser tests use synthetic HTML with fictitious users and values, including
+challenge, maintenance, empty-search, and title-with-size cases. Captured
 TJUPT HTML is deliberately absent because it can contain account information,
 CSRF tokens, or identifiers. Any future fixture must be generated or reviewed
 for secret canaries before commit.
@@ -55,4 +60,3 @@ The natural next adapter methods are torrent details and a clearly labeled
 metafile fetch. A metafile GET is potentially effectful: trackers may record a
 download, and the result contains a passkey. It will require atomic private
 storage and an explicit user acknowledgement before being exposed.
-

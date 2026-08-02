@@ -38,9 +38,10 @@ for an explicit loopback address.
 
 ### Retry storms and account bans
 
-The TJUPT adapter performs one bounded GET per command, waits conservatively
-inside a process, and never retries. HTTP 429 is returned as a terminal error.
-There is no Cloudflare or CAPTCHA bypass.
+The TJUPT adapter performs one bounded GET per command and never retries. HTTP
+429 is returned as a terminal error. There is no cross-process limiter in the
+alpha, so callers must not loop or parallelize site commands. There is no
+Cloudflare or CAPTCHA bypass.
 
 ### Parser exhaustion
 
@@ -49,10 +50,13 @@ qBittorrent responses have explicit limits. Torrent piece length is capped.
 
 ### Filesystem escape and corruption
 
-Torrent components are validated before joining. Existing paths are resolved
+Torrent components are validated before joining, including file/directory
+prefix collisions. Existing paths are resolved
 under an explicit root; case-colliding paths are rejected under insensitive
 semantics. Hashing records size and mtime before reading and rejects unstable
 files afterward. The preview has no apply, overwrite, move, or delete command.
+A plan records source metadata preconditions but still requires exact
+apply-time re-verification.
 
 ### Supply chain
 
@@ -62,7 +66,7 @@ construct synthetic metafiles; real tracker artifacts are forbidden.
 
 ## Known gaps before mutation support
 
-- v2 Merkle verification and hybrid dual-verification;
+- v2 Merkle content verification;
 - durable OS-keyring or audited credential-helper integration;
 - reparse-point-safe Windows mutation using handle-relative APIs;
 - journaled copy/reflink workflows with crash injection;
@@ -72,4 +76,3 @@ construct synthetic metafiles; real tracker artifacts are forbidden.
 
 No filesystem or tracker mutation should be added until the relevant gap has a
 testable control and failure-recovery story.
-

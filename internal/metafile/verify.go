@@ -3,6 +3,8 @@ package metafile
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -19,10 +21,18 @@ type VerificationResult struct {
 	Verified         bool   `json:"verified"`
 	BytesVerified    int64  `json:"bytes_verified"`
 	FilesChecked     int    `json:"files_checked"`
+	PaddingBytes     int64  `json:"virtual_padding_bytes,omitempty"`
+	SourceSnapshotID string `json:"source_snapshot_id,omitempty"`
 	PiecesExpected   int    `json:"pieces_expected"`
 	PiecesMatched    int    `json:"pieces_matched"`
 	MismatchPieces   []int  `json:"mismatch_pieces,omitempty"`
 	MismatchOverflow int    `json:"mismatch_overflow,omitempty"`
+	snapshots        []snapshotRecord
+}
+
+type SourcePrecondition struct {
+	SizeBytes  int64     `json:"size_bytes"`
+	ModifiedAt time.Time `json:"modified_at"`
 }
 
 type fileSpec struct {
@@ -31,13 +41,19 @@ type fileSpec struct {
 	padding    bool
 	sizeBefore int64
 	modBefore  time.Time
+	infoBefore os.FileInfo
+}
+
+type snapshotRecord struct {
+	path string
+	info os.FileInfo
 }
 
 // VerifyV1 verifies the exact v1 piece stream. Pieces are hashed across file
 // boundaries; a per-file checksum is not a valid BitTorrent verification.
 func VerifyV1(ctx context.Context, meta *MetaInfo, contentPath string) (VerificationResult, error) {
 	result := VerificationResult{Version: meta.Version, Evidence: "v1-sha1-pieces", PiecesExpected: len(meta.pieceHashes)}
-	if len(meta.pieceHashes) == 0 {
+	if meta.InfoHashV1 == "" {
 		return result, fmt.Errorf("v1 verification is unavailable for a pure v2 torrent")
 	}
 	if meta.PieceLength <= 0 || meta.PieceLength > 64<<20 {
@@ -47,7 +63,13 @@ func VerifyV1(ctx context.Context, meta *MetaInfo, contentPath string) (Verifica
 	if err != nil {
 		return result, err
 	}
-	result.FilesChecked = len(specs)
+	for _, spec := range specs {
+		if spec.padding {
+			result.PaddingBytes += spec.length
+		} else {
+			result.FilesChecked++
+		}
+	}
 	reader := &sequenceReader{specs: specs}
 	defer reader.Close()
 	buffer := make([]byte, int(meta.PieceLength))
@@ -89,8 +111,41 @@ func VerifyV1(ctx context.Context, meta *MetaInfo, contentPath string) (Verifica
 	if err := ensureStable(specs); err != nil {
 		return result, err
 	}
+	result.SourceSnapshotID = sourceSnapshotID(specs)
+	for _, spec := range specs {
+		if !spec.padding {
+			result.snapshots = append(result.snapshots, snapshotRecord{path: spec.path, info: spec.infoBefore})
+		}
+	}
 	result.Verified = result.PiecesMatched == result.PiecesExpected
 	return result, nil
+}
+
+// MatchSourceSnapshot ensures a planned source is the same file object and
+// metadata snapshot that was observed during piece verification.
+func (r VerificationResult) MatchSourceSnapshot(path string) (SourcePrecondition, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return SourcePrecondition{}, fmt.Errorf("re-stat planned source %q: %w", path, err)
+	}
+	for _, snapshot := range r.snapshots {
+		if !sameSnapshotPath(snapshot.path, path) {
+			continue
+		}
+		if os.SameFile(snapshot.info, info) && snapshot.info.Size() == info.Size() && snapshot.info.ModTime().Equal(info.ModTime()) {
+			return SourcePrecondition{SizeBytes: info.Size(), ModifiedAt: info.ModTime().UTC()}, nil
+		}
+	}
+	return SourcePrecondition{}, fmt.Errorf("planned source %q no longer matches the verified file snapshot", path)
+}
+
+func sameSnapshotPath(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if storage.CurrentSemantics().CaseSensitive {
+		return a == b
+	}
+	return strings.EqualFold(a, b)
 }
 
 func resolveFiles(meta *MetaInfo, contentPath string) ([]fileSpec, error) {
@@ -116,6 +171,10 @@ func resolveFiles(meta *MetaInfo, contentPath string) ([]fileSpec, error) {
 			}
 		} else if info.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("single-file content path is a symlink")
+		}
+		path, err = filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve content path: %w", err)
 		}
 		return preflight([]fileSpec{{path: path, length: meta.Files[0].Length, padding: strings.Contains(meta.Files[0].Attribute, "p")}})
 	}
@@ -160,6 +219,7 @@ func preflight(specs []fileSpec) ([]fileSpec, error) {
 		}
 		specs[i].sizeBefore = info.Size()
 		specs[i].modBefore = info.ModTime()
+		specs[i].infoBefore = info
 	}
 	return specs, nil
 }
@@ -173,11 +233,22 @@ func ensureStable(specs []fileSpec) error {
 		if err != nil {
 			return fmt.Errorf("re-stat content file %q: %w", spec.path, err)
 		}
-		if info.Size() != spec.sizeBefore || !info.ModTime().Equal(spec.modBefore) {
+		if !os.SameFile(spec.infoBefore, info) || info.Size() != spec.sizeBefore || !info.ModTime().Equal(spec.modBefore) {
 			return fmt.Errorf("content file changed while hashing: %q", spec.path)
 		}
 	}
 	return nil
+}
+
+func sourceSnapshotID(specs []fileSpec) string {
+	digest := sha256.New()
+	for _, spec := range specs {
+		if spec.padding {
+			continue
+		}
+		fmt.Fprintf(digest, "%s\x00%d\x00%d\n", filepath.Clean(spec.path), spec.sizeBefore, spec.modBefore.UnixNano())
+	}
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
 type sequenceReader struct {

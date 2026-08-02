@@ -1,6 +1,7 @@
 package metafile
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
@@ -12,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
 type File struct {
@@ -21,23 +24,27 @@ type File struct {
 	Attribute     string   `json:"attribute,omitempty"`
 	PiecesRoot    string   `json:"pieces_root,omitempty"`
 	RawPath       [][]byte `json:"-"`
+	piecesRootRaw []byte
 }
 
 type MetaInfo struct {
-	Name          string   `json:"name"`
-	NameRawBase64 string   `json:"name_raw_base64"`
-	Version       string   `json:"version"`
-	InfoHashV1    string   `json:"info_hash_v1,omitempty"`
-	InfoHashV2    string   `json:"info_hash_v2,omitempty"`
-	Private       bool     `json:"private"`
-	MultiFile     bool     `json:"multi_file"`
-	PieceLength   int64    `json:"piece_length"`
-	PieceCount    int      `json:"piece_count"`
-	TotalLength   int64    `json:"total_length"`
-	Trackers      []string `json:"tracker_origins"`
-	Files         []File   `json:"files"`
-	NameRaw       []byte   `json:"-"`
-	pieceHashes   [][20]byte
+	Name              string   `json:"name"`
+	NameRawBase64     string   `json:"name_raw_base64"`
+	Version           string   `json:"version"`
+	Validation        string   `json:"validation"`
+	MetafileVariantID string   `json:"metafile_variant_id"`
+	MetafileBytes     int64    `json:"metafile_bytes"`
+	InfoHashV1        string   `json:"info_hash_v1,omitempty"`
+	InfoHashV2        string   `json:"info_hash_v2,omitempty"`
+	Private           bool     `json:"private"`
+	MultiFile         bool     `json:"multi_file"`
+	PieceLength       int64    `json:"piece_length"`
+	V1PieceCount      int      `json:"v1_piece_count,omitempty"`
+	TotalLength       int64    `json:"total_length"`
+	Trackers          []string `json:"tracker_origins"`
+	Files             []File   `json:"files"`
+	NameRaw           []byte   `json:"-"`
+	pieceHashes       [][20]byte
 }
 
 func Read(path string) (*MetaInfo, error) {
@@ -68,10 +75,17 @@ func Parse(data []byte) (*MetaInfo, error) {
 	if !ok || info.Kind != KindDictionary {
 		return nil, fmt.Errorf("metafile has no info dictionary")
 	}
-	meta := &MetaInfo{}
+	variantDigest := sha256.Sum256(data)
+	meta := &MetaInfo{
+		MetafileVariantID: "sha256:" + hex.EncodeToString(variantDigest[:]),
+		MetafileBytes:     int64(len(data)),
+	}
 	nameNode, ok := preferredBytes(info, "name.utf-8", "name")
 	if !ok || len(nameNode.Bytes) == 0 {
 		return nil, fmt.Errorf("info dictionary has no name")
+	}
+	if err := validateAlternateBytes(info, "name.utf-8", "name"); err != nil {
+		return nil, err
 	}
 	meta.NameRaw = append([]byte(nil), nameNode.Bytes...)
 	meta.Name = displayBytes(meta.NameRaw)
@@ -87,6 +101,9 @@ func Parse(data []byte) (*MetaInfo, error) {
 		return nil, fmt.Errorf("info dictionary has no piece length")
 	}
 	if private, ok := integer(info, "private"); ok {
+		if private != 0 && private != 1 {
+			return nil, fmt.Errorf("private flag must be 0 or 1")
+		}
 		meta.Private = private == 1
 	}
 
@@ -95,6 +112,9 @@ func Parse(data []byte) (*MetaInfo, error) {
 	hasV2 := hasMetaVersion && metaVersion == 2
 	if hasMetaVersion && metaVersion != 2 {
 		return nil, fmt.Errorf("unsupported meta version %d", metaVersion)
+	}
+	if hasV2 && (meta.PieceLength < 16<<10 || meta.PieceLength&(meta.PieceLength-1) != 0) {
+		return nil, fmt.Errorf("v2 piece length must be a power of two and at least 16 KiB")
 	}
 	if hasV1 {
 		if len(pieces)%sha1.Size != 0 {
@@ -122,23 +142,50 @@ func Parse(data []byte) (*MetaInfo, error) {
 		return nil, fmt.Errorf("info dictionary has neither v1 pieces nor meta version 2")
 	}
 
-	if hasV1 {
+	if hasV1 && hasV2 {
 		if err := parseV1Files(meta, info); err != nil {
 			return nil, err
 		}
+		v2Layout := &MetaInfo{Name: meta.Name, NameRaw: meta.NameRaw, NameRawBase64: meta.NameRawBase64, PieceLength: meta.PieceLength}
+		if err := parseV2Files(v2Layout, info); err != nil {
+			return nil, fmt.Errorf("invalid hybrid v2 layout: %w", err)
+		}
+		if err := reconcileHybridLayouts(meta, v2Layout); err != nil {
+			return nil, err
+		}
+		if err := validateV2PieceLayers(root, v2Layout.Files, meta.PieceLength); err != nil {
+			return nil, err
+		}
+		meta.Validation = "hybrid_layout_consistent"
+	} else if hasV1 {
+		if err := parseV1Files(meta, info); err != nil {
+			return nil, err
+		}
+		meta.Validation = "v1_manifest_structural"
 	} else {
 		if err := parseV2Files(meta, info); err != nil {
 			return nil, err
 		}
+		if err := validateV2PieceLayers(root, meta.Files, meta.PieceLength); err != nil {
+			return nil, err
+		}
+		meta.Validation = "v2_manifest_structural"
 	}
-	meta.PieceCount = len(meta.pieceHashes)
+	manifestPaths := make([][][]byte, len(meta.Files))
+	for i := range meta.Files {
+		manifestPaths[i] = meta.Files[i].RawPath
+	}
+	if err := storage.ValidateManifestPaths(manifestPaths, storage.PathSemantics{CaseSensitive: true}); err != nil {
+		return nil, fmt.Errorf("unsafe torrent manifest: %w", err)
+	}
+	meta.V1PieceCount = len(meta.pieceHashes)
 	if hasV1 {
 		expectedPieces := 0
 		if meta.TotalLength > 0 {
-			expectedPieces = int((meta.TotalLength + meta.PieceLength - 1) / meta.PieceLength)
+			expectedPieces = int(((meta.TotalLength - 1) / meta.PieceLength) + 1)
 		}
-		if meta.PieceLength == 0 || meta.PieceCount != expectedPieces {
-			return nil, fmt.Errorf("piece count %d does not match total length and piece length (expected %d)", meta.PieceCount, expectedPieces)
+		if meta.PieceLength == 0 || meta.V1PieceCount != expectedPieces {
+			return nil, fmt.Errorf("piece count %d does not match total length and piece length (expected %d)", meta.V1PieceCount, expectedPieces)
 		}
 	}
 	meta.Trackers = trackerOrigins(root)
@@ -162,6 +209,9 @@ func parseV1Files(meta *MetaInfo, info *Node) error {
 			pathNode, ok := preferred(item, "path.utf-8", "path")
 			if !ok || pathNode.Kind != KindList || len(pathNode.List) == 0 {
 				return fmt.Errorf("file %d has an invalid path", index)
+			}
+			if err := validateAlternatePath(item, index); err != nil {
+				return err
 			}
 			file := File{Length: length}
 			if attr, ok := bytesValue(item, "attr"); ok {
@@ -218,6 +268,9 @@ func walkV2Tree(meta *MetaInfo, node *Node, prefix [][]byte, depth int) error {
 	if depth > 64 {
 		return fmt.Errorf("v2 file tree exceeds 64 levels")
 	}
+	if _, leaf := node.Dict[""]; leaf && len(node.Dict) != 1 {
+		return fmt.Errorf("v2 file-tree node is both a file and a directory")
+	}
 	keys := make([]string, 0, len(node.Dict))
 	for key := range node.Dict {
 		keys = append(keys, key)
@@ -226,6 +279,9 @@ func walkV2Tree(meta *MetaInfo, node *Node, prefix [][]byte, depth int) error {
 	for _, key := range keys {
 		child := node.Dict[key]
 		if key == "" {
+			if depth == 0 {
+				return fmt.Errorf("v2 file-tree root must not be a file")
+			}
 			if child.Kind != KindDictionary {
 				return fmt.Errorf("invalid v2 file leaf")
 			}
@@ -251,6 +307,7 @@ func walkV2Tree(meta *MetaInfo, node *Node, prefix [][]byte, depth int) error {
 					return fmt.Errorf("v2 file pieces root is not 32 bytes")
 				}
 				file.PiecesRoot = hex.EncodeToString(root)
+				file.piecesRootRaw = append([]byte(nil), root...)
 			} else if length > 0 {
 				return fmt.Errorf("non-empty v2 file has no pieces root")
 			}
@@ -260,12 +317,118 @@ func walkV2Tree(meta *MetaInfo, node *Node, prefix [][]byte, depth int) error {
 			meta.Files = append(meta.Files, file)
 			continue
 		}
-		if key == "" || child.Kind != KindDictionary || len(key) == 0 {
+		if key == "" || child.Kind != KindDictionary || len(key) == 0 || !utf8.ValidString(key) {
 			return fmt.Errorf("invalid v2 file-tree path component")
 		}
 		next := append(append([][]byte(nil), prefix...), []byte(key))
 		if err := walkV2Tree(meta, child, next, depth+1); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func reconcileHybridLayouts(v1, v2 *MetaInfo) error {
+	for _, file := range v2.Files {
+		if strings.Contains(file.Attribute, "p") {
+			return fmt.Errorf("hybrid v2 layout must not use padding files")
+		}
+	}
+	v2Files := nonPaddingFiles(v2.Files)
+	if len(nonPaddingFiles(v1.Files)) != len(v2Files) {
+		return fmt.Errorf("hybrid v1/v2 layouts have different non-padding file counts")
+	}
+	offset := int64(0)
+	nonPaddingIndex := 0
+	for fileIndex := range v1.Files {
+		file := &v1.Files[fileIndex]
+		if strings.Contains(file.Attribute, "p") {
+			if nonPaddingIndex == 0 || nonPaddingIndex >= len(v2Files) || offset%v1.PieceLength == 0 {
+				return fmt.Errorf("hybrid v1 padding file %d is leading, trailing, or starts at an aligned offset", fileIndex)
+			}
+			expected := v1.PieceLength - (offset % v1.PieceLength)
+			if file.Length != expected {
+				return fmt.Errorf("hybrid v1 padding file %d has length %d, expected %d", fileIndex, file.Length, expected)
+			}
+			offset += file.Length
+			continue
+		}
+		if nonPaddingIndex >= len(v2Files) {
+			return fmt.Errorf("hybrid v1 layout has an extra non-padding file")
+		}
+		expected := v2Files[nonPaddingIndex]
+		if file.Length != expected.Length || !sameRawPath(file.RawPath, expected.RawPath) {
+			return fmt.Errorf("hybrid v1/v2 layouts disagree at non-padding file %d", nonPaddingIndex)
+		}
+		if file.Length > 0 && offset%v1.PieceLength != 0 {
+			return fmt.Errorf("hybrid non-padding file %d does not start on a piece boundary", nonPaddingIndex)
+		}
+		file.PiecesRoot = expected.PiecesRoot
+		file.piecesRootRaw = append([]byte(nil), expected.piecesRootRaw...)
+		offset += file.Length
+		nonPaddingIndex++
+	}
+	if nonPaddingIndex != len(v2Files) {
+		return fmt.Errorf("hybrid v1 layout is missing non-padding files")
+	}
+	return nil
+}
+
+func nonPaddingFiles(files []File) []*File {
+	items := make([]*File, 0, len(files))
+	for i := range files {
+		if !strings.Contains(files[i].Attribute, "p") {
+			items = append(items, &files[i])
+		}
+	}
+	return items
+}
+
+func sameRawPath(a, b [][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !bytes.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateV2PieceLayers(root *Node, files []File, pieceLength int64) error {
+	expected := make(map[string]int64)
+	for _, file := range files {
+		if strings.Contains(file.Attribute, "p") || file.Length <= pieceLength {
+			continue
+		}
+		if len(file.piecesRootRaw) != sha256.Size {
+			return fmt.Errorf("v2 file larger than one piece has no pieces root")
+		}
+		count := ((file.Length - 1) / pieceLength) + 1
+		key := string(file.piecesRootRaw)
+		if previous, ok := expected[key]; ok && previous != count {
+			return fmt.Errorf("v2 files sharing a pieces root disagree on piece-layer length")
+		}
+		expected[key] = count
+	}
+	layers, present := root.Get("piece layers")
+	if !present {
+		if len(expected) != 0 {
+			return fmt.Errorf("v2 metafile is missing required piece layers")
+		}
+		return nil
+	}
+	if layers.Kind != KindDictionary {
+		return fmt.Errorf("v2 piece layers is not a dictionary")
+	}
+	if len(layers.Dict) != len(expected) {
+		return fmt.Errorf("v2 piece layers contains missing or unexpected roots")
+	}
+	for key, node := range layers.Dict {
+		count, ok := expected[key]
+		if !ok || len(key) != sha256.Size || node.Kind != KindBytes || int64(len(node.Bytes)) != count*sha256.Size {
+			return fmt.Errorf("v2 piece layer has an unexpected root or length")
 		}
 	}
 	return nil
@@ -291,6 +454,35 @@ func preferred(dict *Node, keys ...string) (*Node, bool) {
 func preferredBytes(dict *Node, keys ...string) (*Node, bool) {
 	node, ok := preferred(dict, keys...)
 	return node, ok && node.Kind == KindBytes
+}
+
+func validateAlternateBytes(dict *Node, preferredKey, legacyKey string) error {
+	preferredNode, hasPreferred := dict.Get(preferredKey)
+	legacyNode, hasLegacy := dict.Get(legacyKey)
+	if !hasPreferred || !hasLegacy {
+		return nil
+	}
+	if preferredNode.Kind != KindBytes || legacyNode.Kind != KindBytes || !bytes.Equal(preferredNode.Bytes, legacyNode.Bytes) {
+		return fmt.Errorf("%s and %s disagree", preferredKey, legacyKey)
+	}
+	return nil
+}
+
+func validateAlternatePath(dict *Node, fileIndex int) error {
+	preferredNode, hasPreferred := dict.Get("path.utf-8")
+	legacyNode, hasLegacy := dict.Get("path")
+	if !hasPreferred || !hasLegacy {
+		return nil
+	}
+	if preferredNode.Kind != KindList || legacyNode.Kind != KindList || len(preferredNode.List) != len(legacyNode.List) {
+		return fmt.Errorf("file %d path.utf-8 and path disagree", fileIndex)
+	}
+	for i := range preferredNode.List {
+		if preferredNode.List[i].Kind != KindBytes || legacyNode.List[i].Kind != KindBytes || !bytes.Equal(preferredNode.List[i].Bytes, legacyNode.List[i].Bytes) {
+			return fmt.Errorf("file %d path.utf-8 and path disagree", fileIndex)
+		}
+	}
+	return nil
 }
 
 func integer(dict *Node, key string) (int64, bool) {
@@ -322,7 +514,7 @@ func trackerOrigins(root *Node) []string {
 	seen := map[string]struct{}{}
 	var add = func(raw []byte) {
 		u, err := url.Parse(string(raw))
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "udp") || u.Host == "" {
 			return
 		}
 		origin := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)

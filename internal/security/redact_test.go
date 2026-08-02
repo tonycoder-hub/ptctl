@@ -13,6 +13,10 @@ func TestRedactCanarySecrets(t *testing.T) {
 		"https://tracker.invalid/announce?passkey=" + canary,
 		"request failed: https://site.invalid/download.php?id=1&authkey=" + canary,
 		"password=" + canary,
+		"password: " + canary,
+		`{"cookie":"` + canary + `"}`,
+		"https://site.invalid/?auth%6bey=" + canary,
+		"SID=" + canary,
 	}
 	for _, input := range inputs {
 		got := Redact(input)

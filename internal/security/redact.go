@@ -10,7 +10,8 @@ const redacted = "[REDACTED]"
 
 var (
 	headerSecret = regexp.MustCompile(`(?i)(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]+`)
-	querySecret  = regexp.MustCompile(`(?i)(passkey|authkey|torrent_pass|rsskey|token|api[_-]?key|password|passwd|cookie)=([^&\s]+)`)
+	querySecret  = regexp.MustCompile(`(?i)(passkey|pass%6bey|authkey|auth%6bey|torrent_pass|rsskey|rss%6bey|sid|token|api[_-]?key|password|passwd|cookie)=([^&\s]+)`)
+	fieldSecret  = regexp.MustCompile(`(?i)((?:["']?(?:password|passwd|cookie|sid|authorization|proxy-authorization)["']?)\s*[:=]\s*["']?)([^"'\s,}&]+)`)
 	announceURL  = regexp.MustCompile(`(?i)https?://[^\s"']+/(announce|download\.php)(\?[^\s"']*)?`)
 )
 
@@ -24,6 +25,7 @@ func Redact(s string) string {
 		return redacted
 	})
 	s = querySecret.ReplaceAllString(s, "$1="+redacted)
+	s = fieldSecret.ReplaceAllString(s, "$1"+redacted)
 	s = announceURL.ReplaceAllStringFunc(s, func(raw string) string {
 		u, err := url.Parse(raw)
 		if err != nil {

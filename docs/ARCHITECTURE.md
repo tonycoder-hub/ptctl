@@ -33,7 +33,7 @@ internal/seed
     evidence-gated, deterministic plans
 
 internal/site
-    small read interfaces and adapter registry
+    optional AuthChecker / AccountReader / TorrentSearcher / BonusCatalogReader ports
         └── tjupt
 
 internal/downloader
@@ -76,10 +76,16 @@ Business logic should eventually persist `(storage_id, relative_components)`;
 an absolute path belongs to a specific process namespace. A mapping explicitly
 relates a host root such as `D:\PT` to a downloader root such as `/downloads`.
 
-Before materialization, every path is checked for traversal, separators, NUL,
+Before materialization, every path is checked for traversal, separators,
+control characters, NUL,
 Windows ADS/device names, trailing dot/space behavior, case collisions, and a
 conservative Unicode-normalization policy. Existing source paths are resolved
 component by component and must remain under the declared root.
+
+Filesystem case and normalization behavior cannot be inferred reliably from
+the process OS for CIFS, FUSE, APFS variants, or per-directory Windows settings.
+The alpha labels that evidence `host_os_assumption`; it must not be treated as
+a measured storage property.
 
 ## Evidence levels
 
@@ -87,8 +93,11 @@ component by component and must remain under the declared root.
 - `likely`: an independent quick digest or trusted provenance agrees.
 - `verified`: every v1 piece or v2 Merkle requirement agrees.
 
-Only `verified` content can produce a seed-ready plan. The current `seed plan`
+Only exactly verified content can enter a layout plan. The current `seed plan`
 implements v1 verification and emits copy operations; it never applies them.
+Its readiness is always `layout_only`, its evidence is scoped to
+`source_snapshot:v1_piece_verified`, and it reports missing target-semantics,
+site identity, downloader mapping, and apply-time verification as blockers.
 
 ## Planned mutation workflow
 
@@ -112,4 +121,3 @@ scope: they inherit keyring, network, and filesystem authority. New adapters are
 built in and reviewed. If external adapters become necessary after several site
 implementations exist, they should use a versioned capability protocol in a
 sandboxed process or WASM runtime with domain and filesystem allowlists.
-
