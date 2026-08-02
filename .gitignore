@@ -1,0 +1,29 @@
+# Build outputs
+/ptctl
+/ptctl.exe
+/dist/
+/coverage.out
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets and private tracker artifacts
+*.torrent
+*.cookie
+*.session
+*.passkey
+*.har
+*.pcap
+.env
+.env.*
+!*.env.example
+
+# Local state
+/.ptctl/
+*.db
+*.db-shm
+*.db-wal
+
