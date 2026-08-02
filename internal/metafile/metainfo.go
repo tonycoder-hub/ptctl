@@ -83,6 +83,9 @@ func Parse(data []byte) (*MetaInfo, error) {
 		}
 		meta.PieceLength = pieceLength
 	}
+	if meta.PieceLength == 0 {
+		return nil, fmt.Errorf("info dictionary has no piece length")
+	}
 	if private, ok := integer(info, "private"); ok {
 		meta.Private = private == 1
 	}
@@ -248,6 +251,8 @@ func walkV2Tree(meta *MetaInfo, node *Node, prefix [][]byte, depth int) error {
 					return fmt.Errorf("v2 file pieces root is not 32 bytes")
 				}
 				file.PiecesRoot = hex.EncodeToString(root)
+			} else if length > 0 {
+				return fmt.Errorf("non-empty v2 file has no pieces root")
 			}
 			if err := addLength(meta, length); err != nil {
 				return err

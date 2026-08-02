@@ -39,6 +39,9 @@ type Plan struct {
 // BuildMaterializePlan is read-only. It performs exact piece verification and
 // produces a plan, but never creates directories, links, or files.
 func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRoot, targetRoot, strategy string) (Plan, error) {
+	if meta.Version != "v1" {
+		return Plan{}, fmt.Errorf("seed planning currently requires a pure v1 metafile; v2 and hybrid layouts need Merkle verification before materialization")
+	}
 	if strategy == "" {
 		strategy = "copy"
 	}

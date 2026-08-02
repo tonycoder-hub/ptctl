@@ -31,7 +31,8 @@ capabilities at the edge, not assumptions in the core domain model.
 - strict, bounded bencode parsing;
 - exact v1 infohash calculation from the original `info` byte slice;
 - v1, v2, and hybrid metafile inspection;
-- exact v1 piece verification across multi-file boundaries;
+- exact v1 piece verification across multi-file boundaries (hybrid verification
+  is labeled v1-only and is not accepted for seed planning yet);
 - virtual zero handling for padding files;
 - tracker output reduced to origins so announce passkeys are not printed;
 - traversal, separator, Windows device-name, case-collision, and conservative

@@ -516,7 +516,7 @@ func writeMetaHuman(out io.Writer, meta *metafile.MetaInfo) error {
 
 func writeVerifyHuman(out io.Writer, result metafile.VerificationResult) error {
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "VERIFIED\t%t\nBYTES\t%d\nFILES\t%d\nPIECES\t%d/%d\n", result.Verified, result.BytesVerified, result.FilesChecked, result.PiecesMatched, result.PiecesExpected)
+	fmt.Fprintf(w, "VERIFIED\t%t\nEVIDENCE\t%s\nBYTES\t%d\nFILES\t%d\nPIECES\t%d/%d\n", result.Verified, result.Evidence, result.BytesVerified, result.FilesChecked, result.PiecesMatched, result.PiecesExpected)
 	if len(result.MismatchPieces) > 0 {
 		fmt.Fprintf(w, "MISMATCHES\t%v", result.MismatchPieces)
 		if result.MismatchOverflow > 0 {

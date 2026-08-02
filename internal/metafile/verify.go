@@ -15,6 +15,7 @@ import (
 
 type VerificationResult struct {
 	Version          string `json:"version"`
+	Evidence         string `json:"evidence"`
 	Verified         bool   `json:"verified"`
 	BytesVerified    int64  `json:"bytes_verified"`
 	FilesChecked     int    `json:"files_checked"`
@@ -35,7 +36,7 @@ type fileSpec struct {
 // VerifyV1 verifies the exact v1 piece stream. Pieces are hashed across file
 // boundaries; a per-file checksum is not a valid BitTorrent verification.
 func VerifyV1(ctx context.Context, meta *MetaInfo, contentPath string) (VerificationResult, error) {
-	result := VerificationResult{Version: meta.Version, PiecesExpected: len(meta.pieceHashes)}
+	result := VerificationResult{Version: meta.Version, Evidence: "v1-sha1-pieces", PiecesExpected: len(meta.pieceHashes)}
 	if len(meta.pieceHashes) == 0 {
 		return result, fmt.Errorf("v1 verification is unavailable for a pure v2 torrent")
 	}
