@@ -363,9 +363,13 @@ func TestReconcileHumanShowAbsolutePathsRendersHostAndClientBindings(t *testing.
 	if code != 0 || errOut.Len() != 0 || requests.login.Load() != 1 || requests.jobs.Load() != 2 || requests.files.Load() != 2 {
 		t.Fatalf("code=%d requests=%d/%d/%d stdout=%q stderr=%q", code, requests.login.Load(), requests.jobs.Load(), requests.files.Load(), out.String(), errOut.String())
 	}
+	expectedHostPath, err := filepath.EvalSymlinks(filepath.Join(searchRoot, fileNames[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
 	text := out.String()
 	for _, expected := range []string{
-		filepath.Join(searchRoot, fileNames[0]),
+		expectedHostPath,
 		reconciliationClientRoot + "/bundle/" + fileNames[0],
 		reconciliationClientRoot + "/bundle",
 	} {
