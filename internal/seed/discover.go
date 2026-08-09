@@ -166,20 +166,44 @@ type DiscoveryPlan struct {
 }
 
 type DiscoveryResult struct {
-	Effect             string             `json:"effect"`
-	WritesPerformed    int                `json:"writes_performed"`
-	AbsolutePathsShown bool               `json:"absolute_paths_shown"`
-	Torrent            DiscoveryTorrent   `json:"torrent"`
-	SourceOutcome      string             `json:"source_outcome"`
-	Selection          DiscoverySelection `json:"selection"`
-	Handoff            DiscoveryHandoff   `json:"handoff"`
-	BestEvidence       string             `json:"best_evidence"`
-	Scan               DiscoveryScan      `json:"scan"`
-	Files              []DiscoveryFile    `json:"files"`
-	Matches            []DiscoveryMatch   `json:"matches"`
-	Plan               *DiscoveryPlan     `json:"plan,omitempty"`
-	Blockers           []DiscoveryBlocker `json:"blockers"`
-	Warnings           []string           `json:"warnings"`
+	Effect              string             `json:"effect"`
+	WritesPerformed     int                `json:"writes_performed"`
+	AbsolutePathsShown  bool               `json:"absolute_paths_shown"`
+	Torrent             DiscoveryTorrent   `json:"torrent"`
+	SourceOutcome       string             `json:"source_outcome"`
+	Selection           DiscoverySelection `json:"selection"`
+	Handoff             DiscoveryHandoff   `json:"handoff"`
+	BestEvidence        string             `json:"best_evidence"`
+	Scan                DiscoveryScan      `json:"scan"`
+	Files               []DiscoveryFile    `json:"files"`
+	Matches             []DiscoveryMatch   `json:"matches"`
+	Plan                *DiscoveryPlan     `json:"plan,omitempty"`
+	Blockers            []DiscoveryBlocker `json:"blockers"`
+	Warnings            []string           `json:"warnings"`
+	verifiedSource      *metafile.VerifiedSource
+	verifiedSelectionID string
+}
+
+// VerifiedSource returns the process-local proof retained by this discovery
+// invocation. It is intentionally omitted from JSON, so a serialized report
+// cannot be replayed later as content authority.
+func (result *DiscoveryResult) VerifiedSource(meta *metafile.MetaInfo) (*metafile.VerifiedSource, bool) {
+	if result == nil || result.SourceOutcome != "verified_unique" || result.verifiedSource == nil ||
+		result.Selection.SelectedID == "" || result.Selection.SelectedID != result.verifiedSelectionID || !result.verifiedSource.Matches(meta) {
+		return nil, false
+	}
+	return result.verifiedSource, true
+}
+
+// PublicReportCopy removes the process-local capability retained by Discover.
+// The returned value can be embedded in a report or serialized without giving
+// callers a way to recover absolute verified source paths through
+// VerifiedSource. Public fields are sanitized separately by the presentation
+// layer according to its path-disclosure policy.
+func (result DiscoveryResult) PublicReportCopy() DiscoveryResult {
+	result.verifiedSource = nil
+	result.verifiedSelectionID = ""
+	return result
 }
 
 type resolvedCandidate struct {
@@ -297,6 +321,8 @@ func Discover(ctx context.Context, meta *metafile.MetaInfo, options DiscoverOpti
 		result.SourceOutcome = "verified_unique"
 		result.Selection.Status = "ready"
 		result.Selection.SelectedID = result.Matches[0].ID
+		result.verifiedSource = matchResult.Matches[0].Source
+		result.verifiedSelectionID = result.Selection.SelectedID
 	default:
 		result.SourceOutcome = "not_found"
 		result.Blockers = append(result.Blockers, DiscoveryBlocker{Code: "source.no_verified_match", Message: "no retained source assignment passed exact torrent verification"})

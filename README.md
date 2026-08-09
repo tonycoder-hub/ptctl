@@ -5,12 +5,12 @@ It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and reconciles them around verifiable torrent metadata.
 
 > Status: `v0.3.0-alpha` development. The implemented surface is intentionally
-> read-only. `seed discover` and `seed plan` verify and explain layouts but do
-> not apply them.
+> read-only. `seed discover`, `seed plan`, and `reconcile report` verify and
+> explain layouts and ledgers but do not apply them.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
-清晰、可审计的计划。TJU PT 是首个实验性只读站点适配器，而不是写死
+清晰、可审计的报告与计划。TJU PT 是首个实验性只读站点适配器，而不是写死
 在核心里的唯一站点。
 
 ## Why this shape?
@@ -64,13 +64,18 @@ capabilities at the edge, not assumptions in the core domain model.
   page recognition and no retry;
 - qBittorrent status and torrent-list reads over HTTPS (or explicit numeric
   loopback HTTP), with passwords accepted only through stdin;
+- read-only reconciliation that brackets storage proof with two qBittorrent
+  ledger snapshots from one login, stream-decodes a bounded job ledger,
+  extracts typed v1/v2 claims from bounded magnet `xt` fields, and reports
+  variant, infohash, content-proof, and path relations as separate evidence
+  axes;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
 Not implemented yet: metafile download, a persistent storage index, downloader
-job reconciliation, journaled plan application, deletion, automatic plan
-execution, site writes, browser login, third-party executable plugins, ratio
-manipulation, or Cloudflare bypass.
+mutation or per-file selection reconciliation, journaled plan application,
+deletion, automatic plan execution, site writes, browser login, third-party
+executable plugins, ratio manipulation, or Cloudflare bypass.
 
 ## Install
 
@@ -173,7 +178,47 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client status \
   --password-stdin
 ```
 
-Run `ptctl help` or `ptctl seed discover --help` for the complete surface.
+Reconcile one exact metafile with verified bytes and qBittorrent's read-only
+ledger. The password is used for one login; the storage proof is bracketed by
+two bounded torrent-list reads. No pause, recheck, move, add, or filesystem
+write is performed.
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
+  --torrent release.torrent \
+  --search-root "D:\Media" \
+  --search-root "D:\Archive" \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --host-root 'D:\' \
+  --client-root /downloads \
+  --client-style posix \
+  --site-ref tjupt/123 \
+  --output json
+```
+
+The [qBittorrent WebUI API torrent-list fields](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-list)
+are treated as untrusted client claims. Its generic `hash` remains an opaque
+job locator. Typed identities come only from strictly parsed `xt=urn:btih:...` and
+`xt=urn:btmh:1220...` claims; the complete magnet URI is immediately
+discarded because it may contain tracker or web-seed secrets. A declared
+`--site-ref` does not contact the site and is never presented as a verified
+metafile binding. qBittorrent does not expose the raw private metafile through
+this ledger, so `metafile_variant_relation` remains `unobservable` even when
+typed infohashes agree.
+Multi-file jobs also remain path-incomplete until a bounded client file ledger
+can prove effective per-file paths, rename state, and selection priorities;
+matching only the top-level content path is not enough.
+For a single-file job, consistency additionally requires the client-reported
+size, complete seeding state, and `content_path` to agree. The expected client
+path is recomputed from the same-call opaque storage proof and the explicit
+invocation mapping; mutable discovery JSON is never path authority. Reports
+name the exact POSIX/Windows comparison mode and an opaque mapping ID.
+
+Run `ptctl help`, `ptctl seed discover --help`, or
+`ptctl reconcile report --help` for the complete surface.
 
 Exit code `0` means a report or requested read succeeded, `1` an operational
 failure, `2` invalid usage, and `3` an explicit integrity mismatch. Discovery
@@ -181,6 +226,9 @@ is report-oriented, so blocked results still print and return `0` by default.
 Add `--require-verified` to return `4` unless `source_outcome` is exactly
 `verified_unique`; target-plan or client-mapping failure does not erase source
 evidence. `torrent verify` prints its result before returning `3`.
+Reconciliation is also report-oriented. Add `--require-reconciled` to return
+`4` unless the independently reported local axes are `consistent`; the report
+is still printed first.
 
 ## Security model in one paragraph
 

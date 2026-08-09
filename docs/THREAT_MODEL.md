@@ -28,6 +28,15 @@ default. It emits stable root IDs, display-safe relative paths, and raw
 components in base64. `--show-absolute-paths` is an explicit local disclosure.
 Fatal diagnostics identify roots by ordinal or opaque ID where practical.
 
+Reconciliation also hides downloader content paths by default and emits a
+one-way path reference instead. qBittorrent magnet URIs are never placed in a
+domain object or report: the adapter extracts only bounded, typed `xt` hashes
+and discards tracker, web-seed, display-name, and other query data. The generic
+client hash remains an opaque locator and is represented by a derived report
+ID where possible.
+These stable references support local correlation; they are hiding controls,
+not anonymity, and a guessable path may still be tested by dictionary attack.
+
 The redactor and path hiding are defense in depth, not permission to log secret
 structures or publish private reports.
 
@@ -49,10 +58,22 @@ The TJUPT adapter performs one bounded GET per command and never retries. HTTP
 must not loop or parallelize site commands. There is no Cloudflare or CAPTCHA
 bypass.
 
+A live reconciliation uses one qBittorrent login and at most two bounded
+torrent-list reads, sequentially and without retry. Authentication, rate-limit,
+HTTP, parse, or timeout failures make the downloader axis incomplete; they do
+not trigger re-login or a client mutation.
+
 ### Parser, scanner, and solver exhaustion
 
 Bencode input, string size, depth, and node count are bounded. HTTP bodies and
 qBittorrent responses have explicit limits. Torrent piece length is capped.
+
+The qBittorrent ledger is capped at 8 MiB and 25,000 jobs. Each magnet claim
+is capped at 64 KiB, 256 query pairs, eight `xt` values, and 256 bytes per
+decoded `xt`. The job array is decoded one object at a time, the N+1 job is
+rejected before decoding, and each object is capped at 256 fields. Query keys
+and `xt` claims must decode to strict ASCII; tracker and web-seed values are
+not materialized. Duplicate JSON fields and opaque job keys fail closed.
 
 Storage discovery has non-disableable limits for roots, depth, directories,
 entries, entries in one directory, retained candidates, retained raw path
@@ -96,6 +117,24 @@ writer. Root/component traversal is best-effort and not handle-relative. A
 filesystem snapshot or OS-specific `openat`/Windows-handle implementation is
 needed for stronger guarantees. Reports and plans label this assurance
 non-atomic.
+
+Downloader reconciliation takes one identity snapshot before storage proof
+and another afterward using the same authenticated session. Typed hashes,
+opaque job key, content/save paths, and size must remain stable. A change makes
+the client relation incomplete. Even two equal snapshots are only a bracketed,
+non-atomic observation: a job may change between reads. Downloading, checking,
+moving, or allocating state never upgrades a lexical path match into proof that
+the client is currently reading the verified files. Client-reported paths are
+never passed to host filesystem APIs.
+Unknown client state text is normalized to `unknown` before entering a ledger
+or report. Single-file path agreement also requires the client-reported size to
+match. The expected path is derived from the same-call process-local storage
+proof plus the invocation mapping; exported discovery fields cannot substitute
+for that proof, and the public report drops the capability entirely.
+For multi-file jobs, a matching top-level content path cannot reveal skipped
+or renamed files, so the alpha keeps that path relation partial. Windows path
+case is compared exactly rather than assuming case-insensitive semantics for a
+particular directory or remote filesystem.
 
 The preview has no apply, overwrite, move, or delete command. A layout plan
 records source metadata preconditions but still requires exact apply-time
