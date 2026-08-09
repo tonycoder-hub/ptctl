@@ -16,10 +16,13 @@ import (
 )
 
 type Operation struct {
+	ManifestIndex      int                          `json:"manifest_index"`
+	TorrentPath        string                       `json:"torrent_path"`
 	Kind               string                       `json:"kind"`
 	Source             string                       `json:"source,omitempty"`
 	SourcePrecondition *metafile.SourcePrecondition `json:"source_precondition,omitempty"`
 	Target             string                       `json:"target"`
+	ClientTarget       string                       `json:"client_target,omitempty"`
 	Bytes              int64                        `json:"bytes"`
 }
 
@@ -33,8 +36,10 @@ type Plan struct {
 	Effect            string                      `json:"effect"`
 	ReadyToApply      bool                        `json:"ready_to_apply"`
 	Readiness         string                      `json:"readiness"`
-	SourceRoot        string                      `json:"source_root"`
+	SourceMode        string                      `json:"source_mode"`
+	SourceRoot        string                      `json:"source_root,omitempty"`
 	TargetRoot        string                      `json:"target_root"`
+	ClientMapping     string                      `json:"client_mapping"`
 	Strategy          string                      `json:"strategy"`
 	EstimatedRead     int64                       `json:"estimated_read_bytes"`
 	EstimatedWrite    int64                       `json:"estimated_write_bytes"`
@@ -50,17 +55,11 @@ var ErrSourceIntegrity = errors.New("source content failed exact torrent verific
 // verification required by the metafile and produces a plan, but never creates
 // directories, links, or files.
 func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRoot, targetRoot, strategy string) (Plan, error) {
-	if strategy == "" {
-		strategy = "copy"
-	}
-	if strategy != "copy" {
-		return Plan{}, fmt.Errorf("the alpha supports only the safe copy strategy; hardlink and symlink remain opt-in future capabilities")
-	}
-	verification, err := metafile.Verify(ctx, meta, sourceRoot)
+	verified, err := metafile.VerifyContentSource(ctx, meta, sourceRoot)
 	if err != nil {
 		return Plan{}, err
 	}
-	if !verification.Verified {
+	if !verified.Result().Verified {
 		return Plan{}, ErrSourceIntegrity
 	}
 	sourceRoot, err = filepath.Abs(sourceRoot)
@@ -68,6 +67,33 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 		return Plan{}, fmt.Errorf("resolve source root: %w", err)
 	}
 	sourceRoot = filepath.Clean(sourceRoot)
+	return buildMaterializePlan(ctx, meta, verified, "exact_root", sourceRoot, targetRoot, strategy)
+}
+
+// BuildMaterializePlanFromVerified consumes an opaque mapped verification
+// observation. It supports sources scattered across multiple storage roots and
+// remains strictly read-only.
+func BuildMaterializePlanFromVerified(ctx context.Context, meta *metafile.MetaInfo, verified *metafile.VerifiedSource, targetRoot, strategy string) (Plan, error) {
+	return buildMaterializePlan(ctx, meta, verified, "discovered_map", "", targetRoot, strategy)
+}
+
+func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified *metafile.VerifiedSource, sourceMode, sourceRoot, targetRoot, strategy string) (Plan, error) {
+	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
+	if strategy == "" {
+		strategy = "copy"
+	}
+	if strategy != "copy" {
+		return Plan{}, fmt.Errorf("the alpha supports only the safe copy strategy; hardlink and symlink remain opt-in future capabilities")
+	}
+	if verified == nil || !verified.Matches(meta) {
+		return Plan{}, fmt.Errorf("verified source observation does not match this metafile variant")
+	}
+	verification := verified.Result()
+	if !verification.Verified {
+		return Plan{}, ErrSourceIntegrity
+	}
 	targetProbe, err := storage.ProbeReadOnly(targetRoot)
 	if err != nil {
 		return Plan{}, err
@@ -91,8 +117,10 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 		Effect:            "none",
 		ReadyToApply:      false,
 		Readiness:         "layout_only",
+		SourceMode:        sourceMode,
 		SourceRoot:        sourceRoot,
 		TargetRoot:        targetProbe.ResolvedPath,
+		ClientMapping:     "not_requested",
 		Strategy:          strategy,
 		Verification:      verification,
 		Warnings: []string{
@@ -107,7 +135,10 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 		},
 	}
 	plan.Warnings = append(plan.Warnings, targetProbe.Warnings...)
-	for _, file := range meta.Files {
+	for fileIndex, file := range meta.Files {
+		if err := ctx.Err(); err != nil {
+			return Plan{}, err
+		}
 		target, err := storage.PlannedJoin(targetProbe.ResolvedPath, targetComponents(meta, file), semantics)
 		if err != nil {
 			return Plan{}, err
@@ -120,16 +151,18 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 		} else if !os.IsNotExist(err) {
 			return Plan{}, fmt.Errorf("inspect target %q: %w", target, err)
 		}
-		operation := Operation{Kind: strategy, Target: target, Bytes: file.Length}
+		operation := Operation{ManifestIndex: fileIndex, TorrentPath: strings.Join(file.Path, "/"), Kind: strategy, Target: target, Bytes: file.Length}
 		if strings.Contains(file.Attribute, "p") {
 			operation.Kind = "padding"
+		} else if file.Length == 0 {
+			operation.Kind = "empty"
 		} else {
-			source, err := resolveSource(meta, file, sourceRoot)
-			if err != nil {
-				return Plan{}, err
+			source, ok := verified.Path(fileIndex)
+			if !ok {
+				return Plan{}, fmt.Errorf("verified source has no binding for manifest file %d", fileIndex)
 			}
 			operation.Source = source
-			precondition, err := verification.MatchSourceSnapshot(source)
+			precondition, err := verified.SourcePrecondition(fileIndex)
 			if err != nil {
 				return Plan{}, err
 			}
@@ -155,20 +188,6 @@ func targetComponents(meta *metafile.MetaInfo, file metafile.File) [][]byte {
 	return [][]byte{append([]byte(nil), meta.NameRaw...)}
 }
 
-func resolveSource(meta *metafile.MetaInfo, file metafile.File, sourceRoot string) (string, error) {
-	if meta.MultiFile {
-		return storage.SecureJoinExisting(sourceRoot, file.RawPath, storage.CurrentSemantics())
-	}
-	info, err := os.Stat(sourceRoot)
-	if err != nil {
-		return "", err
-	}
-	if info.IsDir() {
-		return storage.SecureJoinExisting(sourceRoot, file.RawPath, storage.CurrentSemantics())
-	}
-	return filepath.Abs(sourceRoot)
-}
-
 func rejectSymlinkPrefix(root, target string) error {
 	rel, err := filepath.Rel(root, target)
 	if err != nil {
@@ -185,20 +204,21 @@ func rejectSymlinkPrefix(root, target string) error {
 		if err != nil {
 			return fmt.Errorf("inspect target prefix %q: %w", current, err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("target prefix is a symlink: %q", current)
+		if storage.IsLinkLike(info) {
+			return fmt.Errorf("target prefix is a symlink or reparse point: %q", current)
 		}
 	}
 	return nil
 }
 
 func planID(plan Plan) string {
-	lines := make([]string, 0, len(plan.Operations)+3)
-	lines = append(lines, plan.InfoHashV1, plan.InfoHashV2, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceRoot, plan.TargetRoot, plan.Readiness)
+	lines := []string{plan.InfoHashV1, plan.InfoHashV2, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceMode, plan.SourceRoot, plan.TargetRoot, plan.Readiness, plan.ClientMapping}
+	operations := make([]string, 0, len(plan.Operations))
 	for _, operation := range plan.Operations {
-		lines = append(lines, operation.Kind+"\x00"+operation.Source+"\x00"+operation.Target+"\x00"+fmt.Sprint(operation.Bytes))
+		operations = append(operations, fmt.Sprint(operation.ManifestIndex)+"\x00"+operation.Kind+"\x00"+operation.Source+"\x00"+operation.Target+"\x00"+operation.ClientTarget+"\x00"+fmt.Sprint(operation.Bytes))
 	}
-	sort.Strings(lines[7:])
+	sort.Strings(operations)
+	lines = append(lines, operations...)
 	digest := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return hex.EncodeToString(digest[:12])
 }
@@ -214,4 +234,34 @@ func planEvidence(version string) string {
 	default:
 		return "source_observation:unsupported"
 	}
+}
+
+// MapPlanTargets adds a lexical host-to-client namespace projection. It does
+// not contact the downloader and therefore cannot prove reachability.
+func MapPlanTargets(plan Plan, hostRoot, clientRoot string, clientWindows bool) (Plan, error) {
+	operations := append([]Operation(nil), plan.Operations...)
+	for i := range operations {
+		mapping, err := storage.MapHostToClient(hostRoot, operations[i].Target, clientRoot, clientWindows)
+		if err != nil {
+			return plan, fmt.Errorf("map target for manifest file %d: %w", operations[i].ManifestIndex, err)
+		}
+		operations[i].ClientTarget = mapping.ClientPath
+	}
+	plan.Operations = operations
+	plan.ClientMapping = "lexical_only"
+	plan.Blockers = removeString(plan.Blockers, "no host-to-downloader path mapping or downloader job was reconciled")
+	plan.Blockers = append(plan.Blockers, "client paths were mapped lexically; downloader reachability and job state remain unknown")
+	plan.Warnings = append(plan.Warnings, "host-to-client mapping is lexical evidence only and did not contact a downloader")
+	plan.ID = planID(plan)
+	return plan, nil
+}
+
+func removeString(items []string, target string) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != target {
+			result = append(result, item)
+		}
+	}
+	return result
 }

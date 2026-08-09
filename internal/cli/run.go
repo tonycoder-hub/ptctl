@@ -85,6 +85,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if errors.As(err, &integrity) {
 		return 3
 	}
+	var inconclusive *inconclusiveErr
+	if errors.As(err, &inconclusive) {
+		return 4
+	}
 	return 1
 }
 
@@ -109,6 +113,7 @@ Usage:
   ptctl client list --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
 
   ptctl seed plan --torrent FILE.torrent --source PATH --target PATH [--output table|json]
+  ptctl seed discover --torrent FILE.torrent --search-root PATH [--search-root PATH...] [--target PATH] [--output table|json]
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -116,7 +121,7 @@ Safety defaults:
   * Session cookies are accepted only through stdin and are never persisted.
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
-  * Seed materialization emits a layout-only plan with scoped evidence; no writes.
+  * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
 `)
 }
 
@@ -474,8 +479,14 @@ func (a *app) storage(args []string) error {
 }
 
 func (a *app) seed(args []string) error {
-	if len(args) == 0 || args[0] != "plan" {
-		return usageError("seed supports only the plan subcommand in this alpha")
+	if len(args) == 0 {
+		return usageError("seed subcommand is required")
+	}
+	if args[0] == "discover" {
+		return a.seedDiscover(args[1:])
+	}
+	if args[0] != "plan" {
+		return usageError("unknown seed subcommand %q", args[0])
 	}
 	fs := newFlagSet("seed plan")
 	output := fs.String("output", "table", "table or json")
@@ -507,6 +518,148 @@ func (a *app) seed(args []string) error {
 		return usageError("--output must be table or json")
 	}
 	return writePlanHuman(a.stdout, plan)
+}
+
+func (a *app) seedDiscover(args []string) error {
+	fs := newFlagSet("seed discover")
+	var flagOutput strings.Builder
+	fs.SetOutput(&flagOutput)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage:")
+		fmt.Fprintln(fs.Output(), "  ptctl seed discover --torrent FILE.torrent --search-root PATH [--search-root PATH...] [flags]")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Discovery performs bounded metadata/content reads and zero writes. Host/client mapping applies to discovered sources, or to planned targets when --target is set.")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Flags:")
+		fs.PrintDefaults()
+	}
+	output := fs.String("output", "table", "table or json")
+	torrentPath := fs.String("torrent", "", "metafile path")
+	var searchRoots stringListFlag
+	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
+	target := fs.String("target", "", "optional target storage root for a layout-only plan")
+	strategy := fs.String("strategy", "copy", "layout plan strategy; only copy is supported")
+	showAbsolute := fs.Bool("show-absolute-paths", false, "include absolute host paths in output")
+	allowNetwork := fs.Bool("allow-network", false, "allow explicit network/UNC search roots")
+	requireVerified := fs.Bool("require-verified", false, "exit 4 unless source_outcome is verified_unique; target handoff does not affect this")
+	timeout := fs.Duration("timeout", time.Hour, "shared scan and verification wall-clock budget")
+	hostRoot := fs.String("host-root", "", "optional host namespace root for source paths, or target paths with --target")
+	clientRoot := fs.String("client-root", "", "optional downloader namespace root paired with --host-root")
+	clientStyle := fs.String("client-style", "posix", "downloader path style: posix or windows; requires host/client roots")
+
+	inventoryDefaults := storage.DefaultInventoryLimits()
+	maxDepth := fs.Int("max-depth", inventoryDefaults.MaxDepth, "maximum directory depth")
+	maxDirectories := fs.Int("max-directories", inventoryDefaults.MaxDirectories, "maximum directories opened")
+	maxEntries := fs.Int("max-entries", inventoryDefaults.MaxEntries, "maximum directory entries examined")
+	maxDirectoryEntries := fs.Int("max-directory-entries", inventoryDefaults.MaxEntriesPerDirectory, "maximum entries accepted from one directory")
+	maxCandidates := fs.Int("max-candidates", inventoryDefaults.MaxCandidates, "maximum matching regular files retained")
+	maxPathBytes := fs.Int64("max-path-bytes", inventoryDefaults.MaxPathBytes, "maximum retained relative-path bytes")
+
+	matchDefaults := metafile.DefaultSourceMatchLimits()
+	maxCandidatesPerFile := fs.Int("max-candidates-per-file", matchDefaults.MaxCandidatesPerFile, "maximum candidates explored for one torrent file")
+	maxCandidateEdges := fs.Int("max-candidate-edges", matchDefaults.MaxCandidateEdges, "maximum manifest-file to source-candidate edges considered")
+	maxStates := fs.Int("max-states", matchDefaults.MaxStates, "maximum candidate assignment states")
+	maxVerifiedLayouts := fs.Int("max-verified-layouts", matchDefaults.MaxVerifiedLayouts, "maximum verified alternatives retained")
+	maxProofBytes := fs.Int64("max-proof-bytes", matchDefaults.MaxProofWorkBytes, "maximum physical and virtual bytes charged to proof work")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(a.stdout, flagOutput.String())
+			return nil
+		}
+		detail := strings.TrimSpace(flagOutput.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return usageError("seed discover: %s", detail)
+	}
+	if fs.NArg() != 0 {
+		return usageError("seed discover accepts flags only; unexpected argument %q", fs.Arg(0))
+	}
+	explicit := make(map[string]bool)
+	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
+	if *torrentPath == "" || len(searchRoots) == 0 {
+		return usageError("seed discover requires --torrent and at least one --search-root")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if *timeout <= 0 || *timeout > 7*24*time.Hour {
+		return usageError("--timeout must be greater than zero and no more than 168h")
+	}
+	if *strategy != "copy" {
+		return usageError("--strategy must be copy; layout strategies are used only with --target")
+	}
+	if explicit["strategy"] && *target == "" {
+		return usageError("--strategy requires --target")
+	}
+	if *clientStyle != "posix" && *clientStyle != "windows" {
+		return usageError("--client-style must be posix or windows")
+	}
+	if (*hostRoot == "") != (*clientRoot == "") {
+		return usageError("--host-root and --client-root must be provided together")
+	}
+	if explicit["client-style"] && *hostRoot == "" {
+		return usageError("--client-style requires --host-root and --client-root")
+	}
+	inventoryLimits := inventoryDefaults
+	inventoryLimits.MaxDepth = *maxDepth
+	inventoryLimits.MaxDirectories = *maxDirectories
+	inventoryLimits.MaxEntries = *maxEntries
+	inventoryLimits.MaxEntriesPerDirectory = *maxDirectoryEntries
+	inventoryLimits.MaxCandidates = *maxCandidates
+	inventoryLimits.MaxPathBytes = *maxPathBytes
+	matchLimits := matchDefaults
+	matchLimits.MaxCandidatesPerFile = *maxCandidatesPerFile
+	matchLimits.MaxCandidateEdges = *maxCandidateEdges
+	matchLimits.MaxStates = *maxStates
+	matchLimits.MaxVerifiedLayouts = *maxVerifiedLayouts
+	matchLimits.MaxProofWorkBytes = *maxProofBytes
+	if err := inventoryLimits.Validate(); err != nil {
+		return usageError("seed discover: %v", err)
+	}
+	if err := matchLimits.Validate(); err != nil {
+		return usageError("seed discover: %v", err)
+	}
+	if *hostRoot != "" {
+		if err := storage.ValidatePathMappingConfig(*hostRoot, *clientRoot, *clientStyle == "windows"); err != nil {
+			return usageError("seed discover path mapping is invalid: %v", err)
+		}
+	}
+	meta, err := metafile.Read(*torrentPath)
+	if err != nil {
+		return err
+	}
+	options := seed.DiscoverOptions{
+		SearchRoots:       append([]string(nil), searchRoots...),
+		InventoryLimits:   inventoryLimits,
+		MatchLimits:       matchLimits,
+		AllowNetwork:      *allowNetwork,
+		ShowAbsolutePaths: *showAbsolute,
+		TimeBudget:        *timeout,
+		TargetRoot:        *target,
+		Strategy:          *strategy,
+	}
+	if *hostRoot != "" {
+		options.ClientMapping = &seed.ClientMappingOptions{HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	result, err := seed.Discover(ctx, meta, options)
+	if err != nil {
+		return err
+	}
+	if *output == "json" {
+		err = writeJSON(a.stdout, result, nil)
+	} else {
+		err = writeDiscoveryHuman(a.stdout, result)
+	}
+	if err != nil {
+		return err
+	}
+	if *requireVerified && result.SourceOutcome != "verified_unique" {
+		return &inconclusiveErr{message: "seed discovery source outcome is not verified_unique"}
+	}
+	return nil
 }
 
 func readCredential(reader io.Reader) (site.Credential, error) {
@@ -595,6 +748,8 @@ func jsonKind(data any) string {
 		return "downloader.torrent.list"
 	case seed.Plan:
 		return "content.layout_plan"
+	case seed.DiscoveryResult:
+		return "content.source_discovery"
 	default:
 		return "unknown"
 	}
@@ -740,6 +895,149 @@ func writePlanHuman(out io.Writer, plan seed.Plan) error {
 	return w.Flush()
 }
 
+func writeDiscoveryHuman(out io.Writer, result seed.DiscoveryResult) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	selected := result.Selection.SelectedID
+	if selected == "" {
+		selected = "none"
+	}
+	fmt.Fprintf(w, "SEED DISCOVERY\nSOURCE OUTCOME\t%s\nSELECTION\t%s\nHANDOFF\t%s\nPLAN PRODUCED\t%t\nBEST EVIDENCE\t%s\nEFFECT\t%s\nWRITES\t%d\nTORRENT\t%s\nVERSION\t%s\nTIME BUDGET\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\nVERIFIED FOUND\t%d\nVERIFIED RETAINED\t%d\nSELECTED\t%s\n",
+		terminalSafe(result.SourceOutcome), terminalSafe(result.Selection.Status), terminalSafe(result.Handoff.Status), result.Handoff.PlanProduced,
+		terminalSafe(result.BestEvidence), terminalSafe(result.Effect), result.WritesPerformed,
+		terminalSafe(result.Torrent.Name), terminalSafe(result.Torrent.Version), (time.Duration(result.Scan.TimeBudgetMillis) * time.Millisecond).String(), result.Scan.Complete, result.Scan.VerificationComplete,
+		result.Scan.InventoryUsed.EntriesExamined, result.Scan.InventoryLimits.MaxEntries,
+		result.Scan.InventoryUsed.CandidatesRetained, result.Scan.InventoryLimits.MaxCandidates,
+		result.Scan.MatchUsed.CandidateEdgesConsidered, result.Scan.MatchLimits.MaxCandidateEdges,
+		result.Scan.MatchUsed.StatesExplored, result.Scan.MatchLimits.MaxStates,
+		humanBytes(result.Scan.MatchUsed.ProofWorkBytesCharged), humanBytes(result.Scan.MatchLimits.MaxProofWorkBytes),
+		result.Scan.MatchUsed.VerifiedLayouts, len(result.Matches), terminalSafe(selected))
+	fmt.Fprintln(w, "\nBLOCKERS")
+	if len(result.Blockers) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	} else {
+		for _, blocker := range result.Blockers {
+			fmt.Fprintf(w, "%s\t%s\n", terminalSafe(blocker.Code), terminalSafe(blocker.Message))
+		}
+	}
+	fmt.Fprintln(w, "\nSCAN STOPS")
+	if len(result.Scan.StopReasons) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	} else {
+		for _, reason := range result.Scan.StopReasons {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(reason))
+		}
+	}
+	fmt.Fprintln(w, "\nSCAN ISSUES\nTYPE\tCODE\tSUBJECT\tMESSAGE")
+	if len(result.Scan.InventoryIssues) == 0 && len(result.Scan.MatchIssues) == 0 {
+		fmt.Fprintln(w, "-\tnone\t-\t-")
+	} else {
+		for _, issue := range result.Scan.InventoryIssues {
+			subject := issue.RootID
+			if issue.RelativePath != "" {
+				subject += ":" + issue.RelativePath
+			}
+			if subject == "" {
+				subject = "-"
+			}
+			fmt.Fprintf(w, "inventory\t%s\t%s\t%s\n", terminalSafe(issue.Code), terminalSafe(subject), terminalSafe(issue.Message))
+		}
+		for _, issue := range result.Scan.MatchIssues {
+			subject := shortID(issue.CandidateID)
+			if subject == "" {
+				subject = "-"
+			}
+			fmt.Fprintf(w, "verification\t%s\t%s\t%s\n", terminalSafe(issue.Code), terminalSafe(subject), terminalSafe(issue.Message))
+		}
+	}
+
+	const maxHumanCandidates = 20
+	fmt.Fprintln(w, "\nCANDIDATES (EXACT SIZE ONLY; NOT VERIFIED)\nTORRENT PATH\tID\tEVIDENCE\tBASIS\tRANK\tHOST")
+	shownCandidates := 0
+	omittedCandidates := 0
+	for _, file := range result.Files {
+		for _, candidate := range file.Candidates {
+			if shownCandidates >= maxHumanCandidates {
+				omittedCandidates++
+				continue
+			}
+			host := candidate.RootID + ":" + candidate.RelativePath
+			if candidate.AbsolutePath != "" {
+				host = candidate.AbsolutePath
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", terminalSafe(file.TorrentPath), terminalSafe(shortID(candidate.ID)), terminalSafe(candidate.EvidenceLevel), terminalSafe(candidate.EvidenceBasis), terminalSafe(candidate.MatchRank), terminalSafe(host))
+			shownCandidates++
+		}
+		if file.CandidateCount > len(file.Candidates) {
+			omittedCandidates += file.CandidateCount - len(file.Candidates)
+		}
+	}
+	if shownCandidates == 0 {
+		fmt.Fprintln(w, "-\tnone\t-\t-\t-\t-")
+	}
+	if omittedCandidates > 0 {
+		fmt.Fprintf(w, "...\t%d additional candidate rows omitted; use JSON\t-\t-\t-\t-\n", omittedCandidates)
+	}
+
+	fmt.Fprintln(w, "\nVERIFIED MATCHES\nID\tEVIDENCE\tLAYOUT\tFILES\tHOST\tCLIENT")
+	if len(result.Matches) == 0 {
+		fmt.Fprintln(w, "-\tnone\t-\t-\t-\t-")
+	}
+	for _, match := range result.Matches {
+		host := fmt.Sprintf("%d paths; use JSON", len(match.Bindings))
+		client := "-"
+		if len(match.Bindings) == 1 {
+			host = match.Bindings[0].RootID + ":" + match.Bindings[0].RelativePath
+			if match.Bindings[0].AbsolutePath != "" {
+				host = match.Bindings[0].AbsolutePath
+			}
+			if match.Bindings[0].ClientPath != "" {
+				client = match.Bindings[0].ClientPath
+			}
+		} else if match.Mapping.Status != "not_requested" {
+			client = match.Mapping.Status
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d/%d\t%s\t%s\n", terminalSafe(shortID(match.ID)), terminalSafe(match.EvidenceLevel), terminalSafe(match.Layout), match.Coverage.FilesFound, match.Coverage.FilesExpected, terminalSafe(host), terminalSafe(client))
+	}
+	if result.Plan != nil {
+		fmt.Fprintf(w, "\nLAYOUT PLAN\t%s\nEFFECT\t%s\nEVIDENCE\t%s\nREADINESS\t%s\nREADY TO APPLY\t%t\nCLIENT MAPPING\t%s\n", terminalSafe(result.Plan.ID), terminalSafe(result.Plan.Effect), terminalSafe(result.Plan.Evidence), terminalSafe(result.Plan.Readiness), result.Plan.ReadyToApply, terminalSafe(result.Plan.ClientMapping))
+		fmt.Fprintln(w, "\nPLAN BLOCKERS")
+		if len(result.Plan.Blockers) == 0 {
+			fmt.Fprintln(w, "-\tnone")
+		} else {
+			for _, blocker := range result.Plan.Blockers {
+				fmt.Fprintf(w, "-\t%s\n", terminalSafe(blocker))
+			}
+		}
+		fmt.Fprintln(w, "\nPLAN WARNINGS")
+		if len(result.Plan.Warnings) == 0 {
+			fmt.Fprintln(w, "-\tnone")
+		} else {
+			for _, warning := range result.Plan.Warnings {
+				fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+			}
+		}
+		fmt.Fprintln(w, "\nPLANNED OPERATIONS\nTORRENT PATH\tACTION\tBYTES\tSOURCE\tTARGET\tCLIENT TARGET")
+		for _, operation := range result.Plan.Operations {
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", terminalSafe(operation.TorrentPath), terminalSafe(operation.Kind), operation.Bytes, terminalSafe(operation.Source), terminalSafe(operation.Target), terminalSafe(operation.ClientTarget))
+		}
+	}
+	if len(result.Warnings) > 0 {
+		fmt.Fprintln(w, "\nWARNINGS")
+		for _, warning := range result.Warnings {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+		}
+	}
+	return w.Flush()
+}
+
+func shortID(value string) string {
+	value = strings.TrimPrefix(value, "sha256:")
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
+}
+
 func humanBytes(value int64) string {
 	if value < 1024 {
 		return strconv.FormatInt(value, 10) + " B"
@@ -813,3 +1111,21 @@ func usageError(format string, args ...any) error {
 type integrityErr struct{ message string }
 
 func (e *integrityErr) Error() string { return e.message }
+
+type inconclusiveErr struct{ message string }
+
+func (e *inconclusiveErr) Error() string { return e.message }
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *stringListFlag) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+	*values = append(*values, value)
+	return nil
+}

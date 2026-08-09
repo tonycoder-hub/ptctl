@@ -2,14 +2,16 @@
 
 `ptctl` is a conservative, content-first CLI for private BitTorrent trackers.
 It treats a tracker website, a downloader, and a filesystem as separate trust
-domains and is designed to reconcile them around verifiable torrent metadata.
+domains and reconciles them around verifiable torrent metadata.
 
-> Status: `v0.2.0-alpha`. The implemented surface is intentionally read-only.
-> `seed plan` verifies and explains a layout but does not apply it.
+> Status: `v0.3.0-alpha` development. The implemented surface is intentionally
+> read-only. `seed discover` and `seed plan` verify and explain layouts but do
+> not apply them.
 
-中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、实际文件、
-下载器任务和站点记录这四本账为核心，先精确校验，再生成清晰、可审计的计划。
-TJU PT 是首个实验性只读站点适配器，而不是写死在核心里的唯一站点。
+中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
+实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
+清晰、可审计的计划。TJU PT 是首个实验性只读站点适配器，而不是写死
+在核心里的唯一站点。
 
 ## Why this shape?
 
@@ -18,10 +20,10 @@ The durable PT workflow is:
 1. discover a release on a site;
 2. preserve the exact metafile variant;
 3. locate bytes on one or more storage systems;
-4. verify pieces, including pieces spanning file boundaries;
-5. build a seedable layout without accidental overwrite or deletion;
+4. verify v1 pieces and/or v2 Merkle commitments;
+5. build a seedable layout without overwrite or deletion;
 6. map the host path to the downloader's view;
-7. reconcile the site, downloader, and storage records.
+7. reconcile the site, downloader, metafile, and storage records.
 
 Bonus shops, invites, comments, and uploads are site-specific actions. They are
 capabilities at the edge, not assumptions in the core domain model.
@@ -31,36 +33,44 @@ capabilities at the edge, not assumptions in the core domain model.
 - strict, bounded bencode parsing;
 - exact v1 infohash calculation from the original `info` byte slice;
 - exact whole-metafile SHA-256 variant identity, kept distinct from infohashes;
-- structurally validated v1 and v2 inspection, with every retained v2 piece
-  layer cryptographically reduced back to its file `pieces root`;
+- structural v1/v2 validation, including cryptographic reduction of each v2
+  piece layer back to its file `pieces root`;
 - hybrid inspection that parses both layouts and rejects disagreements;
 - exact v1 SHA-1 verification across multi-file boundaries;
-- streaming v2 SHA-256 Merkle verification using 16 KiB leaves and BEP 52 EOF
+- streaming v2 SHA-256 Merkle verification with 16 KiB leaves and BEP 52 EOF
   padding rules, independently for each file;
-- conjunctive hybrid verification: both v1 pieces and v2 file roots must pass
-  from one physical read of each file;
-- virtual zero handling for v1 padding files; v2 padding and symbolic-link
-  leaves fail closed until their distinct semantics are implemented;
+- conjunctive hybrid verification: one physical read feeds both the v1 piece
+  stream and v2 file tree for every file;
+- virtual zeros for v1 padding files; v2 padding and symbolic-link leaves fail
+  closed until their distinct semantics are implemented;
+- bounded, deterministic discovery across repeatable storage roots, retaining
+  only regular files of required sizes and never following symlinks, Windows
+  reparse points, or mount boundaries;
+- exact scattered-source matching: v1 candidates are pruned at cross-file
+  piece boundaries, v2 candidates by file Merkle root, and every survivor
+  passes the ordinary authoritative verifier;
+- stable source outcomes (`verified_unique`, `verified_ambiguous`, `not_found`,
+  or `incomplete`) kept separate from optional target/client handoff state;
+- read-only storage probing and explicit host-to-client path mapping;
+- zero-write, `layout_only` plans for v1, v2, and hybrid metafiles, bound to a
+  detected-stable verification observation with apply-time re-verification
+  requirements;
 - tracker output reduced to origins so announce passkeys are not printed;
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
-- read-only storage probing and explicit host-to-client path mapping;
-- a zero-write, `layout_only` seed plan for v1, v2, and hybrid metafiles, bound
-  to a detected-stable verification observation with explicit blockers and
-  apply-time re-verification requirements;
-- typed, capability-checked site ports instead of a mandatory monolithic driver;
+- typed, capability-checked site ports instead of a monolithic driver;
 - an experimental TJUPT session check, torrent search, and bonus catalog parser
   through one bounded, same-origin HTTPS GET per invocation, with fail-closed
   page recognition and no retry;
-- qBittorrent status and torrent-list reads over HTTPS (or explicit numeric-loopback
-  HTTP), with passwords accepted only through stdin;
+- qBittorrent status and torrent-list reads over HTTPS (or explicit numeric
+  loopback HTTP), with passwords accepted only through stdin;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
-Not implemented yet: metafile download, multi-root storage discovery,
-journaled plan application, deletion, automatic cross-seeding, site writes,
-browser login, third-party executable plugins, ratio manipulation, or
-Cloudflare bypass.
+Not implemented yet: metafile download, a persistent storage index, downloader
+job reconciliation, journaled plan application, deletion, automatic plan
+execution, site writes, browser login, third-party executable plugins, ratio
+manipulation, or Cloudflare bypass.
 
 ## Install
 
@@ -89,30 +99,39 @@ ptctl torrent inspect --output json release.torrent
 Verify an exact content root. v1 uses its cross-file piece stream, v2 uses
 per-file Merkle trees, and hybrid requires both proofs. For a multi-file
 torrent, `--content` is the directory represented by the torrent's top-level
-name. For a single-file torrent, it can be the file itself or its parent
-directory.
-
-`bytes_verified` counts physical content bytes. In each algorithm entry under
-`checks`, `proof_stream_bytes` reports bytes fed to that proof; for v1 this can
-be larger because it includes virtual padding. Stability is explicitly labeled
-non-atomic.
+name. For a single-file torrent, it can be the file itself or its parent.
 
 ```bash
 ptctl torrent verify --content "D:\PT\Release" release.torrent
 ```
 
-Map a path seen by the host to a path seen by a Dockerized downloader:
+`bytes_verified` counts physical bytes. Per-algorithm `proof_stream_bytes` can
+be larger for v1 because it includes virtual padding. Stability is explicitly
+labeled non-atomic.
+
+Find renamed or scattered bytes across several roots, prove them against the
+torrent, and optionally produce a zero-write target plan:
 
 ```bash
-ptctl storage map \
-  --host-root "D:\PT" \
-  --client-root /downloads \
-  --client-style posix \
-  "D:\PT\Release"
+ptctl seed discover \
+  --torrent release.torrent \
+  --search-root "D:\Media" \
+  --search-root "E:\Archive" \
+  --target "D:\PT" \
+  --output json
 ```
 
-Generate a source-verified, zero-write, layout-only materialization plan for a
-v1, v2, or hybrid metafile:
+Discovery has mandatory limits for roots, depth, directories, entries,
+retained paths, per-file candidates, candidate edges considered, solver states,
+verified alternatives, and proof work. A size match is only `candidate`; only
+full v1/v2 evidence is `verified`. If any relevant scan or proof budget is
+exhausted, the source
+outcome is `incomplete`, even when one verified candidate was found. Two
+verified layouts are `verified_ambiguous` and are never silently reduced to the
+first. Absolute paths are hidden by default; use `--show-absolute-paths` only
+for a private local report.
+
+Generate a plan from an already exact torrent layout:
 
 ```bash
 ptctl seed plan \
@@ -122,17 +141,28 @@ ptctl seed plan \
   --output json
 ```
 
-Read TJUPT without putting a cookie in shell history. The value supplied on
-stdin is the complete `Cookie` request-header value from a session you already
-control. Interactive TTY secret input is refused: use a pipe. Do not paste the
-value into issues, logs, or chat. Search terms are positional arguments and may
-remain in shell history.
+Map a host path to a Dockerized downloader namespace:
+
+```bash
+ptctl storage map \
+  --host-root "D:\PT" \
+  --client-root /downloads \
+  --client-style posix \
+  "D:\PT\Release"
+```
+
+Read TJUPT without putting a cookie in shell history. Stdin must contain the
+complete `Cookie` header value from a session you control. Interactive TTY
+secret input is refused. Do not paste the value into issues, logs, or chat.
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
 printf '%s' "$TJUPT_COOKIE" | ptctl site search --cookie-stdin tjupt "Ubuntu"
 printf '%s' "$TJUPT_COOKIE" | ptctl site bonus-catalog --cookie-stdin tjupt
 ```
+
+Each TJUPT command performs at most one bounded GET and never retries. Do not
+loop or parallelize site reads.
 
 Read qBittorrent state:
 
@@ -143,55 +173,57 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client status \
   --password-stdin
 ```
 
-Run `ptctl help` for the complete command surface.
+Run `ptctl help` or `ptctl seed discover --help` for the complete surface.
 
-Exit code `0` means success, `1` an operational failure, `2` invalid usage,
-and `3` an integrity mismatch. `torrent verify` still prints the complete
-verification result before returning `3`, so automation can retain the
-evidence without mistaking damaged content for success.
+Exit code `0` means a report or requested read succeeded, `1` an operational
+failure, `2` invalid usage, and `3` an explicit integrity mismatch. Discovery
+is report-oriented, so blocked results still print and return `0` by default.
+Add `--require-verified` to return `4` unless `source_outcome` is exactly
+`verified_unique`; target-plan or client-mapping failure does not erase source
+evidence. `torrent verify` prints its result before returning `3`.
 
 ## Security model in one paragraph
 
-A private `.torrent` is a secret-bearing artifact: its announce URL often
-contains a personal passkey. Site cookies and downloader credentials are also
-secrets, while filesystem access can damage irreplaceable data. `ptctl` keeps
-credentials in memory, rejects secret arguments, emits no request bodies,
-blocks site redirects across origins or down to HTTP, performs no automatic
-retry, limits response sizes, escapes terminal controls in human output,
-defaults conflicts to failure, and has no delete or apply command in this
-preview. See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
+A private `.torrent` is secret-bearing because its announce URL often contains
+a personal passkey. Site cookies and downloader credentials are also secrets,
+while filesystem reads can update atime, hydrate cloud placeholders, or incur
+network cost. `ptctl` keeps credentials in memory, rejects secret arguments,
+emits no request bodies, blocks cross-origin/downgrade redirects, never retries
+site reads, bounds network and filesystem work, hides absolute discovery paths
+by default, defaults conflicts to failure, and has no delete or apply command.
+See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Architecture
 
 ```text
-                  +---------------- Core ----------------+
-                  | bencode | manifest | verify | plan   |
-                  +---------+----------+--------+--------+
-                            |          |        |
-                   SiteDriver   ClientDriver   Storage view
-                       |             |              |
-                     TJUPT       qBittorrent     local/FUSE*
+           +--------------------- Core ----------------------+
+           | bencode | manifest | exact verify | seed match |
+           +---------+----------+--------------+------------+
+                     |          |              |
+             Site adapters  Client adapters  Storage inventory
+                  |              |                 |
+                TJUPT       qBittorrent       local/mounted*
 ```
 
-`*` A mounted remote is not considered seedable merely because rclone can list
-it. Random-read behavior, mount health, client-visible mapping, consistency,
-and cost must be established explicitly.
+`*` A mounted remote is not seedable merely because it can be listed. Random
+read behavior, mount health, client mapping, consistency, and cost must be
+established separately.
 
 The detailed design is in [ARCHITECTURE.md](docs/ARCHITECTURE.md), and the
-site-specific boundary is documented in
-[TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md).
+site boundary is in [TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md).
 
 Metafile behavior is grounded in [BEP 3](https://www.bittorrent.org/beps/bep_0003.html),
-[BEP 47 padding files](https://www.bittorrent.org/beps/bep_0047.html), and
-[BEP 52 v2/hybrid torrents](https://www.bittorrent.org/beps/bep_0052.html).
+[BEP 47](https://www.bittorrent.org/beps/bep_0047.html), and
+[BEP 52](https://www.bittorrent.org/beps/bep_0052.html).
 
 ## Project principles
 
 - Missing data is unknown, never silently zero.
 - Names and sizes produce candidates; only piece/Merkle evidence is verified.
+- Budget exhaustion means incomplete, never no-match or unique.
 - No site capability is guessed when an adapter does not declare it.
-- A GET that changes tracker accounting is labeled effectful before support is
-  added.
+- A GET that changes tracker accounting must be labeled effectful before
+  support is added.
 - No ratio cheating, fake upload, DHT/PEX leakage for private torrents, or
   challenge bypass will be accepted.
 - No real cookie, passkey, private metafile, or unredacted HTML fixture belongs

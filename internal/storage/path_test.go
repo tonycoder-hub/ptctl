@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -21,6 +22,32 @@ func TestRejectDangerousWindowsPaths(t *testing.T) {
 	for _, path := range bad {
 		if err := ValidateComponents(path, semantics); err == nil {
 			t.Fatalf("expected rejection for %q", path)
+		}
+	}
+}
+
+func TestSecureJoinExistingRejectsLinkTraversal(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "real")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SecureJoinExisting(root, [][]byte{[]byte("real"), []byte("file")}, CurrentSemantics()); err != nil {
+		t.Fatalf("normal path rejected: %v", err)
+	}
+	linkedDirectory := filepath.Join(root, "linked")
+	if err := os.Symlink(directory, linkedDirectory); err == nil {
+		if _, err := SecureJoinExisting(root, [][]byte{[]byte("linked"), []byte("file")}, CurrentSemantics()); err == nil {
+			t.Fatal("internal symbolic-link traversal was accepted")
+		}
+	}
+	linkedRoot := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(root, linkedRoot); err == nil {
+		if _, err := SecureJoinExisting(linkedRoot, [][]byte{[]byte("real"), []byte("file")}, CurrentSemantics()); err == nil {
+			t.Fatal("symbolic-link storage root was accepted")
 		}
 	}
 }
