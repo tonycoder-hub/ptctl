@@ -52,10 +52,13 @@ credentials. TJUPT is one adapter, not a special case in the content model.
 ## Read-only ledger reconciliation
 
 `reconcile report` is the second vertical slice. One invocation parses one
-exact metafile, opens one read-only downloader session, reads a bounded client
+exact metafile, opens one read-only downloader session, reads a bounded job
 ledger, performs ordinary storage discovery and content proof, then reads the
-client ledger again. The two client observations bracket storage verification
-but do not form an atomic transaction.
+job ledger again. For one uniquely identified ordinary multi-file job, `auto`
+mode attempts one bounded per-file read before the storage proof and sends a
+second afterward only when the first completed. The outer job observations and
+successful inner file observations form a serial bracket, not an atomic
+transaction.
 
 The report deliberately keeps five relations separate:
 
@@ -64,15 +67,17 @@ The report deliberately keeps five relations separate:
    private `.torrent` bytes;
 3. `client_infohash_relation` compares algorithm-tagged v1/v2 claims;
 4. `storage_content_proof` carries the ordinary piece/Merkle proof;
-5. `verified_source_vs_job_path` compares a verified cohesive layout with the
-   downloader's declared content path under an explicit namespace mapping.
+5. `verified_source_vs_job_path` compares a verified single-file path, or each
+   verified multi-file binding by manifest index, with the downloader's
+   lexical claims under one explicit namespace mapping.
 
 There is no single `matched` boolean. The overall lattice is `consistent`,
 `partial`, `conflict`, `ambiguous`, or `incomplete`, while every relation keeps
 its own evidence level and blocker codes. A different client path means that
 verified reusable bytes exist elsewhere; it is not a content mismatch. A
-scattered source is cryptographically reusable but cannot describe one client
-content root.
+scattered source can align only when every physical manifest binding
+independently maps to the corresponding stable client file claim; no shared
+host source root is inferred.
 
 qBittorrent's generic `hash` is an opaque job key. The adapter derives typed
 claims only from strictly bounded magnet `xt` values: BTIH is 20 bytes and
@@ -91,17 +96,25 @@ report output.
 The downloader adapter does not expose raw private metafile bytes, so equal
 typed infohash claims still leave `metafile_variant_relation=unobservable`.
 Likewise, qBittorrent paths are untrusted remote claims: they are parsed only
-for lexical comparison and are never opened as host paths.
-The current path relation can become consistent only for a single-file job in
-a stable, complete seeding state whose reported size agrees with the metafile.
-The expected path is projected from the opaque same-call `VerifiedSource`, not
+for lexical comparison and are never opened as host paths. The path relation
+can become consistent for a single-file job in a stable, complete seeding state
+whose reported size agrees with the metafile. For an ordinary multi-file job it
+additionally requires two stable, complete indexed file observations: every row
+must match its manifest index and size, remain selected and complete, and have
+an effective path equal to the independently projected verified source
+binding. The qBittorrent path contract is fixed as `save_path` plus the returned
+relative file path; `content_path` must be a consistent ancestor. The
+implementation never tries alternate path formulas until one happens to match.
+
+Expected paths are projected from the opaque same-call `VerifiedSource`, not
 from mutable discovery report fields. The public report copy deliberately
-drops that process-local capability. Mapping scope records an opaque mapping
-ID and exact POSIX or Windows comparison semantics. Multi-file reconciliation remains partial
-until a bounded client file ledger supplies effective paths, rename state, and
-selection priorities; a shared top-level `content_path` alone is insufficient.
-Windows comparisons require exact case because case sensitivity can vary by
-directory or remote filesystem.
+drops that process-local capability. Mapping scope records an opaque mapping ID
+and exact POSIX or Windows comparison semantics. A shared top-level
+`content_path` alone remains insufficient. Any nonempty file attribute
+(including padding or symlink semantics) and non-padding empty files are
+conservatively unsupported for the full-layout claim. Windows comparisons
+require exact case because case sensitivity can vary by directory or remote
+filesystem.
 
 ## Capability negotiation
 
@@ -117,6 +130,12 @@ Capabilities are small and explicit:
 Site-specific writes will eventually live under a namespaced action schema.
 They will not be forced into universal fields. The alpha exposes no site
 writes.
+
+Downloader ledgers negotiate normalized capabilities separately:
+algorithm-tagged infohashes, content paths, raw metafiles, and indexed job
+files. The qBittorrent adapter declares indexed job files only when it can
+supply all required path, size, progress, selection, and seed-state fields;
+partial rows do not become a weaker “supported” layout.
 
 ## Identity
 

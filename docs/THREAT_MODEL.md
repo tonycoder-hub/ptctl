@@ -58,10 +58,18 @@ The TJUPT adapter performs one bounded GET per command and never retries. HTTP
 must not loop or parallelize site commands. There is no Cloudflare or CAPTCHA
 bypass.
 
-A live reconciliation uses one qBittorrent login and at most two bounded
-torrent-list reads, sequentially and without retry. Authentication, rate-limit,
-HTTP, parse, or timeout failures make the downloader axis incomplete; they do
-not trigger re-login or a client mutation.
+A live reconciliation uses one qBittorrent login and two bounded torrent-list
+reads, sequentially and without retry. When `auto` observes one uniquely
+identified ordinary multi-file job, it attempts up to two bounded file-list
+reads around storage proof; the second is sent only after a complete first
+read. That path therefore makes at most five HTTP requests including login.
+Authentication, rate-limit, HTTP, parse, or timeout failures make the
+downloader axis incomplete; they do not trigger re-login, fan-out across queue
+jobs, or a client mutation.
+The audit session disables HTTP connection reuse and HTTP/2 so Go's transport
+cannot transparently replay a failed idempotent GET behind the request counter;
+the cookie jar still carries the authenticated session across fresh
+connections.
 
 ### Parser, scanner, and solver exhaustion
 
@@ -74,6 +82,16 @@ decoded `xt`. The job array is decoded one object at a time, the N+1 job is
 rejected before decoding, and each object is capped at 256 fields. Query keys
 and `xt` claims must decode to strict ASCII; tracker and web-seed values are
 not materialized. Duplicate JSON fields and opaque job keys fail closed.
+
+Each qBittorrent file-list response has mandatory row, decoded path-byte, and
+response-byte limits with lower defaults and non-disableable hard caps. Rows
+are decoded incrementally, and row N+1 stops the snapshot before it can expand
+memory. Required fields have explicit presence checks; missing zero-valued
+fields cannot masquerade as an empty, skipped, or incomplete file. Duplicate
+JSON fields or indices, malformed UTF-8, unpaired escaped UTF-16 surrogates,
+invalid relative components, and unknown priorities fail the observation.
+Before and after snapshots retain only bounded normalized rows and stable
+findings, never the raw body.
 
 Storage discovery has non-disableable limits for roots, depth, directories,
 entries, entries in one directory, retained candidates, retained raw path
@@ -118,22 +136,32 @@ filesystem snapshot or OS-specific `openat`/Windows-handle implementation is
 needed for stronger guarantees. Reports and plans label this assurance
 non-atomic.
 
-Downloader reconciliation takes one identity snapshot before storage proof
-and another afterward using the same authenticated session. Typed hashes,
-opaque job key, content/save paths, and size must remain stable. A change makes
-the client relation incomplete. Even two equal snapshots are only a bracketed,
-non-atomic observation: a job may change between reads. Downloading, checking,
-moving, or allocating state never upgrades a lexical path match into proof that
-the client is currently reading the verified files. Client-reported paths are
-never passed to host filesystem APIs.
+Downloader reconciliation takes one identity snapshot before storage proof and
+another afterward using the same authenticated session. For eligible ordinary
+multi-file jobs, a file snapshot is taken after the first identity read and a
+second file snapshot before the final identity read. Typed hashes, opaque job
+key, content/save paths, size, and every conclusion-bearing indexed file field
+must remain stable. A change makes the client relation incomplete. Even equal
+outer and inner snapshots are only a bracketed, non-atomic observation: a job
+may change between reads. Downloading, checking, moving, or allocating state
+never upgrades a lexical path match into proof that the client is currently
+reading the verified files. Client-reported paths are never passed to host
+filesystem APIs.
 Unknown client state text is normalized to `unknown` before entering a ledger
 or report. Single-file path agreement also requires the client-reported size to
 match. The expected path is derived from the same-call process-local storage
 proof plus the invocation mapping; exported discovery fields cannot substitute
 for that proof, and the public report drops the capability entirely.
-For multi-file jobs, a matching top-level content path cannot reveal skipped
-or renamed files, so the alpha keeps that path relation partial. Windows path
-case is compared exactly rather than assuming case-insensitive semantics for a
+For an ordinary multi-file job, every nonempty physical manifest index must
+appear exactly once with its expected size, remain selected and fully seeded,
+and have an effective lexical path equal to the independently mapped
+same-call source binding. A matching top-level content path alone cannot reveal
+skipped or renamed files. The qBittorrent formula is fixed as `save_path` plus
+the returned relative file path, while `content_path` must be a consistent
+ancestor; alternate formulas are not tried opportunistically. Any nonempty
+file attribute (including padding or symlink semantics) and non-padding empty
+files remain unsupported for this full-layout claim. Windows path case is
+compared exactly rather than assuming case-insensitive semantics for a
 particular directory or remote filesystem.
 
 The preview has no apply, overwrite, move, or delete command. A layout plan

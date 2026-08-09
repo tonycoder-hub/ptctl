@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
@@ -29,8 +31,8 @@ type PathMappingOptions struct {
 }
 
 func parseClientPath(value string, windows bool) (clientPath, error) {
-	if value == "" || len(value) > maxClientPathBytes {
-		return clientPath{}, fmt.Errorf("client path is empty or exceeds 32 KiB")
+	if value == "" || len(value) > maxClientPathBytes || !utf8.ValidString(value) || strings.ContainsRune(value, utf8.RuneError) {
+		return clientPath{}, fmt.Errorf("client path is invalid or exceeds 32 KiB")
 	}
 	for _, r := range value {
 		if r == 0 || r < 0x20 || r == 0x7f {
@@ -48,6 +50,28 @@ func parseClientPath(value string, windows bool) (clientPath, error) {
 		return clientPath{}, err
 	}
 	return clientPath{parts: parts}, nil
+}
+
+func parseClientRelativeComponents(components []string, windows bool) ([]string, error) {
+	if len(components) == 0 || len(components) > 128 {
+		return nil, fmt.Errorf("client relative path has no components or exceeds 128 components")
+	}
+	total := 0
+	raw := make([][]byte, len(components))
+	for index, component := range components {
+		if component == "" || !utf8.ValidString(component) || strings.ContainsRune(component, utf8.RuneError) || strings.ContainsAny(component, "/\\") {
+			return nil, fmt.Errorf("client relative path component %d is invalid", index)
+		}
+		total += len(component)
+		if total > maxClientPathBytes {
+			return nil, fmt.Errorf("client relative path exceeds 32 KiB")
+		}
+		raw[index] = []byte(component)
+	}
+	if err := storage.ValidateComponents(raw, storage.PathSemantics{Windows: windows, CaseSensitive: true}); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), components...), nil
 }
 
 func parseWindowsClientPath(value string) (clientPath, error) {
@@ -148,6 +172,99 @@ func (path clientPath) public(show bool) string {
 	}
 	digest := sha256.Sum256([]byte("ptctl-client-path-v1\x00" + path.canonical()))
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func (path clientPath) joinRelative(components []string) clientPath {
+	result := path
+	result.parts = append(append([]string(nil), path.parts...), components...)
+	return result
+}
+
+func (path clientPath) within(root clientPath) bool {
+	if path.windows != root.windows || path.volume != root.volume || len(path.parts) < len(root.parts) {
+		return false
+	}
+	for index := range root.parts {
+		if path.parts[index] != root.parts[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validateClientPathSet(paths map[int]clientPath) error {
+	type item struct {
+		index int
+		path  clientPath
+		key   string
+	}
+	items := make([]item, 0, len(paths))
+	seen := make(map[string]int, len(paths))
+	for index, value := range paths {
+		collisionKey := clientNamespaceKey(value)
+		if previous, exists := seen[collisionKey]; exists {
+			return fmt.Errorf("client file paths %d and %d collide under declared namespace semantics", previous, index)
+		}
+		seen[collisionKey] = index
+		items = append(items, item{index: index, path: value, key: collisionKey})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].key < items[j].key })
+	for index := 1; index < len(items); index++ {
+		if clientPathPrefix(items[index-1].path, items[index].path) {
+			return fmt.Errorf("client file paths %d and %d have a file/directory prefix collision", items[index-1].index, items[index].index)
+		}
+	}
+	return nil
+}
+
+func clientPathPrefix(parent, child clientPath) bool {
+	if parent.windows != child.windows || len(parent.parts) >= len(child.parts) {
+		return false
+	}
+	leftVolume, rightVolume := parent.volume, child.volume
+	if parent.windows {
+		leftVolume, rightVolume = windowsSimpleFoldKey(leftVolume), windowsSimpleFoldKey(rightVolume)
+	}
+	if leftVolume != rightVolume {
+		return false
+	}
+	for index := range parent.parts {
+		left, right := parent.parts[index], child.parts[index]
+		if parent.windows {
+			left, right = windowsSimpleFoldKey(left), windowsSimpleFoldKey(right)
+		}
+		if left != right {
+			return false
+		}
+	}
+	return true
+}
+
+func clientNamespaceKey(path clientPath) string {
+	volume := path.volume
+	parts := append([]string(nil), path.parts...)
+	if path.windows {
+		volume = windowsSimpleFoldKey(volume)
+		for index := range parts {
+			parts[index] = windowsSimpleFoldKey(parts[index])
+		}
+	}
+	return volume + "\x00" + strings.Join(parts, "\x00")
+}
+
+func windowsSimpleFoldKey(value string) string {
+	var result strings.Builder
+	result.Grow(len(value))
+	for _, character := range value {
+		minimum := character
+		for folded := unicode.SimpleFold(character); folded != character; folded = unicode.SimpleFold(folded) {
+			if folded < minimum {
+				minimum = folded
+			}
+		}
+		result.WriteRune(minimum)
+	}
+	return result.String()
 }
 
 func expectedClientContentPath(meta *metafile.MetaInfo, source *metafile.VerifiedSource, mapping PathMappingOptions) (clientPath, string, error) {

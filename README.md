@@ -69,13 +69,17 @@ capabilities at the edge, not assumptions in the core domain model.
   extracts typed v1/v2 claims from bounded magnet `xt` fields, and reports
   variant, infohash, content-proof, and path relations as separate evidence
   axes;
+- bounded qBittorrent per-file ledgers for one uniquely identified ordinary
+  multi-file job, with stable index/size/selection/completion checks and
+  per-binding host-to-client path comparison;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
 Not implemented yet: metafile download, a persistent storage index, downloader
-mutation or per-file selection reconciliation, journaled plan application,
-deletion, automatic plan execution, site writes, browser login, third-party
-executable plugins, ratio manipulation, or Cloudflare bypass.
+mutation, attributed/empty-file client-layout reconciliation, journaled
+plan application, deletion, automatic plan execution, site writes, browser
+login, third-party executable plugins, ratio manipulation, or Cloudflare
+bypass.
 
 ## Install
 
@@ -179,9 +183,12 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client status \
 ```
 
 Reconcile one exact metafile with verified bytes and qBittorrent's read-only
-ledger. The password is used for one login; the storage proof is bracketed by
-two bounded torrent-list reads. No pause, recheck, move, add, or filesystem
-write is performed.
+ledger. The password is used for one login; two bounded torrent-list reads
+bracket the storage proof. For one unique ordinary multi-file job, `auto` mode
+attempts up to two bounded per-file reads around that proof; the second is sent
+only after a complete first read. The complete path is serial, makes at most
+five HTTP requests including login, and never retries.
+No pause, recheck, move, add, or filesystem write is performed.
 
 ```bash
 printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
@@ -195,6 +202,7 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
   --host-root 'D:\' \
   --client-root /downloads \
   --client-style posix \
+  --client-file-layout auto \
   --site-ref tjupt/123 \
   --output json
 ```
@@ -208,14 +216,25 @@ discarded because it may contain tracker or web-seed secrets. A declared
 metafile binding. qBittorrent does not expose the raw private metafile through
 this ledger, so `metafile_variant_relation` remains `unobservable` even when
 typed infohashes agree.
-Multi-file jobs also remain path-incomplete until a bounded client file ledger
-can prove effective per-file paths, rename state, and selection priorities;
-matching only the top-level content path is not enough.
+
+For an ordinary multi-file job, the bounded
+[torrent-contents endpoint](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-contents)
+supplies indexed relative paths, sizes, progress, seed state, and selection
+priority. `auto` reads it only for one uniquely identified job, once before and
+once after local proof. Every index must remain stable, agree with the
+metafile, be selected and complete, and map exactly from the same-call verified
+host source into qBittorrent's lexical namespace. Any nonempty file attribute
+(including padding or symlink semantics) and non-padding empty files remain
+unsupported for this full-layout claim.
+Use `--client-file-layout off` to retain a partial report without the two file
+reads. Matching only a top-level content path is never enough.
+
 For a single-file job, consistency additionally requires the client-reported
 size, complete seeding state, and `content_path` to agree. The expected client
 path is recomputed from the same-call opaque storage proof and the explicit
 invocation mapping; mutable discovery JSON is never path authority. Reports
-name the exact POSIX/Windows comparison mode and an opaque mapping ID.
+name the exact POSIX/Windows comparison mode and an opaque mapping ID. Client
+paths remain remote, non-atomic lexical claims and are never opened on the host.
 
 Run `ptctl help`, `ptctl seed discover --help`, or
 `ptctl reconcile report --help` for the complete surface.
