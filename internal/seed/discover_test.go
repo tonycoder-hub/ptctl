@@ -101,7 +101,15 @@ func TestPublicReportCopyDropsAllProcessLocalSnapshotAuthority(t *testing.T) {
 	if len(result.Matches) != 1 {
 		t.Fatalf("expected one verified match: %#v", result)
 	}
-	if _, err := result.Matches[0].Verification.MatchSourceSnapshot(sourcePath); err != nil {
+	verifiedSource, ok := result.VerifiedSource(meta)
+	if !ok {
+		t.Fatal("discovery did not retain its process-local verified source")
+	}
+	verifiedPath, ok := verifiedSource.Path(0)
+	if !ok {
+		t.Fatal("verified source did not retain the file binding")
+	}
+	if _, err := result.Matches[0].Verification.MatchSourceSnapshot(verifiedPath); err != nil {
 		t.Fatalf("original verification lost its process-local snapshot: %v", err)
 	}
 
@@ -109,15 +117,15 @@ func TestPublicReportCopyDropsAllProcessLocalSnapshotAuthority(t *testing.T) {
 	if _, ok := public.VerifiedSource(meta); ok {
 		t.Fatal("public report copy retained the opaque verified source")
 	}
-	_, existingErr := public.Matches[0].Verification.MatchSourceSnapshot(sourcePath)
-	_, missingErr := public.Matches[0].Verification.MatchSourceSnapshot(filepath.Join(root, "missing"))
+	_, existingErr := public.Matches[0].Verification.MatchSourceSnapshot(verifiedPath)
+	_, missingErr := public.Matches[0].Verification.MatchSourceSnapshot(filepath.Join(filepath.Dir(verifiedPath), "missing"))
 	if existingErr == nil {
 		t.Fatal("public report copy retained a source-path snapshot oracle")
 	}
-	if missingErr == nil || existingErr.Error() != missingErr.Error() || strings.Contains(existingErr.Error(), sourcePath) {
+	if missingErr == nil || existingErr.Error() != missingErr.Error() || strings.Contains(existingErr.Error(), verifiedPath) {
 		t.Fatalf("public verification still distinguishes candidate paths: existing=%q missing=%q", existingErr, missingErr)
 	}
-	if _, err := result.Matches[0].Verification.MatchSourceSnapshot(sourcePath); err != nil {
+	if _, err := result.Matches[0].Verification.MatchSourceSnapshot(verifiedPath); err != nil {
 		t.Fatalf("public copy mutated original verification authority: %v", err)
 	}
 }
