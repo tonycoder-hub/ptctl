@@ -55,6 +55,9 @@ func TestBuildConsistentReportKeepsAxesSeparateAndPathsPrivate(t *testing.T) {
 	if recovered, ok := publicDiscovery.VerifiedSource(meta); ok || recovered != nil {
 		t.Fatal("the public report retained the process-local source capability")
 	}
+	if _, err := publicDiscovery.Matches[0].Verification.MatchSourceSnapshot(filepath.Join(root, "renamed.bin")); err == nil {
+		t.Fatal("the public report retained a source-path snapshot oracle")
+	}
 }
 
 func TestSerializedDiscoveryCannotBecomeProcessLocalProof(t *testing.T) {
@@ -424,6 +427,7 @@ func TestScatteredVerifiedFilesAreNotClaimedAsDownloaderContentRoot(t *testing.T
 		t.Fatalf("unexpected discovery: %#v", discovery)
 	}
 	job := matchingJob(meta, "/downloads/bundle")
+	job.SizeBytes = 6
 	before, after := ledgerPair(job)
 	report, err := Build(BuildInput{
 		Meta: meta, Discovery: discovery, VerifiedSource: source,

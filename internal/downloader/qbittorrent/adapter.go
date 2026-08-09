@@ -21,7 +21,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
-	"github.com/tonycoder-hub/ptctl/internal/security"
 )
 
 const (
@@ -86,6 +85,9 @@ type rawTorrent struct {
 }
 
 func (item *rawTorrent) UnmarshalJSON(data []byte) error {
+	if err := validateStrictJSONStrings(data, hardMaxTorrentJSONDepth); err != nil {
+		return fmt.Errorf("decode qBittorrent torrent object")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil {
@@ -112,7 +114,7 @@ func (item *rawTorrent) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("decode qBittorrent torrent object")
 		}
 		key, ok := token.(string)
-		if !ok {
+		if !ok || !validDecodedJSONFieldKey(key) {
 			return fmt.Errorf("decode qBittorrent torrent object")
 		}
 		if _, exists := seen[key]; exists {
@@ -123,33 +125,43 @@ func (item *rawTorrent) UnmarshalJSON(data []byte) error {
 		if err := decoder.Decode(&raw); err != nil {
 			return fmt.Errorf("decode qBittorrent torrent object field")
 		}
-		var target any
+		var stringTarget *string
 		switch key {
 		case "hash":
-			target = &item.Hash
+			stringTarget = &item.Hash
 		case "magnet_uri":
-			target = &item.MagnetURI
+			stringTarget = &item.MagnetURI
 		case "name":
-			target = &item.Name
+			stringTarget = &item.Name
 		case "size":
-			target = &item.Size
-		case "progress":
-			target = &item.Progress
-		case "state":
-			target = &item.State
-		case "save_path":
-			target = &item.SavePath
-		case "content_path":
-			target = &item.ContentPath
-		case "downloaded":
-			target = &item.Downloaded
-		case "uploaded":
-			target = &item.Uploaded
-		}
-		if target != nil {
-			if err := json.Unmarshal(raw, target); err != nil {
+			if err := decodeJSONInt64(raw, &item.Size); err != nil {
 				return fmt.Errorf("decode qBittorrent torrent object field")
 			}
+		case "progress":
+			if err := decodeJSONFloat64(raw, &item.Progress); err != nil {
+				return fmt.Errorf("decode qBittorrent torrent object field")
+			}
+		case "state":
+			stringTarget = &item.State
+		case "save_path":
+			stringTarget = &item.SavePath
+		case "content_path":
+			stringTarget = &item.ContentPath
+		case "downloaded":
+			if err := decodeJSONInt64(raw, &item.Downloaded); err != nil {
+				return fmt.Errorf("decode qBittorrent torrent object field")
+			}
+		case "uploaded":
+			if err := decodeJSONInt64(raw, &item.Uploaded); err != nil {
+				return fmt.Errorf("decode qBittorrent torrent object field")
+			}
+		}
+		if stringTarget != nil {
+			value, err := decodeStrictJSONStringValue(raw)
+			if err != nil {
+				return fmt.Errorf("decode qBittorrent torrent object field")
+			}
+			*stringTarget = value
 		}
 	}
 	token, err = decoder.Token()
@@ -225,8 +237,9 @@ func (a *Adapter) openReadSession(ctx context.Context, credential downloader.Cre
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
-		IdleConnTimeout:       30 * time.Second,
-		MaxIdleConnsPerHost:   1,
+		DisableKeepAlives:     true,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
 	client := &http.Client{
 		Jar:       jar,
@@ -312,6 +325,7 @@ func (s *readSession) ReadLedger(ctx context.Context) (downloader.LedgerSnapshot
 			TypedInfoHashes: true,
 			ContentPath:     true,
 			RawMetafile:     false,
+			JobFiles:        true,
 		},
 		Jobs: jobs,
 	}, nil
@@ -349,7 +363,10 @@ func (s *readSession) login(ctx context.Context, credential downloader.Credentia
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("qBittorrent login failed: %s", security.Redact(err.Error()))
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		return fmt.Errorf("qBittorrent login failed")
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1025))
@@ -368,7 +385,27 @@ func (s *readSession) getText(ctx context.Context, path string) (string, error) 
 }
 
 func (s *readSession) get(ctx context.Context, path string, maxBody int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.adapter.resolve(path).String(), nil)
+	resp, err := s.getResponse(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read qBittorrent response: %w", err)
+	}
+	if int64(len(body)) > maxBody {
+		return nil, fmt.Errorf("qBittorrent response exceeded %d bytes", maxBody)
+	}
+	return body, nil
+}
+
+func (s *readSession) getResponse(ctx context.Context, path string, query url.Values) (*http.Response, error) {
+	target := s.adapter.resolve(path)
+	if query != nil {
+		target.RawQuery = query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build qBittorrent request: %w", err)
 	}
@@ -380,20 +417,16 @@ func (s *readSession) get(ctx context.Context, path string, maxBody int64) ([]by
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("qBittorrent read failed: %s", security.Redact(err.Error()))
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, fmt.Errorf("qBittorrent read failed")
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("qBittorrent returned HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-	if err != nil {
-		return nil, fmt.Errorf("read qBittorrent response: %w", err)
-	}
-	if int64(len(body)) > maxBody {
-		return nil, fmt.Errorf("qBittorrent response exceeded %d bytes", maxBody)
-	}
-	return body, nil
+	return resp, nil
 }
 
 func (s *readSession) beginRequest(ctx context.Context) error {
@@ -496,16 +529,16 @@ func normalizeTorrent(index int, item rawTorrent) (downloader.Torrent, error) {
 	if item.Hash == "" || len(item.Hash) > maxOpaqueJobKeyBytes || hasUnsafeJobKeyByte(item.Hash) {
 		return downloader.Torrent{}, fmt.Errorf("qBittorrent torrent %d has an invalid opaque job key", index)
 	}
-	if item.Name == "" || len(item.Name) > maxJobNameBytes {
+	if item.Name == "" || len(item.Name) > maxJobNameBytes || !validControlSafeUTF8(item.Name) {
 		return downloader.Torrent{}, fmt.Errorf("qBittorrent torrent %d has an invalid name", index)
 	}
-	if len(item.State) > maxJobStateBytes {
+	if len(item.State) > maxJobStateBytes || !validControlSafeUTF8(item.State) {
 		return downloader.Torrent{}, fmt.Errorf("qBittorrent torrent %d has an invalid state", index)
 	}
-	if len(item.SavePath) > maxJobPathBytes || strings.IndexByte(item.SavePath, 0) >= 0 {
+	if len(item.SavePath) > maxJobPathBytes || !validControlSafeUTF8(item.SavePath) {
 		return downloader.Torrent{}, fmt.Errorf("qBittorrent torrent %d has an invalid save path", index)
 	}
-	if len(item.ContentPath) > maxJobPathBytes || strings.IndexByte(item.ContentPath, 0) >= 0 {
+	if len(item.ContentPath) > maxJobPathBytes || !validControlSafeUTF8(item.ContentPath) {
 		return downloader.Torrent{}, fmt.Errorf("qBittorrent torrent %d has an invalid content path", index)
 	}
 	if item.Size < 0 || item.Downloaded < 0 || item.Uploaded < 0 {

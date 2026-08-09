@@ -203,6 +203,12 @@ func (result *DiscoveryResult) VerifiedSource(meta *metafile.MetaInfo) (*metafil
 func (result DiscoveryResult) PublicReportCopy() DiscoveryResult {
 	result.verifiedSource = nil
 	result.verifiedSelectionID = ""
+	if result.Matches != nil {
+		result.Matches = append([]DiscoveryMatch(nil), result.Matches...)
+		for i := range result.Matches {
+			result.Matches[i].Verification = result.Matches[i].Verification.PublicCopy()
+		}
+	}
 	return result
 }
 

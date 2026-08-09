@@ -35,6 +35,7 @@ type VerificationResult struct {
 	MismatchOverflow   int                 `json:"mismatch_overflow,omitempty"`
 	Checks             []VerificationCheck `json:"checks"`
 	snapshots          []snapshotRecord
+	snapshotAuthority  bool
 }
 
 type VerificationCheck struct {
@@ -51,6 +52,26 @@ type VerificationCheck struct {
 	RootsMatched     int    `json:"roots_matched,omitempty"`
 	MismatchPieces   []int  `json:"mismatch_pieces,omitempty"`
 	MismatchOverflow int    `json:"mismatch_overflow,omitempty"`
+}
+
+// PublicCopy removes process-local filesystem snapshot authority while
+// preserving the serializable verification evidence. The returned slices do
+// not alias the original result.
+func (r VerificationResult) PublicCopy() VerificationResult {
+	if r.MismatchPieces != nil {
+		r.MismatchPieces = append([]int(nil), r.MismatchPieces...)
+	}
+	if r.Checks != nil {
+		r.Checks = append([]VerificationCheck(nil), r.Checks...)
+		for i := range r.Checks {
+			if r.Checks[i].MismatchPieces != nil {
+				r.Checks[i].MismatchPieces = append([]int(nil), r.Checks[i].MismatchPieces...)
+			}
+		}
+	}
+	r.snapshots = nil
+	r.snapshotAuthority = false
+	return r
 }
 
 type SourcePrecondition struct {
@@ -172,6 +193,7 @@ func verifyV1Resolved(ctx context.Context, meta *MetaInfo, specs []fileSpec) (Ve
 			result.snapshots = append(result.snapshots, snapshotRecord{path: spec.path, info: spec.infoBefore})
 		}
 	}
+	result.snapshotAuthority = true
 	result.BytesVerified = result.ProofStreamBytes - result.PaddingBytes
 	result.Verified = result.PiecesMatched == result.PiecesExpected
 	result.Checks = []VerificationCheck{verificationCheck("bt-v1", result)}
@@ -361,6 +383,7 @@ func verifyV2Resolved(ctx context.Context, meta *MetaInfo, specs []fileSpec, pro
 			result.snapshots = append(result.snapshots, snapshotRecord{path: spec.path, info: spec.infoBefore})
 		}
 	}
+	result.snapshotAuthority = true
 	result.Verified = rootsMatch && result.PiecesMatched == result.PiecesExpected && result.RootsMatched == result.RootsExpected
 	result.ProofStreamBytes = result.BytesVerified
 	result.Checks = []VerificationCheck{verificationCheck("bt-v2", result)}
@@ -399,6 +422,7 @@ func verifyHybridResolved(ctx context.Context, meta *MetaInfo, specs []fileSpec)
 	v1.BytesVerified = v2.BytesVerified
 	v1.SourceSnapshotID = v2.SourceSnapshotID
 	v1.snapshots = v2.snapshots
+	v1.snapshotAuthority = v2.snapshotAuthority
 	v1.Verified = v1.PiecesMatched == v1.PiecesExpected
 	v1.Checks = []VerificationCheck{verificationCheck("bt-v1", v1)}
 
@@ -421,6 +445,7 @@ func verifyHybridResolved(ctx context.Context, meta *MetaInfo, specs []fileSpec)
 		RootsMatched:       v2.RootsMatched,
 		Checks:             append(append([]VerificationCheck(nil), v1.Checks...), v2.Checks...),
 		snapshots:          v2.snapshots,
+		snapshotAuthority:  v2.snapshotAuthority,
 	}
 	return result, nil
 }
@@ -567,6 +592,9 @@ func verificationCheck(algorithm string, result VerificationResult) Verification
 // MatchSourceSnapshot ensures a planned source is the same file object and
 // metadata snapshot that was observed during piece verification.
 func (r VerificationResult) MatchSourceSnapshot(path string) (SourcePrecondition, error) {
+	if !r.snapshotAuthority {
+		return SourcePrecondition{}, fmt.Errorf("verification result has no process-local source snapshot authority")
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return SourcePrecondition{}, fmt.Errorf("re-stat planned source %q: %w", path, err)

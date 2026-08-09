@@ -28,11 +28,18 @@ const (
 )
 
 type ClientBracket struct {
-	Requested    bool
-	Before       *downloader.LedgerSnapshot
-	After        *downloader.LedgerSnapshot
-	StopReason   string
-	RequestsMade int
+	Requested        bool
+	Before           *downloader.LedgerSnapshot
+	After            *downloader.LedgerSnapshot
+	StopReason       string
+	RequestsMade     int
+	FileLayoutMode   string
+	FileLimits       downloader.JobFileLedgerLimits
+	FileAttempted    bool
+	FileRequestsMade int
+	FilesBefore      *downloader.JobFileLedgerSnapshot
+	FilesAfter       *downloader.JobFileLedgerSnapshot
+	FileStopReason   string
 }
 
 type BuildInput struct {
@@ -64,6 +71,7 @@ type ReportScope struct {
 	PathMappingRequested bool   `json:"path_mapping_requested"`
 	PathMappingID        string `json:"path_mapping_id,omitempty"`
 	ClientPathSemantics  string `json:"client_path_semantics"`
+	ClientFileLayoutMode string `json:"client_file_layout_mode"`
 	AbsolutePathsShown   bool   `json:"absolute_paths_shown"`
 }
 
@@ -110,6 +118,7 @@ type DownloaderLedger struct {
 	IdentityUnavailable int                           `json:"identity_unavailable"`
 	IdentityInvalid     int                           `json:"identity_invalid"`
 	Matches             []ClientJobClaim              `json:"matches"`
+	FileLayout          ClientFileLayoutLedger        `json:"file_layout"`
 	StopReason          string                        `json:"stop_reason,omitempty"`
 }
 
@@ -169,6 +178,10 @@ func Build(input BuildInput) (Report, error) {
 		return Report{}, fmt.Errorf("metafile is nil")
 	}
 	meta := input.Meta
+	fileLayoutMode, err := normalizeClientFileLayoutMode(input.Client.Requested, input.Client.FileLayoutMode)
+	if err != nil {
+		return Report{}, err
+	}
 	clientWindows := false
 	pathSemantics := "not_requested"
 	pathMappingIDValue := ""
@@ -192,6 +205,7 @@ func Build(input BuildInput) (Report, error) {
 			PathMappingRequested: input.PathMapping != nil,
 			PathMappingID:        pathMappingIDValue,
 			ClientPathSemantics:  pathSemantics,
+			ClientFileLayoutMode: fileLayoutMode,
 			AbsolutePathsShown:   input.ShowAbsolutePaths,
 		},
 		Relations: []Relation{},
@@ -200,6 +214,9 @@ func Build(input BuildInput) (Report, error) {
 	}
 	if input.Client.Requested {
 		report.Effect = append(report.Effect, "read_downloader_state")
+	}
+	if input.Client.FileAttempted {
+		report.Effect = append(report.Effect, "read_downloader_file_layout")
 	}
 	report.Ledgers.Metafile = MetafileLedger{
 		Status: "observed", VariantID: meta.MetafileVariantID, Version: meta.Version,
@@ -255,6 +272,8 @@ func Build(input BuildInput) (Report, error) {
 	report.Ledgers.Storage = storageLedger
 
 	client := assessClientBracket(meta, input.Client, input.ShowAbsolutePaths, clientWindows)
+	fileLayout := assessClientFileLayout(meta, client.job, input.Client, clientWindows, input.ShowAbsolutePaths)
+	client.ledger.FileLayout = fileLayout.ledger
 	report.Ledgers.Downloader = client.ledger
 	variantRelation := newRelation("metafile_variant_relation")
 	variantRelation.LeftIDs = append(variantRelation.LeftIDs, meta.MetafileVariantID)
@@ -280,18 +299,76 @@ func Build(input BuildInput) (Report, error) {
 	case client.relation.Status != "exact_unique" || client.job == nil:
 		pathRelation.Status = relationDependencyStatus(client.relation.Status)
 		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_identity_unavailable")
-	case meta.MultiFile:
-		pathRelation.Status = "client_file_layout_unobservable"
-		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_layout_unobservable")
-	case client.job.SizeBytes != physicalBytes(meta):
-		pathRelation.Status = "client_size_conflict"
-		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_size_conflict")
 	case !client.ledger.Capabilities.ContentPath:
 		pathRelation.Status = "unsupported"
 		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_content_path_capability_missing")
 	case !client.contentStable:
 		pathRelation.Status = "client_content_unsettled"
 		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_content_unsettled")
+	case !meta.MultiFile && fileLayout.incomplete:
+		pathRelation.Status = "incomplete"
+		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_snapshot_incomplete")
+	case meta.MultiFile:
+		switch {
+		case fileLayout.ledger.Status == "not_requested":
+			pathRelation.Status = "client_file_layout_not_requested"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_layout_not_requested")
+		case fileLayout.ledger.Status == "unsupported":
+			pathRelation.Status = "client_file_layout_unobservable"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_layout_unobservable")
+		case client.job.SizeBytes != physicalBytes(meta):
+			pathRelation.Status = "client_size_conflict"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_size_conflict")
+		case fileLayout.ledger.Status == "not_attempted":
+			pathRelation.Status = "incomplete"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_snapshot_incomplete")
+		case fileLayout.conflict:
+			pathRelation.Status = "client_file_layout_conflict"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_layout_conflict")
+		case fileLayout.ledger.Status == "incomplete" || fileLayout.ledger.Status == "unstable" || fileLayout.incomplete:
+			pathRelation.Status = "incomplete"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_snapshot_incomplete")
+			if fileLayout.ledger.Status == "unstable" {
+				pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_snapshot_unstable")
+			}
+		case fileLayout.unselected:
+			pathRelation.Status = "client_files_unselected"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_files_unselected")
+		case fileLayout.unfinished:
+			pathRelation.Status = "client_files_incomplete"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_files_incomplete")
+		case !fileLayout.stable || !fileLayout.manifestOK:
+			pathRelation.Status = "incomplete"
+			pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_file_snapshot_incomplete")
+		default:
+			remainingFindings := maxRetainedClientFileFindings - len(fileLayout.ledger.Findings)
+			expectedPaths, mismatches, mismatchOverflow, compareErr := compareVerifiedSourceFilePaths(meta, input.VerifiedSource, *input.PathMapping, fileLayout.paths, input.ShowAbsolutePaths, remainingFindings)
+			if compareErr != nil {
+				pathRelation.Status = "incomplete"
+				pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.source_mapping_incomplete")
+			} else {
+				for _, finding := range mismatches {
+					fileLayout.addFinding(finding)
+				}
+				fileLayout.ledger.FindingOverflow += mismatchOverflow
+				pathRelation.EvidenceLevel = "lexical"
+				pathRelation.EvidenceBasis = append(pathRelation.EvidenceBasis, "qbittorrent_effective_file_path_claims", "qbittorrent_selection_claims", "bracketed_file_layout", "invocation_scoped_namespace_mapping", "lexical_comparison_only")
+				pathRelation.LeftIDs = []string{clientPathSetID("verified-source", expectedPaths)}
+				pathRelation.RightIDs = []string{fileLayout.snapshotID}
+				if len(mismatches) == 0 && mismatchOverflow == 0 {
+					pathRelation.Status = "same_location"
+				} else {
+					pathRelation.Status = "different_location"
+					pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.verified_source_differs_from_job")
+					report.Blockers = append(report.Blockers, ReportFinding{Code: "path.verified_source_differs_from_job", Message: "verified reusable bytes are not at the downloader's declared effective file paths"})
+				}
+			}
+		}
+		client.ledger.FileLayout = fileLayout.ledger
+		report.Ledgers.Downloader = client.ledger
+	case client.job.SizeBytes != physicalBytes(meta):
+		pathRelation.Status = "client_size_conflict"
+		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_size_conflict")
 	default:
 		expected, layout, err := expectedClientContentPath(meta, input.VerifiedSource, *input.PathMapping)
 		if layout == "scattered_set" {
@@ -335,6 +412,9 @@ func Build(input BuildInput) (Report, error) {
 	report.Outcome = overallOutcome(storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested)
 	if report.Outcome == "consistent" {
 		report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_lexical_path_agreement"
+		if meta.MultiFile {
+			report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_bracketed_per_file_lexical_path_agreement"
+		}
 	}
 	report.Blockers = stableFindings(report.Blockers)
 	report.Warnings = stableStrings(report.Warnings)
@@ -355,6 +435,12 @@ func assessClientBracket(meta *metafile.MetaInfo, bracket ClientBracket, showAbs
 	}
 	result.ledger.Status = "incomplete"
 	result.ledger.StabilityAssurance = "bracketed_non_atomic"
+	if bracket.RequestsMade < 0 || bracket.FileRequestsMade < 0 || bracket.FileRequestsMade > 2 || !bracket.FileAttempted && bracket.FileRequestsMade != 0 {
+		result.ledger.StopReason = "client_snapshot_incomplete"
+		result.relation.Status = "incomplete"
+		result.relation.BlockerCodes = append(result.relation.BlockerCodes, "client.snapshot_incomplete")
+		return result
+	}
 	if bracket.StopReason != "" || bracket.Before == nil || bracket.After == nil {
 		result.ledger.StopReason = safeStopReason(bracket.StopReason)
 		if result.ledger.StopReason == "" {
@@ -365,6 +451,12 @@ func assessClientBracket(meta *metafile.MetaInfo, bracket ClientBracket, showAbs
 		return result
 	}
 	before, after := bracket.Before, bracket.After
+	if bracket.RequestsMade != 3+bracket.FileRequestsMade {
+		result.ledger.StopReason = "client_snapshot_incomplete"
+		result.relation.Status = "incomplete"
+		result.relation.BlockerCodes = append(result.relation.BlockerCodes, "client.snapshot_incomplete")
+		return result
+	}
 	if !validLedgerBracket(*before, *after) {
 		result.ledger.StopReason = "client_snapshot_incomplete"
 		result.relation.Status = "incomplete"
@@ -654,7 +746,7 @@ func overallOutcome(storageStatus string, processProof bool, clientStatus, pathS
 	if storageStatus == "verified_ambiguous" || clientStatus == "ambiguous" {
 		return "ambiguous"
 	}
-	if clientStatus == "conflict" || pathStatus == "client_size_conflict" {
+	if clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
 		return "conflict"
 	}
 	if storageStatus == "incomplete" || storageStatus == "verified_unique" && !processProof || clientRequested && clientStatus == "incomplete" || pathStatus == "incomplete" {
@@ -860,9 +952,21 @@ func findingForPathCode(code string) ReportFinding {
 	case "path.client_content_unsettled":
 		return ReportFinding{Code: code, Message: "the matching downloader job is not in a stable, complete seeding state"}
 	case "path.client_size_conflict":
-		return ReportFinding{Code: code, Message: "the matching downloader job reports a size that conflicts with the single-file metafile"}
+		return ReportFinding{Code: code, Message: "the matching downloader job reports a total size that conflicts with the metafile"}
 	case "path.client_file_layout_unobservable":
-		return ReportFinding{Code: code, Message: "multi-file path alignment requires downloader per-file paths, rename state, and selection priorities"}
+		return ReportFinding{Code: code, Message: "the downloader cannot safely expose the ordinary multi-file paths, sizes, selection, and completion state required for alignment"}
+	case "path.client_file_layout_not_requested":
+		return ReportFinding{Code: code, Message: "downloader per-file layout observation was disabled, so multi-file path alignment was not evaluated"}
+	case "path.client_file_snapshot_incomplete":
+		return ReportFinding{Code: code, Message: "the bounded downloader per-file observations were unavailable, invalid, or incomplete"}
+	case "path.client_file_snapshot_unstable":
+		return ReportFinding{Code: code, Message: "identity-critical downloader file fields changed while storage proof was running"}
+	case "path.client_file_layout_conflict":
+		return ReportFinding{Code: code, Message: "the downloader file ledger conflicts with the metafile index or file sizes"}
+	case "path.client_files_unselected":
+		return ReportFinding{Code: code, Message: "one or more downloader files are explicitly skipped"}
+	case "path.client_files_incomplete":
+		return ReportFinding{Code: code, Message: "one or more downloader files are not completely available according to the client"}
 	case "path.verified_source_scattered":
 		return ReportFinding{Code: code, Message: "verified reusable bytes are scattered and do not describe one downloader content root"}
 	case "path.verified_source_differs_from_job":

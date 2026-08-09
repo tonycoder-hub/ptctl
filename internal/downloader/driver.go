@@ -70,6 +70,7 @@ type LedgerCapabilities struct {
 	TypedInfoHashes bool `json:"typed_info_hashes"`
 	ContentPath     bool `json:"content_path"`
 	RawMetafile     bool `json:"raw_metafile"`
+	JobFiles        bool `json:"job_files"`
 }
 
 // LedgerSnapshot is one bounded observation of downloader jobs. Observation
@@ -84,11 +85,87 @@ type LedgerSnapshot struct {
 	Jobs            []Torrent          `json:"jobs"`
 }
 
+type JobFileSelection string
+
+const (
+	JobFileSelectionSelected JobFileSelection = "selected"
+	JobFileSelectionSkipped  JobFileSelection = "skipped"
+)
+
+type JobFile struct {
+	Index              int              `json:"index"`
+	RelativeComponents []string         `json:"relative_components"`
+	SizeBytes          int64            `json:"size_bytes"`
+	Progress           float64          `json:"progress"`
+	Selection          JobFileSelection `json:"selection"`
+	Complete           bool             `json:"complete"`
+}
+
+const (
+	defaultJobFileLedgerMaxFiles         = 10_000
+	defaultJobFileLedgerMaxPathBytes     = int64(16 << 20)
+	defaultJobFileLedgerMaxResponseBytes = int64(8 << 20)
+
+	hardJobFileLedgerMaxFiles         = 100_000
+	hardJobFileLedgerMaxPathBytes     = int64(64 << 20)
+	hardJobFileLedgerMaxResponseBytes = int64(32 << 20)
+)
+
+// JobFileLedgerLimits are mandatory work and retention budgets. Callers may
+// tighten the defaults but cannot disable a limit or exceed its hard cap.
+type JobFileLedgerLimits struct {
+	MaxFiles         int   `json:"max_files"`
+	MaxPathBytes     int64 `json:"max_path_bytes"`
+	MaxResponseBytes int64 `json:"max_response_bytes"`
+}
+
+func DefaultJobFileLedgerLimits() JobFileLedgerLimits {
+	return JobFileLedgerLimits{
+		MaxFiles:         defaultJobFileLedgerMaxFiles,
+		MaxPathBytes:     defaultJobFileLedgerMaxPathBytes,
+		MaxResponseBytes: defaultJobFileLedgerMaxResponseBytes,
+	}
+}
+
+func (limits JobFileLedgerLimits) Validate() error {
+	if limits.MaxFiles <= 0 || limits.MaxFiles > hardJobFileLedgerMaxFiles {
+		return fmt.Errorf("maximum job files must be in 1..%d", hardJobFileLedgerMaxFiles)
+	}
+	if limits.MaxPathBytes <= 0 || limits.MaxPathBytes > hardJobFileLedgerMaxPathBytes {
+		return fmt.Errorf("maximum job-file path bytes must be in 1..%d", hardJobFileLedgerMaxPathBytes)
+	}
+	if limits.MaxResponseBytes <= 0 || limits.MaxResponseBytes > hardJobFileLedgerMaxResponseBytes {
+		return fmt.Errorf("maximum job-file response bytes must be in 1..%d", hardJobFileLedgerMaxResponseBytes)
+	}
+	return nil
+}
+
+type JobFileLedgerUsage struct {
+	FilesConsidered int   `json:"files_considered"`
+	PathBytes       int64 `json:"path_bytes"`
+	ResponseBytes   int64 `json:"response_bytes"`
+}
+
+// JobFileLedgerSnapshot is one bounded observation of a single downloader
+// job's effective file paths and selection state. JobKey is process-local
+// request authority and is intentionally omitted from serialized reports.
+type JobFileLedgerSnapshot struct {
+	Driver          string              `json:"driver"`
+	JobKey          string              `json:"-"`
+	ObservedAtStart time.Time           `json:"observed_at_start"`
+	ObservedAtEnd   time.Time           `json:"observed_at_end"`
+	Complete        bool                `json:"complete"`
+	Limits          JobFileLedgerLimits `json:"limits"`
+	Used            JobFileLedgerUsage  `json:"used"`
+	Files           []JobFile           `json:"files"`
+}
+
 // LedgerSession reuses one authenticated read-only downloader session. The
 // request count includes authentication. Close releases idle connections and
 // must not perform an effectful logout request.
 type LedgerSession interface {
 	ReadLedger(context.Context) (LedgerSnapshot, error)
+	ReadJobFiles(context.Context, string, JobFileLedgerLimits) (JobFileLedgerSnapshot, error)
 	RequestsMade() int
 	Close() error
 }

@@ -88,6 +88,40 @@ func TestDiscoverReportsVerifiedAmbiguityWithoutSelecting(t *testing.T) {
 	}
 }
 
+func TestPublicReportCopyDropsAllProcessLocalSnapshotAuthority(t *testing.T) {
+	content := []byte("same-call-proof")
+	meta := discoverV1SingleMeta(t, "source.bin", content)
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "renamed")
+	writeSeedFile(t, sourcePath, content)
+	result, err := Discover(context.Background(), meta, defaultDiscoverOptions([]string{root}, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("expected one verified match: %#v", result)
+	}
+	if _, err := result.Matches[0].Verification.MatchSourceSnapshot(sourcePath); err != nil {
+		t.Fatalf("original verification lost its process-local snapshot: %v", err)
+	}
+
+	public := result.PublicReportCopy()
+	if _, ok := public.VerifiedSource(meta); ok {
+		t.Fatal("public report copy retained the opaque verified source")
+	}
+	_, existingErr := public.Matches[0].Verification.MatchSourceSnapshot(sourcePath)
+	_, missingErr := public.Matches[0].Verification.MatchSourceSnapshot(filepath.Join(root, "missing"))
+	if existingErr == nil {
+		t.Fatal("public report copy retained a source-path snapshot oracle")
+	}
+	if missingErr == nil || existingErr.Error() != missingErr.Error() || strings.Contains(existingErr.Error(), sourcePath) {
+		t.Fatalf("public verification still distinguishes candidate paths: existing=%q missing=%q", existingErr, missingErr)
+	}
+	if _, err := result.Matches[0].Verification.MatchSourceSnapshot(sourcePath); err != nil {
+		t.Fatalf("public copy mutated original verification authority: %v", err)
+	}
+}
+
 func TestDiscoverKeepsProvenAmbiguityWhenAlternativeRetentionStops(t *testing.T) {
 	content := []byte("same")
 	meta := discoverV1SingleMeta(t, "source.bin", content)

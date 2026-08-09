@@ -127,7 +127,7 @@ Safety defaults:
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
-  * Reconciliation uses one client login, at most two bounded ledger reads, and no client or filesystem writes.
+  * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
 `)
 }
 
@@ -237,6 +237,7 @@ func (a *app) reconcileReport(args []string) error {
 		fmt.Fprintln(fs.Output(), "  ptctl reconcile report --torrent FILE.torrent --search-root PATH [--search-root PATH...] [flags]")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "The report brackets optional downloader reads around bounded, exact storage discovery. It performs zero writes. Downloader identity cannot expose the private metafile variant, and host/client path comparison is lexical only.")
+		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Client flags are one optional group: --driver qbittorrent --url URL --username USER --password-stdin. If any is supplied, all are required.")
 		fmt.Fprintln(fs.Output(), "")
@@ -251,6 +252,11 @@ func (a *app) reconcileReport(args []string) error {
 	endpoint := fs.String("url", "", "qBittorrent Web API origin; part of the optional client group")
 	username := fs.String("username", "", "qBittorrent username; part of the optional client group")
 	passwordStdin := fs.Bool("password-stdin", false, "read downloader password from stdin; part of the optional client group")
+	clientFileLayout := fs.String("client-file-layout", "auto", "multi-file downloader layout reads: auto or off; requires the client group when explicit")
+	clientFileDefaults := downloader.DefaultJobFileLedgerLimits()
+	maxClientFiles := fs.Int("max-client-files", clientFileDefaults.MaxFiles, "maximum downloader files read for the one exact job; requires the client group when explicit")
+	maxClientFilePathBytes := fs.Int64("max-client-file-path-bytes", clientFileDefaults.MaxPathBytes, "maximum cumulative downloader file-path bytes per read; requires the client group when explicit")
+	maxClientFileResponseBytes := fs.Int64("max-client-file-response-bytes", clientFileDefaults.MaxResponseBytes, "maximum downloader file-list response bytes per read; requires the client group when explicit")
 	hostRoot := fs.String("host-root", "", "optional host namespace root paired with --client-root")
 	clientRoot := fs.String("client-root", "", "optional downloader namespace root paired with --host-root")
 	clientStyle := fs.String("client-style", "posix", "downloader path style: posix or windows; requires host/client roots")
@@ -322,6 +328,22 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("the optional client group requires non-empty --url and --username plus --password-stdin")
 		}
 	}
+	clientFileFlagNames := []string{"client-file-layout", "max-client-files", "max-client-file-path-bytes", "max-client-file-response-bytes"}
+	for _, name := range clientFileFlagNames {
+		if explicit[name] && !clientRequested {
+			return usageError("--%s requires the complete optional client group", name)
+		}
+	}
+	if *clientFileLayout != "auto" && *clientFileLayout != "off" {
+		return usageError("--client-file-layout must be auto or off")
+	}
+	clientFileLimits := clientFileDefaults
+	clientFileLimits.MaxFiles = *maxClientFiles
+	clientFileLimits.MaxPathBytes = *maxClientFilePathBytes
+	clientFileLimits.MaxResponseBytes = *maxClientFileResponseBytes
+	if err := clientFileLimits.Validate(); err != nil {
+		return usageError("reconcile report: %v", err)
+	}
 
 	mappingRootsRequested := explicit["host-root"] || explicit["client-root"] || *hostRoot != "" || *clientRoot != ""
 	if (*hostRoot == "") != (*clientRoot == "") || mappingRootsRequested && (*hostRoot == "" || *clientRoot == "") {
@@ -390,8 +412,14 @@ func (a *app) reconcileReport(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	bracket := reconcile.ClientBracket{Requested: clientRequested}
+	bracket := reconcile.ClientBracket{
+		Requested:      clientRequested,
+		FileLayoutMode: *clientFileLayout,
+		FileLimits:     clientFileLimits,
+	}
 	var session downloader.LedgerSession
+	var fileJobKey string
+	fileBeforeComplete := false
 	if clientRequested {
 		session, err = clientAdapter.OpenReadSession(ctx, clientCredential)
 		if err != nil {
@@ -407,6 +435,28 @@ func (a *app) reconcileReport(args []string) error {
 				bracket.StopReason = reconciliationClientStopReason(ctx, readErr, "client_snapshot_before_failed")
 			} else {
 				bracket.Before = &before
+				if *clientFileLayout == "auto" {
+					if key, ok := reconcile.SelectExactJobForFileRead(meta, before, clientFileLimits); ok {
+						fileJobKey = key
+						bracket.FileAttempted = true
+						fileRequestsBefore := session.RequestsMade()
+						filesBefore, fileErr := session.ReadJobFiles(ctx, fileJobKey, clientFileLimits)
+						bracket.FilesBefore = &filesBefore
+						fileRequestsAfter := session.RequestsMade()
+						if fileRequestsAfter >= fileRequestsBefore {
+							bracket.FileRequestsMade += fileRequestsAfter - fileRequestsBefore
+						}
+						bracket.RequestsMade = fileRequestsAfter
+						switch {
+						case fileErr != nil:
+							bracket.FileStopReason = reconciliationClientStopReason(ctx, fileErr, "client_file_snapshot_before_failed")
+						case !filesBefore.Complete:
+							bracket.FileStopReason = "client_file_snapshot_incomplete"
+						default:
+							fileBeforeComplete = true
+						}
+					}
+				}
 			}
 		}
 	}
@@ -427,6 +477,22 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	discovery, discoveryErr := seed.Discover(ctx, meta, discoverOptions)
 	if session != nil && bracket.Before != nil {
+		if fileBeforeComplete {
+			fileRequestsBefore := session.RequestsMade()
+			filesAfter, fileErr := session.ReadJobFiles(ctx, fileJobKey, clientFileLimits)
+			bracket.FilesAfter = &filesAfter
+			fileRequestsAfter := session.RequestsMade()
+			if fileRequestsAfter >= fileRequestsBefore {
+				bracket.FileRequestsMade += fileRequestsAfter - fileRequestsBefore
+			}
+			bracket.RequestsMade = fileRequestsAfter
+			switch {
+			case fileErr != nil:
+				bracket.FileStopReason = reconciliationClientStopReason(ctx, fileErr, "client_file_snapshot_after_failed")
+			case !filesAfter.Complete:
+				bracket.FileStopReason = "client_file_snapshot_incomplete"
+			}
+		}
 		after, readErr := session.ReadLedger(ctx)
 		bracket.RequestsMade = session.RequestsMade()
 		if readErr != nil {
@@ -1230,17 +1296,64 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 	fmt.Fprintf(w, "storage\t%s\t%s\tprocess-local proof=%t\n", terminalSafe(report.Ledgers.Storage.Status), terminalSafe(shortID(storageID)), report.Ledgers.Storage.ProcessLocalProof)
 	fmt.Fprintf(w, "downloader\t%s\t%s\trequests=%d; jobs=%d/%d\n", terminalSafe(report.Ledgers.Downloader.Status), terminalSafe(downloaderID), report.Ledgers.Downloader.RequestsMade, report.Ledgers.Downloader.JobsExaminedBefore, report.Ledgers.Downloader.JobsExaminedAfter)
 
-	fmt.Fprintln(w, "\nDOWNLOADER MATCHES\nID\tRELATION\tSTATE\tPROGRESS\tIDENTITY EVIDENCE")
+	fileLayout := report.Ledgers.Downloader.FileLayout
+	fileStops := strings.Join(fileLayout.StopReasons, ",")
+	if fileStops == "" {
+		fileStops = "none"
+	}
+	fmt.Fprintf(w, "\nCLIENT FILE LAYOUT (BOUNDED)\nSTATUS\t%s\nSTABILITY\t%s\nREQUESTS\t%d\nFILES\t%d observed / %d expected\nSELECTED\t%d / %d\nCOMPLETE\t%d / %d\nBEFORE FILES CONSIDERED\t%d / %d\nAFTER FILES CONSIDERED\t%d / %d\nBEFORE PATH BYTES\t%d / %d\nAFTER PATH BYTES\t%d / %d\nBEFORE RESPONSE BYTES\t%d / %d\nAFTER RESPONSE BYTES\t%d / %d\nSTOP REASONS\t%s\n",
+		terminalSafe(fileLayout.Status), terminalSafe(fileLayout.StabilityAssurance), fileLayout.RequestsMade,
+		fileLayout.FilesObserved, fileLayout.FilesExpected, fileLayout.FilesSelected, fileLayout.FilesExpected, fileLayout.FilesComplete, fileLayout.FilesExpected,
+		fileLayout.UsedBefore.FilesConsidered, fileLayout.Limits.MaxFiles, fileLayout.UsedAfter.FilesConsidered, fileLayout.Limits.MaxFiles,
+		fileLayout.UsedBefore.PathBytes, fileLayout.Limits.MaxPathBytes, fileLayout.UsedAfter.PathBytes, fileLayout.Limits.MaxPathBytes,
+		fileLayout.UsedBefore.ResponseBytes, fileLayout.Limits.MaxResponseBytes, fileLayout.UsedAfter.ResponseBytes, fileLayout.Limits.MaxResponseBytes,
+		terminalSafe(fileStops))
+
+	fmt.Fprintln(w, "\nCLIENT FILE FINDINGS (BOUNDED)\nINDEX\tSTATUS\tTORRENT PATH\tEXPECTED BYTES\tCLIENT BYTES\tCLIENT PATH")
+	if len(fileLayout.Findings) == 0 {
+		fmt.Fprintln(w, "-\tnone\t-\t-\t-\t-")
+	} else {
+		for _, finding := range fileLayout.Findings {
+			clientSize := "-"
+			if finding.ClientSize != nil {
+				clientSize = strconv.FormatInt(*finding.ClientSize, 10)
+			}
+			expectedSize := "-"
+			if finding.Status != "unexpected_index" {
+				expectedSize = strconv.FormatInt(finding.ExpectedSize, 10)
+			}
+			clientPath := finding.ClientPathRef
+			if finding.ClientPath != "" {
+				clientPath = finding.ClientPath
+			}
+			if clientPath == "" {
+				clientPath = "-"
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", finding.ManifestIndex, terminalSafe(finding.Status), terminalSafe(valueOrUnknown(finding.TorrentPath)), terminalSafe(expectedSize), terminalSafe(clientSize), terminalSafe(clientPath))
+		}
+	}
+	if fileLayout.FindingOverflow > 0 {
+		fmt.Fprintf(w, "...\t%d additional findings omitted by bounded retention\t-\t-\t-\t-\n", fileLayout.FindingOverflow)
+	}
+
+	fmt.Fprintln(w, "\nDOWNLOADER MATCHES\nID\tRELATION\tSTATE\tPROGRESS\tSIZE\tCONTENT PATH\tIDENTITY EVIDENCE")
 	if len(report.Ledgers.Downloader.Matches) == 0 {
-		fmt.Fprintln(w, "-\tnone\t-\t-\t-")
+		fmt.Fprintln(w, "-\tnone\t-\t-\t-\t-\t-")
 	} else {
 		for _, match := range report.Ledgers.Downloader.Matches {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%.1f%%\t%s\n", terminalSafe(shortID(match.ID)), terminalSafe(match.Relation), terminalSafe(match.State), match.Progress*100, terminalSafe(strings.Join(match.IdentityEvidence, ",")))
+			contentPath := match.ContentPathRef
+			if match.ContentPath != "" {
+				contentPath = match.ContentPath
+			}
+			if contentPath == "" {
+				contentPath = "-"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%.1f%%\t%d\t%s\t%s\n", terminalSafe(shortID(match.ID)), terminalSafe(match.Relation), terminalSafe(match.State), match.Progress*100, match.SizeBytes, terminalSafe(contentPath), terminalSafe(strings.Join(match.IdentityEvidence, ",")))
 		}
 	}
 
 	discovery := report.Ledgers.Storage.Discovery
-	fmt.Fprintf(w, "\nSTORAGE SCAN\nSOURCE OUTCOME\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nTIME BUDGET\t%s\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\n",
+	fmt.Fprintf(w, "\nSTORAGE SCAN\nSOURCE OUTCOME\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nSHARED COMMAND TIME BUDGET\t%s\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\n",
 		terminalSafe(discovery.SourceOutcome), discovery.Scan.Complete, discovery.Scan.VerificationComplete,
 		(time.Duration(discovery.Scan.TimeBudgetMillis) * time.Millisecond).String(),
 		discovery.Scan.InventoryUsed.EntriesExamined, discovery.Scan.InventoryLimits.MaxEntries,
@@ -1287,6 +1400,35 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		for _, match := range discovery.Matches {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%d/%d\n", terminalSafe(shortID(match.ID)), terminalSafe(match.EvidenceLevel), terminalSafe(match.Layout), match.Coverage.FilesFound, match.Coverage.FilesExpected)
 		}
+	}
+	fmt.Fprintln(w, "\nVERIFIED STORAGE BINDINGS (BOUNDED)\nMATCH\tINDEX\tTORRENT PATH\tSOURCE\tCLIENT PATH")
+	bindingsShown := 0
+	bindingsOmitted := 0
+	for _, match := range discovery.Matches {
+		for _, binding := range match.Bindings {
+			if bindingsShown >= 20 {
+				bindingsOmitted++
+				continue
+			}
+			sourcePath := binding.RelativePath
+			if binding.AbsolutePath != "" {
+				sourcePath = binding.AbsolutePath
+			} else if binding.RootID != "" {
+				sourcePath = binding.RootID + ":" + binding.RelativePath
+			}
+			clientPath := binding.ClientPath
+			if clientPath == "" {
+				clientPath = "-"
+			}
+			fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\n", terminalSafe(shortID(match.ID)), binding.FileIndex, terminalSafe(binding.TorrentPath), terminalSafe(sourcePath), terminalSafe(clientPath))
+			bindingsShown++
+		}
+	}
+	if bindingsShown == 0 {
+		fmt.Fprintln(w, "-\t-\tnone\t-\t-")
+	}
+	if bindingsOmitted > 0 {
+		fmt.Fprintf(w, "...\t-\t%d additional bindings omitted by bounded rendering\t-\t-\n", bindingsOmitted)
 	}
 	if len(report.Warnings) > 0 {
 		fmt.Fprintln(w, "\nWARNINGS")
