@@ -45,7 +45,18 @@ func TestInventoryCandidatesSkipsLinksAndCollapsesHardlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved != original && (!hardlinkCreated || resolved != alias) {
+	canonicalOriginal, err := filepath.EvalSymlinks(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalAlias := ""
+	if hardlinkCreated {
+		canonicalAlias, err = filepath.EvalSymlinks(alias)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if resolved != canonicalOriginal && (!hardlinkCreated || resolved != canonicalAlias) {
 		t.Fatalf("unexpected resolved candidate %q", resolved)
 	}
 	if result.Candidates[0].RelativePath == "" || len(result.Candidates[0].RelativeComponentsRawBase64) != 1 {
