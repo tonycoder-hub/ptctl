@@ -117,18 +117,13 @@ func TestPlanIDNormalizesEquivalentSourcePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	absoluteSource := filepath.Join(t.TempDir(), "x")
+	sourceDirectory := t.TempDir()
+	absoluteSource := filepath.Join(sourceDirectory, "x")
 	if err := os.WriteFile(absoluteSource, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	relativeSource, err := filepath.Rel(workingDirectory, absoluteSource)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(sourceDirectory)
+	relativeSource := "x"
 	target := t.TempDir()
 	absolutePlan, err := BuildMaterializePlan(context.Background(), meta, absoluteSource, target, "copy")
 	if err != nil {
