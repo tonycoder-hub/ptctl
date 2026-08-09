@@ -195,17 +195,45 @@ func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) 
 	if err != nil {
 		return PathMapping{}, fmt.Errorf("%w: %v", ErrInvalidClientRoot, err)
 	}
-	root, err := filepath.Abs(hostRoot)
+	inputRoot, err := filepath.Abs(hostRoot)
 	if err != nil {
 		return PathMapping{}, fmt.Errorf("resolve host root: %w", err)
 	}
-	path, err := filepath.Abs(hostPath)
+	root, err := filepath.EvalSymlinks(inputRoot)
+	if err != nil {
+		return PathMapping{}, fmt.Errorf("resolve host root aliases: %w", err)
+	}
+	inputPath, err := filepath.Abs(hostPath)
 	if err != nil {
 		return PathMapping{}, fmt.Errorf("resolve host path: %w", err)
 	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return PathMapping{}, ErrHostPathOutsideRoot
+	path := inputPath
+	var rel string
+	resolvedPath, resolveErr := filepath.EvalSymlinks(inputPath)
+	if resolveErr == nil {
+		path = resolvedPath
+		rel, err = confinedRelativePath(root, path)
+		if err != nil {
+			return PathMapping{}, err
+		}
+	} else {
+		if !errors.Is(resolveErr, os.ErrNotExist) {
+			return PathMapping{}, fmt.Errorf("resolve host path aliases: %w", resolveErr)
+		}
+		if rel, err = confinedRelativePath(root, inputPath); err != nil {
+			rel, err = confinedRelativePath(inputRoot, inputPath)
+			if err != nil {
+				return PathMapping{}, err
+			}
+		}
+		path, err = resolvePlannedHostPath(root, filepath.Join(root, rel))
+		if err != nil {
+			return PathMapping{}, err
+		}
+		rel, err = confinedRelativePath(root, path)
+		if err != nil {
+			return PathMapping{}, err
+		}
 	}
 	if rel == "." {
 		rel = ""
@@ -231,6 +259,53 @@ func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) 
 		}
 	}
 	return PathMapping{HostRoot: root, ClientRoot: cleanClientRoot, HostPath: path, ClientPath: clientPath}, nil
+}
+
+func confinedRelativePath(root, path string) (string, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", ErrHostPathOutsideRoot
+	}
+	return rel, nil
+}
+
+// resolvePlannedHostPath resolves the nearest existing ancestor of a path that
+// does not exist yet. This prevents an existing symlink in the planned path
+// prefix from silently changing the namespace being mapped.
+func resolvePlannedHostPath(root, path string) (string, error) {
+	current := path
+	missing := make([]string, 0, 4)
+	for {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if len(missing) > 0 && (!info.IsDir() || IsLinkLike(info)) {
+				return "", fmt.Errorf("planned host path has a non-directory or link-like prefix")
+			}
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", fmt.Errorf("resolve planned host path prefix: %w", err)
+			}
+			if _, err := confinedRelativePath(root, resolved); err != nil {
+				return "", err
+			}
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			if _, err := confinedRelativePath(root, resolved); err != nil {
+				return "", err
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect planned host path prefix: %w", err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", ErrHostPathOutsideRoot
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 // ValidatePathMappingConfig validates the namespace roots before an expensive
