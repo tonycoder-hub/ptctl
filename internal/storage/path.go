@@ -2,7 +2,9 @@ package storage
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
@@ -10,6 +12,12 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+)
+
+var (
+	ErrHostPathOutsideRoot       = errors.New("host path is outside the configured root")
+	ErrInvalidClientRoot         = errors.New("invalid client namespace root")
+	ErrClientPathUnrepresentable = errors.New("host-relative path cannot be represented by the client")
 )
 
 type PathSemantics struct {
@@ -116,22 +124,36 @@ func SecureJoinExisting(root string, components [][]byte, semantics PathSemantic
 	if err != nil {
 		return "", fmt.Errorf("resolve root: %w", err)
 	}
-	rootInfo, err := filepath.EvalSymlinks(absRoot)
+	rootLstat, err := os.Lstat(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect root: %w", err)
+	}
+	if IsLinkLike(rootLstat) {
+		return "", fmt.Errorf("storage root is a symbolic link or reparse point")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve root symlinks: %w", err)
 	}
-	current := rootInfo
+	current := resolvedRoot
 	for index, raw := range components {
 		current = filepath.Join(current, string(raw))
-		rel, err := filepath.Rel(rootInfo, current)
+		rel, err := filepath.Rel(resolvedRoot, current)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 			return "", fmt.Errorf("path component %d escapes the storage root", index)
+		}
+		entryInfo, err := os.Lstat(current)
+		if err != nil {
+			return "", fmt.Errorf("inspect path component %d: %w", index, err)
+		}
+		if IsLinkLike(entryInfo) {
+			return "", fmt.Errorf("path component %d is a symbolic link or reparse point", index)
 		}
 		info, err := filepath.EvalSymlinks(current)
 		if err != nil {
 			return "", fmt.Errorf("resolve path component %d: %w", index, err)
 		}
-		resolvedRel, err := filepath.Rel(rootInfo, info)
+		resolvedRel, err := filepath.Rel(resolvedRoot, info)
 		if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
 			return "", fmt.Errorf("path component %d resolves outside the storage root", index)
 		}
@@ -171,7 +193,7 @@ type PathMapping struct {
 func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) (PathMapping, error) {
 	cleanClientRoot, err := validateClientRoot(clientRoot, clientWindows)
 	if err != nil {
-		return PathMapping{}, err
+		return PathMapping{}, fmt.Errorf("%w: %v", ErrInvalidClientRoot, err)
 	}
 	root, err := filepath.Abs(hostRoot)
 	if err != nil {
@@ -183,7 +205,7 @@ func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) 
 	}
 	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return PathMapping{}, fmt.Errorf("host path is outside the configured root")
+		return PathMapping{}, ErrHostPathOutsideRoot
 	}
 	if rel == "." {
 		rel = ""
@@ -196,7 +218,7 @@ func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) 
 			rawParts[i] = []byte(part)
 		}
 		if err := ValidateComponents(rawParts, PathSemantics{Windows: clientWindows, CaseSensitive: !clientWindows}); err != nil {
-			return PathMapping{}, fmt.Errorf("host-relative path cannot be represented by the client: %w", err)
+			return PathMapping{}, fmt.Errorf("%w: %v", ErrClientPathUnrepresentable, err)
 		}
 	}
 	var clientPath string
@@ -209,6 +231,29 @@ func MapHostToClient(hostRoot, hostPath, clientRoot string, clientWindows bool) 
 		}
 	}
 	return PathMapping{HostRoot: root, ClientRoot: cleanClientRoot, HostPath: path, ClientPath: clientPath}, nil
+}
+
+// ValidatePathMappingConfig validates the namespace roots before an expensive
+// discovery scan. It performs metadata reads only.
+func ValidatePathMappingConfig(hostRoot, clientRoot string, clientWindows bool) error {
+	if _, err := validateClientRoot(clientRoot, clientWindows); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidClientRoot, err)
+	}
+	if hostRoot == "" {
+		return fmt.Errorf("host root is empty")
+	}
+	abs, err := filepath.Abs(hostRoot)
+	if err != nil {
+		return fmt.Errorf("resolve host root: %w", err)
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return fmt.Errorf("inspect host root: %w", err)
+	}
+	if !info.IsDir() || IsLinkLike(info) {
+		return fmt.Errorf("host root must be a directory and not a symbolic link or reparse point")
+	}
+	return nil
 }
 
 func validateClientRoot(root string, windows bool) (string, error) {
