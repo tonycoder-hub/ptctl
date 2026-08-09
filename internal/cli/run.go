@@ -115,6 +115,7 @@ Safety defaults:
   * Site operations are one bounded GET per invocation, with no automatic retry.
   * Session cookies are accepted only through stdin and are never persisted.
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
+  * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed materialization emits a layout-only plan with scoped evidence; no writes.
 `)
 }
@@ -394,7 +395,7 @@ func (a *app) torrent(args []string) error {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		result, err := metafile.VerifyV1(ctx, meta, *content)
+		result, err := metafile.Verify(ctx, meta, *content)
 		if err != nil {
 			return err
 		}
@@ -407,7 +408,7 @@ func (a *app) torrent(args []string) error {
 			return err
 		}
 		if !result.Verified {
-			return &integrityErr{message: fmt.Sprintf("content failed exact piece verification (%d of %d pieces matched)", result.PiecesMatched, result.PiecesExpected)}
+			return &integrityErr{message: fmt.Sprintf("content failed exact torrent verification (%d of %d piece proofs matched)", result.PiecesMatched, result.PiecesExpected)}
 		}
 		return nil
 	default:
@@ -494,6 +495,9 @@ func (a *app) seed(args []string) error {
 	}
 	plan, err := seed.BuildMaterializePlan(context.Background(), meta, *source, *target, *strategy)
 	if err != nil {
+		if errors.Is(err, seed.ErrSourceIntegrity) {
+			return &integrityErr{message: err.Error()}
+		}
 		return err
 	}
 	if *output == "json" {
@@ -670,13 +674,23 @@ func writeMetaHuman(out io.Writer, meta *metafile.MetaInfo) error {
 
 func writeVerifyHuman(out io.Writer, result metafile.VerificationResult) error {
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "VERIFIED\t%t\nEVIDENCE\t%s\nSNAPSHOT\t%s\nBYTES\t%d\nPHYSICAL FILES\t%d\nVIRTUAL PADDING\t%d\nPIECES\t%d/%d\n", result.Verified, terminalSafe(result.Evidence), terminalSafe(result.SourceSnapshotID), result.BytesVerified, result.FilesChecked, result.PaddingBytes, result.PiecesMatched, result.PiecesExpected)
-	if len(result.MismatchPieces) > 0 {
-		fmt.Fprintf(w, "MISMATCHES\t%v", result.MismatchPieces)
-		if result.MismatchOverflow > 0 {
-			fmt.Fprintf(w, " (+%d more)", result.MismatchOverflow)
+	fmt.Fprintf(w, "VERIFIED\t%t\nVERSION\t%s\nEVIDENCE\t%s\nSNAPSHOT\t%s\nSTABILITY\t%s\nBYTES\t%d\nPHYSICAL FILES\t%d\nVIRTUAL PADDING\t%d\n", result.Verified, terminalSafe(result.Version), terminalSafe(result.Evidence), terminalSafe(result.SourceSnapshotID), terminalSafe(result.StabilityAssurance), result.BytesVerified, result.FilesChecked, result.PaddingBytes)
+	for _, check := range result.Checks {
+		status := "fail"
+		if check.Verified {
+			status = "pass"
 		}
-		fmt.Fprintln(w)
+		fmt.Fprintf(w, "\nCHECK\t%s\nSTATUS\t%s\nEVIDENCE\t%s\nPIECES\t%d/%d\n", terminalSafe(check.Algorithm), status, terminalSafe(check.Evidence), check.PiecesMatched, check.PiecesExpected)
+		if check.RootsExpected > 0 {
+			fmt.Fprintf(w, "FILE ROOTS\t%d/%d\n", check.RootsMatched, check.RootsExpected)
+		}
+		if len(check.MismatchPieces) > 0 {
+			fmt.Fprintf(w, "PROOF MISMATCHES\t%v", check.MismatchPieces)
+			if check.MismatchOverflow > 0 {
+				fmt.Fprintf(w, " (+%d more)", check.MismatchOverflow)
+			}
+			fmt.Fprintln(w)
+		}
 	}
 	return w.Flush()
 }
@@ -706,16 +720,22 @@ func writeClientHuman(out io.Writer, command string, data any) error {
 
 func writePlanHuman(out io.Writer, plan seed.Plan) error {
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "PLAN\t%s\nTORRENT\t%s\nMETAFILE VARIANT\t%s\nREADINESS\t%s\nEVIDENCE\t%s (%d/%d pieces)\nSNAPSHOT\t%s\nSTRATEGY\t%s\nSOURCE\t%s\nTARGET\t%s\nREAD\t%s\nWRITE\t%s\n", terminalSafe(plan.ID), terminalSafe(plan.TorrentName), terminalSafe(plan.MetafileVariantID), terminalSafe(plan.Readiness), terminalSafe(plan.Evidence), plan.Verification.PiecesMatched, plan.Verification.PiecesExpected, terminalSafe(plan.Verification.SourceSnapshotID), terminalSafe(plan.Strategy), terminalSafe(plan.SourceRoot), terminalSafe(plan.TargetRoot), humanBytes(plan.EstimatedRead), humanBytes(plan.EstimatedWrite))
-	fmt.Fprintln(w, "\nACTION\tBYTES\tSOURCE\tTARGET")
+	ready := "no"
+	if plan.ReadyToApply {
+		ready = "yes"
+	}
+	fmt.Fprintf(w, "PLAN\t%s\nTORRENT\t%s\nMETAFILE VARIANT\t%s\nEFFECT\t%s\nREADY TO APPLY\t%s\nREADINESS\t%s\nEVIDENCE\t%s (%d/%d piece proofs)\nSNAPSHOT\t%s\nSTRATEGY\t%s\nSOURCE\t%s\nTARGET\t%s\nREAD\t%s\nWRITE\t%s\n", terminalSafe(plan.ID), terminalSafe(plan.TorrentName), terminalSafe(plan.MetafileVariantID), terminalSafe(plan.Effect), ready, terminalSafe(plan.Readiness), terminalSafe(plan.Evidence), plan.Verification.PiecesMatched, plan.Verification.PiecesExpected, terminalSafe(plan.Verification.SourceSnapshotID), terminalSafe(plan.Strategy), terminalSafe(plan.SourceRoot), terminalSafe(plan.TargetRoot), humanBytes(plan.EstimatedRead), humanBytes(plan.EstimatedWrite))
+	fmt.Fprintln(w, "\nBLOCKERS")
+	for _, blocker := range plan.Blockers {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(blocker))
+	}
+	fmt.Fprintln(w, "\nWARNINGS")
+	for _, warning := range plan.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	fmt.Fprintln(w, "\nPLANNED ACTION\tBYTES\tSOURCE\tTARGET")
 	for _, operation := range plan.Operations {
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", terminalSafe(operation.Kind), operation.Bytes, terminalSafe(operation.Source), terminalSafe(operation.Target))
-	}
-	for _, blocker := range plan.Blockers {
-		fmt.Fprintf(w, "BLOCKER\t\t\t%s\n", terminalSafe(blocker))
-	}
-	for _, warning := range plan.Warnings {
-		fmt.Fprintf(w, "WARNING\t\t\t%s\n", terminalSafe(warning))
 	}
 	return w.Flush()
 }

@@ -94,10 +94,24 @@ a measured storage property.
 - `verified`: every v1 piece or v2 Merkle requirement agrees.
 
 Only exactly verified content can enter a layout plan. The current `seed plan`
-implements v1 verification and emits copy operations; it never applies them.
-Its readiness is always `layout_only`, its evidence is scoped to
-`source_snapshot:v1_piece_verified`, and it reports missing target-semantics,
-site identity, downloader mapping, and apply-time verification as blockers.
+supports v1, v2, and hybrid verification and emits copy operations; it never
+applies them. v1 is one SHA-1 stream across file boundaries, while v2 is a
+separate 16 KiB-leaf SHA-256 Merkle tree for each file. A hybrid is verified
+only when one physical read feeds both the v1 stream and v2 trees; v1 virtual
+padding feeds only the v1 proof. Readiness is always `layout_only`; evidence is
+named `source_observation:*` to avoid claiming an atomic snapshot, and missing
+target semantics, site identity, downloader mapping, and apply-time
+verification remain blockers.
+
+Piece layers are proof material rather than trust roots. During parsing, each
+layer is reduced with BEP 52's zero-leaf rules and must equal the corresponding
+file `pieces root` before it is retained for content verification.
+
+`bytes_verified` is physical content read. Per-algorithm
+`proof_stream_bytes` may differ: v1 includes virtual padding, while v2 does not.
+Every verification result declares its non-atomic stability assurance. v2
+padding and symbolic-link leaves are rejected until their filesystem semantics
+can be modeled without silently converting them into ordinary files.
 
 ## Planned mutation workflow
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,9 +26,12 @@ type Operation struct {
 type Plan struct {
 	ID                string                      `json:"id"`
 	TorrentName       string                      `json:"torrent_name"`
-	InfoHashV1        string                      `json:"info_hash_v1"`
+	InfoHashV1        string                      `json:"info_hash_v1,omitempty"`
+	InfoHashV2        string                      `json:"info_hash_v2,omitempty"`
 	MetafileVariantID string                      `json:"metafile_variant_id"`
 	Evidence          string                      `json:"evidence"`
+	Effect            string                      `json:"effect"`
+	ReadyToApply      bool                        `json:"ready_to_apply"`
 	Readiness         string                      `json:"readiness"`
 	SourceRoot        string                      `json:"source_root"`
 	TargetRoot        string                      `json:"target_root"`
@@ -40,25 +44,30 @@ type Plan struct {
 	Blockers          []string                    `json:"blockers"`
 }
 
-// BuildMaterializePlan is read-only. It performs exact piece verification and
-// produces a plan, but never creates directories, links, or files.
+var ErrSourceIntegrity = errors.New("source content failed exact torrent verification")
+
+// BuildMaterializePlan is read-only. It performs the exact v1 and/or v2
+// verification required by the metafile and produces a plan, but never creates
+// directories, links, or files.
 func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRoot, targetRoot, strategy string) (Plan, error) {
-	if meta.Version != "v1" {
-		return Plan{}, fmt.Errorf("seed planning currently requires a pure v1 metafile; v2 and hybrid layouts need Merkle verification before materialization")
-	}
 	if strategy == "" {
 		strategy = "copy"
 	}
 	if strategy != "copy" {
 		return Plan{}, fmt.Errorf("the alpha supports only the safe copy strategy; hardlink and symlink remain opt-in future capabilities")
 	}
-	verification, err := metafile.VerifyV1(ctx, meta, sourceRoot)
+	verification, err := metafile.Verify(ctx, meta, sourceRoot)
 	if err != nil {
 		return Plan{}, err
 	}
 	if !verification.Verified {
-		return Plan{}, fmt.Errorf("source content failed exact piece verification")
+		return Plan{}, ErrSourceIntegrity
 	}
+	sourceRoot, err = filepath.Abs(sourceRoot)
+	if err != nil {
+		return Plan{}, fmt.Errorf("resolve source root: %w", err)
+	}
+	sourceRoot = filepath.Clean(sourceRoot)
 	targetProbe, err := storage.ProbeReadOnly(targetRoot)
 	if err != nil {
 		return Plan{}, err
@@ -76,8 +85,11 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 	plan := Plan{
 		TorrentName:       meta.Name,
 		InfoHashV1:        meta.InfoHashV1,
+		InfoHashV2:        meta.InfoHashV2,
 		MetafileVariantID: meta.MetafileVariantID,
-		Evidence:          "source_snapshot:v1_piece_verified",
+		Evidence:          planEvidence(meta.Version),
+		Effect:            "none",
+		ReadyToApply:      false,
 		Readiness:         "layout_only",
 		SourceRoot:        sourceRoot,
 		TargetRoot:        targetProbe.ResolvedPath,
@@ -182,11 +194,24 @@ func rejectSymlinkPrefix(root, target string) error {
 
 func planID(plan Plan) string {
 	lines := make([]string, 0, len(plan.Operations)+3)
-	lines = append(lines, plan.InfoHashV1, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceRoot, plan.TargetRoot, plan.Readiness)
+	lines = append(lines, plan.InfoHashV1, plan.InfoHashV2, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceRoot, plan.TargetRoot, plan.Readiness)
 	for _, operation := range plan.Operations {
 		lines = append(lines, operation.Kind+"\x00"+operation.Source+"\x00"+operation.Target+"\x00"+fmt.Sprint(operation.Bytes))
 	}
-	sort.Strings(lines[6:])
+	sort.Strings(lines[7:])
 	digest := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return hex.EncodeToString(digest[:12])
+}
+
+func planEvidence(version string) string {
+	switch version {
+	case "v1":
+		return "source_observation:v1_piece_verified"
+	case "v2":
+		return "source_observation:v2_merkle_verified"
+	case "hybrid":
+		return "source_observation:single_pass_v1_piece_and_v2_merkle_verified"
+	default:
+		return "source_observation:unsupported"
+	}
 }

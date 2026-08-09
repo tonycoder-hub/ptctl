@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,7 +44,7 @@ func TestBuildMaterializePlanIsVerifiedAndZeroWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.ID == "" || plan.Evidence != "source_snapshot:v1_piece_verified" || plan.Readiness != "layout_only" || len(plan.Operations) != 2 || !plan.Verification.Verified || len(plan.Blockers) == 0 {
+	if plan.ID == "" || plan.Evidence != "source_observation:v1_piece_verified" || plan.Effect != "none" || plan.ReadyToApply || plan.Readiness != "layout_only" || len(plan.Operations) != 2 || !plan.Verification.Verified || len(plan.Blockers) == 0 {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}
 	for _, operation := range plan.Operations {
@@ -53,6 +54,92 @@ func TestBuildMaterializePlanIsVerifiedAndZeroWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, "bundle")); !os.IsNotExist(err) {
 		t.Fatalf("plan wrote to target: %v", err)
+	}
+}
+
+func TestBuildMaterializePlanSupportsV2AndHybrid(t *testing.T) {
+	content := []byte("verified")
+	v2Root := sha256.Sum256(content)
+	v1Piece := sha1.Sum(content)
+	tests := []struct {
+		name     string
+		hybrid   bool
+		evidence string
+	}{
+		{name: "v2", evidence: "source_observation:v2_merkle_verified"},
+		{name: "hybrid", hybrid: true, evidence: "source_observation:single_pass_v1_piece_and_v2_merkle_verified"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			info := map[string]any{
+				"file tree": map[string]any{"verified.bin": map[string]any{"": map[string]any{
+					"length": int64(len(content)), "pieces root": v2Root[:],
+				}}},
+				"meta version": int64(2), "name": "verified.bin", "piece length": int64(16384),
+			}
+			if test.hybrid {
+				info["length"] = int64(len(content))
+				info["pieces"] = v1Piece[:]
+			}
+			meta, err := metafile.Parse(encode(map[string]any{"info": info}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceDir := t.TempDir()
+			source := filepath.Join(sourceDir, "verified.bin")
+			if err := os.WriteFile(source, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			target := t.TempDir()
+			plan, err := BuildMaterializePlan(context.Background(), meta, source, target, "copy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Evidence != test.evidence || plan.Effect != "none" || plan.ReadyToApply || plan.InfoHashV2 == "" || plan.Verification.Verified != true || len(plan.Verification.Checks) == 0 {
+				t.Fatalf("unexpected %s plan: %#v", test.name, plan)
+			}
+			if test.hybrid && plan.InfoHashV1 == "" {
+				t.Fatalf("hybrid plan has no v1 infohash: %#v", plan)
+			}
+			if _, err := os.Stat(filepath.Join(target, "verified.bin")); !os.IsNotExist(err) {
+				t.Fatalf("plan wrote to target: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlanIDNormalizesEquivalentSourcePaths(t *testing.T) {
+	content := []byte("x")
+	piece := sha1.Sum(content)
+	meta, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(1), "name": "x", "piece length": int64(1), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	absoluteSource := filepath.Join(t.TempDir(), "x")
+	if err := os.WriteFile(absoluteSource, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeSource, err := filepath.Rel(workingDirectory, absoluteSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	absolutePlan, err := BuildMaterializePlan(context.Background(), meta, absoluteSource, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativePlan, err := BuildMaterializePlan(context.Background(), meta, relativeSource, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absolutePlan.ID != relativePlan.ID || absolutePlan.SourceRoot != relativePlan.SourceRoot {
+		t.Fatalf("equivalent paths changed plan identity: absolute=%#v relative=%#v", absolutePlan, relativePlan)
 	}
 }
 

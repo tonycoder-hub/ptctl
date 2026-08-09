@@ -25,6 +25,7 @@ type File struct {
 	PiecesRoot    string   `json:"pieces_root,omitempty"`
 	RawPath       [][]byte `json:"-"`
 	piecesRootRaw []byte
+	pieceLayerRaw []byte
 }
 
 type MetaInfo struct {
@@ -150,10 +151,10 @@ func Parse(data []byte) (*MetaInfo, error) {
 		if err := parseV2Files(v2Layout, info); err != nil {
 			return nil, fmt.Errorf("invalid hybrid v2 layout: %w", err)
 		}
-		if err := reconcileHybridLayouts(meta, v2Layout); err != nil {
+		if err := validateV2PieceLayers(root, v2Layout.Files, meta.PieceLength); err != nil {
 			return nil, err
 		}
-		if err := validateV2PieceLayers(root, v2Layout.Files, meta.PieceLength); err != nil {
+		if err := reconcileHybridLayouts(meta, v2Layout); err != nil {
 			return nil, err
 		}
 		meta.Validation = "hybrid_layout_consistent"
@@ -180,10 +181,14 @@ func Parse(data []byte) (*MetaInfo, error) {
 	}
 	meta.V1PieceCount = len(meta.pieceHashes)
 	if hasV1 {
-		expectedPieces := 0
+		expectedPieces64 := int64(0)
 		if meta.TotalLength > 0 {
-			expectedPieces = int(((meta.TotalLength - 1) / meta.PieceLength) + 1)
+			expectedPieces64 = ((meta.TotalLength - 1) / meta.PieceLength) + 1
 		}
+		if expectedPieces64 > int64(^uint(0)>>1) {
+			return nil, fmt.Errorf("v1 piece count overflows int")
+		}
+		expectedPieces := int(expectedPieces64)
 		if meta.PieceLength == 0 || meta.V1PieceCount != expectedPieces {
 			return nil, fmt.Errorf("piece count %d does not match total length and piece length (expected %d)", meta.V1PieceCount, expectedPieces)
 		}
@@ -216,6 +221,9 @@ func parseV1Files(meta *MetaInfo, info *Node) error {
 			file := File{Length: length}
 			if attr, ok := bytesValue(item, "attr"); ok {
 				file.Attribute = string(attr)
+			}
+			if strings.Contains(file.Attribute, "l") {
+				return fmt.Errorf("v1 symbolic-link files are not supported")
 			}
 			for _, component := range pathNode.List {
 				if component.Kind != KindBytes || len(component.Bytes) == 0 {
@@ -302,6 +310,12 @@ func walkV2Tree(meta *MetaInfo, node *Node, prefix [][]byte, depth int) error {
 			if attr, ok := bytesValue(child, "attr"); ok {
 				file.Attribute = string(attr)
 			}
+			if strings.Contains(file.Attribute, "p") {
+				return fmt.Errorf("v2 file tree must not contain padding files")
+			}
+			if strings.Contains(file.Attribute, "l") {
+				return fmt.Errorf("v2 symbolic-link files are not supported")
+			}
 			if root, ok := bytesValue(child, "pieces root"); ok {
 				if len(root) != sha256.Size {
 					return fmt.Errorf("v2 file pieces root is not 32 bytes")
@@ -365,6 +379,7 @@ func reconcileHybridLayouts(v1, v2 *MetaInfo) error {
 		}
 		file.PiecesRoot = expected.PiecesRoot
 		file.piecesRootRaw = append([]byte(nil), expected.piecesRootRaw...)
+		file.pieceLayerRaw = expected.pieceLayerRaw
 		offset += file.Length
 		nonPaddingIndex++
 	}
@@ -397,8 +412,12 @@ func sameRawPath(a, b [][]byte) bool {
 }
 
 func validateV2PieceLayers(root *Node, files []File, pieceLength int64) error {
-	expected := make(map[string]int64)
-	for _, file := range files {
+	type expectedLayer struct {
+		count       int64
+		fileIndexes []int
+	}
+	expected := make(map[string]*expectedLayer)
+	for fileIndex, file := range files {
 		if strings.Contains(file.Attribute, "p") || file.Length <= pieceLength {
 			continue
 		}
@@ -407,10 +426,15 @@ func validateV2PieceLayers(root *Node, files []File, pieceLength int64) error {
 		}
 		count := ((file.Length - 1) / pieceLength) + 1
 		key := string(file.piecesRootRaw)
-		if previous, ok := expected[key]; ok && previous != count {
-			return fmt.Errorf("v2 files sharing a pieces root disagree on piece-layer length")
+		entry, ok := expected[key]
+		if ok {
+			if entry.count != count {
+				return fmt.Errorf("v2 files sharing a pieces root disagree on piece-layer length")
+			}
+			entry.fileIndexes = append(entry.fileIndexes, fileIndex)
+			continue
 		}
-		expected[key] = count
+		expected[key] = &expectedLayer{count: count, fileIndexes: []int{fileIndex}}
 	}
 	layers, present := root.Get("piece layers")
 	if !present {
@@ -426,9 +450,20 @@ func validateV2PieceLayers(root *Node, files []File, pieceLength int64) error {
 		return fmt.Errorf("v2 piece layers contains missing or unexpected roots")
 	}
 	for key, node := range layers.Dict {
-		count, ok := expected[key]
-		if !ok || len(key) != sha256.Size || node.Kind != KindBytes || int64(len(node.Bytes)) != count*sha256.Size {
+		entry, ok := expected[key]
+		if !ok || len(key) != sha256.Size || node.Kind != KindBytes || entry.count > int64(^uint64(0)>>1)/sha256.Size || int64(len(node.Bytes)) != entry.count*sha256.Size {
 			return fmt.Errorf("v2 piece layer has an unexpected root or length")
+		}
+		computed, err := reduceV2PieceLayer(node.Bytes, entry.count, pieceLength)
+		if err != nil {
+			return fmt.Errorf("validate v2 piece layer: %w", err)
+		}
+		if !bytes.Equal(computed[:], []byte(key)) {
+			return fmt.Errorf("v2 piece layer does not hash to its file pieces root")
+		}
+		layer := append([]byte(nil), node.Bytes...)
+		for _, fileIndex := range entry.fileIndexes {
+			files[fileIndex].pieceLayerRaw = layer
 		}
 	}
 	return nil

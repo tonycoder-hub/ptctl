@@ -53,10 +53,14 @@ qBittorrent responses have explicit limits. Torrent piece length is capped.
 Torrent components are validated before joining, including file/directory
 prefix collisions. Existing paths are resolved
 under an explicit root; case-colliding paths are rejected under insensitive
-semantics. Hashing records size and mtime before reading and rejects unstable
-files afterward. The preview has no apply, overwrite, move, or delete command.
-A plan records source metadata preconditions but still requires exact
-apply-time re-verification.
+semantics. Hashing records file identity, size, and mtime before reading and
+rejects detectable changes afterward. The v2 verifier also checks the same
+open handle before and after each file read. Hybrid verification feeds both
+hash families from that one read rather than combining two observations. This
+is still detected stability, not an atomic filesystem snapshot or protection
+against a malicious concurrent writer. The preview has no apply, overwrite,
+move, or delete command. A plan records source metadata preconditions but
+still requires exact apply-time re-verification.
 
 ### Supply chain
 
@@ -66,7 +70,8 @@ construct synthetic metafiles; real tracker artifacts are forbidden.
 
 ## Known gaps before mutation support
 
-- v2 Merkle content verification;
+- durable, serializable file identity and atomic-snapshot integration for
+  adversarial concurrent modification;
 - durable OS-keyring or audited credential-helper integration;
 - reparse-point-safe Windows mutation using handle-relative APIs;
 - journaled copy/reflink workflows with crash injection;

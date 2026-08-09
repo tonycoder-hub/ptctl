@@ -1,11 +1,13 @@
 package metafile
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,18 +18,39 @@ import (
 )
 
 type VerificationResult struct {
-	Version          string `json:"version"`
+	Version            string              `json:"version"`
+	Evidence           string              `json:"evidence"`
+	Verified           bool                `json:"verified"`
+	BytesVerified      int64               `json:"bytes_verified"`
+	ProofStreamBytes   int64               `json:"proof_stream_bytes,omitempty"`
+	FilesChecked       int                 `json:"files_checked"`
+	PaddingBytes       int64               `json:"virtual_padding_bytes,omitempty"`
+	SourceSnapshotID   string              `json:"source_snapshot_id,omitempty"`
+	StabilityAssurance string              `json:"stability_assurance"`
+	PiecesExpected     int                 `json:"pieces_expected"`
+	PiecesMatched      int                 `json:"pieces_matched"`
+	RootsExpected      int                 `json:"roots_expected,omitempty"`
+	RootsMatched       int                 `json:"roots_matched,omitempty"`
+	MismatchPieces     []int               `json:"mismatch_pieces,omitempty"`
+	MismatchOverflow   int                 `json:"mismatch_overflow,omitempty"`
+	Checks             []VerificationCheck `json:"checks"`
+	snapshots          []snapshotRecord
+}
+
+type VerificationCheck struct {
+	Algorithm        string `json:"algorithm"`
 	Evidence         string `json:"evidence"`
 	Verified         bool   `json:"verified"`
 	BytesVerified    int64  `json:"bytes_verified"`
+	ProofStreamBytes int64  `json:"proof_stream_bytes,omitempty"`
 	FilesChecked     int    `json:"files_checked"`
 	PaddingBytes     int64  `json:"virtual_padding_bytes,omitempty"`
-	SourceSnapshotID string `json:"source_snapshot_id,omitempty"`
 	PiecesExpected   int    `json:"pieces_expected"`
 	PiecesMatched    int    `json:"pieces_matched"`
+	RootsExpected    int    `json:"roots_expected,omitempty"`
+	RootsMatched     int    `json:"roots_matched,omitempty"`
 	MismatchPieces   []int  `json:"mismatch_pieces,omitempty"`
 	MismatchOverflow int    `json:"mismatch_overflow,omitempty"`
-	snapshots        []snapshotRecord
 }
 
 type SourcePrecondition struct {
@@ -49,10 +72,26 @@ type snapshotRecord struct {
 	info os.FileInfo
 }
 
+// Verify selects the exact verifier required by the metafile. A hybrid is
+// accepted only when the same physical reads validate both its v1 piece stream
+// and every v2 file Merkle root.
+func Verify(ctx context.Context, meta *MetaInfo, contentPath string) (VerificationResult, error) {
+	switch meta.Version {
+	case "v1":
+		return VerifyV1(ctx, meta, contentPath)
+	case "v2":
+		return VerifyV2(ctx, meta, contentPath)
+	case "hybrid":
+		return verifyHybrid(ctx, meta, contentPath)
+	default:
+		return VerificationResult{}, fmt.Errorf("unsupported metafile version %q", meta.Version)
+	}
+}
+
 // VerifyV1 verifies the exact v1 piece stream. Pieces are hashed across file
 // boundaries; a per-file checksum is not a valid BitTorrent verification.
 func VerifyV1(ctx context.Context, meta *MetaInfo, contentPath string) (VerificationResult, error) {
-	result := VerificationResult{Version: meta.Version, Evidence: "v1-sha1-pieces", PiecesExpected: len(meta.pieceHashes)}
+	result := VerificationResult{Version: meta.Version, Evidence: "v1-sha1-pieces", StabilityAssurance: "file_identity_size_mtime_checked_non_atomic", PiecesExpected: len(meta.pieceHashes)}
 	if meta.InfoHashV1 == "" {
 		return result, fmt.Errorf("v1 verification is unavailable for a pure v2 torrent")
 	}
@@ -98,7 +137,7 @@ func VerifyV1(ctx context.Context, meta *MetaInfo, contentPath string) (Verifica
 		} else {
 			result.MismatchOverflow++
 		}
-		result.BytesVerified += pieceBytes
+		result.ProofStreamBytes += pieceBytes
 		remainingTotal -= pieceBytes
 	}
 	if remainingTotal != 0 {
@@ -117,8 +156,385 @@ func VerifyV1(ctx context.Context, meta *MetaInfo, contentPath string) (Verifica
 			result.snapshots = append(result.snapshots, snapshotRecord{path: spec.path, info: spec.infoBefore})
 		}
 	}
+	result.BytesVerified = result.ProofStreamBytes - result.PaddingBytes
 	result.Verified = result.PiecesMatched == result.PiecesExpected
+	result.Checks = []VerificationCheck{verificationCheck("bt-v1", result)}
 	return result, nil
+}
+
+// VerifyV2 verifies each non-padding file independently using BEP 52's
+// 16 KiB SHA-256 Merkle tree. Unlike v1, v2 pieces never span files.
+func VerifyV2(ctx context.Context, meta *MetaInfo, contentPath string) (VerificationResult, error) {
+	result := VerificationResult{Version: meta.Version, Evidence: "v2-sha256-merkle", StabilityAssurance: "file_identity_size_mtime_checked_non_atomic"}
+	if meta.InfoHashV2 == "" {
+		return result, fmt.Errorf("v2 verification is unavailable for a pure v1 torrent")
+	}
+	specs, err := resolveFiles(meta, contentPath)
+	if err != nil {
+		return result, err
+	}
+	return verifyV2Resolved(ctx, meta, specs, nil)
+}
+
+// verifyV2Resolved optionally mirrors every actual content byte, and every v1
+// virtual padding byte, to proofStream. Hybrid verification uses that mirror to
+// calculate its v1 proof from the exact same read that feeds the v2 trees.
+func verifyV2Resolved(ctx context.Context, meta *MetaInfo, specs []fileSpec, proofStream io.Writer) (VerificationResult, error) {
+	result := VerificationResult{Version: meta.Version, Evidence: "v2-sha256-merkle", StabilityAssurance: "file_identity_size_mtime_checked_non_atomic"}
+	if meta.InfoHashV2 == "" {
+		return result, fmt.Errorf("v2 verification is unavailable for a pure v1 torrent")
+	}
+	depth, err := v2PieceLayerDepth(meta.PieceLength)
+	if err != nil {
+		return result, err
+	}
+	blocksPerPiece := meta.PieceLength / v2BlockSize
+	if len(specs) != len(meta.Files) {
+		return result, fmt.Errorf("resolved file layout does not match v2 manifest")
+	}
+	buffer := make([]byte, int(v2BlockSize))
+	zeroBuffer := make([]byte, int(v2BlockSize))
+	rootsMatch := true
+	for fileIndex, spec := range specs {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+		fileMeta := meta.Files[fileIndex]
+		if spec.padding {
+			result.PaddingBytes += spec.length
+			if proofStream != nil {
+				if err := writeZeroBytes(ctx, proofStream, spec.length, zeroBuffer); err != nil {
+					return result, fmt.Errorf("hash v1 virtual padding file %d: %w", fileIndex, err)
+				}
+			}
+			continue
+		}
+		result.FilesChecked++
+		file, err := os.Open(spec.path)
+		if err != nil {
+			return result, fmt.Errorf("open content file %q: %w", spec.path, err)
+		}
+		before, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return result, fmt.Errorf("stat open content file %q: %w", spec.path, err)
+		}
+		if !os.SameFile(spec.infoBefore, before) || before.Size() != spec.sizeBefore || !before.ModTime().Equal(spec.modBefore) {
+			_ = file.Close()
+			return result, fmt.Errorf("content file changed before hashing: %q", spec.path)
+		}
+
+		contentReader := io.Reader(file)
+		if proofStream != nil {
+			contentReader = io.TeeReader(file, proofStream)
+		}
+		var actualRoot v2Hash
+		if spec.length > 0 {
+			if len(fileMeta.piecesRootRaw) != sha256.Size {
+				_ = file.Close()
+				return result, fmt.Errorf("non-empty v2 file has no valid pieces root")
+			}
+			result.RootsExpected++
+			if spec.length <= meta.PieceLength {
+				blocks := ((spec.length - 1) / v2BlockSize) + 1
+				targetBlocks, err := nextPowerOfTwo(blocks)
+				if err != nil {
+					_ = file.Close()
+					return result, err
+				}
+				actualRoot, err = hashV2Segment(ctx, contentReader, spec.length, targetBlocks, buffer)
+				if err != nil {
+					_ = file.Close()
+					return result, fmt.Errorf("hash v2 file %d: %w", fileIndex, err)
+				}
+				pieceIndex := result.PiecesExpected
+				result.PiecesExpected++
+				if bytes.Equal(actualRoot[:], fileMeta.piecesRootRaw) {
+					result.PiecesMatched++
+				} else {
+					recordMismatch(&result, pieceIndex)
+				}
+				result.BytesVerified += spec.length
+			} else {
+				pieceCount := ((spec.length - 1) / meta.PieceLength) + 1
+				if pieceCount > int64(^uint(0)>>1) || int64(len(fileMeta.pieceLayerRaw)) != pieceCount*sha256.Size {
+					_ = file.Close()
+					return result, fmt.Errorf("v2 file %d has no valid authenticated piece layer", fileIndex)
+				}
+				var rootAccumulator merkleAccumulator
+				remaining := spec.length
+				for localPiece := int64(0); localPiece < pieceCount; localPiece++ {
+					pieceBytes := meta.PieceLength
+					if remaining < pieceBytes {
+						pieceBytes = remaining
+					}
+					pieceRoot, err := hashV2Segment(ctx, contentReader, pieceBytes, blocksPerPiece, buffer)
+					if err != nil {
+						_ = file.Close()
+						return result, fmt.Errorf("hash v2 file %d piece %d: %w", fileIndex, localPiece, err)
+					}
+					pieceIndex := result.PiecesExpected
+					result.PiecesExpected++
+					start := int(localPiece * sha256.Size)
+					if bytes.Equal(pieceRoot[:], fileMeta.pieceLayerRaw[start:start+sha256.Size]) {
+						result.PiecesMatched++
+					} else {
+						recordMismatch(&result, pieceIndex)
+					}
+					if err := rootAccumulator.add(pieceRoot, depth); err != nil {
+						_ = file.Close()
+						return result, err
+					}
+					result.BytesVerified += pieceBytes
+					remaining -= pieceBytes
+				}
+				targetPieces, err := nextPowerOfTwo(pieceCount)
+				if err != nil {
+					_ = file.Close()
+					return result, err
+				}
+				zeroPiece := v2ZeroHash(depth)
+				for piece := pieceCount; piece < targetPieces; piece++ {
+					if err := rootAccumulator.add(zeroPiece, depth); err != nil {
+						_ = file.Close()
+						return result, err
+					}
+				}
+				actualRoot, err = rootAccumulator.root()
+				if err != nil {
+					_ = file.Close()
+					return result, err
+				}
+			}
+			if bytes.Equal(actualRoot[:], fileMeta.piecesRootRaw) {
+				result.RootsMatched++
+			} else {
+				rootsMatch = false
+			}
+		}
+
+		var extra [1]byte
+		if n, readErr := file.Read(extra[:]); n != 0 || (readErr != nil && readErr != io.EOF) {
+			_ = file.Close()
+			return result, fmt.Errorf("content file %q contains bytes beyond the torrent manifest", spec.path)
+		}
+		after, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return result, fmt.Errorf("re-stat open content file %q: %w", spec.path, err)
+		}
+		if !os.SameFile(before, after) || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+			_ = file.Close()
+			return result, fmt.Errorf("content file changed while hashing: %q", spec.path)
+		}
+		if err := file.Close(); err != nil {
+			return result, fmt.Errorf("close content file %q: %w", spec.path, err)
+		}
+	}
+	if err := ensureStable(specs); err != nil {
+		return result, err
+	}
+	result.SourceSnapshotID = sourceSnapshotID(specs)
+	for _, spec := range specs {
+		if !spec.padding {
+			result.snapshots = append(result.snapshots, snapshotRecord{path: spec.path, info: spec.infoBefore})
+		}
+	}
+	result.Verified = rootsMatch && result.PiecesMatched == result.PiecesExpected && result.RootsMatched == result.RootsExpected
+	result.ProofStreamBytes = result.BytesVerified
+	result.Checks = []VerificationCheck{verificationCheck("bt-v2", result)}
+	return result, nil
+}
+
+func verifyHybrid(ctx context.Context, meta *MetaInfo, contentPath string) (VerificationResult, error) {
+	if meta.InfoHashV1 == "" || meta.InfoHashV2 == "" {
+		return VerificationResult{}, fmt.Errorf("hybrid verification requires both v1 and v2 metadata")
+	}
+	specs, err := resolveFiles(meta, contentPath)
+	if err != nil {
+		return VerificationResult{}, err
+	}
+	v1Stream := newV1ProofStream(ctx, meta)
+	v2, err := verifyV2Resolved(ctx, meta, specs, v1Stream)
+	if err != nil {
+		return VerificationResult{}, err
+	}
+	if err := v1Stream.complete(); err != nil {
+		return VerificationResult{}, err
+	}
+	if v1Stream.result.ProofStreamBytes != meta.TotalLength {
+		return VerificationResult{}, fmt.Errorf("hybrid proof stream covered %d bytes, expected %d", v1Stream.result.ProofStreamBytes, meta.TotalLength)
+	}
+	v1 := v1Stream.result
+	v1.FilesChecked = v2.FilesChecked
+	v1.PaddingBytes = v2.PaddingBytes
+	v1.BytesVerified = v2.BytesVerified
+	v1.SourceSnapshotID = v2.SourceSnapshotID
+	v1.snapshots = v2.snapshots
+	v1.Verified = v1.PiecesMatched == v1.PiecesExpected
+	v1.Checks = []VerificationCheck{verificationCheck("bt-v1", v1)}
+
+	if v1.PiecesExpected > int(^uint(0)>>1)-v2.PiecesExpected || v1.PiecesMatched > int(^uint(0)>>1)-v2.PiecesMatched {
+		return VerificationResult{}, fmt.Errorf("hybrid verification piece count overflows int")
+	}
+	result := VerificationResult{
+		Version:            "hybrid",
+		Evidence:           "v1-sha1-pieces+v2-sha256-merkle",
+		Verified:           v1.Verified && v2.Verified,
+		BytesVerified:      v2.BytesVerified,
+		FilesChecked:       v2.FilesChecked,
+		PaddingBytes:       v1.PaddingBytes,
+		SourceSnapshotID:   v2.SourceSnapshotID,
+		StabilityAssurance: "single_read_file_identity_size_mtime_checked_non_atomic",
+		PiecesExpected:     v1.PiecesExpected + v2.PiecesExpected,
+		PiecesMatched:      v1.PiecesMatched + v2.PiecesMatched,
+		RootsExpected:      v2.RootsExpected,
+		RootsMatched:       v2.RootsMatched,
+		Checks:             append(append([]VerificationCheck(nil), v1.Checks...), v2.Checks...),
+		snapshots:          v2.snapshots,
+	}
+	return result, nil
+}
+
+type v1ProofStream struct {
+	ctx         context.Context
+	pieceLength int64
+	expected    [][sha1.Size]byte
+	hasher      hash.Hash
+	pieceBytes  int64
+	pieceIndex  int
+	result      VerificationResult
+}
+
+func newV1ProofStream(ctx context.Context, meta *MetaInfo) *v1ProofStream {
+	return &v1ProofStream{
+		ctx:         ctx,
+		pieceLength: meta.PieceLength,
+		expected:    meta.pieceHashes,
+		hasher:      sha1.New(),
+		result: VerificationResult{
+			Version:        meta.Version,
+			Evidence:       "v1-sha1-pieces",
+			PiecesExpected: len(meta.pieceHashes),
+		},
+	}
+}
+
+func (stream *v1ProofStream) Write(data []byte) (int, error) {
+	written := 0
+	for len(data) > 0 {
+		select {
+		case <-stream.ctx.Done():
+			return written, stream.ctx.Err()
+		default:
+		}
+		pieceRemaining := stream.pieceLength - stream.pieceBytes
+		if pieceRemaining <= 0 {
+			return written, fmt.Errorf("invalid v1 proof-stream piece boundary")
+		}
+		chunk := len(data)
+		if int64(chunk) > pieceRemaining {
+			chunk = int(pieceRemaining)
+		}
+		n, err := stream.hasher.Write(data[:chunk])
+		written += n
+		stream.pieceBytes += int64(n)
+		stream.result.ProofStreamBytes += int64(n)
+		if err != nil {
+			return written, err
+		}
+		if n != chunk {
+			return written, io.ErrShortWrite
+		}
+		data = data[chunk:]
+		if stream.pieceBytes == stream.pieceLength {
+			if err := stream.finishPiece(); err != nil {
+				return written, err
+			}
+		}
+	}
+	return written, nil
+}
+
+func (stream *v1ProofStream) finishPiece() error {
+	if stream.pieceIndex >= len(stream.expected) {
+		return fmt.Errorf("content contains bytes beyond the v1 piece manifest")
+	}
+	actualBytes := stream.hasher.Sum(nil)
+	var actual [sha1.Size]byte
+	copy(actual[:], actualBytes)
+	if actual == stream.expected[stream.pieceIndex] {
+		stream.result.PiecesMatched++
+	} else {
+		recordMismatch(&stream.result, stream.pieceIndex)
+	}
+	stream.pieceIndex++
+	stream.pieceBytes = 0
+	stream.hasher.Reset()
+	return nil
+}
+
+func (stream *v1ProofStream) complete() error {
+	if stream.pieceBytes > 0 {
+		if err := stream.finishPiece(); err != nil {
+			return err
+		}
+	}
+	if stream.pieceIndex != len(stream.expected) {
+		return fmt.Errorf("v1 piece list ended with %d proofs unobserved", len(stream.expected)-stream.pieceIndex)
+	}
+	return nil
+}
+
+func writeZeroBytes(ctx context.Context, writer io.Writer, count int64, buffer []byte) error {
+	for count > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		chunk := int64(len(buffer))
+		if count < chunk {
+			chunk = count
+		}
+		n, err := writer.Write(buffer[:int(chunk)])
+		count -= int64(n)
+		if err != nil {
+			return err
+		}
+		if int64(n) != chunk {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func recordMismatch(result *VerificationResult, piece int) {
+	if len(result.MismatchPieces) < 100 {
+		result.MismatchPieces = append(result.MismatchPieces, piece)
+	} else {
+		result.MismatchOverflow++
+	}
+}
+
+func verificationCheck(algorithm string, result VerificationResult) VerificationCheck {
+	return VerificationCheck{
+		Algorithm:        algorithm,
+		Evidence:         result.Evidence,
+		Verified:         result.Verified,
+		BytesVerified:    result.BytesVerified,
+		ProofStreamBytes: result.ProofStreamBytes,
+		FilesChecked:     result.FilesChecked,
+		PaddingBytes:     result.PaddingBytes,
+		PiecesExpected:   result.PiecesExpected,
+		PiecesMatched:    result.PiecesMatched,
+		RootsExpected:    result.RootsExpected,
+		RootsMatched:     result.RootsMatched,
+		MismatchPieces:   append([]int(nil), result.MismatchPieces...),
+		MismatchOverflow: result.MismatchOverflow,
+	}
 }
 
 // MatchSourceSnapshot ensures a planned source is the same file object and
@@ -255,10 +671,15 @@ type sequenceReader struct {
 	specs         []fileSpec
 	index         int
 	current       *os.File
+	currentBefore os.FileInfo
 	currentRemain int64
+	pendingErr    error
 }
 
 func (r *sequenceReader) Read(p []byte) (int, error) {
+	if r.pendingErr != nil {
+		return 0, r.pendingErr
+	}
 	for len(p) > 0 {
 		if r.index >= len(r.specs) {
 			return 0, io.EOF
@@ -271,10 +692,22 @@ func (r *sequenceReader) Read(p []byte) (int, error) {
 				if err != nil {
 					return 0, err
 				}
+				before, err := file.Stat()
+				if err != nil {
+					_ = file.Close()
+					return 0, err
+				}
+				if !os.SameFile(spec.infoBefore, before) || before.Size() != spec.sizeBefore || !before.ModTime().Equal(spec.modBefore) {
+					_ = file.Close()
+					return 0, fmt.Errorf("content file changed before hashing: %q", spec.path)
+				}
 				r.current = file
+				r.currentBefore = before
 			}
 			if spec.length == 0 {
-				r.advance()
+				if err := r.advance(); err != nil {
+					return 0, err
+				}
 				continue
 			}
 		}
@@ -286,7 +719,9 @@ func (r *sequenceReader) Read(p []byte) (int, error) {
 			clear(p[:int(limit)])
 			r.currentRemain -= limit
 			if r.currentRemain == 0 {
-				r.advance()
+				if err := r.advance(); err != nil {
+					return int(limit), err
+				}
 			}
 			return int(limit), nil
 		}
@@ -299,7 +734,9 @@ func (r *sequenceReader) Read(p []byte) (int, error) {
 			return 0, io.ErrUnexpectedEOF
 		}
 		if r.currentRemain == 0 {
-			r.advance()
+			if advanceErr := r.advance(); advanceErr != nil {
+				return n, advanceErr
+			}
 		}
 		if n > 0 {
 			return n, nil
@@ -308,13 +745,27 @@ func (r *sequenceReader) Read(p []byte) (int, error) {
 	return 0, nil
 }
 
-func (r *sequenceReader) advance() {
+func (r *sequenceReader) advance() error {
+	var result error
 	if r.current != nil {
-		_ = r.current.Close()
+		after, err := r.current.Stat()
+		if err != nil {
+			result = err
+		} else if !os.SameFile(r.currentBefore, after) || after.Size() != r.currentBefore.Size() || !after.ModTime().Equal(r.currentBefore.ModTime()) {
+			result = fmt.Errorf("content file changed while hashing: %q", r.specs[r.index].path)
+		}
+		if closeErr := r.current.Close(); result == nil && closeErr != nil {
+			result = closeErr
+		}
 		r.current = nil
+		r.currentBefore = nil
 	}
 	r.currentRemain = 0
 	r.index++
+	if result != nil {
+		r.pendingErr = result
+	}
+	return result
 }
 
 func (r *sequenceReader) Close() error {

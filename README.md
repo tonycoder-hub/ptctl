@@ -4,7 +4,7 @@
 It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and is designed to reconcile them around verifiable torrent metadata.
 
-> Status: `v0.1.0-alpha`. The implemented surface is intentionally read-only.
+> Status: `v0.2.0-alpha`. The implemented surface is intentionally read-only.
 > `seed plan` verifies and explains a layout but does not apply it.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、实际文件、
@@ -31,17 +31,23 @@ capabilities at the edge, not assumptions in the core domain model.
 - strict, bounded bencode parsing;
 - exact v1 infohash calculation from the original `info` byte slice;
 - exact whole-metafile SHA-256 variant identity, kept distinct from infohashes;
-- structurally validated v1 and v2 inspection, including v2 piece layers;
+- structurally validated v1 and v2 inspection, with every retained v2 piece
+  layer cryptographically reduced back to its file `pieces root`;
 - hybrid inspection that parses both layouts and rejects disagreements;
-- exact v1 piece verification across multi-file boundaries (hybrid verification
-  is labeled v1-only and is not accepted for seed planning yet);
-- virtual zero handling for padding files;
+- exact v1 SHA-1 verification across multi-file boundaries;
+- streaming v2 SHA-256 Merkle verification using 16 KiB leaves and BEP 52 EOF
+  padding rules, independently for each file;
+- conjunctive hybrid verification: both v1 pieces and v2 file roots must pass
+  from one physical read of each file;
+- virtual zero handling for v1 padding files; v2 padding and symbolic-link
+  leaves fail closed until their distinct semantics are implemented;
 - tracker output reduced to origins so announce passkeys are not printed;
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
 - read-only storage probing and explicit host-to-client path mapping;
-- a zero-write, `layout_only` seed plan bound to a verified source snapshot,
-  with explicit blockers and apply-time re-verification requirements;
+- a zero-write, `layout_only` seed plan for v1, v2, and hybrid metafiles, bound
+  to a detected-stable verification observation with explicit blockers and
+  apply-time re-verification requirements;
 - typed, capability-checked site ports instead of a mandatory monolithic driver;
 - an experimental TJUPT session check, torrent search, and bonus catalog parser
   through one bounded, same-origin HTTPS GET per invocation, with fail-closed
@@ -51,7 +57,7 @@ capabilities at the edge, not assumptions in the core domain model.
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
-Not implemented yet: v2 Merkle content verification, metafile download,
+Not implemented yet: metafile download, multi-root storage discovery,
 journaled plan application, deletion, automatic cross-seeding, site writes,
 browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
@@ -80,9 +86,16 @@ ptctl torrent inspect release.torrent
 ptctl torrent inspect --output json release.torrent
 ```
 
-Verify an exact content root. For a multi-file torrent, `--content` is the
-directory represented by the torrent's top-level name. For a single-file
-torrent, it can be the file itself or its parent directory.
+Verify an exact content root. v1 uses its cross-file piece stream, v2 uses
+per-file Merkle trees, and hybrid requires both proofs. For a multi-file
+torrent, `--content` is the directory represented by the torrent's top-level
+name. For a single-file torrent, it can be the file itself or its parent
+directory.
+
+`bytes_verified` counts physical content bytes. In each algorithm entry under
+`checks`, `proof_stream_bytes` reports bytes fed to that proof; for v1 this can
+be larger because it includes virtual padding. Stability is explicitly labeled
+non-atomic.
 
 ```bash
 ptctl torrent verify --content "D:\PT\Release" release.torrent
@@ -98,7 +111,8 @@ ptctl storage map \
   "D:\PT\Release"
 ```
 
-Generate a source-verified, zero-write, layout-only materialization plan:
+Generate a source-verified, zero-write, layout-only materialization plan for a
+v1, v2, or hybrid metafile:
 
 ```bash
 ptctl seed plan \

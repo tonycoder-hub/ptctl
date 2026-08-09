@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,8 +71,77 @@ func TestVerifyMismatchUsesIntegrityExitCode(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := Run([]string{"torrent", "verify", "--content", contentPath, "--output", "json", torrentPath}, strings.NewReader(""), &out, &errOut)
-	if code != 3 || !strings.Contains(out.String(), `"verified": false`) || !strings.Contains(errOut.String(), "failed exact piece verification") {
+	if code != 3 || !strings.Contains(out.String(), `"verified": false`) || !strings.Contains(errOut.String(), "failed exact torrent verification") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestVerifyV2MismatchUsesIntegrityExitCode(t *testing.T) {
+	root := t.TempDir()
+	expected := sha256.Sum256([]byte("x"))
+	metafile := testV2Metafile(expected)
+	torrentPath := filepath.Join(root, "mismatch-v2.torrent")
+	contentPath := filepath.Join(root, "content-v2.bin")
+	if err := os.WriteFile(torrentPath, metafile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contentPath, []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"torrent", "verify", "--content", contentPath, "--output", "json", torrentPath}, strings.NewReader(""), &out, &errOut)
+	if code != 3 || !strings.Contains(out.String(), `"algorithm": "bt-v2"`) || !strings.Contains(out.String(), `"verified": false`) || !strings.Contains(errOut.String(), "failed exact torrent verification") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestSeedPlanV2IntegrityExitAndMachineSafetyFields(t *testing.T) {
+	root := t.TempDir()
+	expected := sha256.Sum256([]byte("x"))
+	torrentPath := filepath.Join(root, "v2.torrent")
+	contentPath := filepath.Join(root, "content.bin")
+	targetPath := t.TempDir()
+	if err := os.WriteFile(torrentPath, testV2Metafile(expected), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contentPath, []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{"seed", "plan", "--torrent", torrentPath, "--source", contentPath, "--target", targetPath, "--output", "json"}, strings.NewReader(""), &out, &errOut)
+	if code != 3 || out.Len() != 0 || !strings.Contains(errOut.String(), "failed exact torrent verification") {
+		t.Fatalf("mismatch code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+
+	if err := os.WriteFile(contentPath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	code = Run([]string{"seed", "plan", "--torrent", torrentPath, "--source", contentPath, "--target", targetPath, "--output", "json"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("valid code=%d stderr=%q", code, errOut.String())
+	}
+	var envelope struct {
+		Data struct {
+			Effect       string `json:"effect"`
+			ReadyToApply bool   `json:"ready_to_apply"`
+			Readiness    string `json:"readiness"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.Effect != "none" || envelope.Data.ReadyToApply || envelope.Data.Readiness != "layout_only" {
+		t.Fatalf("unsafe or missing machine safety fields: %s", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = Run([]string{"seed", "plan", "--torrent", torrentPath, "--source", contentPath, "--target", targetPath}, strings.NewReader(""), &out, &errOut)
+	if code != 0 || strings.Index(out.String(), "BLOCKERS") < 0 || strings.Index(out.String(), "PLANNED ACTION") < strings.Index(out.String(), "BLOCKERS") {
+		t.Fatalf("unclear plan output: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 }
 
@@ -93,4 +164,10 @@ func TestInspectEscapesTerminalControlSequences(t *testing.T) {
 	if strings.ContainsAny(escaped, "\x1b\a\n") || !strings.Contains(escaped, `\x1b`) || !strings.Contains(escaped, `\n`) {
 		t.Fatalf("unsafe or missing terminal escaping: %q", escaped)
 	}
+}
+
+func testV2Metafile(root [32]byte) []byte {
+	metafile := []byte("d4:infod9:file treed1:xd0:d6:lengthi1e11:pieces root32:")
+	metafile = append(metafile, root[:]...)
+	return append(metafile, []byte("eee12:meta versioni2e4:name1:x12:piece lengthi16384eee")...)
 }
