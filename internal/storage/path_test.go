@@ -114,3 +114,54 @@ func TestMapHostToClientPreservesFilesystemRoots(t *testing.T) {
 		t.Fatalf("Windows root mapping = %q", windows.ClientPath)
 	}
 }
+
+func TestMapHostToClientCanonicalizesParentAlias(t *testing.T) {
+	container := t.TempDir()
+	actualParent := filepath.Join(container, "actual")
+	root := filepath.Join(actualParent, "root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(container, "alias")
+	if err := os.Symlink(actualParent, aliasParent); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+	inputRoot := filepath.Join(aliasParent, "root")
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(root, "existing.bin")
+	if err := os.WriteFile(existing, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mapped, err := MapHostToClient(inputRoot, existing, "/downloads", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.ClientPath != "/downloads/existing.bin" || mapped.HostRoot != canonicalRoot {
+		t.Fatalf("existing canonical path mapping = %#v", mapped)
+	}
+
+	planned, err := MapHostToClient(inputRoot, filepath.Join(inputRoot, "planned.bin"), "/downloads", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.ClientPath != "/downloads/planned.bin" || planned.HostPath != filepath.Join(canonicalRoot, "planned.bin") {
+		t.Fatalf("planned alias path mapping = %#v", planned)
+	}
+}
+
+func TestMapHostToClientRejectsPlannedPathThroughLink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	linkedDirectory := filepath.Join(root, "linked")
+	if err := os.Symlink(outside, linkedDirectory); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+	planned := filepath.Join(linkedDirectory, "planned.bin")
+	if _, err := MapHostToClient(root, planned, "/downloads", false); err == nil {
+		t.Fatal("planned path through a symbolic link was accepted")
+	}
+}
