@@ -155,7 +155,11 @@ func TestDiscoverV2RejectsSameSizeDecoyAndMapsClientPath(t *testing.T) {
 	writeSeedFile(t, filepath.Join(root, "a-decoy"), []byte("jello"))
 	writeSeedFile(t, filepath.Join(root, "z-renamed"), content)
 	options := defaultDiscoverOptions([]string{root}, "")
-	options.ClientMapping = &ClientMappingOptions{HostRoot: root, ClientRoot: "/downloads"}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.ClientMapping = &ClientMappingOptions{HostRoot: canonicalRoot, ClientRoot: "/downloads"}
 	result, err := Discover(context.Background(), meta, options)
 	if err != nil {
 		t.Fatal(err)
