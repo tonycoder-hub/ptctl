@@ -17,6 +17,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/reconcile"
 	"github.com/tonycoder-hub/ptctl/internal/security"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/site"
@@ -67,6 +68,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = a.storage(args[1:])
 	case "client":
 		err = a.client(args[1:])
+	case "reconcile":
+		err = a.reconcileCommand(args[1:])
 	case "seed":
 		err = a.seed(args[1:])
 	default:
@@ -112,6 +115,8 @@ Usage:
   ptctl client status --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
   ptctl client list --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
 
+  ptctl reconcile report --torrent FILE.torrent --search-root PATH [--search-root PATH...] [--output table|json]
+
   ptctl seed plan --torrent FILE.torrent --source PATH --target PATH [--output table|json]
   ptctl seed discover --torrent FILE.torrent --search-root PATH [--search-root PATH...] [--target PATH] [--output table|json]
   ptctl version [--output table|json]
@@ -122,6 +127,7 @@ Safety defaults:
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
+  * Reconciliation uses one client login, at most two bounded ledger reads, and no client or filesystem writes.
 `)
 }
 
@@ -213,6 +219,283 @@ func (a *app) client(args []string) error {
 		return usageError("--output must be table or json")
 	}
 	return writeClientHuman(a.stdout, command, data)
+}
+
+func (a *app) reconcileCommand(args []string) error {
+	if len(args) == 0 || args[0] != "report" {
+		return usageError("reconcile requires report")
+	}
+	return a.reconcileReport(args[1:])
+}
+
+func (a *app) reconcileReport(args []string) error {
+	fs := newFlagSet("reconcile report")
+	var flagOutput strings.Builder
+	fs.SetOutput(&flagOutput)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage:")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report --torrent FILE.torrent --search-root PATH [--search-root PATH...] [flags]")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "The report brackets optional downloader reads around bounded, exact storage discovery. It performs zero writes. Downloader identity cannot expose the private metafile variant, and host/client path comparison is lexical only.")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Client flags are one optional group: --driver qbittorrent --url URL --username USER --password-stdin. If any is supplied, all are required.")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Flags:")
+		fs.PrintDefaults()
+	}
+	output := fs.String("output", "table", "table or json")
+	torrentPath := fs.String("torrent", "", "metafile path")
+	var searchRoots stringListFlag
+	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
+	driverName := fs.String("driver", "qbittorrent", "downloader driver; part of the optional client group")
+	endpoint := fs.String("url", "", "qBittorrent Web API origin; part of the optional client group")
+	username := fs.String("username", "", "qBittorrent username; part of the optional client group")
+	passwordStdin := fs.Bool("password-stdin", false, "read downloader password from stdin; part of the optional client group")
+	hostRoot := fs.String("host-root", "", "optional host namespace root paired with --client-root")
+	clientRoot := fs.String("client-root", "", "optional downloader namespace root paired with --host-root")
+	clientStyle := fs.String("client-style", "posix", "downloader path style: posix or windows; requires host/client roots")
+	siteRefValue := fs.String("site-ref", "", "optional user-declared SITE/REMOTE_ID reference")
+	showAbsolute := fs.Bool("show-absolute-paths", false, "include absolute host and downloader paths in output")
+	allowNetwork := fs.Bool("allow-network", false, "allow explicit network/UNC search roots")
+	timeout := fs.Duration("timeout", time.Hour, "shared downloader, scan, and verification wall-clock budget")
+	requireReconciled := fs.Bool("require-reconciled", false, "exit 4 after the report unless outcome is consistent")
+
+	inventoryDefaults := storage.DefaultInventoryLimits()
+	maxDepth := fs.Int("max-depth", inventoryDefaults.MaxDepth, "maximum directory depth")
+	maxDirectories := fs.Int("max-directories", inventoryDefaults.MaxDirectories, "maximum directories opened")
+	maxEntries := fs.Int("max-entries", inventoryDefaults.MaxEntries, "maximum directory entries examined")
+	maxDirectoryEntries := fs.Int("max-directory-entries", inventoryDefaults.MaxEntriesPerDirectory, "maximum entries accepted from one directory")
+	maxCandidates := fs.Int("max-candidates", inventoryDefaults.MaxCandidates, "maximum matching regular files retained")
+	maxPathBytes := fs.Int64("max-path-bytes", inventoryDefaults.MaxPathBytes, "maximum retained relative-path bytes")
+
+	matchDefaults := metafile.DefaultSourceMatchLimits()
+	maxCandidatesPerFile := fs.Int("max-candidates-per-file", matchDefaults.MaxCandidatesPerFile, "maximum candidates explored for one torrent file")
+	maxCandidateEdges := fs.Int("max-candidate-edges", matchDefaults.MaxCandidateEdges, "maximum manifest-file to source-candidate edges considered")
+	maxStates := fs.Int("max-states", matchDefaults.MaxStates, "maximum candidate assignment states")
+	maxVerifiedLayouts := fs.Int("max-verified-layouts", matchDefaults.MaxVerifiedLayouts, "maximum verified alternatives retained")
+	maxProofBytes := fs.Int64("max-proof-bytes", matchDefaults.MaxProofWorkBytes, "maximum physical and virtual bytes charged to proof work")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(a.stdout, flagOutput.String())
+			return nil
+		}
+		detail := strings.TrimSpace(flagOutput.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return usageError("reconcile report: %s", detail)
+	}
+	if fs.NArg() != 0 {
+		return usageError("reconcile report accepts flags only; unexpected argument %q", fs.Arg(0))
+	}
+	explicit := make(map[string]bool)
+	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
+	if *torrentPath == "" || len(searchRoots) == 0 {
+		return usageError("reconcile report requires --torrent and at least one --search-root")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if *timeout <= 0 || *timeout > 7*24*time.Hour {
+		return usageError("--timeout must be greater than zero and no more than 168h")
+	}
+
+	clientFlagNames := []string{"driver", "url", "username", "password-stdin"}
+	clientRequested := false
+	for _, name := range clientFlagNames {
+		clientRequested = clientRequested || explicit[name]
+	}
+	if clientRequested {
+		missing := make([]string, 0, len(clientFlagNames))
+		for _, name := range clientFlagNames {
+			if !explicit[name] {
+				missing = append(missing, "--"+name)
+			}
+		}
+		if len(missing) > 0 {
+			return usageError("the optional client group requires %s", strings.Join(missing, ", "))
+		}
+		if *driverName != "qbittorrent" {
+			return usageError("--driver currently supports only qbittorrent")
+		}
+		if *endpoint == "" || *username == "" || !*passwordStdin {
+			return usageError("the optional client group requires non-empty --url and --username plus --password-stdin")
+		}
+	}
+
+	mappingRootsRequested := explicit["host-root"] || explicit["client-root"] || *hostRoot != "" || *clientRoot != ""
+	if (*hostRoot == "") != (*clientRoot == "") || mappingRootsRequested && (*hostRoot == "" || *clientRoot == "") {
+		return usageError("--host-root and --client-root must be provided together")
+	}
+	if explicit["client-style"] && !mappingRootsRequested {
+		return usageError("--client-style requires --host-root and --client-root")
+	}
+	if *clientStyle != "posix" && *clientStyle != "windows" {
+		return usageError("--client-style must be posix or windows")
+	}
+	if explicit["site-ref"] && *siteRefValue == "" {
+		return usageError("--site-ref must be exactly SITE/REMOTE_ID")
+	}
+
+	siteRef, err := parseSiteRef(*siteRefValue)
+	if err != nil {
+		return usageError("reconcile report: %v", err)
+	}
+	inventoryLimits := inventoryDefaults
+	inventoryLimits.MaxDepth = *maxDepth
+	inventoryLimits.MaxDirectories = *maxDirectories
+	inventoryLimits.MaxEntries = *maxEntries
+	inventoryLimits.MaxEntriesPerDirectory = *maxDirectoryEntries
+	inventoryLimits.MaxCandidates = *maxCandidates
+	inventoryLimits.MaxPathBytes = *maxPathBytes
+	matchLimits := matchDefaults
+	matchLimits.MaxCandidatesPerFile = *maxCandidatesPerFile
+	matchLimits.MaxCandidateEdges = *maxCandidateEdges
+	matchLimits.MaxStates = *maxStates
+	matchLimits.MaxVerifiedLayouts = *maxVerifiedLayouts
+	matchLimits.MaxProofWorkBytes = *maxProofBytes
+	if err := inventoryLimits.Validate(); err != nil {
+		return usageError("reconcile report: %v", err)
+	}
+	if len(searchRoots) > inventoryLimits.MaxRoots {
+		return usageError("reconcile report accepts at most %d --search-root values", inventoryLimits.MaxRoots)
+	}
+	if err := matchLimits.Validate(); err != nil {
+		return usageError("reconcile report: %v", err)
+	}
+	if mappingRootsRequested {
+		if err := storage.ValidatePathMappingConfig(*hostRoot, *clientRoot, *clientStyle == "windows"); err != nil {
+			return usageError("reconcile report path mapping is invalid: %v", err)
+		}
+	}
+
+	var clientAdapter *qbittorrent.Adapter
+	if clientRequested {
+		clientAdapter, err = qbittorrent.New(*endpoint)
+		if err != nil {
+			return usageError("reconcile report downloader endpoint is invalid: %v", err)
+		}
+	}
+	meta, err := metafile.Read(*torrentPath)
+	if err != nil {
+		return err
+	}
+	var clientCredential downloader.Credential
+	if clientRequested {
+		clientCredential, err = readDownloaderCredential(a.stdin, *username)
+		if err != nil {
+			return err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	bracket := reconcile.ClientBracket{Requested: clientRequested}
+	var session downloader.LedgerSession
+	if clientRequested {
+		session, err = clientAdapter.OpenReadSession(ctx, clientCredential)
+		if err != nil {
+			session = nil
+			if requests, ok := downloader.RequestsMadeFromError(err); ok {
+				bracket.RequestsMade = requests
+			}
+			bracket.StopReason = reconciliationClientStopReason(ctx, err, "client_session_failed")
+		} else {
+			before, readErr := session.ReadLedger(ctx)
+			bracket.RequestsMade = session.RequestsMade()
+			if readErr != nil {
+				bracket.StopReason = reconciliationClientStopReason(ctx, readErr, "client_snapshot_before_failed")
+			} else {
+				bracket.Before = &before
+			}
+		}
+	}
+
+	discoverOptions := seed.DiscoverOptions{
+		SearchRoots:       append([]string(nil), searchRoots...),
+		InventoryLimits:   inventoryLimits,
+		MatchLimits:       matchLimits,
+		AllowNetwork:      *allowNetwork,
+		ShowAbsolutePaths: *showAbsolute,
+		TimeBudget:        *timeout,
+		Strategy:          "copy",
+	}
+	var reportMapping *reconcile.PathMappingOptions
+	if mappingRootsRequested {
+		discoverOptions.ClientMapping = &seed.ClientMappingOptions{HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows"}
+		reportMapping = &reconcile.PathMappingOptions{HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows"}
+	}
+	discovery, discoveryErr := seed.Discover(ctx, meta, discoverOptions)
+	if session != nil && bracket.Before != nil {
+		after, readErr := session.ReadLedger(ctx)
+		bracket.RequestsMade = session.RequestsMade()
+		if readErr != nil {
+			bracket.StopReason = reconciliationClientStopReason(ctx, readErr, "client_snapshot_after_failed")
+		} else {
+			bracket.After = &after
+		}
+	}
+	if session != nil {
+		bracket.RequestsMade = session.RequestsMade()
+		_ = session.Close()
+	}
+	if discoveryErr != nil {
+		return discoveryErr
+	}
+	verifiedSource, _ := discovery.VerifiedSource(meta)
+	report, err := reconcile.Build(reconcile.BuildInput{
+		Meta:              meta,
+		Discovery:         discovery,
+		VerifiedSource:    verifiedSource,
+		Client:            bracket,
+		SiteRef:           siteRef,
+		PathMapping:       reportMapping,
+		ShowAbsolutePaths: *showAbsolute,
+	})
+	if err != nil {
+		return err
+	}
+	if *output == "json" {
+		err = writeJSON(a.stdout, report, nil)
+	} else {
+		err = writeReconciliationHuman(a.stdout, report)
+	}
+	if err != nil {
+		return err
+	}
+	if *requireReconciled && report.Outcome != "consistent" {
+		return &inconclusiveErr{message: "reconciliation outcome is not consistent"}
+	}
+	return nil
+}
+
+func parseSiteRef(value string) (*domain.TorrentRef, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if strings.Count(value, "/") != 1 {
+		return nil, fmt.Errorf("--site-ref must be exactly SITE/REMOTE_ID")
+	}
+	siteID, remoteID, _ := strings.Cut(value, "/")
+	if len(siteID) == 0 || len(siteID) > 128 || len(remoteID) == 0 || len(remoteID) > 256 {
+		return nil, fmt.Errorf("--site-ref SITE and REMOTE_ID must be 1..128 and 1..256 bytes respectively")
+	}
+	for _, part := range []string{siteID, remoteID} {
+		for _, r := range part {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' || r == ':' {
+				continue
+			}
+			return nil, fmt.Errorf("--site-ref accepts only ASCII letters, digits, dot, underscore, hyphen, and colon")
+		}
+	}
+	return &domain.TorrentRef{SiteID: siteID, RemoteID: remoteID}, nil
+}
+
+func reconciliationClientStopReason(ctx context.Context, err error, fallback string) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return "context_cancelled"
+	}
+	return fallback
 }
 
 func (a *app) siteList(args []string) error {
@@ -750,6 +1033,8 @@ func jsonKind(data any) string {
 		return "content.layout_plan"
 	case seed.DiscoveryResult:
 		return "content.source_discovery"
+	case reconcile.Report:
+		return "ledger.reconciliation"
 	default:
 		return "unknown"
 	}
@@ -891,6 +1176,123 @@ func writePlanHuman(out io.Writer, plan seed.Plan) error {
 	fmt.Fprintln(w, "\nPLANNED ACTION\tBYTES\tSOURCE\tTARGET")
 	for _, operation := range plan.Operations {
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", terminalSafe(operation.Kind), operation.Bytes, terminalSafe(operation.Source), terminalSafe(operation.Target))
+	}
+	return w.Flush()
+}
+
+func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	mappingID := report.Scope.PathMappingID
+	if mappingID == "" {
+		mappingID = "not_requested"
+	}
+	fmt.Fprintf(w, "PT RECONCILIATION\nOUTCOME\t%s\nEFFECT\t%s\nWRITES\t%d\nASSURANCE\t%s\nPATH MAPPING\t%s\nCLIENT PATH SEMANTICS\t%s\n", terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, "+")), report.WritesPerformed, terminalSafe(report.Assurance), terminalSafe(mappingID), terminalSafe(report.Scope.ClientPathSemantics))
+
+	fmt.Fprintln(w, "\nBLOCKERS\nCODE\tMESSAGE")
+	if len(report.Blockers) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	} else {
+		for _, blocker := range report.Blockers {
+			fmt.Fprintf(w, "%s\t%s\n", terminalSafe(blocker.Code), terminalSafe(blocker.Message))
+		}
+	}
+
+	fmt.Fprintln(w, "\nRELATIONS\nKIND\tSTATUS\tEVIDENCE\tBASIS\tBLOCKERS")
+	for _, relation := range report.Relations {
+		basis := strings.Join(relation.EvidenceBasis, ",")
+		if basis == "" {
+			basis = "-"
+		}
+		blockers := strings.Join(relation.BlockerCodes, ",")
+		if blockers == "" {
+			blockers = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", terminalSafe(relation.Kind), terminalSafe(relation.Status), terminalSafe(relation.EvidenceLevel), terminalSafe(basis), terminalSafe(blockers))
+	}
+	fmt.Fprintln(w, "METAFILE VARIANT NOTE\tdownloader APIs do not expose the private raw metafile variant; infohash linkage cannot prove variant equality")
+	fmt.Fprintln(w, "PATH NOTE\thost/client namespace projection and content-path comparison are lexical only")
+
+	siteID := "-"
+	if report.Ledgers.Site.Ref != nil {
+		siteID = report.Ledgers.Site.Ref.SiteID + "/" + report.Ledgers.Site.Ref.RemoteID
+	}
+	storageID := report.Ledgers.Storage.SelectedSourceID
+	if storageID == "" {
+		storageID = "-"
+	}
+	downloaderID := report.Ledgers.Downloader.Driver
+	if downloaderID == "" {
+		downloaderID = "-"
+	}
+	fmt.Fprintln(w, "\nLEDGERS\nLEDGER\tSTATUS\tID\tSUMMARY")
+	fmt.Fprintf(w, "site\t%s\t%s\tuser declaration is not a live site binding\n", terminalSafe(report.Ledgers.Site.Status), terminalSafe(siteID))
+	fmt.Fprintf(w, "metafile\t%s\t%s\t%s; %s\n", terminalSafe(report.Ledgers.Metafile.Status), terminalSafe(shortID(report.Ledgers.Metafile.VariantID)), terminalSafe(report.Ledgers.Metafile.Version), humanBytes(report.Ledgers.Metafile.PhysicalBytes))
+	fmt.Fprintf(w, "storage\t%s\t%s\tprocess-local proof=%t\n", terminalSafe(report.Ledgers.Storage.Status), terminalSafe(shortID(storageID)), report.Ledgers.Storage.ProcessLocalProof)
+	fmt.Fprintf(w, "downloader\t%s\t%s\trequests=%d; jobs=%d/%d\n", terminalSafe(report.Ledgers.Downloader.Status), terminalSafe(downloaderID), report.Ledgers.Downloader.RequestsMade, report.Ledgers.Downloader.JobsExaminedBefore, report.Ledgers.Downloader.JobsExaminedAfter)
+
+	fmt.Fprintln(w, "\nDOWNLOADER MATCHES\nID\tRELATION\tSTATE\tPROGRESS\tIDENTITY EVIDENCE")
+	if len(report.Ledgers.Downloader.Matches) == 0 {
+		fmt.Fprintln(w, "-\tnone\t-\t-\t-")
+	} else {
+		for _, match := range report.Ledgers.Downloader.Matches {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%.1f%%\t%s\n", terminalSafe(shortID(match.ID)), terminalSafe(match.Relation), terminalSafe(match.State), match.Progress*100, terminalSafe(strings.Join(match.IdentityEvidence, ",")))
+		}
+	}
+
+	discovery := report.Ledgers.Storage.Discovery
+	fmt.Fprintf(w, "\nSTORAGE SCAN\nSOURCE OUTCOME\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nTIME BUDGET\t%s\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\n",
+		terminalSafe(discovery.SourceOutcome), discovery.Scan.Complete, discovery.Scan.VerificationComplete,
+		(time.Duration(discovery.Scan.TimeBudgetMillis) * time.Millisecond).String(),
+		discovery.Scan.InventoryUsed.EntriesExamined, discovery.Scan.InventoryLimits.MaxEntries,
+		discovery.Scan.InventoryUsed.CandidatesRetained, discovery.Scan.InventoryLimits.MaxCandidates,
+		discovery.Scan.MatchUsed.CandidateEdgesConsidered, discovery.Scan.MatchLimits.MaxCandidateEdges,
+		discovery.Scan.MatchUsed.StatesExplored, discovery.Scan.MatchLimits.MaxStates,
+		humanBytes(discovery.Scan.MatchUsed.ProofWorkBytesCharged), humanBytes(discovery.Scan.MatchLimits.MaxProofWorkBytes))
+
+	fmt.Fprintln(w, "\nSTORAGE SCAN STOPS")
+	if len(discovery.Scan.StopReasons) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	} else {
+		for _, reason := range discovery.Scan.StopReasons {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(reason))
+		}
+	}
+	fmt.Fprintln(w, "\nSTORAGE ISSUES\nTYPE\tCODE\tSUBJECT\tMESSAGE")
+	if len(discovery.Scan.InventoryIssues) == 0 && len(discovery.Scan.MatchIssues) == 0 {
+		fmt.Fprintln(w, "-\tnone\t-\t-")
+	} else {
+		for _, issue := range discovery.Scan.InventoryIssues {
+			subject := issue.RootID
+			if issue.RelativePath != "" {
+				subject += ":" + issue.RelativePath
+			}
+			if subject == "" {
+				subject = "-"
+			}
+			fmt.Fprintf(w, "inventory\t%s\t%s\t%s\n", terminalSafe(issue.Code), terminalSafe(subject), terminalSafe(issue.Message))
+		}
+		for _, issue := range discovery.Scan.MatchIssues {
+			subject := shortID(issue.CandidateID)
+			if subject == "" {
+				subject = "-"
+			}
+			fmt.Fprintf(w, "verification\t%s\t%s\t%s\n", terminalSafe(issue.Code), terminalSafe(subject), terminalSafe(issue.Message))
+		}
+	}
+
+	fmt.Fprintln(w, "\nVERIFIED STORAGE MATCHES\nID\tEVIDENCE\tLAYOUT\tFILES")
+	if len(discovery.Matches) == 0 {
+		fmt.Fprintln(w, "-\tnone\t-\t-")
+	} else {
+		for _, match := range discovery.Matches {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%d/%d\n", terminalSafe(shortID(match.ID)), terminalSafe(match.EvidenceLevel), terminalSafe(match.Layout), match.Coverage.FilesFound, match.Coverage.FilesExpected)
+		}
+	}
+	if len(report.Warnings) > 0 {
+		fmt.Fprintln(w, "\nWARNINGS")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+		}
 	}
 	return w.Flush()
 }

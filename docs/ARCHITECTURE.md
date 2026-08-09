@@ -32,6 +32,9 @@ internal/storage
 internal/seed
     discovery orchestration and evidence-gated deterministic plans
 
+internal/reconcile
+    axis-separated, read-only four-ledger reports
+
 internal/site
     optional AuthChecker / AccountReader / TorrentSearcher /
     BonusCatalogReader ports
@@ -45,6 +48,60 @@ internal/downloader
 The core never imports a concrete site or downloader implementation. Site
 adapters do not receive filesystem handles, and storage code does not receive
 credentials. TJUPT is one adapter, not a special case in the content model.
+
+## Read-only ledger reconciliation
+
+`reconcile report` is the second vertical slice. One invocation parses one
+exact metafile, opens one read-only downloader session, reads a bounded client
+ledger, performs ordinary storage discovery and content proof, then reads the
+client ledger again. The two client observations bracket storage verification
+but do not form an atomic transaction.
+
+The report deliberately keeps five relations separate:
+
+1. `site_metafile` records only a user-declared site reference in this slice;
+2. `metafile_variant_relation` asks whether the downloader exposes the exact
+   private `.torrent` bytes;
+3. `client_infohash_relation` compares algorithm-tagged v1/v2 claims;
+4. `storage_content_proof` carries the ordinary piece/Merkle proof;
+5. `verified_source_vs_job_path` compares a verified cohesive layout with the
+   downloader's declared content path under an explicit namespace mapping.
+
+There is no single `matched` boolean. The overall lattice is `consistent`,
+`partial`, `conflict`, `ambiguous`, or `incomplete`, while every relation keeps
+its own evidence level and blocker codes. A different client path means that
+verified reusable bytes exist elsewhere; it is not a content mismatch. A
+scattered source is cryptographically reusable but cannot describe one client
+content root.
+
+qBittorrent's generic `hash` is an opaque job key. The adapter derives typed
+claims only from strictly bounded magnet `xt` values: BTIH is 20 bytes and
+BTMH must be the SHA-256 multihash `1220` plus 32 bytes. Pure v1 and pure v2
+jobs must expose exactly their required family; hybrid reconciliation requires
+both. Names, sizes, progress, state, save path, and generic hash length never
+establish identity. The magnet URI is discarded after parsing because its
+tracker or web-seed parameters may contain credentials.
+
+The job array is decoded incrementally: the job limit is checked before row
+N+1 is decoded, and each object has its own field-count cap. Duplicate JSON
+fields and duplicate opaque job keys fail the snapshot. State is reduced to a
+known qBittorrent code or `unknown`, so untrusted free text cannot become
+report output.
+
+The downloader adapter does not expose raw private metafile bytes, so equal
+typed infohash claims still leave `metafile_variant_relation=unobservable`.
+Likewise, qBittorrent paths are untrusted remote claims: they are parsed only
+for lexical comparison and are never opened as host paths.
+The current path relation can become consistent only for a single-file job in
+a stable, complete seeding state whose reported size agrees with the metafile.
+The expected path is projected from the opaque same-call `VerifiedSource`, not
+from mutable discovery report fields. The public report copy deliberately
+drops that process-local capability. Mapping scope records an opaque mapping
+ID and exact POSIX or Windows comparison semantics. Multi-file reconciliation remains partial
+until a bounded client file ledger supplies effective paths, rename state, and
+selection priorities; a shared top-level `content_path` alone is insufficient.
+Windows comparisons require exact case because case sensitivity can vary by
+directory or remote filesystem.
 
 ## Capability negotiation
 
