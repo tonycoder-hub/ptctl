@@ -34,12 +34,12 @@ var (
 	// visible and revalidated, but the platform could not confirm the final
 	// directory durability boundary. Callers must report the committed write;
 	// retrying is safe only through the ordinary idempotent import path.
-	ErrDurabilityUnconfirmed = errors.New("private metafile publication durability is unconfirmed")
+	ErrDurabilityUnconfirmed = errors.New("private store publication durability is unconfirmed")
 
 	// ErrPublishedCleanupIncomplete means the final object crossed its
 	// durability boundary, but removal or directory flushing of its private
 	// staging name failed. The final object must not be rolled back.
-	ErrPublishedCleanupIncomplete = errors.New("private metafile publication staging cleanup is incomplete")
+	ErrPublishedCleanupIncomplete = errors.New("private store publication staging cleanup is incomplete")
 )
 
 type ArtifactID string

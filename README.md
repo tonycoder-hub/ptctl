@@ -4,11 +4,12 @@
 It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and reconciles them around verifiable torrent metadata.
 
-> Status: `v0.3.0-alpha` development. Inspection, downloader, content,
+> Status: `v0.4.0-alpha` development. Inspection, downloader, content,
 > discovery, planning, and reconciliation operations are intentionally
 > zero-write. Persistent writes are confined to explicit private-store
-> operations: `metafile store init`, `metafile store import`, and the
-> acknowledged `site metafile fetch`. The fetch also crosses a separate,
+> operations: `metafile store init`, `metafile store import`, `storage profile
+> create`, `storage index refresh`, and the acknowledged `site metafile fetch`.
+> The fetch also crosses a separate,
 > tracker-visible read boundary. None of these operations mutates content or
 > moves, rewrites, or deletes an import source; reads may still update atime or
 > hydrate an offline placeholder.
@@ -40,6 +41,11 @@ capabilities at the edge, not assumptions in the core domain model.
 - exact whole-metafile SHA-256 variant identity, kept distinct from infohashes;
 - a versioned private metafile store with explicit initialization, exact-byte
   import, content-addressed no-clobber objects, and verified inspection;
+- immutable storage profiles plus bounded, deterministic, streaming filesystem
+  inventory snapshots sealed into the same owner-only private store;
+- descriptor-last snapshot publication, domain-separated record IDs, bounded
+  latest-generation selection, root-identity invalidation, and live
+  identity-bound reobservation of historical locators;
 - one mutually exclusive metafile selector across inspect, verify, seed, and
   reconciliation commands: an ordinary file, or an initialized store plus its
   whole-metafile variant ID;
@@ -88,7 +94,8 @@ capabilities at the edge, not assumptions in the core domain model.
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
-Not implemented yet: a persistent storage index, site torrent-detail reads,
+Not implemented yet: current-filesystem negative/uniqueness proofs from an
+index alone, background refresh/watchers, site torrent-detail reads,
 downloader mutation, attributed/empty-file client-layout reconciliation,
 journaled plan application, deletion, automatic plan execution, site writes,
 browser login, third-party executable plugins, ratio manipulation, or
@@ -208,6 +215,65 @@ adding a positional metafile to the stored form is invalid usage. Loading from
 the store rechecks the object digest and parses the exact bytes before invoking
 the same verifier, discovery, planning, or reconciliation core. Those consumer
 commands remain zero-write.
+
+Create an immutable filesystem scope and explicitly refresh its private index.
+The state store is the same initialized, owner-only store format used for
+private metafiles; profile and index record IDs are domain-separated from
+metafile artifact IDs:
+
+```bash
+ptctl storage profile create \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --name media \
+  --search-root "D:\Media" \
+  --search-root "E:\Archive"
+
+ptctl storage index refresh \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --profile media
+
+ptctl storage index inspect \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --profile media
+```
+
+Profiles bind exact roots, platform/path semantics, mount/network policy, and
+scan budgets. They are immutable: changing that declaration requires a new
+profile name. A profile can be inspected on another operating system, but
+live refresh/query rejects it before interpreting native path bytes; current-
+platform roots must also remain absolute and clean. Profile scan limits cannot
+exceed the sealed-index encoder's file, path, or component capacity. Refresh
+walks regular files deterministically without following links, reparse points,
+or mount boundaries. It streams a bounded NDJSON data
+record first and publishes a small descriptor only after the enumeration and
+data publication are complete. After descriptor publication, both immutable
+records are digest-verified together under one operation-bound physical store
+root before the result can be `stored`. A failed descriptor publication can
+leave an orphan data record, but latest selection lists descriptors only. Concurrent
+writers that produce the same maximum generation are reported as ambiguous;
+they are never ordered by wall-clock time.
+
+Use a sealed snapshot as a bounded candidate source without scanning every
+directory again:
+
+```bash
+ptctl seed discover \
+  --torrent release.torrent \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --storage-profile media \
+  --output json
+```
+
+Each retained historical locator is resolved beneath the current profile root,
+root/file identity is reobserved, and survivors still pass the ordinary exact
+v1/v2/hybrid verifier. Nevertheless `source_outcome` remains `incomplete`, even
+when one candidate is currently `verified`: a historical snapshot cannot prove
+that no new, removed, or renamed alternative exists now. Snapshot-only mode
+therefore never emits a materialization plan, never reports `not_found` or
+`verified_unique`, and never makes reconciliation `consistent`. Use ordinary
+same-call `--search-root` discovery when current uniqueness or absence is
+required. `--snapshot-record` can bypass bounded latest listing, but does not
+upgrade freshness or proof semantics.
 
 Verify an exact content root. v1 uses its cross-file piece stream, v2 uses
 per-file Merkle trees, and hybrid requires both proofs. For a multi-file
@@ -341,8 +407,8 @@ name the exact POSIX/Windows comparison mode and an opaque mapping ID. Client
 paths remain remote, non-atomic lexical claims and are never opened on the host.
 
 Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
-`ptctl seed discover --help`, or `ptctl reconcile report --help` for the
-complete surface.
+`ptctl storage profile`, `ptctl storage index`, `ptctl seed discover --help`,
+or `ptctl reconcile report --help` for the complete surface.
 
 Exit code `0` means a report or requested read succeeded, `1` an operational
 failure, `2` invalid usage, and `3` an explicit integrity mismatch. Discovery
@@ -362,6 +428,14 @@ input artifacts or a stored digest/parse mismatch return `3`. Exit `4` is not
 repurposed and remains the report-first requirement failure described above. A
 post-publication durability failure reports `published_durability_unconfirmed`
 and returns `1`, even though its write count may already be `1`.
+
+Storage profile creation is idempotent for the same name and immutable
+declaration; reusing a name for different roots or policy fails. A complete
+index refresh normally commits two writes (data then descriptor). Budget or
+enumeration incompleteness prints a report and returns `4` without publishing a
+descriptor. Publication/I/O failure returns `1`; a published-but-unconfirmed
+record keeps its nonzero write receipt and is never rolled back or silently
+reported as durable.
 
 `site metafile fetch` returns `0` when the exact response is newly stored or
 already present, `1` for site, credential, store, or publication failures, `2`
@@ -384,10 +458,11 @@ site reads, bounds network and filesystem work, hides private store/object and
 discovery/reconciliation absolute paths by default, defaults conflicts to
 failure, and has no delete or apply command. Commands such as `storage probe`
 and `seed plan` keep their documented path-display contracts. The private
-metafile store uses owner-only permissions and atomic no-clobber publication;
-this is access control, not encryption. Store init/import and the store phase
-of an acknowledged site metafile fetch are the explicit write exceptions to
-the otherwise zero-write operational surface.
+store uses owner-only permissions and atomic no-clobber publication for both
+metafiles and allowlisted sealed state records; this is access control, not
+encryption. Store init/import, storage profile creation/index refresh, and the
+store phase of an acknowledged site metafile fetch are the explicit write
+exceptions to the otherwise zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Architecture
