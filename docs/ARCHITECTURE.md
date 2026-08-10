@@ -27,10 +27,15 @@ internal/metafile
     bounded bencode, exact info hashing, manifests, mapped verification
 
 internal/metastore
-    versioned private exact-byte artifacts, permission checks, atomic no-clobber
+    versioned private exact-byte artifacts and allowlisted sealed state records,
+    permission checks, atomic no-clobber
 
 internal/storage
     bounded inventory, path semantics, identity guards, namespace mapping
+
+internal/storageindex
+    immutable profiles, streaming snapshot format, descriptor selection,
+    live reobservation of historical candidate locators
 
 internal/seed
     discovery orchestration and evidence-gated deterministic plans
@@ -309,6 +314,99 @@ remains opt-in. Non-usage failures are reported before the command returns its
 operational or integrity exit; exit `4` remains reserved for existing
 verification and reconciliation requirement flags.
 
+## Immutable storage profiles and sealed candidate snapshots
+
+The private store also accepts four fixed, internal sealed-record kinds. They
+are not a user-controlled namespace and do not expose a generic put/cat CLI:
+
+```text
+storage.profile.v1
+storage.index.data.v1
+storage.index.descriptor.v1
+site.metafile.binding.v1       # reserved for a later slice
+```
+
+Record identity is domain-separated as SHA-256 over a fixed record domain, the
+allowlisted kind, and every payload byte. It is a different type from a
+metafile `ArtifactID`; identical bytes under different schemas cannot alias.
+Import and load stream through the existing operation-bound private root,
+owner-only staging, no-replace publication, final-directory durability, and
+fresh named-identity checks. Load grants a synchronous reader only and succeeds
+after both the consumer and the store observe EOF, the full domain digest
+matches, and handle/name metadata remains stable. Listing is bounded by entries,
+records, and path bytes; unknown `objects` entries fail closed.
+
+A storage profile is immutable configuration: exact roots, platform/path
+encoding, one-filesystem/network policy, and scan budgets determine its
+authority ID. Its display name and creation time do not. Reusing one name for a
+different declaration is a conflict; multiple records with the same name and
+same declaration are logically idempotent. Raw absolute roots are stored only
+inside the owner-only record and are omitted from public reports by default.
+Foreign-platform profiles remain inspectable but cannot be used for live
+refresh/query; before any root access, the consumer requires the current GOOS,
+absolute clean native paths, and scan limits representable by its encoder.
+
+Refresh uses the profile declaration as follows:
+
+```text
+profile roots
+    -> bounded deterministic lexical DFS
+    -> stream header + regular-file NDJSON rows + complete footer
+    -> seal storage.index.data.v1
+    -> seal storage.index.descriptor.v1 (commit record)
+```
+
+The scanner emits declared root ID, raw base64 relative components, size,
+mtime, and a non-authoritative identity hint. It never follows symlinks or
+Windows reparse points, never crosses the captured root filesystem, and retains
+no whole-tree slice in memory. Rows are globally ordered by root ID and raw
+components so duplicate/unsorted locators can be rejected while streaming.
+Every count, line, total byte, path, component, directory, entry, file, issue,
+and root dimension has a hard bound. Directory N+1 sentinels count against the
+global entry budget, and cumulative traversal-name bytes are charged even for
+non-regular entries. An incomplete scan closes the data stream without a
+footer, so the data object is not published. Public refresh reports remove
+relative issue paths and root/filesystem identity hints.
+
+The data record is published before its descriptor. A data record without a
+descriptor is an ignored orphan. Data durability failure prevents descriptor
+publication. Descriptor durability failure preserves its visible-write receipt
+without claiming a durable commit. A successful descriptor publication is not
+reported `stored` until the descriptor and its data record coexist and pass
+their domain-separated digests in one operation-bound physical-store session.
+Latest selection loads and validates every bounded descriptor for the exact
+profile revision and chooses the unique
+largest monotonic generation; a tie is ambiguous, listing N+1 is incomplete,
+and a corrupt/dangling newest descriptor never causes fallback to an older
+generation. An explicit descriptor record ID bypasses listing only, not
+freshness semantics.
+
+Snapshot consumption is candidate-only. It first verifies the entire sealed
+descriptor and NDJSON record, while retaining only torrent-required sizes under
+current candidate/path budgets. Parsed rows remain provisional until EOF and
+record digest verification finish. Each locator is then resolved again beneath
+the current declared root, link/mount traversal is rejected, and fresh
+root/file identities are captured. A changed root invalidates all candidates
+under that root. Changed file identity or mtime is counted as stale but may
+remain a candidate if the current regular file has the exact required size;
+the ordinary identity-bound torrent verifier still decides content truth.
+Hardlink aliases remain distinct paths and candidate edges.
+
+Historical inventory completeness and current search completeness are separate
+axes. In snapshot-only `seed discover`:
+
+- a live exact match may be reported with `best_evidence=verified`;
+- `source_outcome` always remains `incomplete`;
+- zero matches never becomes `not_found`;
+- multiple exact matches add positive ambiguity evidence but remain incomplete;
+- selection, client/target handoff, and materialization plan remain blocked.
+
+`reconcile report` consumes the same result and therefore cannot become
+`consistent` from a historical snapshot. Only ordinary same-invocation full
+`--search-root` enumeration can currently establish current absence or unique
+selection. Refresh is a separate explicit write; read commands never update an
+index implicitly.
+
 ## Read-only storage discovery
 
 `seed discover` is the first vertical reconciliation slice:
@@ -332,8 +430,9 @@ count all have mandatory process hard caps.
 
 The public report uses a root ID plus relative components and raw base64.
 Absolute host paths are process-local details and are hidden unless explicitly
-requested. A future durable inventory should persist a storage profile ID and
-raw relative components, never assume one machine's absolute path is portable.
+requested. The durable index persists an immutable storage profile ID and raw
+relative components, then performs live reobservation; it never assumes one
+machine's absolute path or an old identity hint is current proof.
 
 An inventory hit is only `candidate/exact_size`. Basename and suffix agreement
 affect deterministic exploration order, never evidence level. v2/hybrid

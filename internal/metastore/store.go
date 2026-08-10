@@ -857,5 +857,5 @@ func publishedError(err error) error {
 	if errors.Is(err, ErrDurabilityUnconfirmed) {
 		return fmt.Errorf("%w", ErrDurabilityUnconfirmed)
 	}
-	return fmt.Errorf("private metafile publication completed but bound identity validation failed")
+	return fmt.Errorf("private store publication completed but bound identity validation failed")
 }

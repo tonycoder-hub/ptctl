@@ -17,10 +17,10 @@ its explicit acknowledgement authorizes at most one tracker-visible request.
 Page recognition is fail-closed: a login page is unauthenticated, a positively
 recognized bonus/search page is accepted, and maintenance, challenge, or
 unknown HTML is indeterminate/an error rather than a successful empty result.
-Ordinary site reads perform no intentional filesystem write. Local store
-mutations are `metafile store init`, `metafile store import`, and the store
-phase of `site metafile fetch`; these form the explicit private-store write
-boundary.
+Ordinary site reads perform no intentional filesystem write. TJUPT-related
+local store mutations are `metafile store init`, `metafile store import`, and
+the store phase of `site metafile fetch`; storage profile/index commands are a
+separate filesystem-ledger boundary and never contact TJUPT.
 
 ## Why the bonus catalog remains site-defined
 

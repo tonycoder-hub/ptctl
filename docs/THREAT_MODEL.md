@@ -49,6 +49,13 @@ with filesystem permissions; it does not encrypt them, so a process or
 administrator that can read the store can recover every embedded tracker
 secret.
 
+Sealed storage profile/index records are equally private. They contain absolute
+profile roots, raw relative filename components, sizes, mtimes, and platform
+identity hints. Public profile/index reports omit absolute and inventory-
+relative paths plus raw filesystem/root identity hints by default, but
+disclosed record/profile/root IDs are stable correlators and not anonymity.
+Anyone who can read the private store can recover the complete historical inventory.
+
 ### SSRF and redirect leakage
 
 Site origins must be HTTPS. DNS answers are checked before dialing and private,
@@ -221,6 +228,54 @@ write authority to that command. The paired `--metafile-store` and
 or `--torrent`; selector validation happens before reconciliation reads a
 downloader password from stdin.
 
+Allowlisted sealed state records share the private store's root binding,
+owner-only staging, no-replace, durability, and corruption controls, but use a
+kind-separated digest domain distinct from private metafile artifacts. There is
+no generic record filename or payload CLI. Record loads stream and require the
+consumer to observe EOF before the record can be accepted; provisional parsed
+rows are discarded if the final digest, named identity, metadata, framing, or
+schema check fails. Listing reads N+1 and becomes incomplete at entry, matching
+record, or path-byte limits. Unknown entries fail closed instead of being
+silently ignored.
+
+Persistent filesystem snapshots introduce a stale-observation threat. A
+complete descriptor proves only that one bounded enumeration completed at its
+recorded interval. It does not prove the current filesystem contains no new,
+removed, renamed, or permission-hidden files. An explicit descriptor selector
+and a successfully re-hashed candidate do not strengthen that negative fact.
+Consequently snapshot-only discovery always reports current search incomplete,
+never emits a plan, never claims `not_found` or `verified_unique`, and cannot
+make reconciliation consistent.
+
+Profiles bind exact root bytes, platform/path semantics, one-filesystem/network
+policy, and hard scan budgets. Display names and creation times are not
+authority. A profile from another GOOS is inspectable but rejected for live
+use before its native path bytes or downloader credentials are used. Same-GOOS
+live use also requires absolute clean roots and scan limits no larger than the
+sealed encoder can represent. On consumption, every retained locator is
+decoded from canonical base64 and re-resolved beneath the current profile root.
+Symlink, junction,
+reparse, mount, non-regular, missing, size-changed, or unsafe paths are dropped.
+Current filesystem/root identity must agree with the snapshot root observation;
+a mismatch invalidates all candidate rows for that root. File identity or mtime
+changes are only stale hints: a same-sized current regular file may proceed as
+a candidate, but only the same-call identity-bound v1/v2/hybrid verifier can
+upgrade its content evidence. Hardlink aliases remain separate paths so an
+alias cannot be hidden by identity-based deduplication.
+
+Snapshot publication is deliberately two-step. The streaming data object is
+sealed first; only a complete, confirmed data publication permits a descriptor
+commit. Orphan data is not discoverable as a snapshot. Concurrent writers can
+publish different descriptors at one generation; maximum-generation ties are
+ambiguous rather than resolved by an untrusted wall clock. A descriptor or
+listing budget failure never falls back to an older record. Data and descriptor
+write/durability receipts remain separate, including post-publication failure.
+Before returning `stored`, both record IDs are re-opened and digest-verified in
+one root-bound store session so a root replacement cannot splice a descriptor
+and data observation from different physical stores. This remains a
+detected-stable, non-atomic observation; every later read revalidates the sealed
+records again.
+
 Downloader reconciliation takes one identity snapshot before storage proof and
 another afterward using the same authenticated session. For eligible ordinary
 multi-file jobs, a file snapshot is taken after the first identity read and a
@@ -264,8 +319,9 @@ and scans use one goroutine with no retry. Context cancellation is checked
 between operations, but a blocked filesystem syscall may not be interruptible.
 Users should narrow roots and budgets before scanning mounted remote storage.
 
-`metafile store init`, `metafile store import`, and the store phase of
-`site metafile fetch` are the explicit write exceptions. Their reported write
+`metafile store init`, `metafile store import`, `storage profile create`,
+`storage index refresh`, and the store phase of `site metafile fetch` are the
+explicit write exceptions. Their reported write
 count covers logical publication of an accepted store marker or immutable
 object, not private temporary or uninitialized staging entries. It is nonzero
 when that accepted state became visible, including a possible count of `1` for
@@ -307,7 +363,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - durable OS-keyring or audited credential-helper integration;
 - journaled copy/reflink workflows with crash injection and rollback;
 - downloader add/recheck/location transitions and private-mode verification;
-- persistent storage profiles/index with stale-observation invalidation;
+- current-filesystem completeness tokens or journal-backed incremental index
+  invalidation; the existing sealed snapshot is candidate-only;
 - encryption-at-rest or an audited external-key design for private metafile
   stores on filesystems where owner-only ACLs cannot be enforced;
 - per-account cross-process site rate-limit coordination;

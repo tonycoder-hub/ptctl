@@ -17,12 +17,14 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/reconcile"
 	"github.com/tonycoder-hub/ptctl/internal/security"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/site"
 	"github.com/tonycoder-hub/ptctl/internal/site/tjupt"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
+	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
 
 var (
@@ -118,14 +120,18 @@ Usage:
 
   ptctl storage probe [--output table|json] PATH
   ptctl storage map --host-root PATH --client-root PATH [--client-style posix|windows] HOST_PATH
+  ptctl storage profile create --state-store DIR --name NAME --search-root PATH [--search-root PATH...] [--output table|json]
+  ptctl storage profile inspect --state-store DIR [--output table|json] PROFILE
+  ptctl storage index refresh --state-store DIR --profile PROFILE [--output table|json]
+  ptctl storage index inspect --state-store DIR --profile PROFILE [--snapshot-record ID] [--output table|json]
 
   ptctl client status --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
   ptctl client list --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
 
-  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [--output table|json]
+  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
-  ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [--target PATH] [--output table|json]
+  ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -135,6 +141,7 @@ Safety defaults:
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
+  * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
 `)
 }
@@ -247,7 +254,7 @@ func (a *app) reconcileReport(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [flags]")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "The report brackets optional downloader reads around bounded, exact storage discovery. It performs zero writes. Downloader identity cannot expose the private metafile variant, and host/client path comparison is lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
@@ -263,6 +270,9 @@ func (a *app) reconcileReport(args []string) error {
 	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
+	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
+	storageProfile := fs.String("storage-profile", "", "stored profile name or immutable ID; pair with --state-store")
+	snapshotRecord := fs.String("snapshot-record", "", "explicit descriptor record ID for stored-profile mode")
 	driverName := fs.String("driver", "qbittorrent", "downloader driver; part of the optional client group")
 	endpoint := fs.String("url", "", "qBittorrent Web API origin; part of the optional client group")
 	username := fs.String("username", "", "qBittorrent username; part of the optional client group")
@@ -311,8 +321,31 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
-	if len(searchRoots) == 0 {
-		return usageError("reconcile report requires at least one --search-root")
+	indexedRequested := explicit["state-store"] || explicit["storage-profile"] || explicit["snapshot-record"]
+	if len(searchRoots) == 0 && !indexedRequested {
+		return usageError("reconcile report requires --search-root or the --state-store/--storage-profile pair")
+	}
+	if len(searchRoots) > 0 && indexedRequested {
+		return usageError("--search-root and stored-profile index mode are mutually exclusive")
+	}
+	if indexedRequested && (*stateStore == "" || *storageProfile == "") {
+		return usageError("stored-profile mode requires non-empty --state-store and --storage-profile")
+	}
+	if indexedRequested && explicit["allow-network"] {
+		return usageError("--allow-network is fixed by the immutable storage profile in stored-profile mode")
+	}
+	for _, name := range []string{"max-depth", "max-directories", "max-entries", "max-directory-entries"} {
+		if indexedRequested && explicit[name] {
+			return usageError("--%s applies only to live --search-root scanning; refresh limits are fixed by the storage profile", name)
+		}
+	}
+	var explicitDescriptor metastore.RecordID
+	if explicit["snapshot-record"] {
+		parsedDescriptor, parseErr := metastore.ParseRecordID(*snapshotRecord)
+		if parseErr != nil {
+			return usageError("--snapshot-record is invalid")
+		}
+		explicitDescriptor = parsedDescriptor
 	}
 	input, err := flaggedMetafileInput("reconcile report", *torrentPath, *storeRoot, *variantID, explicit["torrent"], explicit["metafile-store"], explicit["metafile-variant"])
 	if err != nil {
@@ -398,7 +431,7 @@ func (a *app) reconcileReport(args []string) error {
 	if err := inventoryLimits.Validate(); err != nil {
 		return usageError("reconcile report: %v", err)
 	}
-	if len(searchRoots) > inventoryLimits.MaxRoots {
+	if !indexedRequested && len(searchRoots) > inventoryLimits.MaxRoots {
 		return usageError("reconcile report accepts at most %d --search-root values", inventoryLimits.MaxRoots)
 	}
 	if err := matchLimits.Validate(); err != nil {
@@ -421,6 +454,34 @@ func (a *app) reconcileReport(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	var indexedRepository *storageindex.Repository
+	var indexedProfile storageindex.Profile
+	var indexedDescriptorID metastore.RecordID
+	if indexedRequested {
+		store, openErr := metastore.Open(*stateStore)
+		if openErr != nil {
+			return openErr
+		}
+		indexedRepository, err = storageindex.NewRepository(store, storageindex.DefaultLimits())
+		if err != nil {
+			return err
+		}
+		profileSelection, selectionErr := indexedRepository.SelectProfile(ctx, *storageProfile)
+		if selectionErr != nil {
+			return selectionErr
+		}
+		if liveErr := storageindex.ValidateProfileForLiveUse(profileSelection.Profile, storageindex.DefaultLimits()); liveErr != nil {
+			return liveErr
+		}
+		snapshotSelection, selectionErr := indexedRepository.SelectSnapshot(ctx, profileSelection.Profile, explicitDescriptor)
+		if selectionErr != nil {
+			return selectionErr
+		}
+		indexedProfile = profileSelection.Profile
+		indexedDescriptorID = snapshotSelection.DescriptorRecordID
+	}
 	var clientCredential downloader.Credential
 	if clientRequested {
 		clientCredential, err = readDownloaderCredential(a.stdin, *username)
@@ -429,8 +490,6 @@ func (a *app) reconcileReport(args []string) error {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
 	bracket := reconcile.ClientBracket{
 		Requested:      clientRequested,
 		FileLayoutMode: *clientFileLayout,
@@ -494,7 +553,22 @@ func (a *app) reconcileReport(args []string) error {
 		discoverOptions.ClientMapping = &seed.ClientMappingOptions{HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows"}
 		reportMapping = &reconcile.PathMappingOptions{HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows"}
 	}
-	discovery, discoveryErr := seed.Discover(ctx, meta, discoverOptions)
+	var discovery seed.DiscoveryResult
+	var discoveryErr error
+	if indexedRequested {
+		candidateLimits := storageindex.DefaultCandidateLimits()
+		candidateLimits.MaxCandidates = inventoryLimits.MaxCandidates
+		candidateLimits.MaxPathBytes = inventoryLimits.MaxPathBytes
+		candidateLimits.MaxIssues = inventoryLimits.MaxIssues
+		indexed, queryErr := indexedRepository.LoadCandidates(ctx, indexedProfile, indexedDescriptorID, wantedMetafileSizes(meta), candidateLimits)
+		if queryErr != nil {
+			discoveryErr = queryErr
+		} else {
+			discovery, discoveryErr = seed.DiscoverFromIndex(ctx, meta, indexedProfile, indexed, discoverOptions)
+		}
+	} else {
+		discovery, discoveryErr = seed.Discover(ctx, meta, discoverOptions)
+	}
 	if session != nil && bracket.Before != nil {
 		if fileBeforeComplete {
 			fileRequestsBefore := session.RequestsMade()
@@ -856,6 +930,10 @@ func (a *app) storage(args []string) error {
 		}
 		fmt.Fprintf(a.stdout, "%s\n", terminalSafe(result.ClientPath))
 		return nil
+	case "profile":
+		return a.storageProfileCommand(args[1:])
+	case "index":
+		return a.storageIndexCommand(args[1:])
 	default:
 		return usageError("unknown storage subcommand %q", args[0])
 	}
@@ -918,9 +996,10 @@ func (a *app) seedDiscover(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "Discovery performs bounded metadata/content reads and zero writes. Host/client mapping applies to discovered sources, or to planned targets when --target is set.")
+		fmt.Fprintln(fs.Output(), "Live-root discovery can establish current uniqueness. Stored-profile discovery reobserves and exactly verifies historical locators, but remains incomplete and never emits a plan because a snapshot cannot prove current uniqueness. Both modes perform zero writes.")
+		fmt.Fprintln(fs.Output(), "Host/client mapping applies to discovered sources, or to planned targets when --target is set.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Flags:")
 		fs.PrintDefaults()
@@ -931,6 +1010,9 @@ func (a *app) seedDiscover(args []string) error {
 	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
+	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
+	storageProfile := fs.String("storage-profile", "", "stored profile name or immutable ID; pair with --state-store")
+	snapshotRecord := fs.String("snapshot-record", "", "explicit descriptor record ID for stored-profile mode")
 	target := fs.String("target", "", "optional target storage root for a layout-only plan")
 	strategy := fs.String("strategy", "copy", "layout plan strategy; only copy is supported")
 	showAbsolute := fs.Bool("show-absolute-paths", false, "include absolute host paths in output")
@@ -971,8 +1053,34 @@ func (a *app) seedDiscover(args []string) error {
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
-	if len(searchRoots) == 0 {
-		return usageError("seed discover requires at least one --search-root")
+	indexedRequested := explicit["state-store"] || explicit["storage-profile"] || explicit["snapshot-record"]
+	if len(searchRoots) == 0 && !indexedRequested {
+		return usageError("seed discover requires --search-root or the --state-store/--storage-profile pair")
+	}
+	if len(searchRoots) > 0 && indexedRequested {
+		return usageError("--search-root and stored-profile index mode are mutually exclusive")
+	}
+	if indexedRequested && (*stateStore == "" || *storageProfile == "") {
+		return usageError("stored-profile mode requires non-empty --state-store and --storage-profile")
+	}
+	if explicit["snapshot-record"] && !indexedRequested {
+		return usageError("--snapshot-record requires stored-profile mode")
+	}
+	if indexedRequested && explicit["allow-network"] {
+		return usageError("--allow-network is fixed by the immutable storage profile in stored-profile mode")
+	}
+	for _, name := range []string{"max-depth", "max-directories", "max-entries", "max-directory-entries"} {
+		if indexedRequested && explicit[name] {
+			return usageError("--%s applies only to live --search-root scanning; refresh limits are fixed by the storage profile", name)
+		}
+	}
+	var explicitDescriptor metastore.RecordID
+	if explicit["snapshot-record"] {
+		parsedDescriptor, parseErr := metastore.ParseRecordID(*snapshotRecord)
+		if parseErr != nil {
+			return usageError("--snapshot-record is invalid")
+		}
+		explicitDescriptor = parsedDescriptor
 	}
 	input, err := flaggedMetafileInput("seed discover", *torrentPath, *storeRoot, *variantID, explicit["torrent"], explicit["metafile-store"], explicit["metafile-variant"])
 	if err != nil {
@@ -1042,7 +1150,39 @@ func (a *app) seedDiscover(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	result, err := seed.Discover(ctx, meta, options)
+	var result seed.DiscoveryResult
+	if indexedRequested {
+		store, openErr := metastore.Open(*stateStore)
+		if openErr != nil {
+			return openErr
+		}
+		repository, repositoryErr := storageindex.NewRepository(store, storageindex.DefaultLimits())
+		if repositoryErr != nil {
+			return repositoryErr
+		}
+		profileSelection, selectionErr := repository.SelectProfile(ctx, *storageProfile)
+		if selectionErr != nil {
+			return selectionErr
+		}
+		if liveErr := storageindex.ValidateProfileForLiveUse(profileSelection.Profile, storageindex.DefaultLimits()); liveErr != nil {
+			return liveErr
+		}
+		snapshotSelection, selectionErr := repository.SelectSnapshot(ctx, profileSelection.Profile, explicitDescriptor)
+		if selectionErr != nil {
+			return selectionErr
+		}
+		candidateLimits := storageindex.DefaultCandidateLimits()
+		candidateLimits.MaxCandidates = inventoryLimits.MaxCandidates
+		candidateLimits.MaxPathBytes = inventoryLimits.MaxPathBytes
+		candidateLimits.MaxIssues = inventoryLimits.MaxIssues
+		indexed, queryErr := repository.LoadCandidates(ctx, profileSelection.Profile, snapshotSelection.DescriptorRecordID, wantedMetafileSizes(meta), candidateLimits)
+		if queryErr != nil {
+			return queryErr
+		}
+		result, err = seed.DiscoverFromIndex(ctx, meta, profileSelection.Profile, indexed, options)
+	} else {
+		result, err = seed.Discover(ctx, meta, options)
+	}
 	if err != nil {
 		return err
 	}
@@ -1111,6 +1251,24 @@ func validateOutput(output string) error {
 	return nil
 }
 
+func wantedMetafileSizes(meta *metafile.MetaInfo) []int64 {
+	if meta == nil {
+		return []int64{}
+	}
+	seen := make(map[int64]struct{})
+	for _, file := range meta.Files {
+		if file.Length == 0 || strings.Contains(file.Attribute, "p") {
+			continue
+		}
+		seen[file.Length] = struct{}{}
+	}
+	result := make([]int64, 0, len(seen))
+	for size := range seen {
+		result = append(result, size)
+	}
+	return result
+}
+
 func writeJSON(out io.Writer, data any, warnings []string) error {
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")
@@ -1137,6 +1295,12 @@ func jsonKind(data any) string {
 	case metafileStoreReport:
 		return typed.kind
 	case siteMetafileFetchReport:
+		return typed.kind
+	case storageProfileReport:
+		return typed.kind
+	case storageIndexReport:
+		return typed.kind
+	case storageIndexInspectReport:
 		return typed.kind
 	case metafile.VerificationResult:
 		return "content.verification"
