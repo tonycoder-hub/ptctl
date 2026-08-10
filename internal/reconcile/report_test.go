@@ -138,6 +138,101 @@ func TestExplicitSealedSiteBindingAddsHistoricalAxisWithoutUpgradingLocalProof(t
 	}
 }
 
+func TestLiveSiteDetailAddsCurrentRefClaimWithoutVariantProof(t *testing.T) {
+	meta, discovery, source, root := reconciledSingleFile(t)
+	ref := domain.TorrentRef{SiteID: "tjupt", RemoteID: "123"}
+	observed, receipt := observedDetailForRef(t, ref)
+	job := matchingJob(meta, "/downloads/renamed.bin")
+	before, after := ledgerPair(job)
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		Client:  ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3},
+		SiteRef: &ref,
+		SiteDetail: SiteDetailSelection{
+			Requested: true, Config: site.TorrentDetailConfig{Origin: receipt.Origin, RouteID: receipt.RouteID},
+			Observed: observed, Receipt: receipt, RequestsMade: 1,
+		},
+		PathMapping: testPathMapping(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "consistent" || relationStatus(report, "site_metafile") != "declared_unbound" ||
+		!report.Scope.SiteDetailRequested || report.Ledgers.Site.Detail.Status != "observed_current_ref" ||
+		!report.Ledgers.Site.Detail.ProcessLocalProof || report.Ledgers.Site.Detail.Observation == nil ||
+		!strings.Contains(report.Assurance, "same_invocation_current_site_ref_claim") {
+		t.Fatalf("live detail was not represented as a separate claim: %#v", report)
+	}
+	for _, basis := range report.Relations[0].EvidenceBasis {
+		if basis == "metafile_variant_observed" || basis == "private_metafile_observed" {
+			t.Fatalf("live detail was promoted to variant proof: %#v", report.Relations[0])
+		}
+	}
+
+	raw, err := json.Marshal(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replay site.ObservedTorrentDetail
+	if err := json.Unmarshal(raw, &replay); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source, SiteRef: &ref,
+		SiteDetail: SiteDetailSelection{
+			Requested: true, Config: site.TorrentDetailConfig{Origin: receipt.Origin, RouteID: receipt.RouteID},
+			Observed: &replay, Receipt: receipt, RequestsMade: 1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Outcome != "incomplete" || replayed.Ledgers.Site.Detail.Status != "incomplete" || replayed.Ledgers.Site.Detail.ProcessLocalProof {
+		t.Fatalf("serialized detail regained authority: %#v", replayed)
+	}
+	wrongConfig, err := site.NewTorrentDetailConfig("https://other.invalid", "other.details_by_id.v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongOrigin, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source, SiteRef: &ref,
+		SiteDetail: SiteDetailSelection{Requested: true, Config: wrongConfig, Observed: observed, Receipt: receipt, RequestsMade: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrongOrigin.Outcome != "incomplete" || wrongOrigin.Ledgers.Site.Detail.Status != "incomplete" || wrongOrigin.Ledgers.Site.Detail.ProcessLocalProof {
+		t.Fatalf("observation crossed its pinned site origin/route: %#v", wrongOrigin)
+	}
+}
+
+func TestLiveSiteDetailFailureIsIncompleteAndSanitizesAdapterData(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	ref := domain.TorrentRef{SiteID: "tjupt", RemoteID: "123"}
+	const canary = "SITE-DETAIL-RECEIPT-CANARY"
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source, SiteRef: &ref,
+		SiteDetail: SiteDetailSelection{
+			Requested: true, StopReason: canary, RequestsMade: 999,
+			Receipt: site.TorrentDetailReceipt{
+				Ref: domain.TorrentRef{SiteID: canary, RemoteID: canary}, Origin: "https://" + canary, RouteID: canary,
+				Used: site.TorrentDetailUsage{RequestsAttempted: 999, ResponseBytesRead: 1 << 40},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "incomplete" || report.Ledgers.Site.Detail.Status != "incomplete" || report.Ledgers.Site.Detail.ProcessLocalProof ||
+		report.Ledgers.Site.Detail.RequestsMade != 2 || strings.Contains(string(encoded), canary) {
+		t.Fatalf("unsafe failed live detail report: %s", encoded)
+	}
+}
+
 func TestExplicitSiteBindingMismatchAndIntegrityGateOverallOutcome(t *testing.T) {
 	meta, discovery, source, _ := reconciledSingleFile(t)
 	recordID, ref, verified := sealedSiteBindingForMeta(t, meta)
@@ -178,11 +273,31 @@ func TestOverallConflictOutranksAmbiguityAcrossAxes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := overallOutcome("not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true); got != "conflict" {
+			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true); got != "conflict" {
 				t.Fatalf("positive contradiction was hidden by ambiguity: got %q", got)
 			}
 		})
 	}
+}
+
+func observedDetailForRef(t *testing.T, ref domain.TorrentRef) (*site.ObservedTorrentDetail, site.TorrentDetailReceipt) {
+	t.Helper()
+	start := time.Date(2026, 8, 11, 4, 5, 6, 0, time.UTC)
+	receipt := site.TorrentDetailReceipt{
+		Effect: site.TorrentDetailReadEffect, Ref: ref, Origin: "https://www.tjupt.org", RouteID: "tjupt.details_by_id_no_hit.v1",
+		ObservedAtStart: start, ObservedAtEnd: start.Add(time.Second), Complete: true,
+		Limits: site.DefaultTorrentDetailLimits(),
+		Used:   site.TorrentDetailUsage{RequestsAttempted: 1, ResponseBytesRead: 1024, ResponseBytesKnown: true},
+	}
+	detail := domain.TorrentDetail{
+		Ref: ref, DisplayTitle: "Observed release", DownloadReferenceObserved: true,
+		EvidenceBasis: []string{site.DetailBasisAuthenticated, site.DetailBasisExactRef, site.DetailBasisOneRequest, site.DetailBasisSiteClaimOnly, site.DetailBasisDownloadRef},
+	}
+	observed, err := site.NewObservedTorrentDetail(detail, receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return observed, receipt
 }
 
 func TestProofFromAnotherDiscoveryCannotBackSelectedPath(t *testing.T) {

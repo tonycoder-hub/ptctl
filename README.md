@@ -99,8 +99,9 @@ capabilities at the edge, not assumptions in the core domain model.
   exact response only into an initialized private metafile store;
 - qBittorrent status and torrent-list reads over HTTPS (or explicit numeric
   loopback HTTP), with passwords accepted only through stdin;
-- read-only reconciliation that brackets storage proof with two qBittorrent
-  ledger snapshots from one login, stream-decodes a bounded job ledger,
+- read-only reconciliation that can first observe one authenticated live site
+  detail page, then brackets storage proof with two qBittorrent ledger
+  snapshots from one login, stream-decodes a bounded job ledger,
   extracts typed v1/v2 claims from bounded magnet `xt` fields, and reports
   variant, infohash, content-proof, and path relations as separate evidence
   axes;
@@ -814,6 +815,25 @@ discarded because it may contain tracker or web-seed secrets. A declared
 metafile binding. qBittorrent does not expose the raw private metafile through
 this ledger, so `metafile_variant_relation` remains `unobservable` even when
 typed infohashes agree.
+
+To observe that remote ID live without a downloader, add
+`--site-cookie-stdin`. To observe both the site and qBittorrent in one command,
+use `--credential-bundle-stdin` instead of the two single-secret flags and pipe
+one bounded strict JSON object:
+
+```json
+{"schema":"ptctl.credentials/v1","site_cookie":"SID=...","downloader_password":"..."}
+```
+
+Unknown, duplicate, missing, trailing, oversized, invalid-UTF-8, and unpaired
+surrogate input is rejected. All adapter capability/origin/ref, metafile,
+store, storage-profile, mapping, endpoint, and budget checks finish before this
+stdin is read. The site detail request runs first. Its opaque same-invocation
+authority adds only a current remote-ID site claim to `site_metafile`; the
+relation remains unbound unless an explicit sealed historical binding is also
+verified. A requested live read that does not complete makes the overall report
+`incomplete`; a successful read never upgrades storage, downloader, path, or
+exact-private-variant proof.
 
 When `--site-binding-record` is explicit, the site axis is accepted only from
 a same-invocation opaque authority produced by jointly re-reading the sealed

@@ -90,7 +90,7 @@ type torrentDetailSession struct {
 	closed bool
 }
 
-func (session *torrentDetailSession) ReadTorrentDetail(ctx context.Context, ref domain.TorrentRef, limits site.TorrentDetailLimits) (domain.TorrentDetail, site.TorrentDetailReceipt, error) {
+func (session *torrentDetailSession) ReadTorrentDetail(ctx context.Context, ref domain.TorrentRef, limits site.TorrentDetailLimits) (*site.ObservedTorrentDetail, site.TorrentDetailReceipt, error) {
 	now := time.Now().UTC()
 	receipt := site.TorrentDetailReceipt{
 		Effect:          site.TorrentDetailReadEffect,
@@ -102,29 +102,29 @@ func (session *torrentDetailSession) ReadTorrentDetail(ctx context.Context, ref 
 	}
 	if err := limits.Validate(); err != nil {
 		receipt.StopReason = "invalid_limits"
-		return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail limits are invalid")
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail limits are invalid")
 	}
 	if err := validateCanonicalTorrentRef(ref); err != nil {
 		receipt.StopReason = "invalid_reference"
-		return domain.TorrentDetail{}, receipt, err
+		return nil, receipt, err
 	}
 	receipt.Ref = ref
 	if err := ctx.Err(); err != nil {
 		receipt.StopReason = "context_done"
-		return domain.TorrentDetail{}, receipt, err
+		return nil, receipt, err
 	}
 
 	session.mu.Lock()
 	if session.closed {
 		session.mu.Unlock()
 		receipt.StopReason = "session_closed"
-		return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail session is closed")
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail session is closed")
 	}
 	if session.used {
 		session.mu.Unlock()
 		receipt.StopReason = "request_budget_exhausted"
 		receipt.Used.RequestsAttempted = session.RequestsMade()
-		return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail request budget is exhausted")
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail request budget is exhausted")
 	}
 	session.used = true
 	client := session.client
@@ -145,40 +145,46 @@ func (session *torrentDetailSession) ReadTorrentDetail(ctx context.Context, ref 
 	if requestErr != nil {
 		if errors.Is(requestErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			receipt.StopReason = "context_done"
-			return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail request stopped: %w", context.Canceled)
+			return nil, receipt, fmt.Errorf("TJUPT torrent detail request stopped: %w", context.Canceled)
 		}
 		if errors.Is(requestErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			receipt.StopReason = "context_done"
-			return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail request stopped: %w", context.DeadlineExceeded)
+			return nil, receipt, fmt.Errorf("TJUPT torrent detail request stopped: %w", context.DeadlineExceeded)
 		}
 		if receipt.Used.RequestsAttempted != 1 {
 			receipt.StopReason = "request_accounting_invalid"
-			return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail request accounting is invalid")
+			return nil, receipt, fmt.Errorf("TJUPT torrent detail request accounting is invalid")
 		}
 		receipt.StopReason = "site_request_failed"
-		return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail request failed")
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail request failed")
 	}
 	if receipt.Used.RequestsAttempted != 1 {
 		receipt.StopReason = "request_accounting_invalid"
-		return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail request accounting is invalid")
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail request accounting is invalid")
 	}
 	if !response.ResponseBytesKnown || response.ResponseBytesRead != int64(len(response.Body)) ||
 		response.ObservedAtStart.IsZero() || response.ObservedAtEnd.IsZero() || response.ObservedAtEnd.Before(response.ObservedAtStart) ||
 		int64(len(response.Body)) > limits.MaxResponseBytes {
 		receipt.StopReason = "response_accounting_invalid"
-		return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail response accounting is invalid")
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail response accounting is invalid")
 	}
 	if stopReason, err := classifyDetailResponse(response, ref); err != nil {
 		receipt.StopReason = stopReason
-		return domain.TorrentDetail{}, receipt, err
+		return nil, receipt, err
 	}
 	detail, err := parseTorrentDetail(response.Body, ref)
 	if err != nil {
 		receipt.StopReason = "unrecognized_response"
-		return domain.TorrentDetail{}, receipt, fmt.Errorf("TJUPT torrent detail page was not recognized")
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail page was not recognized")
 	}
 	receipt.Complete = true
-	return detail, receipt, nil
+	observed, err := site.NewObservedTorrentDetail(detail, receipt)
+	if err != nil {
+		receipt.Complete = false
+		receipt.StopReason = "response_accounting_invalid"
+		return nil, receipt, fmt.Errorf("TJUPT torrent detail observation is invalid")
+	}
+	return observed, receipt, nil
 }
 
 func (session *torrentDetailSession) RequestsMade() int {

@@ -15,13 +15,14 @@ import (
 )
 
 type fakeTorrentDetailAdapter struct {
-	configErr error
-	openErr   error
-	detail    domain.TorrentDetail
-	receipt   site.TorrentDetailReceipt
-	readErr   error
-	closeErr  error
-	opened    int
+	configErr  error
+	openErr    error
+	detail     domain.TorrentDetail
+	receipt    site.TorrentDetailReceipt
+	readErr    error
+	closeErr   error
+	opened     int
+	credential string
 }
 
 func (*fakeTorrentDetailAdapter) Descriptor() domain.SiteDescriptor {
@@ -57,6 +58,7 @@ func (adapter *fakeTorrentDetailAdapter) OpenTorrentDetailSession(ctx context.Co
 	if credential.Method() != domain.AuthMethodCookieHeader || credential.SecretValue() == "" {
 		return nil, fmt.Errorf("invalid credential")
 	}
+	adapter.credential = credential.SecretValue()
 	if adapter.openErr != nil {
 		return nil, adapter.openErr
 	}
@@ -69,9 +71,10 @@ type fakeTorrentDetailSession struct {
 	closed   bool
 }
 
-func (session *fakeTorrentDetailSession) ReadTorrentDetail(context.Context, domain.TorrentRef, site.TorrentDetailLimits) (domain.TorrentDetail, site.TorrentDetailReceipt, error) {
+func (session *fakeTorrentDetailSession) ReadTorrentDetail(context.Context, domain.TorrentRef, site.TorrentDetailLimits) (*site.ObservedTorrentDetail, site.TorrentDetailReceipt, error) {
 	session.requests++
-	return session.adapter.detail, session.adapter.receipt, session.adapter.readErr
+	observed, _ := site.NewObservedTorrentDetail(session.adapter.detail, session.adapter.receipt)
+	return observed, session.adapter.receipt, session.adapter.readErr
 }
 
 func (session *fakeTorrentDetailSession) RequestsMade() int { return session.requests }

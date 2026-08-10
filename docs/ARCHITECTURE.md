@@ -60,7 +60,8 @@ credentials. TJUPT is one adapter, not a special case in the content model.
 ## Read-only ledger reconciliation
 
 `reconcile report` is the second vertical slice. One invocation resolves and
-parses one exact metafile, opens one read-only downloader session, reads a
+parses one exact metafile, optionally reads one authenticated site detail page,
+optionally opens one read-only downloader session, reads a
 bounded job ledger, performs ordinary storage discovery and content proof, then
 reads the job ledger again. For one uniquely identified ordinary multi-file job, `auto`
 mode attempts one bounded per-file read before the storage proof and sends a
@@ -75,8 +76,9 @@ not weaken or alter any relation, outcome, or zero-write guarantee below.
 
 The report deliberately keeps five relations separate:
 
-1. `site_metafile` is either a user-declared reference or an explicitly
-   selected, jointly verified sealed historical site-to-whole-variant record;
+1. `site_metafile` is either a user-declared reference, optionally augmented by
+   a same-invocation live remote-ID page observation, or an explicitly selected,
+   jointly verified sealed historical site-to-whole-variant record;
 2. `metafile_variant_relation` asks whether the downloader exposes the exact
    private `.torrent` bytes;
 3. `client_infohash_relation` compares algorithm-tagged v1/v2 claims;
@@ -99,7 +101,11 @@ requests and never selected by ref, time, or enumeration. A valid historical
 binding does not upgrade any storage/client/path axis and does not change the
 downloader raw-metafile relation; a mismatch conflicts, while unavailable or
 corrupt authority prevents overall consistency. A bare `--site-ref` remains a
-non-gating declaration.
+non-gating declaration. Explicit `--site-cookie-stdin` makes the live detail
+axis gating: failure is incomplete, while success adds only a current site
+claim. With a downloader in the same invocation, one strict bounded
+`--credential-bundle-stdin` object supplies both secrets so stdin is consumed
+exactly once; all credential-free gates run first.
 
 qBittorrent's generic `hash` is an opaque job key. The adapter derives typed
 claims only from strictly bounded magnet `xt` values: BTIH is 20 bytes and
@@ -170,9 +176,12 @@ public projection retains a display title, optional peer counts, whether a
 matching download reference was present, and a separate request receipt. It
 does not retain raw HTML, descriptions, URLs, or arbitrary server text.
 
-This observation is a site claim at one non-atomic interval. It does not bind
-the site ID to a whole-raw metafile variant, cannot replace the historical exact
-fetch binding, and does not participate in the reconciliation lattice yet.
+This observation is a site claim at one non-atomic interval. The typed reader
+returns opaque process-local authority; its public JSON projection cannot be
+replayed as evidence. Reconciliation can consume that authority in the same
+invocation to show that the selected remote-ID page was observed. It does not
+bind the site ID to a whole-raw metafile variant, cannot replace the historical
+exact fetch binding, and cannot upgrade any local or downloader evidence axis.
 
 Downloader ledgers negotiate normalized capabilities separately:
 algorithm-tagged infohashes, content paths, raw metafiles, and indexed job

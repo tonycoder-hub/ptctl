@@ -91,8 +91,12 @@ description, cookie, redirect location, or arbitrary server diagnostics.
 The result is only a same-invocation site-page observation. Its display title
 may include promotion decoration; names, peer counts, and links are site
 claims. It is not a metafile identity, proof of the site's current private
-variant, a site signature, or storage-content proof, and it is not persisted or
-consumed by reconciliation in this slice.
+variant, a site signature, or storage-content proof, and it is not persisted.
+The typed port returns opaque process-local authority. An explicitly
+requested `reconcile report --site-ref tjupt/ID --site-cookie-stdin` may consume
+that authority in the same invocation, but only to record that the selected
+remote-ID page was observed; JSON replay cannot recreate it and it never proves
+which private `.torrent` variant the site currently serves.
 
 ## Private metafile prerequisite
 
@@ -174,6 +178,16 @@ the newest record. The adapter ref/origin/route is revalidated before any
 downloader password read or request. A valid binding is historical evidence
 only and cannot upgrade incomplete storage/client/path axes or make
 qBittorrent's raw private metafile observable.
+
+When live site detail and qBittorrent are requested together, reconciliation
+requires `--credential-bundle-stdin` and accepts exactly:
+
+```json
+{"schema":"ptctl.credentials/v1","site_cookie":"SID=...","downloader_password":"..."}
+```
+
+The bounded detail GET runs before the downloader session. Its current site
+claim remains separate from the sealed historical exact-response relation.
 
 The report accounts for the site request and logical store publication
 separately. The request URL, redirect location, response body, announce path,

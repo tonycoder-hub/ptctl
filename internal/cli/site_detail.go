@@ -99,7 +99,7 @@ func (a *app) siteDetail(args []string) error {
 		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "site.session_open_failed", Message: "the bounded site detail session could not be opened"})
 		return a.finishSiteDetail(*output, report, fmt.Errorf("open site torrent detail session failed"))
 	}
-	detail, receipt, readErr := session.ReadTorrentDetail(ctx, ref, limits)
+	observed, receipt, readErr := session.ReadTorrentDetail(ctx, ref, limits)
 	report.Request.RequestsMade = boundedFetchCounter(session.RequestsMade(), limits.MaxRequests+1)
 	report.Request.Receipt = publicTorrentDetailReceipt(ref, config, limits, receipt)
 	closeErr := session.Close()
@@ -121,7 +121,7 @@ func (a *app) siteDetail(args []string) error {
 		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "site.session_close_failed", Message: "the site detail session could not be closed cleanly"})
 		return a.finishSiteDetail(*output, report, fmt.Errorf("close site torrent detail session failed"))
 	}
-	if err := validateSuccessfulTorrentDetail(ref, config, limits, detail, receipt, report.Request.RequestsMade); err != nil {
+	if err := validateSuccessfulTorrentDetail(ref, config, limits, observed, receipt, report.Request.RequestsMade); err != nil {
 		report.Request.Status = "incomplete"
 		report.Request.Receipt.Complete = false
 		report.Request.Receipt.StopReason = "receipt_inconsistent"
@@ -130,6 +130,7 @@ func (a *app) siteDetail(args []string) error {
 	}
 	report.Outcome = "observed"
 	report.Request.Status = "complete"
+	detail := observed.PublicCopy()
 	report.Observation = &detail
 	return a.writeSiteDetailReport(*output, report)
 }
@@ -156,7 +157,11 @@ func newSiteDetailReport(ref domain.TorrentRef, config site.TorrentDetailConfig,
 	}
 }
 
-func validateSuccessfulTorrentDetail(ref domain.TorrentRef, config site.TorrentDetailConfig, limits site.TorrentDetailLimits, detail domain.TorrentDetail, receipt site.TorrentDetailReceipt, requestsMade int) error {
+func validateSuccessfulTorrentDetail(ref domain.TorrentRef, config site.TorrentDetailConfig, limits site.TorrentDetailLimits, observed *site.ObservedTorrentDetail, receipt site.TorrentDetailReceipt, requestsMade int) error {
+	if observed == nil || !observed.MatchesReceipt(receipt) || !observed.Matches(ref, config.Origin, config.RouteID) {
+		return fmt.Errorf("detail authority is invalid")
+	}
+	detail := observed.PublicCopy()
 	if config.Validate() != nil || limits.Validate() != nil || detail.Ref != ref || receipt.Effect != site.TorrentDetailReadEffect || receipt.Ref != ref ||
 		receipt.Origin != config.Origin || receipt.RouteID != config.RouteID || receipt.Limits != limits || !receipt.Complete || receipt.StopReason != "" ||
 		receipt.ObservedAtStart.IsZero() || receipt.ObservedAtEnd.IsZero() || receipt.ObservedAtEnd.Before(receipt.ObservedAtStart) ||

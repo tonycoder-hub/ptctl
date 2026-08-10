@@ -84,8 +84,9 @@ func TestTorrentDetailHappyPathUsesOneNoHitRequest(t *testing.T) {
 		client.accept != detailAccept || client.maxBody != limits.MaxResponseBytes || client.maxHeader != limits.MaxResponseHeaderBytes {
 		t.Fatalf("path=%q query=%v accept=%q budgets=%d/%d calls=%d", client.path, client.query, client.accept, client.maxBody, client.maxHeader, client.calls)
 	}
-	if detail.Ref != ref || detail.DisplayTitle != "A Release FREE" || detail.Seeders == nil || *detail.Seeders != 12 || detail.Leechers == nil || *detail.Leechers != 3 ||
-		!detail.DownloadReferenceObserved || len(detail.EvidenceBasis) != 5 {
+	public := detail.PublicCopy()
+	if !detail.MatchesReceipt(receipt) || !detail.Matches(ref, DetailOrigin, DetailRouteID) || public.Ref != ref || public.DisplayTitle != "A Release FREE" || public.Seeders == nil || *public.Seeders != 12 || public.Leechers == nil || *public.Leechers != 3 ||
+		!public.DownloadReferenceObserved || len(public.EvidenceBasis) != 5 {
 		t.Fatalf("detail=%#v", detail)
 	}
 	if !receipt.Complete || receipt.StopReason != "" || receipt.Ref != ref || receipt.Origin != DetailOrigin || receipt.RouteID != DetailRouteID ||
@@ -105,7 +106,7 @@ func TestTorrentDetailHappyPathUsesOneNoHitRequest(t *testing.T) {
 	encoded, _ := json.Marshal(struct {
 		Detail  domain.TorrentDetail      `json:"detail"`
 		Receipt site.TorrentDetailReceipt `json:"receipt"`
-	}{detail, receipt})
+	}{public, receipt})
 	if strings.Contains(string(encoded), cookie) || strings.Contains(string(encoded), string(body)) {
 		t.Fatal("serialized detail disclosed cookie or raw response")
 	}
@@ -149,7 +150,7 @@ func TestTorrentDetailResponseClassificationFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			detail, receipt, readErr := session.ReadTorrentDetail(context.Background(), domain.TorrentRef{SiteID: "tjupt", RemoteID: "42"}, site.DefaultTorrentDetailLimits())
-			if readErr == nil || detail.Ref != (domain.TorrentRef{}) || detail.DisplayTitle != "" || len(detail.EvidenceBasis) != 0 || receipt.Complete || receipt.StopReason != test.stopReason || client.calls != 1 || strings.Contains(readErr.Error(), string(test.body)) {
+			if readErr == nil || detail != nil || receipt.Complete || receipt.StopReason != test.stopReason || client.calls != 1 || strings.Contains(readErr.Error(), string(test.body)) {
 				t.Fatalf("detail=%#v receipt=%#v err=%v calls=%d", detail, receipt, readErr, client.calls)
 			}
 		})

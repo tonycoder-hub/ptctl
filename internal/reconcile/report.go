@@ -15,6 +15,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
+	"github.com/tonycoder-hub/ptctl/internal/site"
 	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
@@ -51,6 +52,7 @@ type BuildInput struct {
 	Client            ClientBracket
 	SiteRef           *domain.TorrentRef
 	SiteBinding       SiteBindingSelection
+	SiteDetail        SiteDetailSelection
 	PathMapping       *PathMappingOptions
 	ShowAbsolutePaths bool
 }
@@ -63,6 +65,18 @@ type SiteBindingSelection struct {
 	RecordID   metastore.RecordID
 	Verified   *sitebinding.VerifiedSiteBinding
 	StopReason string
+}
+
+// SiteDetailSelection is an explicit same-invocation live observation. The
+// public TorrentDetail DTO alone is never authority; Observed must retain the
+// opaque value returned by the adapter in this invocation.
+type SiteDetailSelection struct {
+	Requested    bool
+	Config       site.TorrentDetailConfig
+	Observed     *site.ObservedTorrentDetail
+	Receipt      site.TorrentDetailReceipt
+	StopReason   string
+	RequestsMade int
 }
 
 type Report struct {
@@ -82,6 +96,7 @@ type ReportScope struct {
 	SiteRequested        bool   `json:"site_requested"`
 	SiteBindingRequested bool   `json:"site_binding_requested"`
 	SiteBindingSelector  string `json:"site_binding_selector"`
+	SiteDetailRequested  bool   `json:"site_detail_requested"`
 	ClientRequested      bool   `json:"client_requested"`
 	PathMappingRequested bool   `json:"path_mapping_requested"`
 	PathMappingID        string `json:"path_mapping_id,omitempty"`
@@ -110,6 +125,22 @@ type SiteLedger struct {
 	ProcessLocalProof bool               `json:"process_local_proof"`
 	Historical        bool               `json:"historical"`
 	StopReason        string             `json:"stop_reason,omitempty"`
+	Detail            SiteDetailLedger   `json:"detail"`
+}
+
+type SiteDetailLedger struct {
+	Status            string                   `json:"status"`
+	Ref               *domain.TorrentRef       `json:"ref,omitempty"`
+	Origin            string                   `json:"origin,omitempty"`
+	RouteID           string                   `json:"route_id,omitempty"`
+	ObservedAtStart   *time.Time               `json:"observed_at_start,omitempty"`
+	ObservedAtEnd     *time.Time               `json:"observed_at_end,omitempty"`
+	RequestsMade      int                      `json:"requests_made"`
+	Limits            site.TorrentDetailLimits `json:"limits"`
+	Used              site.TorrentDetailUsage  `json:"used"`
+	Observation       *domain.TorrentDetail    `json:"observation,omitempty"`
+	ProcessLocalProof bool                     `json:"process_local_proof"`
+	StopReason        string                   `json:"stop_reason,omitempty"`
 }
 
 type MetafileLedger struct {
@@ -225,9 +256,10 @@ func Build(input BuildInput) (Report, error) {
 		Assurance:       "axis_separated_non_atomic",
 		Scope: ReportScope{
 			MetafileVariantID:    meta.MetafileVariantID,
-			SiteRequested:        input.SiteRef != nil || input.SiteBinding.Requested,
+			SiteRequested:        input.SiteRef != nil || input.SiteBinding.Requested || input.SiteDetail.Requested,
 			SiteBindingRequested: input.SiteBinding.Requested,
 			SiteBindingSelector:  siteBindingSelector(input.SiteBinding.Requested),
+			SiteDetailRequested:  input.SiteDetail.Requested,
 			ClientRequested:      input.Client.Requested,
 			PathMappingRequested: input.PathMapping != nil,
 			PathMappingID:        pathMappingIDValue,
@@ -242,6 +274,9 @@ func Build(input BuildInput) (Report, error) {
 	if input.Client.Requested {
 		report.Effect = append(report.Effect, "read_downloader_state")
 	}
+	if input.SiteDetail.Requested {
+		report.Effect = append(report.Effect, site.TorrentDetailReadEffect)
+	}
 	if input.Client.FileAttempted {
 		report.Effect = append(report.Effect, "read_downloader_file_layout")
 	}
@@ -252,9 +287,24 @@ func Build(input BuildInput) (Report, error) {
 	}
 
 	siteLedger, siteRelation, siteBlockers, siteWarnings := assessSiteBinding(meta, input.SiteRef, input.SiteBinding)
+	siteDetailLedger, detailBlockers, detailWarnings := assessSiteDetail(input.SiteRef, input.SiteDetail)
+	siteLedger.Detail = siteDetailLedger
+	if siteDetailLedger.Status == "observed_current_ref" {
+		siteRelation.EvidenceBasis = append(siteRelation.EvidenceBasis,
+			"same_invocation_authenticated_site_detail",
+			"exact_remote_id_detail_page",
+			"single_bounded_no_redirect_site_read",
+			"current_site_claim_not_metafile_variant_proof",
+		)
+		if siteRelation.EvidenceLevel == "declared" || siteRelation.EvidenceLevel == "none" {
+			siteRelation.EvidenceLevel = "direct_site_claim"
+		}
+	}
 	report.Ledgers.Site = siteLedger
 	report.Blockers = append(report.Blockers, siteBlockers...)
+	report.Blockers = append(report.Blockers, detailBlockers...)
 	report.Warnings = append(report.Warnings, siteWarnings...)
+	report.Warnings = append(report.Warnings, detailWarnings...)
 	storageRelation := newRelation("storage_content_proof")
 	storageRelation.Status = input.Discovery.SourceOutcome
 	storageRelation.LeftIDs = append(storageRelation.LeftIDs, meta.MetafileVariantID)
@@ -426,7 +476,7 @@ func Build(input BuildInput) (Report, error) {
 	if client.active {
 		report.Warnings = append(report.Warnings, "the matching downloader job is active; lexical path agreement does not prove which bytes the client is currently reading")
 	}
-	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested)
+	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, siteDetailLedger.Status, input.SiteDetail.Requested, storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested)
 	if report.Outcome == "consistent" {
 		report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_lexical_path_agreement"
 		if meta.MultiFile {
@@ -434,6 +484,9 @@ func Build(input BuildInput) (Report, error) {
 		}
 		if input.SiteBinding.Requested && siteRelation.Status == "historical_observed_exact_variant" {
 			report.Assurance += "_plus_sealed_historical_site_observation_current_site_mapping_unobservable"
+		}
+		if input.SiteDetail.Requested && siteDetailLedger.Status == "observed_current_ref" {
+			report.Assurance += "_plus_same_invocation_current_site_ref_claim"
 		}
 	}
 	report.Blockers = stableFindings(report.Blockers)
@@ -862,6 +915,76 @@ func assessSiteBinding(meta *metafile.MetaInfo, declared *domain.TorrentRef, sel
 	return ledger, relation, blockers, warnings
 }
 
+func assessSiteDetail(declared *domain.TorrentRef, selection SiteDetailSelection) (SiteDetailLedger, []ReportFinding, []string) {
+	ledger := SiteDetailLedger{
+		Status: "not_requested",
+		Limits: site.DefaultTorrentDetailLimits(),
+		Used:   site.TorrentDetailUsage{},
+	}
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	if !selection.Requested {
+		return ledger, blockers, warnings
+	}
+	ledger.Status = "incomplete"
+	ledger.RequestsMade = boundedSiteDetailCount(selection.RequestsMade)
+	ledger.StopReason = safeSiteDetailStopReason(selection.StopReason)
+	if ledger.RequestsMade > 0 {
+		warnings = append(warnings, "the live site read was remote-visible even though reconciliation performed zero local writes")
+	}
+	receipt := selection.Receipt
+	if receipt.Limits.Validate() == nil {
+		ledger.Limits = receipt.Limits
+	}
+	ledger.Used = site.TorrentDetailUsage{
+		RequestsAttempted:  boundedSiteDetailCount(receipt.Used.RequestsAttempted),
+		AutomaticRetries:   boundedSiteDetailCount(receipt.Used.AutomaticRetries),
+		RedirectsFollowed:  boundedSiteDetailCount(receipt.Used.RedirectsFollowed),
+		ResponseBytesRead:  boundedSiteDetailBytes(receipt.Used.ResponseBytesRead, ledger.Limits.MaxResponseBytes),
+		ResponseBytesKnown: receipt.Used.ResponseBytesKnown,
+	}
+	if declared == nil {
+		ledger.StopReason = "site_detail_reference_missing"
+		blockers = append(blockers, ReportFinding{Code: "site.detail_reference_missing", Message: "a live site detail observation requires an explicit site reference"})
+		return ledger, blockers, warnings
+	}
+	ref := *declared
+	ledger.Ref = &ref
+	config := selection.Config
+	configErr := config.Validate()
+	if configErr == nil {
+		ledger.Origin = config.Origin
+		ledger.RouteID = config.RouteID
+	}
+	if selection.Observed == nil {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "site_detail_observation_incomplete"
+		}
+		blockers = append(blockers, ReportFinding{Code: "site.detail_observation_incomplete", Message: "the requested live site detail observation did not complete"})
+		return ledger, blockers, warnings
+	}
+	if configErr != nil || selection.StopReason != "" || receipt.Ref != ref || receipt.Origin != config.Origin || receipt.RouteID != config.RouteID ||
+		receipt.Limits != ledger.Limits || selection.RequestsMade != 1 || !selection.Observed.MatchesReceipt(receipt) ||
+		!selection.Observed.Matches(ref, config.Origin, config.RouteID) {
+		ledger.StopReason = "site_detail_receipt_inconsistent"
+		blockers = append(blockers, ReportFinding{Code: "site.detail_receipt_inconsistent", Message: "the live site detail authority and bounded request receipt did not agree"})
+		return ledger, blockers, warnings
+	}
+	public := selection.Observed.PublicCopy()
+	start, end := receipt.ObservedAtStart.UTC(), receipt.ObservedAtEnd.UTC()
+	ledger.Status = "observed_current_ref"
+	ledger.ObservedAtStart = &start
+	ledger.ObservedAtEnd = &end
+	ledger.Observation = &public
+	ledger.ProcessLocalProof = true
+	ledger.StopReason = ""
+	warnings = append(warnings,
+		"the live site detail is a same-invocation site claim for the remote ID, not proof that the site currently serves this exact metafile variant",
+		"the live site request and the storage/downloader observations are non-atomic",
+	)
+	return ledger, blockers, warnings
+}
+
 func relationWithStatus(relation Relation, status string) Relation {
 	relation.Status = status
 	return relation
@@ -885,7 +1008,41 @@ func safeSiteBindingStopReason(value string) string {
 	}
 }
 
-func overallOutcome(siteStatus string, siteBindingRequested bool, storageStatus string, processProof bool, clientStatus, pathStatus string, clientRequested bool) string {
+func safeSiteDetailStopReason(value string) string {
+	switch value {
+	case "invalid_limits", "invalid_reference", "context_done", "session_closed", "request_budget_exhausted", "request_accounting_invalid", "site_request_failed", "authentication_required", "not_found", "rate_limited", "redirect_rejected", "http_status_rejected", "empty_response", "challenge_response", "unrecognized_response", "content_type_rejected", "invalid_text_encoding", "response_accounting_invalid", "session_open_failed", "session_close_failed", "receipt_inconsistent", "site_detail_observation_incomplete", "site_detail_receipt_inconsistent", "site_detail_reference_missing", "site_detail_skipped_by_binding_gate":
+		return value
+	case "":
+		return ""
+	default:
+		return "site_detail_observation_incomplete"
+	}
+}
+
+func boundedSiteDetailCount(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 2 {
+		return 2
+	}
+	return value
+}
+
+func boundedSiteDetailBytes(value, maximum int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	if maximum <= 0 {
+		maximum = site.DefaultTorrentDetailLimits().MaxResponseBytes
+	}
+	if value > maximum+1 {
+		return maximum + 1
+	}
+	return value
+}
+
+func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStatus string, siteDetailRequested bool, storageStatus string, processProof bool, clientStatus, pathStatus string, clientRequested bool) string {
 	if siteBindingRequested && siteStatus == "integrity_failed" {
 		return "integrity_failed"
 	}
@@ -895,7 +1052,7 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, storageStatus 
 	if storageStatus == "verified_ambiguous" || clientStatus == "ambiguous" {
 		return "ambiguous"
 	}
-	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") || storageStatus == "incomplete" || (storageStatus == "verified_unique" && !processProof) || (clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
+	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") || (siteDetailRequested && siteDetailStatus != "observed_current_ref") || storageStatus == "incomplete" || (storageStatus == "verified_unique" && !processProof) || (clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
 		return "incomplete"
 	}
 	if processProof && clientStatus == "exact_unique" && pathStatus == "same_location" {

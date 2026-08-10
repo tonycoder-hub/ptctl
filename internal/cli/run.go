@@ -290,10 +290,10 @@ func (a *app) reconcileReport(args []string) error {
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "The report brackets optional downloader reads around bounded, exact storage discovery. It performs zero writes. Downloader identity cannot expose the private metafile variant, and host/client path comparison is lexical only.")
+		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around bounded, exact storage discovery. It performs zero writes. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "Client flags are one optional group: --driver qbittorrent --url URL --username USER --password-stdin. If any is supplied, all are required.")
+		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent --url URL --username USER --password-stdin. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Flags:")
 		fs.PrintDefaults()
@@ -311,6 +311,8 @@ func (a *app) reconcileReport(args []string) error {
 	endpoint := fs.String("url", "", "qBittorrent Web API origin; part of the optional client group")
 	username := fs.String("username", "", "qBittorrent username; part of the optional client group")
 	passwordStdin := fs.Bool("password-stdin", false, "read downloader password from stdin; part of the optional client group")
+	siteCookieStdin := fs.Bool("site-cookie-stdin", false, "read a site Cookie header from stdin and observe --site-ref live")
+	credentialBundleStdin := fs.Bool("credential-bundle-stdin", false, "read strict JSON containing site_cookie and downloader_password when live site and client reads are both requested")
 	clientFileLayout := fs.String("client-file-layout", "auto", "multi-file downloader layout reads: auto or off; requires the client group when explicit")
 	clientFileDefaults := downloader.DefaultJobFileLedgerLimits()
 	maxClientFiles := fs.Int("max-client-files", clientFileDefaults.MaxFiles, "maximum downloader files read for the one exact job; requires the client group when explicit")
@@ -323,7 +325,7 @@ func (a *app) reconcileReport(args []string) error {
 	siteBindingRecordValue := fs.String("site-binding-record", "", "explicit sealed site-binding record ID; requires the stored metafile selector")
 	showAbsolute := fs.Bool("show-absolute-paths", false, "include absolute host and downloader paths in output")
 	allowNetwork := fs.Bool("allow-network", false, "allow explicit network/UNC search roots")
-	timeout := fs.Duration("timeout", time.Hour, "shared downloader, scan, and verification wall-clock budget")
+	timeout := fs.Duration("timeout", time.Hour, "shared site, downloader, scan, and verification wall-clock budget")
 	requireReconciled := fs.Bool("require-reconciled", false, "exit 4 after the report unless outcome is consistent")
 
 	inventoryDefaults := storage.DefaultInventoryLimits()
@@ -404,14 +406,21 @@ func (a *app) reconcileReport(args []string) error {
 		return usageError("--timeout must be greater than zero and no more than 168h")
 	}
 
-	clientFlagNames := []string{"driver", "url", "username", "password-stdin"}
+	clientConnectionFlagNames := []string{"driver", "url", "username"}
 	clientRequested := false
-	for _, name := range clientFlagNames {
+	for _, name := range append(append([]string{}, clientConnectionFlagNames...), "password-stdin", "credential-bundle-stdin") {
 		clientRequested = clientRequested || explicit[name]
 	}
+	siteDetailRequested := explicit["site-cookie-stdin"] || explicit["credential-bundle-stdin"]
+	if explicit["password-stdin"] && !*passwordStdin || explicit["site-cookie-stdin"] && !*siteCookieStdin || explicit["credential-bundle-stdin"] && !*credentialBundleStdin {
+		return usageError("secret stdin flags cannot be explicitly disabled")
+	}
+	if explicit["credential-bundle-stdin"] && (explicit["password-stdin"] || explicit["site-cookie-stdin"]) {
+		return usageError("--credential-bundle-stdin is mutually exclusive with --password-stdin and --site-cookie-stdin")
+	}
 	if clientRequested {
-		missing := make([]string, 0, len(clientFlagNames))
-		for _, name := range clientFlagNames {
+		missing := make([]string, 0, len(clientConnectionFlagNames))
+		for _, name := range clientConnectionFlagNames {
 			if !explicit[name] {
 				missing = append(missing, "--"+name)
 			}
@@ -422,9 +431,19 @@ func (a *app) reconcileReport(args []string) error {
 		if *driverName != "qbittorrent" {
 			return usageError("--driver currently supports only qbittorrent")
 		}
-		if *endpoint == "" || *username == "" || !*passwordStdin {
-			return usageError("the optional client group requires non-empty --url and --username plus --password-stdin")
+		if *endpoint == "" || *username == "" {
+			return usageError("the optional client group requires non-empty --url and --username")
 		}
+		if siteDetailRequested {
+			if !explicit["credential-bundle-stdin"] {
+				return usageError("combined live site and downloader reads require --credential-bundle-stdin")
+			}
+		} else if !explicit["password-stdin"] {
+			return usageError("client-only reconciliation requires --password-stdin")
+		}
+	}
+	if siteDetailRequested && !clientRequested && !explicit["site-cookie-stdin"] {
+		return usageError("site-detail-only reconciliation requires --site-cookie-stdin")
 	}
 	clientFileFlagNames := []string{"client-file-layout", "max-client-files", "max-client-file-path-bytes", "max-client-file-response-bytes"}
 	for _, name := range clientFileFlagNames {
@@ -461,6 +480,9 @@ func (a *app) reconcileReport(args []string) error {
 	if err != nil {
 		return usageError("reconcile report: %v", err)
 	}
+	if siteDetailRequested && siteRef == nil {
+		return usageError("live site detail reconciliation requires --site-ref SITE/REMOTE_ID")
+	}
 	inventoryLimits := inventoryDefaults
 	inventoryLimits.MaxDepth = *maxDepth
 	inventoryLimits.MaxDirectories = *maxDirectories
@@ -494,6 +516,29 @@ func (a *app) reconcileReport(args []string) error {
 		clientAdapter, err = qbittorrent.New(*endpoint)
 		if err != nil {
 			return usageError("reconcile report downloader endpoint is invalid: %v", err)
+		}
+	}
+	var siteDetailReader site.TorrentDetailReader
+	var siteDetailConfig site.TorrentDetailConfig
+	if siteDetailRequested {
+		adapter, ok := a.registry.Get(siteRef.SiteID)
+		if !ok {
+			return usageError("live site detail adapter is unavailable")
+		}
+		descriptor := adapter.Descriptor()
+		if !descriptor.Supports(domain.CapabilityDetail) || !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
+			return usageError("site %q does not support authenticated torrent detail reads", descriptor.ID)
+		}
+		siteDetailReader, ok = adapter.(site.TorrentDetailReader)
+		if !ok {
+			return usageError("site %q does not implement its declared torrent detail capability", descriptor.ID)
+		}
+		siteDetailConfig, err = siteDetailReader.TorrentDetailConfig()
+		if err != nil || siteDetailConfig.Validate() != nil {
+			return usageError("site torrent detail configuration is unavailable")
+		}
+		if err := siteDetailReader.ValidateTorrentDetailRef(*siteRef); err != nil {
+			return usageError("live site detail reference is invalid")
 		}
 	}
 	meta, err := loadMetafileInput(context.Background(), input)
@@ -561,11 +606,27 @@ func (a *app) reconcileReport(args []string) error {
 			}
 		}
 	}
+	var siteCredential site.Credential
 	var clientCredential downloader.Credential
-	if clientRequested && !siteBindingGateFailed {
-		clientCredential, err = readDownloaderCredential(a.stdin, *username)
+	if !siteBindingGateFailed {
+		switch {
+		case siteDetailRequested && clientRequested:
+			siteCredential, clientCredential, err = readReconciliationCredentialBundle(a.stdin, *username)
+		case siteDetailRequested:
+			siteCredential, err = readCredential(a.stdin)
+		case clientRequested:
+			clientCredential, err = readDownloaderCredential(a.stdin, *username)
+		}
 		if err != nil {
 			return err
+		}
+	}
+	siteDetailSelection := reconcile.SiteDetailSelection{Requested: siteDetailRequested, Config: siteDetailConfig}
+	if siteDetailRequested {
+		if siteBindingGateFailed {
+			siteDetailSelection.StopReason = "site_detail_skipped_by_binding_gate"
+		} else {
+			siteDetailSelection = readReconciliationSiteDetail(ctx, siteDetailReader, siteDetailConfig, *siteRef, siteCredential)
 		}
 	}
 
@@ -691,6 +752,7 @@ func (a *app) reconcileReport(args []string) error {
 		Client:            bracket,
 		SiteRef:           siteRef,
 		SiteBinding:       siteSelection,
+		SiteDetail:        siteDetailSelection,
 		PathMapping:       reportMapping,
 		ShowAbsolutePaths: *showAbsolute,
 	})
@@ -1673,6 +1735,29 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 	if siteLedger.StopReason != "" {
 		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(siteLedger.StopReason))
 	}
+	detailLedger := siteLedger.Detail
+	detailRef := "-"
+	if detailLedger.Ref != nil {
+		detailRef = detailLedger.Ref.SiteID + "/" + detailLedger.Ref.RemoteID
+	}
+	detailStart, detailEnd := "-", "-"
+	if detailLedger.ObservedAtStart != nil {
+		detailStart = detailLedger.ObservedAtStart.Format(time.RFC3339Nano)
+	}
+	if detailLedger.ObservedAtEnd != nil {
+		detailEnd = detailLedger.ObservedAtEnd.Format(time.RFC3339Nano)
+	}
+	fmt.Fprintf(w, "\nLIVE SITE DETAIL\nREQUESTED\t%t\nSTATUS\t%s\nSITE REF\t%s\nPROCESS-LOCAL PROOF\t%t\nORIGIN\t%s\nROUTE\t%s\nOBSERVED START\t%s\nOBSERVED END\t%s\nREQUESTS\t%d\nAUTOMATIC RETRIES\t%d\nREDIRECTS FOLLOWED\t%d\nRESPONSE BYTES\t%d\n",
+		report.Scope.SiteDetailRequested, terminalSafe(detailLedger.Status), terminalSafe(detailRef), detailLedger.ProcessLocalProof,
+		terminalSafe(valueOrUnknown(detailLedger.Origin)), terminalSafe(valueOrUnknown(detailLedger.RouteID)),
+		terminalSafe(detailStart), terminalSafe(detailEnd), detailLedger.RequestsMade, detailLedger.Used.AutomaticRetries,
+		detailLedger.Used.RedirectsFollowed, detailLedger.Used.ResponseBytesRead)
+	if detailLedger.Observation != nil {
+		fmt.Fprintf(w, "DISPLAY TITLE\t%s\nDOWNLOAD REFERENCE\t%t\n", terminalSafe(detailLedger.Observation.DisplayTitle), detailLedger.Observation.DownloadReferenceObserved)
+	}
+	if detailLedger.StopReason != "" {
+		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(detailLedger.StopReason))
+	}
 
 	siteID := "-"
 	if report.Ledgers.Site.Ref != nil {
@@ -1694,6 +1779,9 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		siteSummary = "sealed historical exact-response observation; current site mapping unobservable"
 	} else if report.Scope.SiteBindingRequested {
 		siteSummary = "explicit binding could not be verified"
+	}
+	if report.Ledgers.Site.Detail.Status == "observed_current_ref" {
+		siteSummary += "; live remote-ID detail observed (site claim only)"
 	}
 	fmt.Fprintf(w, "site\t%s\t%s\t%s\n", terminalSafe(report.Ledgers.Site.Status), terminalSafe(siteID), terminalSafe(siteSummary))
 	fmt.Fprintf(w, "metafile\t%s\t%s\t%s; %s\n", terminalSafe(report.Ledgers.Metafile.Status), terminalSafe(shortID(report.Ledgers.Metafile.VariantID)), terminalSafe(report.Ledgers.Metafile.Version), humanBytes(report.Ledgers.Metafile.PhysicalBytes))

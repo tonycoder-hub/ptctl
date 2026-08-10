@@ -118,6 +118,141 @@ func TestReconcileReportBracketsOneClientSessionAndProducesConsistentJSON(t *tes
 	assertJSONStringsExclude(t, out.Bytes(), torrentPath, searchRoot, filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), clientPath, server.URL, clientUser, password, magnet, magnetCanary)
 }
 
+func TestReconcileObservesLiveSiteAndDownloaderFromOneStrictCredentialBundle(t *testing.T) {
+	torrentPath, searchRoot, meta := writeReconciliationFixture(t)
+	const (
+		clientRoot   = "/downloads"
+		clientPath   = "/downloads/PTCTL-CLIENT-PATH-CANARY.bin"
+		siteCookie   = "sid=LIVE-SITE-COOKIE-CANARY"
+		clientUser   = "bundle-user"
+		clientSecret = "BUNDLE-DOWNLOADER-PASSWORD-CANARY"
+	)
+	var loginRequests, listRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			loginRequests.Add(1)
+			if err := r.ParseForm(); err != nil || r.Form.Get("username") != clientUser || r.Form.Get("password") != clientSecret {
+				t.Errorf("unexpected bundled downloader credential")
+			}
+			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "ok", Path: "/"})
+			_, _ = w.Write([]byte("Ok."))
+		case "/api/v2/torrents/info":
+			listRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"hash": "opaque", "magnet_uri": "magnet:?xt=urn:btih:" + meta.InfoHashV1,
+				"name": "PTCTL-CLIENT-PATH-CANARY.bin", "size": int64(len("content")), "progress": 1.0,
+				"state": "uploading", "save_path": clientRoot, "content_path": clientPath,
+				"downloaded": int64(len("content")), "uploaded": int64(10),
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	adapter := successfulFakeTorrentDetail(t)
+	bundle, err := json.Marshal(map[string]string{
+		"schema": reconciliationCredentialSchema, "site_cookie": siteCookie, "downloader_password": clientSecret,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a := &app{stdin: bytes.NewReader(bundle), stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+	if err := a.reconcileReport([]string{
+		"--torrent", torrentPath, "--search-root", searchRoot,
+		"--site-ref", "fakept/42", "--credential-bundle-stdin",
+		"--driver", "qbittorrent", "--url", server.URL, "--username", clientUser,
+		"--host-root", searchRoot, "--client-root", clientRoot, "--client-style", "posix",
+		"--timeout", "1m", "--output", "json",
+	}); err != nil {
+		t.Fatalf("reconcile live site/client: %v stdout=%s", err, out.String())
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	detail := response.Data.Ledgers.Site.Detail
+	if response.Data.Outcome != "consistent" || !response.Data.Scope.SiteDetailRequested || detail.Status != "observed_current_ref" ||
+		!detail.ProcessLocalProof || detail.Observation == nil || detail.Observation.DisplayTitle != "Safe Release" || detail.RequestsMade != 1 ||
+		relationStatusCLI(response.Data, "site_metafile") != "declared_unbound" || !strings.Contains(response.Data.Assurance, "same_invocation_current_site_ref_claim") ||
+		adapter.opened != 1 || adapter.credential != siteCookie || loginRequests.Load() != 1 || listRequests.Load() != 2 {
+		t.Fatalf("live site axis was not kept separate: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), siteCookie, clientSecret, server.URL, clientUser, torrentPath, searchRoot, clientPath)
+
+	const failureCanary = "SITE-DETAIL-FAILURE-BODY-URL-CANARY"
+	adapter.receipt.Complete = false
+	adapter.receipt.StopReason = "site_request_failed"
+	adapter.readErr = errors.New(failureCanary)
+	a.stdin = bytes.NewReader(bundle)
+	out.Reset()
+	if err := a.reconcileReport([]string{
+		"--torrent", torrentPath, "--search-root", searchRoot,
+		"--site-ref", "fakept/42", "--credential-bundle-stdin",
+		"--driver", "qbittorrent", "--url", server.URL, "--username", clientUser,
+		"--host-root", searchRoot, "--client-root", clientRoot, "--client-style", "posix",
+		"--timeout", "1m", "--output", "json",
+	}); err != nil {
+		t.Fatalf("failed site axis should still produce a report: %v stdout=%s", err, out.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "incomplete" || response.Data.Ledgers.Site.Detail.Status != "incomplete" ||
+		relationStatusCLI(response.Data, "client_infohash_relation") != "exact_unique" || !response.Data.Ledgers.Storage.ProcessLocalProof ||
+		loginRequests.Load() != 2 || listRequests.Load() != 4 || strings.Contains(out.String(), failureCanary) {
+		t.Fatalf("site failure erased another axis or leaked diagnostics: %s", out.String())
+	}
+}
+
+func TestReconcileObservesLiveSiteWithoutDownloader(t *testing.T) {
+	torrentPath, searchRoot, _ := writeReconciliationFixture(t)
+	const cookie = "sid=SITE-ONLY-COOKIE-CANARY"
+	adapter := successfulFakeTorrentDetail(t)
+	var out bytes.Buffer
+	a := &app{stdin: strings.NewReader(cookie), stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+	if err := a.reconcileReport([]string{
+		"--torrent", torrentPath, "--search-root", searchRoot, "--site-ref", "fakept/42", "--site-cookie-stdin", "--output", "json",
+	}); err != nil {
+		t.Fatalf("site-only reconciliation: %v stdout=%s", err, out.String())
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "partial" || !response.Data.Scope.SiteDetailRequested || response.Data.Scope.ClientRequested ||
+		response.Data.Ledgers.Site.Detail.Status != "observed_current_ref" || response.Data.Ledgers.Downloader.Status != "not_requested" ||
+		adapter.credential != cookie {
+		t.Fatalf("site-only observation was not isolated: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), cookie, torrentPath, searchRoot)
+}
+
+func TestReconcileLiveSiteCredentialModesRejectBeforeStdin(t *testing.T) {
+	torrentPath, searchRoot, _ := writeReconciliationFixture(t)
+	base := []string{"--torrent", torrentPath, "--search-root", searchRoot, "--output", "json"}
+	tests := [][]string{
+		append(append([]string{}, base...), "--site-cookie-stdin"),
+		append(append([]string{}, base...), "--site-ref", "fakept/42", "--site-cookie-stdin", "--driver", "qbittorrent", "--url", "http://127.0.0.1:1", "--username", "user", "--password-stdin"),
+		append(append([]string{}, base...), "--site-ref", "fakept/42", "--credential-bundle-stdin", "--password-stdin", "--driver", "qbittorrent", "--url", "http://127.0.0.1:1", "--username", "user"),
+		append(append([]string{}, base...), "--site-ref", "fakept/42", "--credential-bundle-stdin"),
+	}
+	for index, args := range tests {
+		reader := &trackingReader{}
+		var out bytes.Buffer
+		a := &app{stdin: reader, stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(successfulFakeTorrentDetail(t))}
+		if err := a.reconcileReport(args); err == nil || reader.read || out.Len() != 0 {
+			t.Fatalf("case %d crossed credential boundary: err=%v read=%t out=%q", index, err, reader.read, out.String())
+		}
+	}
+}
+
 func TestReconcileConsumesOnlyAnExplicitSealedSiteBindingRecord(t *testing.T) {
 	storeRoot, variantID, recordID, searchRoot, adapter := prepareStoredSiteBinding(t)
 	var out bytes.Buffer
@@ -420,7 +555,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client flags are one optional group") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") || !strings.Contains(helpOut.String(), "lexical only") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -433,6 +568,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	blockers := strings.Index(text, "BLOCKERS")
 	relations := strings.Index(text, "RELATIONS")
 	siteBinding := strings.Index(text, "SITE BINDING")
+	liveSite := strings.Index(text, "LIVE SITE DETAIL")
 	ledgers := strings.Index(text, "LEDGERS")
 	fileLayout := strings.Index(text, "CLIENT FILE LAYOUT (BOUNDED)")
 	fileFindings := strings.Index(text, "CLIENT FILE FINDINGS (BOUNDED)")
@@ -440,7 +576,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	scan := strings.Index(text, "STORAGE SCAN")
 	matches := strings.Index(text, "VERIFIED STORAGE MATCHES")
 	bindings := strings.Index(text, "VERIFIED STORAGE BINDINGS (BOUNDED)")
-	if blockers < 0 || relations <= blockers || siteBinding <= relations || ledgers <= siteBinding || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
+	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || ledgers <= liveSite || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
 		t.Fatalf("unclear reconciliation human order: %q", text)
 	}
 }

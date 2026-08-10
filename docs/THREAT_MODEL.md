@@ -97,11 +97,13 @@ parameter and never follows the download reference found in the page.
 not perform a preceding detail lookup, follow a redirect, retry, or fan out to
 related IDs.
 
-A live reconciliation uses one qBittorrent login and two bounded torrent-list
-reads, sequentially and without retry. When `auto` observes one uniquely
+A live reconciliation may first use one independent, bounded site-detail GET.
+It then uses one qBittorrent login and two bounded torrent-list reads,
+sequentially and without retry. When `auto` observes one uniquely
 identified ordinary multi-file job, it attempts up to two bounded file-list
 reads around storage proof; the second is sent only after a complete first
-read. That path therefore makes at most five HTTP requests including login.
+read. The downloader path therefore makes at most five HTTP requests including
+login; a combined site+downloader invocation makes at most six.
 Authentication, rate-limit, HTTP, parse, or timeout failures make the
 downloader axis incomplete; they do not trigger re-login, fan-out across queue
 jobs, or a client mutation.
@@ -109,6 +111,13 @@ The audit session disables HTTP connection reuse and HTTP/2 so Go's transport
 cannot transparently replay a failed idempotent GET behind the request counter;
 the cookie jar still carries the authenticated session across fresh
 connections.
+
+Site-only and downloader-only reconciliation retain their single-secret stdin
+formats. A combined invocation requires one `ptctl.credentials/v1` JSON object,
+hard-limited to 128 KiB, with exactly the three allowlisted fields. Duplicate,
+unknown, missing, trailing, invalid UTF-8, and unpaired-surrogate input is
+rejected before either network session opens. Raw bundle bytes and both secrets
+remain in memory only and never enter a report or diagnostic.
 
 ### Parser, scanner, and solver exhaustion
 
@@ -613,6 +622,13 @@ both objects, and repeats the installed adapter's canonical ref/origin/route
 check before reading downloader credentials. It never chooses a record by
 remote ID or observation time. The record proves only a past exact response,
 not current site state or freshness.
+
+When explicitly requested, a live detail observation runs before downloader
+reads and contributes only an opaque same-invocation remote-ID page claim. Its
+public DTO or JSON round trip has no authority, and its display title, peer
+counts, and links cannot establish metafile identity. Failure makes the live
+site axis incomplete; success cannot replace the sealed historical binding or
+upgrade storage, client, path, or private-variant proof.
 
 ### Supply chain
 
