@@ -13,6 +13,9 @@ does not retry, refuses cross-origin redirects, and never submits a form. Page
 recognition is fail-closed: a login page is unauthenticated, a positively
 recognized bonus/search page is accepted, and maintenance, challenge, or
 unknown HTML is indeterminate/an error rather than a successful empty result.
+These current site reads perform no intentional filesystem write. Local
+`metafile store init` and `metafile store import` are a separate, explicitly
+writing boundary and do not contact TJUPT.
 
 ## Why the bonus catalog remains site-defined
 
@@ -54,9 +57,75 @@ TJUPT HTML is deliberately absent because it can contain account information,
 CSRF tokens, or identifiers. Any future fixture must be generated or reviewed
 for secret canaries before commit.
 
-## Next read capabilities
+## Private metafile prerequisite
 
-The natural next adapter methods are torrent details and a clearly labeled
-metafile fetch. A metafile GET is potentially effectful: trackers may record a
-download, and the result contains a passkey. It will require atomic private
-storage and an explicit user acknowledgement before being exposed.
+Private `.torrent` files contain account-specific announce material. `ptctl`
+therefore provides an explicit local store before exposing a site download:
+
+```bash
+ptctl metafile store init --store PRIVATE_STORE
+ptctl metafile store import --store PRIVATE_STORE existing.torrent
+ptctl metafile store inspect --store PRIVATE_STORE sha256:WHOLE_RAW_SHA256
+```
+
+The variant ID is SHA-256 over the complete original byte stream, not merely
+the `info` dictionary. Import preserves those exact bytes without moving,
+rewriting, or deleting the source; reading it may still update atime or hydrate
+a placeholder. Import publishes an immutable content-addressed object with
+private permissions and atomic no-clobber semantics. Re-importing the same
+artifact is idempotent. This permission isolation is not encryption.
+Store and import-source absolute paths are hidden by default; object paths,
+announce URLs, passkeys, web seeds, and raw bytes never enter reports.
+
+Existing `torrent inspect`, `torrent verify`, `seed discover`, `seed plan`, and
+`reconcile report` commands can consume a stored variant by replacing their
+file/`--torrent` source with the paired `--metafile-store DIR
+--metafile-variant ID` flags. The alternatives are mutually exclusive, and all
+stored consumers remain zero-write.
+
+## B1: effectful metafile fetch gate
+
+The natural next adapter methods remain torrent details and a clearly labeled
+metafile fetch, but TJUPT does not yet declare or expose
+`torrent.metafile.read_effectful`. A metafile GET may be recorded by the
+tracker, and its response contains a passkey. B1 is gated on the private store
+above and must not add a raw stdout or arbitrary-destination download path.
+
+The planned command shape is:
+
+```bash
+printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch \
+  --cookie-stdin \
+  --acknowledge-site-effect \
+  --metafile-store PRIVATE_STORE \
+  tjupt REMOTE_ID
+```
+
+Before reading the cookie or sending a request, B1 must validate all usage,
+limits, the remote ID, and the initialized store's privacy/no-clobber
+assurance. It then performs one bounded, same-origin GET with no retry, rejects
+login/challenge/maintenance/HTML responses, strictly validates the exact raw
+metafile, and hands those bytes to the same store import primitive. The report
+may bind `(tjupt, remote_id)` to the resulting whole-raw variant for that
+observation, but must not expose the request URL, response body, announce path,
+passkey, cookie, temporary path, or absolute store path by default.
+
+If no-clobber publication succeeds but its durability confirmation fails, B1
+must propagate `published_durability_unconfirmed`: a complete artifact may be
+visible and the write count may be `1`. It must not claim zero writes, delete
+that artifact as rollback, or retry the tracker GET.
+
+The store operation remains bound to one reviewed local root/filesystem
+identity from staging through final verification. Volatile memory filesystems
+and namespace replacement fail closed.
+
+A later inspect or idempotent import validates current bytes but cannot upgrade
+that history. Its publication assurance remains unobservable; a completed
+publication followed by cleanup or validation failure is reported as
+`published_post_commit_failure`.
+
+Store commands use exit `0` for successful and idempotent outcomes, `1` for
+operational/store failures, `2` for invalid or conflicting selectors, and `3`
+for invalid or corrupt metafile bytes. Exit `4` remains reserved for the
+existing report-first verification/reconciliation requirement flags; B1 must
+not silently redefine it.
