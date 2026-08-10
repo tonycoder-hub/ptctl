@@ -16,16 +16,35 @@ func hasOperationDirectoryPrefix(name string) bool {
 
 const (
 	operationDirectoryPrefix = ".ptctl-materialize-"
-	intentFileName           = "intent.json"
-	journalDirectoryName     = "journal"
-	stageDirectoryName       = "stage"
-	scratchDirectoryName     = "scratch"
-	retentionDirectoryName   = "retention"
-	retentionIntentFileName  = "intent.json"
-	retentionCompleteName    = "complete.json"
-	eventFilePrefix          = "event-"
-	eventFileSuffix          = ".json"
+	// ClientAdoptOperationDirectoryPrefix is reserved at the materialized
+	// target root so a torrent payload can never collide with adoption control
+	// state. clientadopt consumes this exact constant to prevent drift.
+	ClientAdoptOperationDirectoryPrefix = ".ptctl-client-adopt-"
+	clientAdoptDirectoryPrefix          = ClientAdoptOperationDirectoryPrefix
+	intentFileName                      = "intent.json"
+	journalDirectoryName                = "journal"
+	stageDirectoryName                  = "stage"
+	scratchDirectoryName                = "scratch"
+	retentionDirectoryName              = "retention"
+	retentionIntentFileName             = "intent.json"
+	retentionCompleteName               = "complete.json"
+	eventFilePrefix                     = "event-"
+	eventFileSuffix                     = ".json"
 )
+
+func hasReservedControlPrefix(name string) bool {
+	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix}
+	for _, prefix := range prefixes {
+		if runtime.GOOS == "windows" {
+			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
+				return true
+			}
+		} else if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 func OperationDirectoryName(id OperationID) (string, error) {
 	parsed, err := ParseOperationID(id.String())

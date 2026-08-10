@@ -4,16 +4,18 @@
 It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and reconciles them around verifiable torrent metadata.
 
-> Status: `v0.4.0-alpha` development. Inspection, downloader, content,
-> discovery, planning, and reconciliation operations are intentionally
+> Status: `v0.4.0-alpha` development. Ordinary inspection, downloader reads,
+> content proof, discovery, planning, and reconciliation are intentionally
 > zero-write. Persistent writes are confined to explicit private-store/index
-> operations, the acknowledged `site metafile fetch`, and the separately
+> operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune`
-> workflow. The fetch also crosses a separate,
+> workflow, and exact `client adopt run|resume` stopped-add operations. The
+> fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
-> heavy state and retains its tombstone. No listed operation overwrites, moves,
-> rewrites, or deletes a source or published final layout; reads
+> heavy state and retains its tombstone. Client adoption never mutates an
+> existing job. No listed operation overwrites, moves, rewrites, or deletes a
+> source or published final layout; reads
 > may still update atime or hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
@@ -99,14 +101,21 @@ capabilities at the edge, not assumptions in the core domain model.
 - bounded qBittorrent per-file ledgers for one uniquely identified ordinary
   multi-file job, with stable index/size/selection/completion checks and
   per-binding host-to-client path comparison;
+- explicitly acknowledged exact qBittorrent stopped-job adoption downstream
+  of a current materialized-final proof, with typed queue-absence gating, a
+  durable request-intent journal, one non-retried add POST, after-ledger/path
+  checks, exact final re-verification, and no automatic replay of an unknown
+  request;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
 index alone, background refresh/watchers, site torrent-detail reads,
-downloader mutation, attributed/empty-file client-layout reconciliation,
+downloader recheck/start/pause/location/removal or existing-job mutation,
+attributed/empty-file client-layout reconciliation,
 reflink/hardlink or cross-filesystem materialization, automatic execution of
-serialized plan reports, source/staging cleanup or rollback, deletion, site
+serialized plan reports, source/staging cleanup or rollback, source or
+published-layout deletion, site
 writes, browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
 
@@ -472,6 +481,117 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client status \
   --password-stdin
 ```
 
+Adopt one exact materialized layout into qBittorrent without starting it:
+
+```bash
+# First review the deterministic adoption plan. MATERIALIZE_PLAN_ID is the
+# reviewed seed discover --target ID used by the committed materialize run.
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt plan \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --host-root 'D:\' \
+  --client-root /downloads \
+  --client-style posix \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --output json
+
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt run \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --host-root 'D:\' \
+  --client-root /downloads \
+  --client-style posix \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --expect-adoption-plan-id ADOPTION_PLAN_ID \
+  --acknowledge-client-add \
+  --output json
+```
+
+Version 1 is intentionally a one-way, stopped-add handoff. It requires the
+exact raw metafile from the owner-only metafile store, a current exact proof of
+the committed (or retained) materialized final, and a complete typed-infohash
+queue observation proving that the target job is absent. It then publishes a
+private target-root-local request intent before exactly one add POST. The POST
+submits the exact stored bytes with the reviewed save path and requests a
+stopped/paused job. It never changes an existing job, moves data, starts a
+recheck, resumes transfer, deletes content, or retires the source.
+
+The normal run uses one login, one complete ledger read before the request, one
+add POST, and one complete ledger read after it. Success additionally requires
+one unique exact typed-infohash job in a stopped state, the reviewed size and
+lexical save/content paths, a second exact verification of the materialized
+final, and a durable completion marker. Its outcome is
+`adopted_pending_client_recheck`, not “seeding verified”: qBittorrent does not
+expose the raw private variant and no client recheck is performed.
+
+If the POST response or after-ledger is lost, the durable attempt remains
+`request_result_unknown`. Resume first reads the current queue and never
+repeats the POST automatically:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt resume \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --host-root 'D:\' \
+  --client-root /downloads \
+  --client-style posix \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --expect-adoption-plan-id ADOPTION_PLAN_ID \
+  sha256:ADOPTION_OPERATION_DIGEST
+
+# Only if a second POST is deliberately accepted:
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt resume \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --host-root 'D:\' \
+  --client-root /downloads \
+  --client-style posix \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --expect-adoption-plan-id ADOPTION_PLAN_ID \
+  --acknowledge-client-add \
+  --acknowledge-repeat-add \
+  sha256:ADOPTION_OPERATION_DIGEST
+
+ptctl client adopt status \
+  --target "D:\PT" \
+  sha256:ADOPTION_OPERATION_DIGEST
+```
+
+`status` is local and read-only: it never reads a password or contacts the
+client, and therefore reports current client state as unobserved. It validates
+canonical marker presence but does not issue a directory sync, so only an
+effectful resume refreshes journal durability before relying on those markers.
+An operation ID is deterministic from the reviewed adoption plan; no command
+enumerates or chooses a “latest” operation. JSON kind `client.adoption` keeps declared
+effects, actual/uncertain journal writes, request counts, before/after typed
+identity states, current-final proof basis, and non-null findings separate.
+Raw host/client paths, endpoint, username, password, opaque qB job key, magnet
+URI, tracker URL, passkey, and raw metafile bytes never enter the report.
+
 Reconcile one exact metafile with verified bytes and qBittorrent's read-only
 ledger. The password is used for one login; two bounded torrent-list reads
 bracket the storage proof. For one unique ordinary multi-file job, `auto` mode
@@ -609,8 +729,9 @@ publication for both metafiles and allowlisted sealed state records; this is
 access control, not encryption. Store init/import, storage profile
 creation/index refresh, the artifact plus sealed-binding phases of an
 acknowledged site metafile fetch, and acknowledged target-root-local
-materialize operations (including explicit retention pruning) are the explicit
-write exceptions to the otherwise
+materialize operations (including explicit retention pruning), plus
+acknowledged exact stopped-job adoption and its private request journal, are
+the explicit write exceptions to the otherwise
 zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 

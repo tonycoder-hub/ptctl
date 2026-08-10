@@ -51,7 +51,7 @@ func BuildLayout(meta *metafile.MetaInfo, limits Limits) (Layout, error) {
 	if err != nil {
 		return Layout{}, fmt.Errorf("%w: top-level target name is unsupported", ErrPolicy)
 	}
-	if hasOperationDirectoryPrefix(finalName) {
+	if hasReservedControlPrefix(finalName) {
 		return Layout{}, fmt.Errorf("%w: top-level target name is reserved for materialize control state", ErrPolicy)
 	}
 	layout := Layout{

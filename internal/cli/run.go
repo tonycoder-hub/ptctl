@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
@@ -129,6 +130,10 @@ Usage:
 
   ptctl client status --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
   ptctl client list --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
+  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
+  ptctl client adopt run [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
+  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add --acknowledge-repeat-add] [--output table|json] OPERATION_ID
+  ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
 
   ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
@@ -149,6 +154,7 @@ Safety defaults:
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
   * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone.
+  * Client adoption only adds an absent exact-infohash qBittorrent job in stopped mode. It journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
 `)
@@ -199,8 +205,11 @@ func (a *app) site(args []string) error {
 }
 
 func (a *app) client(args []string) error {
+	if len(args) > 0 && args[0] == "adopt" {
+		return a.clientAdopt(args[1:])
+	}
 	if len(args) == 0 || (args[0] != "status" && args[0] != "list") {
-		return usageError("client requires status or list")
+		return usageError("client requires status, list, or adopt")
 	}
 	command := args[0]
 	fs := newFlagSet("client " + command)
@@ -1431,6 +1440,8 @@ func jsonKind(data any) string {
 		return "content.materialization.operation_list"
 	case materialize.RetentionReport:
 		return "content.materialization.retention"
+	case clientadopt.Report:
+		return "client.adoption"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

@@ -32,10 +32,11 @@ const (
 	maxMagnetXTBytes   = 256
 	maxTorrentFields   = 256
 
-	maxOpaqueJobKeyBytes = 256
-	maxJobNameBytes      = 64 << 10
-	maxJobStateBytes     = 4 << 10
-	maxJobPathBytes      = 64 << 10
+	maxOpaqueJobKeyBytes   = 256
+	maxJobNameBytes        = 64 << 10
+	maxJobStateBytes       = 4 << 10
+	maxJobPathBytes        = 64 << 10
+	maxResponseHeaderBytes = 64 << 10
 )
 
 const (
@@ -195,8 +196,9 @@ func (err *openSessionError) RequestsMade() int {
 }
 
 var (
-	_ downloader.Driver        = (*Adapter)(nil)
-	_ downloader.LedgerSession = (*readSession)(nil)
+	_ downloader.Driver          = (*Adapter)(nil)
+	_ downloader.LedgerSession   = (*readSession)(nil)
+	_ downloader.MutationSession = (*readSession)(nil)
 )
 
 func New(endpoint string) (*Adapter, error) {
@@ -233,13 +235,14 @@ func (a *Adapter) openReadSession(ctx context.Context, credential downloader.Cre
 		return nil, countedOpenError(fmt.Errorf("create qBittorrent cookie jar: %w", err), 0)
 	}
 	transport := &http.Transport{
-		Proxy:                 nil,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		DisableKeepAlives:     true,
-		ForceAttemptHTTP2:     false,
-		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
+		Proxy:                  nil,
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:    10 * time.Second,
+		ResponseHeaderTimeout:  15 * time.Second,
+		MaxResponseHeaderBytes: maxResponseHeaderBytes,
+		DisableKeepAlives:      true,
+		ForceAttemptHTTP2:      false,
+		TLSNextProto:           map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
 	client := &http.Client{
 		Jar:       jar,

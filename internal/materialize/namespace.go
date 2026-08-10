@@ -136,6 +136,42 @@ func auditPublishedNamespace(ctx context.Context, layout Layout, journal *journa
 	return auditExactNamespace(ctx, published, expected, 0, journal.intent.Limits)
 }
 
+// auditCurrentPublishedNamespace proves the exact current namespace without
+// relying on retained staging-file identities. It is used after a materialize
+// journal has been pruned: expected names, kinds, and sizes come from the exact
+// metafile layout, while the two-sided snapshot comparison below still binds
+// every observed object identity for this invocation.
+func auditCurrentPublishedNamespace(ctx context.Context, layout Layout, published *fsbind.Published, expectedFinal fsbind.Identity, limits Limits) (namespaceSnapshot, error) {
+	if published == nil || expectedFinal.IsZero() {
+		return namespaceSnapshot{}, fmt.Errorf("%w: current publication authority is incomplete", ErrIntegrity)
+	}
+	rootKind := fsbind.ObjectKindRegular
+	if layout.MultiFile {
+		rootKind = fsbind.ObjectKindDirectory
+	}
+	expected := make([]expectedNamespaceObject, 0, layout.NamespaceObjects)
+	expected = append(expected, expectedNamespaceObject{kind: rootKind, identity: expectedFinal})
+	if !layout.MultiFile {
+		if len(layout.Files) != 1 {
+			return namespaceSnapshot{}, fmt.Errorf("%w: single-file layout is invalid", ErrIntegrity)
+		}
+		expected[0].size = layout.Files[0].Length
+	} else {
+		for _, directory := range layout.Directories {
+			if len(directory) <= 1 {
+				continue
+			}
+			expected = append(expected, expectedNamespaceObject{components: directory[1:], kind: fsbind.ObjectKindDirectory})
+		}
+		for _, file := range layout.Files {
+			expected = append(expected, expectedNamespaceObject{
+				components: file.Components[1:], kind: fsbind.ObjectKindRegular, size: file.Length,
+			})
+		}
+	}
+	return auditExactNamespace(ctx, published, expected, 0, limits)
+}
+
 func auditExactNamespace(ctx context.Context, view namespaceView, expected []expectedNamespaceObject, topIndex int, limits Limits) (namespaceSnapshot, error) {
 	if view == nil || len(expected) == 0 || len(expected) > limits.MaxNamespaceObjects || topIndex < 0 || topIndex >= len(expected) {
 		return namespaceSnapshot{}, fmt.Errorf("%w: namespace expectation is unavailable or outside its budget", ErrCorruptJournal)

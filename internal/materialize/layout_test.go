@@ -130,16 +130,19 @@ func TestBuildLayoutRejectsUnicodeSimpleFoldCollisionOnWindows(t *testing.T) {
 	}
 }
 
-func TestBuildLayoutReservesControlPrefixUnderWindowsCaseSemantics(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows namespace semantics only")
-	}
-	meta := &metafile.MetaInfo{
-		NameRaw:    []byte(strings.ToUpper(operationDirectoryPrefix) + "content"),
-		InfoHashV1: strings.Repeat("1", 40),
-		Files:      []metafile.File{{Length: 1}},
-	}
-	if _, err := BuildLayout(meta, DefaultLimits()); !errors.Is(err, ErrPolicy) {
-		t.Fatalf("case-folded control prefix was accepted: %v", err)
+func TestBuildLayoutReservesEveryControlPrefix(t *testing.T) {
+	for _, prefix := range []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix} {
+		name := prefix + "content"
+		if runtime.GOOS == "windows" {
+			name = strings.ToUpper(name)
+		}
+		meta := &metafile.MetaInfo{
+			NameRaw:    []byte(name),
+			InfoHashV1: strings.Repeat("1", 40),
+			Files:      []metafile.File{{Length: 1}},
+		}
+		if _, err := BuildLayout(meta, DefaultLimits()); !errors.Is(err, ErrPolicy) {
+			t.Fatalf("reserved control prefix %q was accepted: %v", prefix, err)
+		}
 	}
 }

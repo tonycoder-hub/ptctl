@@ -627,24 +627,76 @@ blocker, explicit operation not found, or incomplete operation listing. A
 failure can have nonzero or uncertain writes; its explicit operation ID is the
 only resume handoff.
 
-## Future downloader coordination
+## Exact stopped-job adoption
 
-The implemented materialize engine does not pause, add, relocate, recheck, or
-resume a downloader. A future coordinated command must bracket those separate
-client mutations around the existing recoverable filesystem operation:
+`client adopt` is the first downloader-write slice. It is downstream of a
+committed copy-only materialize operation and deliberately stops before any
+client verification or transfer-state transition:
 
 ```text
-pause client -> record journal -> materialize -> verify target
-             -> switch client location -> client recheck -> restore state
-             -> separately confirm source retirement
+exact stored metafile + current exact final + complete typed queue absence
+  -> durable target-root-local request intent
+  -> one qBittorrent add POST requesting stopped/paused state
+  -> complete typed queue observation of one exact stopped job
+  -> exact final reverify
+  -> durable adopted-pending-recheck marker
 ```
 
-It must support explicit resume, never overwrite by default, and never infer
-source retirement from successful publication. Cleanup/deletion needs its own
-authority and journal; `prune` is limited to private operation state, and
-`abandon` cannot be presented as rollback. Reflink may
-eventually be safer than hardlink because a client repair through a shared
-inode can corrupt a media library, but the implemented strategy is copy only.
+The process-local `materialize.VerifiedFinal` is the only bridge from a
+committed journal or sealed retention tombstone to adoption. It reloads the
+exact metafile, binds the materialize operation and reviewed discovery plan,
+audits the current final namespace, verifies every v1/v2/hybrid byte, and
+retains the target locator only in memory. A `FinalObservation` exposes opaque
+identities and proof counts but no path. Its client projection uses one
+invocation-scoped host/client mapping; public plans contain only domain-separated
+path and mapping references.
+
+`downloader.MutationSession` extends the bounded ledger session with one
+`AddStopped` port. The exact raw payload is an opaque, one-shot
+`MetafilePayload` loaded only from the bound private metastore object. The
+qBittorrent implementation reuses one authenticated session, disables HTTP/2,
+connection reuse, redirects, proxy use, and automatic retry, streams one
+bounded multipart POST, and reports request/byte completion separately. Its
+generic `hash` remains an opaque job locator; only typed v1/v2 claims establish
+identity.
+
+Before a new operation, one complete ledger must prove absence. Any unavailable,
+invalid, partial, conflicting, or duplicate typed identity fails closed.
+Hybrid identity requires both hash families on the same job. Names, sizes,
+progress, and paths never select a job. After the POST, success requires one
+unique exact job, expected size, stopped state, and exact lexical save/content
+paths. This is still a client claim: the completion marker says
+`adopted_pending_client_recheck`, while the raw metafile variant remains
+unobservable to qBittorrent.
+
+The deterministic operation directory is reserved by the materialize layout
+validator and contains canonical no-clobber intent, bounded attempt, and
+completion markers. A request attempt is durable before the POST. If its result
+is unknown, resume performs a ledger read first and never repeats the POST
+unless both add and repeat acknowledgements are explicit. At most three
+explicit attempts are representable. An initialization crash is recoverable
+only when the operation namespace is exactly empty apart from its lock and
+optional empty scratch directory; unexpected objects remain integrity failures.
+`status` never contacts the client and cannot call an unobserved state ready.
+It also remains filesystem-read-only: canonical marker presence is reported,
+but directory durability is refreshed only by effectful resume before client
+I/O.
+
+The current slice never mutates an existing job, changes its location, starts a
+recheck, resumes or pauses transfer, removes a job, deletes a source, or claims
+source retirement. Those later transitions need a separate plan and journal:
+
+```text
+explicit client recheck -> bracket result -> optional controlled start
+explicit location change -> current per-file proof -> bracket result
+separate source-retirement proof and deletion authority
+```
+
+They must support explicit resume, preserve the no-overwrite defaults, and
+never infer source retirement from materialization or stopped-job adoption.
+Reflink may eventually be safer than hardlink because a client repair through
+a shared inode can corrupt a media library, but the implemented filesystem
+strategy remains copy only.
 
 ## Plugin direction
 

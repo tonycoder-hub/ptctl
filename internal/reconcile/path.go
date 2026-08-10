@@ -21,6 +21,36 @@ type clientPath struct {
 	parts   []string
 }
 
+// NormalizeClientPath applies the exact lexical semantics used by
+// reconciliation without touching the host filesystem.
+func NormalizeClientPath(value string, windows bool) (string, error) {
+	parsed, err := parseClientPath(value, windows)
+	if err != nil {
+		return "", err
+	}
+	return parsed.canonical(), nil
+}
+
+func EqualClientPaths(left, right string, windows bool) (bool, error) {
+	first, err := parseClientPath(left, windows)
+	if err != nil {
+		return false, err
+	}
+	second, err := parseClientPath(right, windows)
+	if err != nil {
+		return false, err
+	}
+	return first.equal(second), nil
+}
+
+func ClientPathReference(value string, windows bool) (string, error) {
+	parsed, err := parseClientPath(value, windows)
+	if err != nil {
+		return "", err
+	}
+	return parsed.public(false), nil
+}
+
 // PathMappingOptions is the invocation-scoped host/client namespace mapping
 // used to project a process-local verified source. It is configuration, not
 // evidence that the downloader can actually access the projected path.

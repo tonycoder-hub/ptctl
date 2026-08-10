@@ -255,6 +255,40 @@ prune acknowledgement authorizes deletion, and only inside the selected
 owner-private operation subtree; the final layout, source, other operations,
 and retained tombstone remain outside that authority.
 
+Client adoption has a separate downloader-write boundary. `plan` performs one
+complete typed ledger observation but writes nothing. `run` requires
+`--acknowledge-client-add`; a repeat after an unknown result additionally
+requires `--acknowledge-repeat-add`. Before password stdin or network access,
+the CLI validates the exact private-store artifact selector, committed or
+retained materialize selector, current target-root/final proof, host/client
+mapping, endpoint, user-derived client configuration ID, reviewed adoption plan
+ID, and any existing operation selector it can inspect locally. The
+acknowledgement authorizes only one exact-metafile qBittorrent add request in
+stopped mode plus the small private target-root-local journal. It does not
+authorize changing an existing job, rechecking, starting, pausing, moving,
+removing, deleting, or retiring content.
+
+One complete before-ledger must prove typed identity absence. A generic qB job
+hash, name, size, path, progress, or state never selects identity; unavailable,
+invalid, partial, conflicting, or duplicate typed rows make absence
+unprovable. The canonical request intent is durable before the POST. The
+effectful transport is HTTP/1.1-only, fresh/no-keepalive, proxy-free,
+redirect-free, bounded, serial, and non-retrying. A lost response remains
+unknown even if the body may have reached qBittorrent. Resume reads the current
+ledger first and does not repeat without both acknowledgements.
+Read-only status validates the canonical marker namespace but does not infer a
+historical directory-fsync result. Effectful resume refreshes that durability
+boundary before it reads the client ledger or relies on a marker.
+
+After the POST, a terminal marker requires one unique exact typed job, stopped
+state, reviewed size and exact lexical save/content paths, plus a second exact
+final verification. These are bracketed, non-atomic observations. They neither
+prove that qBittorrent stored the submitted private variant nor that it has
+checked or is reading the materialized bytes. The public report uses only
+one-way client/path/job references and never includes host/client paths,
+endpoint, username, password, generic job key, magnet URI, tracker material,
+or raw metafile bytes.
+
 The target root must support the fsbind root-identity, no-link/reparse,
 same-filesystem, and no-replace primitives. The plan-review root identity is
 rechecked before journal creation. Journal, scratch, and stage objects live
@@ -395,7 +429,8 @@ remote storage.
 
 `metafile store init`, `metafile store import`, `storage profile create`,
 `storage index refresh`, the artifact/binding phases of `site metafile fetch`,
-and acknowledged materialize operations are the explicit write exceptions.
+acknowledged materialize operations, and acknowledged exact stopped-job
+adoption are the explicit write exceptions.
 Store/index/fetch reported write
 count covers logical publication of an accepted store marker or immutable
 object, not private temporary or uninitialized staging entries. It is nonzero
@@ -403,7 +438,10 @@ when that accepted state became visible, including a possible count of `1` for
 `published_durability_unconfirmed`. Materialize instead separately counts
 operation subtrees/directories, journal objects/events, scratch/staged objects,
 publication attempts, logical publications, ambiguous writes, and bytes. Store
-inspect and every non-materialize artifact consumer remain zero-write.
+inspect and every non-materialize/non-adoption artifact consumer remain
+zero-write. Adoption separately counts its operation/control directories,
+temporary marker bytes, no-clobber marker publications/removals, uncertain
+writes, login/ledger/add requests, and add receipt.
 
 The B1 site metafile fetch crosses two independent boundaries. The tracker may
 record its passkey-bearing GET, so the command requires an explicit
@@ -451,7 +489,9 @@ synthetic metafiles; real tracker artifacts are forbidden.
   terminal operation state now has only exact single-operation pruning);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
-- downloader add/recheck/location transitions and private-mode verification;
+- downloader recheck/start/pause/location/removal transitions, re-adoption
+  after a terminal job disappears, and client-side private-variant
+  observability;
 - current-filesystem completeness tokens or journal-backed incremental index
   invalidation; the existing sealed snapshot is candidate-only;
 - encryption-at-rest or an audited external-key design for private metafile
@@ -459,8 +499,10 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - per-account cross-process site rate-limit coordination;
 - signed releases, SBOM, and build provenance.
 
-No broader deletion, downloader mutation, tracker write, or broader content
-strategy should be added until the relevant gap has a testable control and a
-failure-recovery story. The private metafile store grants no authority over
-seeded content, and a materialize acknowledgement grants no authority outside
-its explicit copy-only target-root-local operation.
+No broader deletion, downloader mutation beyond the exact stopped-add slice,
+tracker write, or broader content strategy should be added until the relevant
+gap has a testable control and a failure-recovery story. The private metafile
+store grants no authority over seeded content, a materialize acknowledgement
+grants no authority outside its explicit copy-only target-root-local operation,
+and a client-add acknowledgement grants no authority over an existing job or
+source retirement.
