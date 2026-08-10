@@ -200,7 +200,11 @@ func (s *Store) ImportRecord(ctx context.Context, kind RecordKind, reader io.Rea
 		return RecordRef{}, receipt, safeError("import sealed record", err)
 	}
 	defer session.Close()
+	return s.importRecordSession(ctx, session, kind, reader, limits)
+}
 
+func (s *Store) importRecordSession(ctx context.Context, session *rootSession, kind RecordKind, reader io.Reader, limits RecordLimits) (RecordRef, RecordImportReceipt, error) {
+	receipt := RecordImportReceipt{Effect: recordImportEffect, Store: s.Info()}
 	temporaryName, err := randomRelativeName(temporaryDir, ".record-import-", recordSuffix)
 	if err != nil {
 		return RecordRef{}, receipt, fmt.Errorf("import sealed record: random staging name unavailable")
@@ -326,7 +330,11 @@ func (s *Store) LoadRecord(ctx context.Context, kind RecordKind, id RecordID, li
 		return RecordRef{}, receipt, safeError("load sealed record", err)
 	}
 	defer session.Close()
+	return s.loadRecordSession(ctx, session, kind, id, limits, consume)
+}
 
+func (s *Store) loadRecordSession(ctx context.Context, session *rootSession, kind RecordKind, id RecordID, limits RecordLimits, consume RecordConsumer) (RecordRef, RecordLoadReceipt, error) {
+	receipt := RecordLoadReceipt{Effect: recordLoadEffect, Store: s.Info()}
 	relative := recordRelativePath(kind, id)
 	file, before, err := session.openValidated(relative, false)
 	if err != nil {

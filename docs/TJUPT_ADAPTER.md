@@ -94,7 +94,9 @@ TJUPT declares `torrent.metafile.read_effectful` independently of
 `torrent.detail`; no detail capability or detail request is implied. A
 metafile GET may be recorded by the tracker, and its response contains a
 passkey. B1 is gated on the private store above and has no raw stdout,
-arbitrary-destination, or sidecar path.
+arbitrary destination, or caller-chosen sidecar path. Its only durable
+provenance output is an internal allowlisted sealed binding record in that same
+store.
 
 The command shape is:
 
@@ -115,15 +117,31 @@ login/challenge/maintenance/HTML responses, and passes the bounded exact bytes
 directly to the same store import primitive. That pipeline requires a complete,
 strictly valid metafile before no-clobber publication.
 
-The report-only `observed_exact_variant` relation may bind
+The invocation-only `observed_exact_variant` relation may bind
 `(tjupt, remote_id)` to the whole-raw variant only when store import explicitly
 returns a valid exact artifact reference and its whole-response digest and
 consumed-byte receipt agree. A pre-publication or import failure retains only
 the bounded request/response receipt; the CLI never re-hashes the received body
 to upgrade that failure into a relation. Once the exact reference has been
 established, a later durability or post-publication failure does not erase the
-observation. It remains neither a durability claim nor a persistent site
-ledger, store alias, or sidecar.
+observation. It remains neither a durability claim nor a current-site claim.
+
+After a fully successful artifact import, the command publishes a canonical
+`site.metafile.binding.v1` record as a binding-last commit marker. The record
+contains the canonical TJUPT production origin and
+`tjupt.download_by_id.v1` route, exact whole-response artifact link, bounded
+single-request account, and historical observation interval; it contains no
+cookie, request URL, announce/passkey, raw bytes, filename, or path. Publication
+and every load jointly verify the record and referenced private artifact under
+one operation-bound store identity.
+
+`reconcile report` consumes that provenance only through an explicit
+`--site-binding-record` combined with the same store's
+`--metafile-store/--metafile-variant`. It never enumerates by site/ref or picks
+the newest record. The adapter ref/origin/route is revalidated before any
+downloader password read or request. A valid binding is historical evidence
+only and cannot upgrade incomplete storage/client/path axes or make
+qBittorrent's raw private metafile observable.
 
 The report accounts for the site request and logical store publication
 separately. The request URL, redirect location, response body, announce path,
@@ -146,8 +164,8 @@ publication followed by cleanup or validation failure is reported as
 `published_post_commit_failure`.
 
 The fetch reports before returning any non-usage operational or integrity
-failure. It uses exit `0` for newly stored and already-present exact variants,
-`1` for site, credential, store, or publication failures, `2` for invalid usage
-or missing acknowledgement, and `3` for invalid exact metafile bytes or a
-corrupt existing artifact. Exit `4` remains reserved for the existing
+failure. It uses exit `0` only after the artifact and sealed binding both
+verify, `1` for site, credential, store, binding publication, or durability
+failures, `2` for invalid usage or missing acknowledgement, and `3` for invalid
+exact metafile bytes or a corrupt artifact/binding. Exit `4` remains reserved for the existing
 report-first verification/reconciliation requirement flags.

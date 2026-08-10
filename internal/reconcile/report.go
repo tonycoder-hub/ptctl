@@ -13,7 +13,9 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
+	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
@@ -48,8 +50,19 @@ type BuildInput struct {
 	VerifiedSource    *metafile.VerifiedSource
 	Client            ClientBracket
 	SiteRef           *domain.TorrentRef
+	SiteBinding       SiteBindingSelection
 	PathMapping       *PathMappingOptions
 	ShowAbsolutePaths bool
+}
+
+// SiteBindingSelection is an explicit, same-invocation read of one sealed
+// record ID. StopReason is a stable internal code; public reports never copy a
+// store error, record payload, or path into it.
+type SiteBindingSelection struct {
+	Requested  bool
+	RecordID   metastore.RecordID
+	Verified   *sitebinding.VerifiedSiteBinding
+	StopReason string
 }
 
 type Report struct {
@@ -67,6 +80,8 @@ type Report struct {
 type ReportScope struct {
 	MetafileVariantID    string `json:"metafile_variant_id"`
 	SiteRequested        bool   `json:"site_requested"`
+	SiteBindingRequested bool   `json:"site_binding_requested"`
+	SiteBindingSelector  string `json:"site_binding_selector"`
 	ClientRequested      bool   `json:"client_requested"`
 	PathMappingRequested bool   `json:"path_mapping_requested"`
 	PathMappingID        string `json:"path_mapping_id,omitempty"`
@@ -83,8 +98,18 @@ type ReportLedgers struct {
 }
 
 type SiteLedger struct {
-	Status string             `json:"status"`
-	Ref    *domain.TorrentRef `json:"ref,omitempty"`
+	Status            string             `json:"status"`
+	Ref               *domain.TorrentRef `json:"ref,omitempty"`
+	BindingRecordID   string             `json:"binding_record_id,omitempty"`
+	StoreID           string             `json:"store_id,omitempty"`
+	MetafileVariantID string             `json:"metafile_variant_id,omitempty"`
+	Origin            string             `json:"origin,omitempty"`
+	RouteID           string             `json:"route_id,omitempty"`
+	ObservedAtStart   *time.Time         `json:"observed_at_start,omitempty"`
+	ObservedAtEnd     *time.Time         `json:"observed_at_end,omitempty"`
+	ProcessLocalProof bool               `json:"process_local_proof"`
+	Historical        bool               `json:"historical"`
+	StopReason        string             `json:"stop_reason,omitempty"`
 }
 
 type MetafileLedger struct {
@@ -200,7 +225,9 @@ func Build(input BuildInput) (Report, error) {
 		Assurance:       "axis_separated_non_atomic",
 		Scope: ReportScope{
 			MetafileVariantID:    meta.MetafileVariantID,
-			SiteRequested:        input.SiteRef != nil,
+			SiteRequested:        input.SiteRef != nil || input.SiteBinding.Requested,
+			SiteBindingRequested: input.SiteBinding.Requested,
+			SiteBindingSelector:  siteBindingSelector(input.SiteBinding.Requested),
 			ClientRequested:      input.Client.Requested,
 			PathMappingRequested: input.PathMapping != nil,
 			PathMappingID:        pathMappingIDValue,
@@ -224,20 +251,10 @@ func Build(input BuildInput) (Report, error) {
 		PhysicalBytes: physicalBytes(meta),
 	}
 
-	siteRelation := newRelation("site_metafile")
-	if input.SiteRef == nil {
-		report.Ledgers.Site = SiteLedger{Status: "not_supplied"}
-		siteRelation.Status = "not_supplied"
-	} else {
-		ref := *input.SiteRef
-		report.Ledgers.Site = SiteLedger{Status: "declared_unbound", Ref: &ref}
-		siteRelation.Status = "declared_unbound"
-		siteRelation.EvidenceLevel = "declared"
-		siteRelation.EvidenceBasis = append(siteRelation.EvidenceBasis, "user_supplied_site_reference")
-		siteRelation.LeftIDs = append(siteRelation.LeftIDs, ref.SiteID+"/"+ref.RemoteID)
-		siteRelation.RightIDs = append(siteRelation.RightIDs, meta.MetafileVariantID)
-		report.Warnings = append(report.Warnings, "the site reference is user-declared and is not bound to this exact metafile variant")
-	}
+	siteLedger, siteRelation, siteBlockers, siteWarnings := assessSiteBinding(meta, input.SiteRef, input.SiteBinding)
+	report.Ledgers.Site = siteLedger
+	report.Blockers = append(report.Blockers, siteBlockers...)
+	report.Warnings = append(report.Warnings, siteWarnings...)
 	storageRelation := newRelation("storage_content_proof")
 	storageRelation.Status = input.Discovery.SourceOutcome
 	storageRelation.LeftIDs = append(storageRelation.LeftIDs, meta.MetafileVariantID)
@@ -409,11 +426,14 @@ func Build(input BuildInput) (Report, error) {
 	if client.active {
 		report.Warnings = append(report.Warnings, "the matching downloader job is active; lexical path agreement does not prove which bytes the client is currently reading")
 	}
-	report.Outcome = overallOutcome(storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested)
+	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested)
 	if report.Outcome == "consistent" {
 		report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_lexical_path_agreement"
 		if meta.MultiFile {
 			report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_bracketed_per_file_lexical_path_agreement"
+		}
+		if input.SiteBinding.Requested && siteRelation.Status == "historical_observed_exact_variant" {
+			report.Assurance += "_plus_sealed_historical_site_observation_current_site_mapping_unobservable"
 		}
 	}
 	report.Blockers = stableFindings(report.Blockers)
@@ -742,14 +762,140 @@ func publicClientClaims(value snapshotAssessment, showAbsolute, windows bool) []
 	return claims
 }
 
-func overallOutcome(storageStatus string, processProof bool, clientStatus, pathStatus string, clientRequested bool) string {
+func assessSiteBinding(meta *metafile.MetaInfo, declared *domain.TorrentRef, selection SiteBindingSelection) (SiteLedger, Relation, []ReportFinding, []string) {
+	relation := newRelation("site_metafile")
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	if !selection.Requested {
+		if declared == nil {
+			return SiteLedger{Status: "not_supplied"}, relationWithStatus(relation, "not_supplied"), blockers, warnings
+		}
+		ref := *declared
+		ledger := SiteLedger{Status: "declared_unbound", Ref: &ref}
+		relation.Status = "declared_unbound"
+		relation.EvidenceLevel = "declared"
+		relation.EvidenceBasis = append(relation.EvidenceBasis, "user_supplied_site_reference")
+		relation.LeftIDs = append(relation.LeftIDs, ref.SiteID+"/"+ref.RemoteID)
+		relation.RightIDs = append(relation.RightIDs, meta.MetafileVariantID)
+		warnings = append(warnings, "the site reference is user-declared and is not bound to this exact metafile variant")
+		return ledger, relation, blockers, warnings
+	}
+
+	ledger := SiteLedger{Status: "incomplete", BindingRecordID: selection.RecordID.String(), StopReason: safeSiteBindingStopReason(selection.StopReason)}
+	relation.LeftIDs = append(relation.LeftIDs, selection.RecordID.String())
+	relation.RightIDs = append(relation.RightIDs, meta.MetafileVariantID)
+	if parsed, err := metastore.ParseRecordID(selection.RecordID.String()); err != nil || parsed != selection.RecordID {
+		ledger.StopReason = "site_binding_identity_invalid"
+		relation.Status = "incomplete"
+		relation.BlockerCodes = append(relation.BlockerCodes, "site.binding_identity_invalid")
+		blockers = append(blockers, ReportFinding{Code: "site.binding_identity_invalid", Message: "the explicit site binding record identity is invalid"})
+		return ledger, relation, blockers, warnings
+	}
+	if selection.Verified == nil {
+		switch ledger.StopReason {
+		case "site_binding_mismatch":
+			ledger.Status = "selected_binding_mismatch"
+			relation.Status = "selected_binding_mismatch"
+			relation.BlockerCodes = append(relation.BlockerCodes, "site.selected_binding_mismatch")
+			blockers = append(blockers, ReportFinding{Code: "site.selected_binding_mismatch", Message: "the explicit historical site binding does not match the requested reference or metafile variant"})
+		case "site_binding_integrity_failed":
+			ledger.Status = "integrity_failed"
+			relation.Status = "integrity_failed"
+			relation.BlockerCodes = append(relation.BlockerCodes, "site.binding_integrity_failed")
+			blockers = append(blockers, ReportFinding{Code: "site.binding_integrity_failed", Message: "the explicit site binding record or its linked metafile artifact failed integrity verification"})
+		default:
+			ledger.Status = "incomplete"
+			relation.Status = "incomplete"
+			relation.BlockerCodes = append(relation.BlockerCodes, "site.binding_proof_unavailable")
+			blockers = append(blockers, ReportFinding{Code: "site.binding_proof_unavailable", Message: "the explicit site binding could not be verified in the current invocation"})
+		}
+		return ledger, relation, blockers, warnings
+	}
+	if !selection.Verified.Verified() {
+		ledger.Status = "incomplete"
+		ledger.StopReason = "site_binding_load_failed"
+		relation.Status = "incomplete"
+		relation.BlockerCodes = append(relation.BlockerCodes, "site.binding_proof_unavailable")
+		blockers = append(blockers, ReportFinding{Code: "site.binding_proof_unavailable", Message: "the explicit site binding could not be verified in the current invocation"})
+		return ledger, relation, blockers, warnings
+	}
+
+	public := selection.Verified.PublicCopy()
+	record := public.Record
+	ref := domain.TorrentRef{SiteID: record.SiteID, RemoteID: record.RemoteID}
+	ledger.Ref = &ref
+	ledger.StoreID = public.Store.StoreID
+	ledger.MetafileVariantID = record.MetafileVariantID
+	ledger.Origin = record.Origin
+	ledger.RouteID = record.RouteID
+	start, end := record.ObservedAtStart, record.ObservedAtEnd
+	ledger.ObservedAtStart, ledger.ObservedAtEnd = &start, &end
+	ledger.Historical = true
+	requestedRef := ref
+	if declared != nil {
+		requestedRef = *declared
+	}
+	if !selection.Verified.Matches(selection.RecordID, ref, record.MetafileVariantID) ||
+		public.RecordRef.ID != selection.RecordID || record.MetafileVariantID != meta.MetafileVariantID || requestedRef != ref {
+		ledger.Status = "selected_binding_mismatch"
+		ledger.StopReason = "site_binding_mismatch"
+		relation.Status = "selected_binding_mismatch"
+		relation.BlockerCodes = append(relation.BlockerCodes, "site.selected_binding_mismatch")
+		relation.LeftIDs = append(relation.LeftIDs, ref.SiteID+"/"+ref.RemoteID)
+		blockers = append(blockers, ReportFinding{Code: "site.selected_binding_mismatch", Message: "the explicit historical site binding does not match the requested reference or metafile variant"})
+		return ledger, relation, blockers, warnings
+	}
+	ledger.Status = "historical_observed_exact_variant"
+	ledger.ProcessLocalProof = true
+	ledger.StopReason = ""
+	relation.Status = "historical_observed_exact_variant"
+	relation.EvidenceLevel = "persistent_direct_observation"
+	relation.EvidenceBasis = append(relation.EvidenceBasis,
+		"effectful_fetch_exact_response",
+		"sealed_binding_record_digest_verified",
+		"referenced_whole_raw_artifact_verified",
+		"same_store_operation_bound_pair",
+		"historical_non_atomic_site_observation",
+	)
+	relation.LeftIDs = append(relation.LeftIDs, ref.SiteID+"/"+ref.RemoteID)
+	warnings = append(warnings, "the sealed site binding is a historical exact-response observation, not proof of the site's current mapping or a site signature")
+	return ledger, relation, blockers, warnings
+}
+
+func relationWithStatus(relation Relation, status string) Relation {
+	relation.Status = status
+	return relation
+}
+
+func siteBindingSelector(requested bool) string {
+	if requested {
+		return "explicit_record"
+	}
+	return "not_requested"
+}
+
+func safeSiteBindingStopReason(value string) string {
+	switch value {
+	case "site_binding_load_failed", "site_binding_integrity_failed", "site_binding_adapter_mismatch", "site_binding_mismatch":
+		return value
+	case "":
+		return ""
+	default:
+		return "site_binding_load_failed"
+	}
+}
+
+func overallOutcome(siteStatus string, siteBindingRequested bool, storageStatus string, processProof bool, clientStatus, pathStatus string, clientRequested bool) string {
+	if siteBindingRequested && siteStatus == "integrity_failed" {
+		return "integrity_failed"
+	}
+	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") || clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
+		return "conflict"
+	}
 	if storageStatus == "verified_ambiguous" || clientStatus == "ambiguous" {
 		return "ambiguous"
 	}
-	if clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
-		return "conflict"
-	}
-	if storageStatus == "incomplete" || storageStatus == "verified_unique" && !processProof || clientRequested && clientStatus == "incomplete" || pathStatus == "incomplete" {
+	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") || storageStatus == "incomplete" || (storageStatus == "verified_unique" && !processProof) || (clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
 		return "incomplete"
 	}
 	if processProof && clientStatus == "exact_unique" && pathStatus == "same_location" {

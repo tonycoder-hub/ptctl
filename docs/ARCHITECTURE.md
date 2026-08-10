@@ -75,7 +75,8 @@ not weaken or alter any relation, outcome, or zero-write guarantee below.
 
 The report deliberately keeps five relations separate:
 
-1. `site_metafile` records only a user-declared site reference in this slice;
+1. `site_metafile` is either a user-declared reference or an explicitly
+   selected, jointly verified sealed historical site-to-whole-variant record;
 2. `metafile_variant_relation` asks whether the downloader exposes the exact
    private `.torrent` bytes;
 3. `client_infohash_relation` compares algorithm-tagged v1/v2 claims;
@@ -85,12 +86,20 @@ The report deliberately keeps five relations separate:
    lexical claims under one explicit namespace mapping.
 
 There is no single `matched` boolean. The overall lattice is `consistent`,
-`partial`, `conflict`, `ambiguous`, or `incomplete`, while every relation keeps
+`partial`, `conflict`, `ambiguous`, `incomplete`, or `integrity_failed`, while every relation keeps
 its own evidence level and blocker codes. A different client path means that
 verified reusable bytes exist elsewhere; it is not a content mismatch. A
 scattered source can align only when every physical manifest binding
 independently maps to the corresponding stable client file claim; no shared
 host source root is inferred.
+
+An explicit `--site-binding-record` requires the stored metafile selector from
+the same private store. It is loaded before downloader credential input or
+requests and never selected by ref, time, or enumeration. A valid historical
+binding does not upgrade any storage/client/path axis and does not change the
+downloader raw-metafile relation; a mismatch conflicts, while unavailable or
+corrupt authority prevents overall consistency. A bare `--site-ref` remains a
+non-gating declaration.
 
 qBittorrent's generic `hash` is an opaque job key. The adapter derives typed
 claims only from strictly bounded magnet `xt` values: BTIH is 20 bytes and
@@ -280,6 +289,7 @@ site metafile fetch --cookie-stdin --acknowledge-site-effect
     -> send one bounded GET, with no redirect and no retry
     -> strictly validate the complete exact response
     -> publish only through the existing private, no-clobber store primitive
+    -> after successful artifact import, publish a sealed historical binding
 ```
 
 The command does not fetch a torrent-detail page and does not infer another
@@ -290,15 +300,25 @@ directory into a store. A site adapter must explicitly declare
 method, and validate its own remote-ID syntax without credentials. This keeps
 the CLI and report generic when a second site adapter is added.
 
-The site-to-metafile relation may become an invocation-scoped, report-only
+The site-to-metafile relation first becomes an invocation-scoped
 `observed_exact_variant` only when the store import explicitly returns a valid
 exact `ArtifactRef` and its whole-response digest and consumed-byte receipt
 agree. The CLI does not independently re-hash a response to upgrade a
 pre-publication or import failure into that relation. Such a failure retains
 only its bounded request/response receipt. Once the import has established the
 exact reference, a later durability or post-publication failure does not erase
-the observation. It remains neither a durable site ledger nor a store alias or
-replayable capability.
+the report-only observation.
+
+B2 adds a binding-last `site.metafile.binding.v1` commit marker only after the
+artifact import returns complete success. The sealed record preserves the
+canonical site ref, adapter origin/route, whole-raw artifact link, bounded
+single-request account, and historical observation interval. Its publication
+and every load jointly verify the record and referenced private artifact in one
+operation-bound physical store session. This is not a two-object transaction:
+an artifact may remain as an unreferenced immutable object if marker publication
+fails. Reconciliation accepts only an explicit record ID and returns an opaque
+process-local `VerifiedSiteBinding`; serialization loses that authority. There
+is no list/latest/ref-based automatic selector.
 
 The site observation and store publication/durability facts remain independent
 report axes. A GET may complete with no exact relation or published object,
@@ -323,7 +343,7 @@ are not a user-controlled namespace and do not expose a generic put/cat CLI:
 storage.profile.v1
 storage.index.data.v1
 storage.index.descriptor.v1
-site.metafile.binding.v1       # reserved for a later slice
+site.metafile.binding.v1       # historical exact-response provenance
 ```
 
 Record identity is domain-separated as SHA-256 over a fixed record domain, the

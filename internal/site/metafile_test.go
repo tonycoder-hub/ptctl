@@ -152,6 +152,9 @@ func TestFetchedMetafileIsOpaqueImmutableAndExactlyBindable(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation := binding.PublicCopy()
+	if err := site.ValidateMetafileObservation(observation); err != nil {
+		t.Fatalf("valid observation was rejected: %v", err)
+	}
 	if observation.Ref != ref || observation.Origin != "https://fake.example" || observation.RouteID != "fake.download.v1" ||
 		observation.MetafileVariantID != variantID || observation.Basis != site.MetafileObservationExactFetchBasis ||
 		observation.ResponseBytes != int64(len(original)) || !observation.ObservedAtStart.Equal(start) || !observation.ObservedAtEnd.Equal(end) {
@@ -163,6 +166,24 @@ func TestFetchedMetafileIsOpaqueImmutableAndExactlyBindable(t *testing.T) {
 		binding.Matches(domain.TorrentRef{SiteID: "fake", RemoteID: "43"}, observation.Origin, observation.RouteID, variantID) {
 		t.Fatal("binding match did not cover all observed authority fields")
 	}
+	if !binding.MatchesReceipt(receipt) {
+		t.Fatal("binding did not retain the exact fetch receipt authority")
+	}
+	changedReceipt := receipt
+	changedReceipt.ObservedAtEnd = changedReceipt.ObservedAtEnd.Add(time.Nanosecond)
+	if binding.MatchesReceipt(changedReceipt) {
+		t.Fatal("binding accepted a different fetch observation interval")
+	}
+	changedReceipt = receipt
+	changedReceipt.Used.ResponseBytesRead--
+	if binding.MatchesReceipt(changedReceipt) {
+		t.Fatal("binding accepted a partial fetch receipt")
+	}
+	changedReceipt = receipt
+	changedReceipt.Used.RedirectsFollowed = 1
+	if binding.MatchesReceipt(changedReceipt) {
+		t.Fatal("binding accepted a redirected fetch receipt")
+	}
 	bindingJSON, _ := json.Marshal(binding)
 	bindingValueJSON, _ := json.Marshal(*binding)
 	if strings.Contains(string(bindingJSON), canary) || strings.Contains(string(bindingValueJSON), canary) ||
@@ -172,6 +193,28 @@ func TestFetchedMetafileIsOpaqueImmutableAndExactlyBindable(t *testing.T) {
 	publicJSON, _ := json.Marshal(observation)
 	if strings.Contains(string(publicJSON), canary) {
 		t.Fatal("public observation disclosed response content")
+	}
+	for _, mutate := range []func(*domain.SiteMetafileObservation){
+		func(value *domain.SiteMetafileObservation) { value.Ref.RemoteID = "" },
+		func(value *domain.SiteMetafileObservation) { value.Origin = "https://other.example/" },
+		func(value *domain.SiteMetafileObservation) { value.RouteID = "other/route" },
+		func(value *domain.SiteMetafileObservation) {
+			value.MetafileVariantID = "sha256:" + strings.Repeat("A", 64)
+		},
+		func(value *domain.SiteMetafileObservation) { value.Basis = "declared" },
+		func(value *domain.SiteMetafileObservation) {
+			value.ObservedAtStart = value.ObservedAtStart.In(time.FixedZone("offset", 3600))
+		},
+		func(value *domain.SiteMetafileObservation) {
+			value.ObservedAtEnd = value.ObservedAtStart.Add(-time.Second)
+		},
+		func(value *domain.SiteMetafileObservation) { value.ResponseBytes = 0 },
+	} {
+		changed := observation
+		mutate(&changed)
+		if err := site.ValidateMetafileObservation(changed); err == nil {
+			t.Fatalf("invalid observation was accepted: %#v", changed)
+		}
 	}
 }
 

@@ -113,6 +113,14 @@ and consumed-byte receipt agree. Login, challenge, maintenance, unknown HTML,
 oversized, and partial responses fail closed and never become an empty or
 weaker artifact.
 
+A persistent site binding is attempted only after complete artifact-import
+success. Its canonical record is capped at 256 KiB, rejects duplicate/unknown
+fields and non-canonical framing, and carries no credential, URL, announce
+material, raw response, or path. Publication and load jointly hash the sealed
+record and complete private artifact under one operation-bound store root.
+Only an explicit record ID can create process-local reconciliation authority;
+JSON round trips and public DTOs cannot recreate it.
+
 The qBittorrent ledger is capped at 8 MiB and 25,000 jobs. Each magnet claim
 is capped at 64 KiB, 256 query pairs, eight `xt` values, and 256 bytes per
 decoded `xt`. The job array is decoded one object at a time, the N+1 job is
@@ -320,7 +328,7 @@ between operations, but a blocked filesystem syscall may not be interruptible.
 Users should narrow roots and budgets before scanning mounted remote storage.
 
 `metafile store init`, `metafile store import`, `storage profile create`,
-`storage index refresh`, and the store phase of `site metafile fetch` are the
+`storage index refresh`, and the artifact/binding phases of `site metafile fetch` are the
 explicit write exceptions. Their reported write
 count covers logical publication of an accepted store marker or immutable
 object, not private temporary or uninitialized staging entries. It is nonzero
@@ -337,9 +345,9 @@ stdin. It then sends at most one bounded GET, with no detail lookup, redirect,
 or retry, and passes the bounded exact response directly to the existing
 no-clobber store primitive, which requires strict validation before publication.
 
-The report-only `observed_exact_variant` relation records the exact store
-reference established for that site reference during this invocation; no
-persistent binding or sidecar is created. A pre-publication or import failure
+The invocation-only `observed_exact_variant` relation records the exact store
+reference established for that site reference during this invocation. A
+pre-publication or import failure
 retains only the bounded request/response receipt. The CLI must not independently
 hash received bytes and promote that failure into a relation. Once store import
 has returned the valid exact reference, a later durability or post-publication
@@ -348,6 +356,16 @@ prove durability. Request accounting, logical store writes, and durability
 assurance remain separate even on failure. No raw response, request URL,
 cookie, announce material, object or temporary path may be written to stdout,
 reports, errors, or an arbitrary destination.
+
+Only after a fully successful artifact import may the command publish a sealed
+historical `site.metafile.binding.v1` commit marker. Marker publication is
+binding-last rather than a two-object transaction; an orphan immutable artifact
+is harmless when marker publication fails. Reconciliation requires the exact
+record ID and the artifact selector from the same store, jointly revalidates
+both objects, and repeats the installed adapter's canonical ref/origin/route
+check before reading downloader credentials. It never chooses a record by
+remote ID or observation time. The record proves only a past exact response,
+not current site state or freshness.
 
 ### Supply chain
 

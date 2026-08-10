@@ -162,7 +162,17 @@ consumed-byte receipt agree. A pre-publication or import failure retains only
 the bounded request/response receipt; the CLI never hashes the response again
 to promote it into a site-to-variant observation. Once an exact reference has
 been established, a later durability or post-publication failure does not erase
-that observation. No persistent binding or sidecar is created.
+that invocation-only observation.
+
+After, and only after, a fully successful private artifact import, the command
+publishes a sealed `site.metafile.binding.v1` record in the same store. The
+record is a binding-last commit marker for one historical exact response. Its
+record ID is printed as the explicit handoff to reconciliation. Publication
+rechecks the sealed record and referenced private artifact under one
+operation-bound physical store identity; it is not a two-object transaction,
+a site signature, or proof that the site's current mapping is unchanged. A
+new acknowledged GET creates a new historical observation even when it returns
+the same variant. No command selects a binding by remote ID or by “latest”.
 
 The artifact ID hashes the complete raw `.torrent` byte stream, not just its
 `info` dictionary. Two private variants with the same infohash therefore remain
@@ -208,6 +218,21 @@ ptctl seed discover \
   --metafile-variant sha256:WHOLE_METAFILE_SHA256 \
   --search-root "D:\Media"
 ```
+
+An explicitly selected historical site binding can be added only when
+reconciliation reads its metafile from that same private store:
+
+```bash
+ptctl reconcile report \
+  --metafile-store "D:\Private\ptctl-metafiles" \
+  --metafile-variant sha256:WHOLE_METAFILE_SHA256 \
+  --site-binding-record sha256:SEALED_BINDING_RECORD_ID \
+  --search-root "D:\Media"
+```
+
+`--site-ref SITE/REMOTE_ID` is an optional expected-ref cross-check. By itself
+it remains `declared_unbound`. A binding record cannot be paired with
+`--torrent`, loaded from a separate store, or selected by enumeration/latest.
 
 The same pair is supported by `torrent verify`, `seed plan`, and `reconcile
 report`. Supplying only half the pair, mixing it with a file/`--torrent`, or
@@ -387,6 +412,14 @@ metafile binding. qBittorrent does not expose the raw private metafile through
 this ledger, so `metafile_variant_relation` remains `unobservable` even when
 typed infohashes agree.
 
+When `--site-binding-record` is explicit, the site axis is accepted only from
+a same-invocation opaque authority produced by jointly re-reading the sealed
+record and its referenced whole-raw private artifact. It is reported as a
+historical exact-response observation; it never upgrades incomplete storage,
+client, or path evidence and never changes qBittorrent's raw-metafile
+unobservability. Binding verification happens before downloader password stdin
+or any downloader request.
+
 For an ordinary multi-file job, the bounded
 [torrent-contents endpoint](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-contents)
 supplies indexed relative paths, sizes, progress, seed state, and selection
@@ -437,10 +470,12 @@ descriptor. Publication/I/O failure returns `1`; a published-but-unconfirmed
 record keeps its nonzero write receipt and is never rolled back or silently
 reported as durable.
 
-`site metafile fetch` returns `0` when the exact response is newly stored or
-already present, `1` for site, credential, store, or publication failures, `2`
-for invalid usage or a missing acknowledgement, and `3` for an invalid exact
-metafile response or corrupt existing artifact. It does not redefine exit `4`.
+`site metafile fetch` returns `0` only after both the exact artifact and its
+sealed historical binding are verified (newly published or already present),
+`1` for site, credential, store, binding publication, or durability failures,
+`2` for invalid usage or a missing acknowledgement, and `3` for an invalid
+exact metafile response or corrupt artifact/binding. It does not redefine exit
+`4`.
 After usage validation, failures remain report-first: site request accounting
 and private-store write accounting are separate facts, and a successful site
 observation never implies confirmed store durability. An import failure without
@@ -461,8 +496,8 @@ and `seed plan` keep their documented path-display contracts. The private
 store uses owner-only permissions and atomic no-clobber publication for both
 metafiles and allowlisted sealed state records; this is access control, not
 encryption. Store init/import, storage profile creation/index refresh, and the
-store phase of an acknowledged site metafile fetch are the explicit write
-exceptions to the otherwise zero-write operational surface.
+artifact plus sealed-binding phases of an acknowledged site metafile fetch are
+the explicit write exceptions to the otherwise zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Architecture
