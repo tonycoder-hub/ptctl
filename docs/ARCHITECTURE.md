@@ -855,6 +855,31 @@ a same-invocation bound read of the exact target, operation, intent, and
 completion. JSON round trips remain powerless, and the tombstone does not claim
 that the downloader job or final layout is currently unchanged.
 
+`client activate forget` is the separately acknowledged irreversible boundary
+after prune. Its selector is exactly one full activation operation ID, the
+reviewed activation plan ID, and the historical-evidence-deletion
+acknowledgement. Before deleting any retained marker it copies the canonical
+retention intent and completion into a domain-separated, deterministic,
+owner-private root recovery intent bound to both the target-root and operation
+identities. The transition is:
+
+```text
+exact retained activation tombstone
+  -> staged forget intent inside the bound operation
+  -> durable no-clobber root forget intent
+  -> exact retained-marker and operation-subtree removal
+  -> durable operation-name absence
+  -> exact last root-marker removal
+  -> unattributed absence
+```
+
+The staged or root intent blocks ordinary resume, completion proof, and prune;
+only the same explicit forget selector may recover it. Status remains local and
+read-only and does not reassert marker durability. The final removal deliberately
+destroys the evidence needed for idempotent attribution, so a later call cannot
+claim historical success. It never opens a downloader session, reads a
+credential, mutates content, retires sources, or selects another operation.
+
 ## Source-retirement review and execution
 
 `seed retire plan` is the zero-write evidence half of source retirement.

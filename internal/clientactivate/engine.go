@@ -702,6 +702,12 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 	}
 	handle, _, err := openJournal(ctx, options.TargetRoot, options.OperationID, false, nil)
 	if err != nil {
+		var forgetting *forgetInProgressError
+		if errors.As(err, &forgetting) {
+			applyForgetControlReport(&report, forgetting)
+			report.finalize()
+			return report, nil
+		}
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err

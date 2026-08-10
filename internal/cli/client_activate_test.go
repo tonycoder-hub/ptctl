@@ -28,6 +28,12 @@ type clientActivateRetentionJSONEnvelope struct {
 	Data   clientactivate.RetentionReport `json:"data"`
 }
 
+type clientActivateForgetJSONEnvelope struct {
+	Schema string                      `json:"schema"`
+	Kind   string                      `json:"kind"`
+	Data   clientactivate.ForgetReport `json:"data"`
+}
+
 type clientActivateServer struct {
 	server *httptest.Server
 	meta   *metafile.MetaInfo
@@ -167,6 +173,34 @@ func TestClientActivatePlanRunResumeStatusAndPrivacy(t *testing.T) {
 	if code := Run(mismatchedRetainedResume, reader, &out, &errOut); code != 4 || reader.read || activationServer.totalRequests() != requestsBeforePrune {
 		t.Fatalf("mismatched retained resume code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
 	}
+	forgetArgs := []string{"client", "activate", "forget", "--target", fixture.materialize.targetRoot,
+		"--expect-activation-plan-id", planned.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json", planned.Data.Operation.ID}
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 0 || reader.read || activationServer.totalRequests() != requestsBeforePrune {
+		t.Fatalf("activation forget code=%d read=%t requests=%d stdout=%q stderr=%q", code, reader.read,
+			activationServer.totalRequests()-requestsBeforePrune, out.String(), errOut.String())
+	}
+	forgotten := decodeClientActivateForgetReport(t, out.Bytes())
+	if forgotten.Data.Outcome != clientactivate.ForgetOutcomeForgotten || !forgotten.Data.Authority.TargetHistoricalEvidenceErased ||
+		forgotten.Data.Authority.MarkerDurable || forgotten.Data.Operation.Resumable || forgotten.Data.WritesPerformed == 0 ||
+		forgotten.Data.Blockers == nil || forgotten.Data.Issues == nil || forgotten.Data.Warnings == nil {
+		t.Fatalf("unexpected activation forget report: %s", out.String())
+	}
+	assertClientActivatePrivate(t, out.Bytes(), fixture, activationServer.server.URL)
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 1 || reader.read || activationServer.totalRequests() != requestsBeforePrune {
+		t.Fatalf("repeated activation forget code=%d read=%t requests=%d stdout=%q stderr=%q", code, reader.read,
+			activationServer.totalRequests()-requestsBeforePrune, out.String(), errOut.String())
+	}
+	absent := decodeClientActivateForgetReport(t, out.Bytes())
+	if absent.Data.Outcome != clientactivate.ForgetOutcomeAbsentUnattributed || absent.Data.WritesPerformed != 0 || absent.Data.Authority.TargetHistoricalEvidenceErased {
+		t.Fatalf("repeated activation forget claimed historical idempotence: %s", out.String())
+	}
+	assertClientActivatePrivate(t, out.Bytes(), fixture, activationServer.server.URL)
 	if activationServer.login.Load() != 5 || activationServer.version.Load() != 3 || activationServer.ledger.Load() != 8 ||
 		activationServer.add.Load() != 1 || activationServer.recheck.Load() != 1 || activationServer.start.Load() != 1 {
 		t.Fatalf("requests login=%d version=%d ledger=%d add=%d recheck=%d start=%d", activationServer.login.Load(), activationServer.version.Load(),
@@ -186,12 +220,25 @@ func decodeClientActivateRetentionReport(t *testing.T, raw []byte) clientActivat
 	return result
 }
 
+func decodeClientActivateForgetReport(t *testing.T, raw []byte) clientActivateForgetJSONEnvelope {
+	t.Helper()
+	var result clientActivateForgetJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode client activation forget report: %v\n%s", err, raw)
+	}
+	if result.Schema != "ptctl.dev/v1" || result.Kind != "client.activation.forget" {
+		t.Fatalf("unexpected client activation forget envelope: %s", raw)
+	}
+	return result
+}
+
 func TestClientActivateBadUsageDoesNotReadPassword(t *testing.T) {
 	planID := strings.Repeat("f", 24)
 	operationID := clientactivate.OperationIDForPlan(planID).String()
 	for _, args := range [][]string{
 		{"client", "activate", "run", "--password-stdin", "--expect-activation-plan-id", planID, "--acknowledge-client-recheck"},
 		{"client", "activate", "prune", "--target", `C:\not-opened`, "--expect-activation-plan-id", planID, operationID},
+		{"client", "activate", "forget", "--target", `C:\not-opened`, "--expect-activation-plan-id", planID, operationID},
 	} {
 		reader := &trackingReader{}
 		var out, errOut bytes.Buffer

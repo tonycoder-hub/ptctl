@@ -22,7 +22,9 @@ domains and reconciles them around verifiable torrent metadata.
 > terminal completion tombstone before deleting only that operation's private
 > request journal. `client activate prune` does the same for one explicitly
 > selected terminal recheck/start journal while retaining the exact historical
-> completion needed by source-retirement review. Outside the separately
+> completion needed by source-retirement review; `client activate forget` has
+> a third acknowledgement and irreversibly removes only that retained
+> activation tombstone plus its last recovery marker. Outside the separately
 > acknowledged source-name retirement workflow, no listed operation
 > overwrites, moves, rewrites, or
 > deletes a source or published final layout. Retirement can unlink only the
@@ -734,6 +736,15 @@ ptctl client activate prune \
   --acknowledge-operation-state-deletion \
   --output json \
   sha256:ACTIVATION_OPERATION_DIGEST
+
+# After downstream retention is no longer needed, irreversibly erase this one
+# exact activation tombstone and its final historical attribution.
+ptctl client activate forget \
+  --target "D:\PT" \
+  --expect-activation-plan-id ACTIVATION_PLAN_ID \
+  --acknowledge-historical-evidence-deletion \
+  --output json \
+  sha256:ACTIVATION_OPERATION_DIGEST
 ```
 
 Activation never treats a successful POST as a completed recheck. It records
@@ -765,6 +776,22 @@ authority for source-retirement review through a fresh bound read; copied JSON
 cannot. It is historical evidence, not proof of current downloader state.
 JSON kind is `client.activation.retention`; `pruned` and `already_pruned`
 return `0`.
+
+Activation `forget` is a third, narrower irreversible boundary. It accepts
+only the same full operation ID and reviewed activation plan ID plus
+`--acknowledge-historical-evidence-deletion`; it reads no credential and makes
+no network request. Before touching the tombstone it copies the exact retention
+intent and completion into a deterministic owner-private root recovery intent.
+It then removes only the two retained markers, their empty directory, and the
+exact operation subtree, rechecks durable absence, and finally removes the last
+root intent. A crash after staging, root publication, or operation removal is
+recoverable only by repeating the same explicit forget selector. While either
+intent is visible, status reports `forgetting` and ordinary resume, completion
+proof, and prune stop before client access. After confirmed last-marker removal
+there is intentionally no idempotence evidence: a repeated call reports
+`absent_unattributed`, never `already_forgotten`. JSON kind is
+`client.activation.forget`. Deleting durable evidence cannot revoke an opaque
+`VerifiedCompletion` capability that was already issued in another live call.
 
 Review which current source file names are eligible for a separately
 acknowledged retirement operation:
@@ -1089,8 +1116,9 @@ access control, not encryption. Store init/import, storage profile
 creation/index refresh, the artifact plus sealed-binding phases of an
 acknowledged site metafile fetch, and acknowledged target-root-local
 materialize operations (including explicit retention pruning and exact
-tombstone forgetting), acknowledged
-exact stopped-job adoption, reviewed client recheck/start, and acknowledged
+tombstone forgetting), acknowledged exact stopped-job adoption, reviewed
+client recheck/start (including explicit retention pruning and exact tombstone
+forgetting), and acknowledged
 source-name retirement (including its separate journal pruning and explicit
 last-evidence forget transition), are
 the explicit write exceptions to the otherwise

@@ -20,6 +20,7 @@ const (
 	OutcomeStartedClientClaim    Outcome = "client_started_claim_observed"
 	OutcomeHistoricalChecked     Outcome = "historical_recheck_recorded_current_client_not_observed"
 	OutcomeHistoricalStarted     Outcome = "historical_start_recorded_current_client_not_observed"
+	OutcomeForgetting            Outcome = "forgetting"
 	OutcomeBlocked               Outcome = "blocked"
 	OutcomeIncomplete            Outcome = "incomplete"
 	OutcomeIntegrityFailed       Outcome = "integrity_failed"

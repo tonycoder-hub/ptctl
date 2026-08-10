@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 )
@@ -19,6 +20,10 @@ type retentionState struct {
 	CompletePending  bool
 	Complete         RetentionComplete
 	CompleteID       RetentionMarkerID
+	ForgetPending    bool
+	ForgetIntent     ForgetIntent
+	ForgetID         ForgetMarkerID
+	ForgetName       string
 	Entries          []fsbind.Entry
 }
 
@@ -56,7 +61,10 @@ func loadRetentionState(ctx context.Context, handle *journalHandle, operation Op
 		switch entry.Name {
 		case retentionIntentName, retentionIntentPending, retentionCompleteName, retentionCompletePending:
 		default:
-			return state, fmt.Errorf("%w: client activation retention contains an unexpected object", ErrIntegrity)
+			if !strings.HasPrefix(entry.Name, "forget-") || !strings.HasSuffix(entry.Name, ".pending") || state.ForgetName != "" {
+				return state, fmt.Errorf("%w: client activation retention contains an unexpected object", ErrIntegrity)
+			}
+			state.ForgetName = entry.Name
 		}
 	}
 	readIntent := func(name string) (RetentionIntent, RetentionMarkerID, error) {
@@ -138,6 +146,23 @@ func loadRetentionState(ctx context.Context, handle *journalHandle, operation Op
 			}
 		}
 	}
+	if state.ForgetName != "" {
+		if !state.IntentPresent || !state.CompletePresent || state.IntentPending || state.CompletePending {
+			return state, fmt.Errorf("%w: client activation forget pending marker lacks one exact tombstone", ErrIntegrity)
+		}
+		raw, readErr := handle.readNamedBytes(ctx, []string{retentionDirectoryName, state.ForgetName})
+		if readErr != nil {
+			return state, readErr
+		}
+		forget, id, decodeErr := DecodeForgetIntent(bytes.NewReader(raw))
+		if decodeErr != nil || forgetPendingName(id) != state.ForgetName || forget.OperationID != operation ||
+			forget.OperationRootIdentity != handle.subtree.Identity().String() || forget.TargetRootIdentity != targetIdentity.String() ||
+			forget.RetentionIntentMarkerID != state.IntentID || forget.RetentionCompleteMarkerID != state.CompleteID ||
+			!sameRetentionIntent(forget.RetentionIntent, state.Intent) || forget.RetentionComplete != state.Complete {
+			return state, fmt.Errorf("%w: client activation forget pending marker is invalid", ErrIntegrity)
+		}
+		state.ForgetPending, state.ForgetIntent, state.ForgetID = true, forget, id
+	}
 	if err := confirmRetentionReadState(ctx, handle, state, seen); err != nil {
 		return state, err
 	}
@@ -177,6 +202,15 @@ func confirmRetentionReadState(ctx context.Context, handle *journalHandle, state
 					return verifyErr
 				}
 			}
+		}
+	}
+	if state.ForgetPending {
+		raw, _, encodeErr := EncodeForgetIntent(state.ForgetIntent)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if _, verifyErr := handle.verifyNamedBytes(ctx, []string{retentionDirectoryName, state.ForgetName}, raw); verifyErr != nil {
+			return verifyErr
 		}
 	}
 	return classifyJournalError(handle.subtree.CheckPaths(directoryPath))

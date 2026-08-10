@@ -27,6 +27,11 @@ const (
 	// recheck/start coordination state downstream of stopped-job adoption.
 	ClientActivateOperationDirectoryPrefix = ".ptctl-client-activate-"
 	clientActivateDirectoryPrefix          = ClientActivateOperationDirectoryPrefix
+	// ClientActivateForgetMarkerPrefix reserves the root-level, owner-private
+	// recovery marker used while one exact retained client-activation tombstone
+	// is being irreversibly forgotten.
+	ClientActivateForgetMarkerPrefix = ".ptctl-client-activate-forget-"
+	clientActivateForgetMarkerPrefix = ClientActivateForgetMarkerPrefix
 	// SourceRetireOperationDirectoryPrefix is reserved for the separately
 	// acknowledged, journaled removal of source names after client activation.
 	SourceRetireOperationDirectoryPrefix = ".ptctl-source-retire-"
@@ -48,7 +53,7 @@ const (
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
+	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {

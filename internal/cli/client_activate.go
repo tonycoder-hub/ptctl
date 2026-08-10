@@ -74,6 +74,8 @@ func (a *app) clientActivate(args []string) error {
 		return a.clientActivateStatus(args[1:])
 	case "prune":
 		return a.clientActivatePrune(args[1:])
+	case "forget":
+		return a.clientActivateForget(args[1:])
 	default:
 		return usageError("unknown client activate subcommand %q", args[0])
 	}
@@ -86,6 +88,7 @@ func (a *app) clientActivateHelp() {
   ptctl client activate resume [same selectors] --expect-activation-plan-id ID [--acknowledge-client-recheck --acknowledge-repeat-recheck] [--acknowledge-client-start --acknowledge-repeat-start] [--output table|json] OPERATION_ID
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
   ptctl client activate prune --target PATH --expect-activation-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl client activate forget --target PATH --expect-activation-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
 This workflow only targets one exact typed-infohash job established by a
 canonical stopped-adoption journal and a current exact materialized-final
@@ -102,6 +105,10 @@ effectful client POST. No source data is retired or deleted.
 Prune is local-only. It seals one terminal activation journal into an exact
 owner-private tombstone before deleting only that operation's original markers
 and empty scratch. The tombstone remains usable by source-retirement proof.
+Forget is a final, separately acknowledged local-only boundary. It publishes a
+root-level recovery intent, removes one exact retained activation tombstone,
+then removes that last intent. A repeated call can report only unattributed
+absence; it cannot claim idempotent historical success.
 `)
 }
 
@@ -383,6 +390,36 @@ func (a *app) clientActivatePrune(args []string) error {
 	return a.finishClientActivateRetention(*output, report, operationErr)
 }
 
+func (a *app) clientActivateForget(args []string) error {
+	fs := newFlagSet("client activate forget")
+	output := fs.String("output", "table", "table or json")
+	targetRoot := fs.String("target", "", "materialized target root")
+	expectedPlanID := fs.String("expect-activation-plan-id", "", "reviewed 24-hex client activation plan ID")
+	acknowledge := fs.Bool("acknowledge-historical-evidence-deletion", false, "acknowledge irreversible deletion of the retained activation tombstone and final historical attribution")
+	timeout := fs.Duration("timeout", time.Minute, "historical-evidence deletion wall-clock budget")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *targetRoot == "" {
+		return usageError("client activate forget requires --target, --expect-activation-plan-id, acknowledgement, and one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validMaterializePlanID(*expectedPlanID) || !*acknowledge {
+		return usageError("client activate forget requires canonical --expect-activation-plan-id and --acknowledge-historical-evidence-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("client activate forget --timeout must be in (0,1h]")
+	}
+	operationID, err := clientactivate.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("client activate forget requires a canonical OPERATION_ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := clientactivate.Forget(ctx, clientactivate.ForgetOptions{TargetRoot: *targetRoot, OperationID: operationID,
+		ExpectedPlanID: *expectedPlanID, Acknowledge: true, Limits: clientactivate.DefaultForgetLimits()})
+	return a.finishClientActivateForget(*output, report, operationErr)
+}
+
 func (a *app) clientActivateStatus(args []string) error {
 	fs := newFlagSet("client activate status")
 	output := fs.String("output", "table", "table or json")
@@ -442,6 +479,29 @@ func (a *app) finishClientActivateRetention(output string, report clientactivate
 		return &inconclusiveErr{message: "client activation retention is blocked; see report"}
 	}
 	return fmt.Errorf("client activation retention was interrupted; see report")
+}
+
+func (a *app) finishClientActivateForget(output string, report clientactivate.ForgetReport, operationErr error) error {
+	if output == "json" {
+		if err := writeJSON(a.stdout, report, nil); err != nil {
+			return err
+		}
+	} else if err := writeClientActivateForgetHuman(a.stdout, report); err != nil {
+		return err
+	}
+	if operationErr == nil && report.Outcome == clientactivate.ForgetOutcomeForgotten {
+		return nil
+	}
+	if report.Outcome == clientactivate.ForgetOutcomeIntegrityFailed {
+		return &integrityErr{message: "client activation historical evidence failed integrity validation; see report"}
+	}
+	if report.Outcome == clientactivate.ForgetOutcomeBlocked {
+		return &inconclusiveErr{message: "client activation historical-evidence deletion is blocked; see report"}
+	}
+	if report.Outcome == clientactivate.ForgetOutcomeAbsentUnattributed {
+		return fmt.Errorf("client activation historical evidence is absent without a remaining attribution marker; see report")
+	}
+	return fmt.Errorf("client activation historical-evidence deletion was interrupted or its durability is unconfirmed; see report")
 }
 
 func (a *app) writeClientActivateReport(output string, report clientactivate.Report) error {
@@ -516,6 +576,39 @@ func writeClientActivateRetentionHuman(out io.Writer, report clientactivate.Rete
 		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.PruneResumable,
 		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerTemporaryBytes,
 		report.Writes.MarkerPublications, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved)
+	fmt.Fprintln(w, "\nISSUES")
+	writeClientActivateFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	if len(report.Warnings) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
+}
+
+func writeClientActivateForgetHuman(out io.Writer, report clientactivate.ForgetReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nPHASE BEFORE\t%s\nPHASE AFTER\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseBefore), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeClientActivateFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / TARGET\nPLAN ID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nACTION\t%s\nEXPECTED ROOT IDENTITY\t%s\nOBSERVED ROOT IDENTITY\t%s\nROOT BOUND\t%t\nSTABILITY\t%s\n",
+		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(valueOrUnknown(report.Plan.ExpectedID)), report.Plan.Matches, terminalSafe(report.Plan.Action),
+		terminalSafe(valueOrUnknown(report.Target.ExpectedRootIdentity)), terminalSafe(valueOrUnknown(report.Target.ObservedRootIdentity)),
+		report.Target.RootIdentityBound, terminalSafe(report.Target.StabilityAssurance))
+	fmt.Fprintf(w, "\nAUTHORITY\nSTATE\t%s\nFORGET MARKER\t%s\nMARKER DURABLE\t%t\nRETENTION INTENT\t%s\nRETENTION COMPLETE\t%s\nEXACT TOMBSTONE EVIDENCE AVAILABLE\t%t\nTARGET HISTORICAL EVIDENCE ERASED\t%t\n",
+		terminalSafe(report.Authority.State), terminalSafe(valueOrUnknown(report.Authority.MarkerID)), report.Authority.MarkerDurable,
+		terminalSafe(valueOrUnknown(report.Authority.RetentionIntentMarkerID)), terminalSafe(valueOrUnknown(report.Authority.RetentionCompleteMarkerID)),
+		report.Authority.ExactTombstoneEvidenceAvailable, report.Authority.TargetHistoricalEvidenceErased)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nACTIVATION INTENT\t%s\nTERMINAL MARKER\t%s\nMARKERS RECORDED\t%d\nAUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(valueOrUnknown(report.Proof.IntentID)), terminalSafe(valueOrUnknown(report.Proof.TerminalMarkerID)),
+		report.Proof.MarkersRecorded, report.Proof.HistoricalAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nMARKER TEMPORARIES\t%d\nMARKER PUBLICATIONS\t%d\nAMBIGUOUS MARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\nMAX MARKER BYTES\t%d\n",
+		report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications, report.Writes.AmbiguousMarkerPublications, report.Writes.RemovalAttempts,
+		report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals, report.Limits.MaxMarkerBytes)
 	fmt.Fprintln(w, "\nISSUES")
 	writeClientActivateFindings(w, report.Issues)
 	fmt.Fprintln(w, "\nWARNINGS")

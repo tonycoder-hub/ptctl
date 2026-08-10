@@ -128,6 +128,11 @@ func createJournal(ctx context.Context, targetRoot string, plan Plan, planID str
 		return failSession(fmt.Errorf("%w: target root identity differs from the activation plan", ErrIntegrity))
 	}
 	operationID := OperationIDForPlan(planID)
+	if pending, inspectErr := inspectForgetControl(ctx, session, operationID, planID); inspectErr != nil {
+		return failSession(inspectErr)
+	} else if pending != nil {
+		return failSession(pending)
+	}
 	directoryName, err := operationDirectoryName(operationID)
 	if err != nil {
 		return failSession(err)
@@ -183,6 +188,13 @@ func openJournal(ctx context.Context, targetRoot string, operationID OperationID
 	if err != nil {
 		return nil, recovery, err
 	}
+	if pending, inspectErr := inspectForgetControl(ctx, session, operationID, ""); inspectErr != nil {
+		_ = session.Close()
+		return nil, recovery, inspectErr
+	} else if pending != nil {
+		_ = session.Close()
+		return nil, recovery, pending
+	}
 	directoryName, _ := operationDirectoryName(operationID)
 	object, err := session.InspectRoot(ctx, directoryName)
 	if errors.Is(err, fsbind.ErrNotFound) {
@@ -207,6 +219,10 @@ func openJournal(ctx context.Context, targetRoot string, operationID OperationID
 	if retentionErr != nil {
 		_ = handle.Close()
 		return nil, recovery, retentionErr
+	}
+	if retention.ForgetPending {
+		_ = handle.Close()
+		return nil, recovery, &forgetInProgressError{marker: retention.ForgetIntent, markerID: retention.ForgetID}
 	}
 	if retention.DirectoryPresent {
 		if retention.IntentID != "" {

@@ -143,6 +143,7 @@ Usage:
   ptctl client activate resume [same selectors] --expect-activation-plan-id ID [explicit acknowledgement flags] [--output table|json] OPERATION_ID
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
   ptctl client activate prune --target PATH --expect-activation-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl client activate forget --target PATH --expect-activation-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
   ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
@@ -1540,6 +1541,8 @@ func jsonKind(data any) string {
 		return "client.activation"
 	case clientactivate.RetentionReport:
 		return "client.activation.retention"
+	case clientactivate.ForgetReport:
+		return "client.activation.forget"
 	case sourceretire.Report:
 		return "content.source_retirement_plan"
 	case sourceretire.ExecutionReport:

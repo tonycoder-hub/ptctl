@@ -356,6 +356,23 @@ downstream activation-completion authority only through a fresh bound read;
 its public DTO and JSON round trip remain powerless and it does not establish
 current downloader state.
 
+Activation tombstone forgetting is a third, separately acknowledged local
+deletion authority. It accepts only one explicit full operation ID and its
+reviewed plan ID. The complete retained intent and completion are copied into a
+canonical, domain-separated root recovery intent before any retained marker is
+removed. The marker name is deterministic from the operation ID, the file is
+owner-private, publication is no-clobber, and its payload is bound to the exact
+target-root and operation identities. Staged intent, root intent, partial marker
+deletion, empty-directory removal, operation-root removal, and final-marker
+removal are all fail-closed recovery boundaries. Ordinary status does not sync;
+resume, completion proof, and prune stop before credential or network access.
+The authority cannot remove content, source names, client jobs, another
+operation, or any unexpected object. Once the last marker is durably absent,
+success attribution is intentionally gone and subsequent absence is reported
+as unattributed rather than idempotently successful. This storage transition
+cannot revoke an opaque process-local completion capability already issued to a
+concurrent caller before forgetting began.
+
 Source-retirement planning is a separate read-only boundary. It accepts a
 downloader password only from stdin but accepts no mutation acknowledgement and
 always reports zero writes, zero deletion, and `deletion_authority: none`. Eligibility requires a
@@ -709,11 +726,11 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- activation/adoption-tombstone forgetting and broader quota/age policy
+- adoption-tombstone forgetting and broader quota/age policy
   (materialize, adoption, activation, and source-retirement heavy state have
-  exact explicit pruning; materialize and source-retirement tombstones also
-  have separately acknowledged forget transitions; no operation is selected
-  automatically by policy);
+  exact explicit pruning; materialize, activation, and source-retirement
+  tombstones also have separately acknowledged forget transitions; no
+  operation is selected automatically by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal
