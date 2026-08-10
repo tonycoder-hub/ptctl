@@ -207,7 +207,8 @@ This slice does not:
 - implement quotas, background garbage collection, or cross-filesystem trash;
 - weaken the no-delete semantics of `abandon`.
 
-Deleting retained tombstones, executing a reviewed source-retirement plan, and
-downloader coordination need separate explicit authorities and recovery
-stories. The zero-write `seed retire plan` evidence slice does not change this
-retention operation's scope.
+Deleting retained tombstones and broader downloader coordination still need
+separate explicit authorities and recovery stories. `seed retire run|resume`
+now implements its own target-root-local, per-name source-retirement journal;
+that independent acknowledgement and operation do not broaden this retention
+operation's scope or authorize it to touch source content.

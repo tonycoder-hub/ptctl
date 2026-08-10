@@ -321,10 +321,49 @@ references; explicit path disclosure does not change the plan ID. The result
 does not cover empty files, padding, directories, symlink targets, cleanup, or
 unlink semantics. Unselected hardlink or alias names may remain, and no space
 reclamation is claimed. The qB effective paths are parsed only as remote lexical
-claims and are never passed to host filesystem APIs. A future deletion must
-repeat the unique typed-job and effective per-file path bracket against the
-current final. The plan is non-atomic review evidence, not a promise that a
-later delete is safe.
+claims and are never passed to host filesystem APIs. The plan is non-atomic
+review evidence, not a promise that a later delete is safe.
+
+Source-retirement execution is a distinct irreversible boundary. `run` and
+`resume` require `--acknowledge-source-deletion`, a full reviewed SHA-256 plan
+ID, the same metafile/final/activation/mapping/client selectors, and explicit
+source roots. `run` repeats the complete source/final/client proof and compares
+the fresh plan ID before its first write. It ignores any path-disclosure request
+and never parses plan JSON as authority. `resume` first validates the explicit
+private journal, root scope, and all local authorities before password stdin or
+network access. Status reads only one explicit journal and never reads source
+roots or credentials.
+
+The target-root-local operation subtree is protected by the same bound-root,
+owner-private, no-follow journal primitives as materialization, with its own
+reserved prefix. Its intent is canonical, size-bounded, and private because it
+contains exact absolute source parents/names. Any component reserved for ptctl
+materialize, adoption, activation, or retirement control state is ineligible
+as source content. Every public path is instead a domain-separated pseudonymous
+reference. The implementation pre-encodes the
+intent and all fixed marker shapes before creating the subtree, so an
+undersized protocol budget cannot leave predictable initialization debris.
+Operation/journal/scratch namespaces are bounded and exact; duplicate keys,
+unknown fields, trailing data, invalid identities, unsafe objects, replacement
+of a bound parent/root/name, and marker disagreement are integrity failures.
+
+For each selected ordinary content-bearing name, a canonical durable attempt
+marker precedes the unlink. The unlink is relative to a bound direct-parent
+handle and requires the exact reviewed name, identity, regular type, and size;
+links/reparse points and directories are never followed or removed. Parent
+directory durability is separate from observed absence. A completion marker is
+published only after absence is observed. After a crash, absence is recoverable
+only if the durable attempt already exists; otherwise it is unexplained loss
+and fails integrity. An ambiguous unlink or durability failure retains its
+attempt/receipt and returns partial rather than retrying blindly.
+
+After all names, the exact materialized final is reverified and the same
+authenticated downloader session reobserves the exact typed job/effective
+layout before the terminal marker. These brackets do not freeze a remote client
+or filesystem after the last check. No operation removes a source parent,
+empty/padding entry, unselected hardlink name, final, client job, or private
+metafile. No outcome promises block reclamation, cleanup, rollback, or the
+absence of an out-of-band writer.
 
 All usage, metafile, current-final, terminal-activation, mapping, endpoint, and
 live-source discovery/preflight failures are handled before password stdin and
@@ -577,9 +616,9 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal
   job disappears, and client-side private-variant observability;
-- journaled source deletion with fresh expected-plan reproduction, bound
-  no-follow per-name unlink, partial-success receipts, and crash recovery; the
-  implemented source-retirement plan is zero-write evidence only;
+- source-parent directory cleanup, block-reclamation accounting, and explicit
+  retirement of unselected aliases; journaled retirement intentionally removes
+  only the reviewed regular-file names;
 - current-filesystem completeness tokens or journal-backed incremental index
   invalidation; the existing sealed snapshot is candidate-only;
 - encryption-at-rest or an audited external-key design for private metafile
@@ -587,8 +626,9 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - per-account cross-process site rate-limit coordination;
 - signed releases, SBOM, and build provenance.
 
-No broader deletion or downloader mutation beyond exact stopped-add and
-reviewed recheck/start slices,
+No broader deletion or downloader mutation beyond exact private operation-state
+pruning, acknowledged source-name retirement, exact stopped-add, and reviewed
+recheck/start slices,
 tracker write, or broader content strategy should be added until the relevant
 gap has a testable control and a failure-recovery story. The private metafile
 store grants no authority over seeded content, a materialize acknowledgement

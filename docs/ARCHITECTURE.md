@@ -682,20 +682,22 @@ It also remains filesystem-read-only: canonical marker presence is reported,
 but directory durability is refreshed only by effectful resume before client
 I/O.
 
-The adoption slice never mutates an existing job, changes its location, starts
-a recheck, resumes or pauses transfer, removes a job, deletes a source, or
-claims source retirement. Existing-job recheck/start and read-only source
-retirement eligibility are separate downstream slices; mutation and deletion
-remain future work:
+The adoption slice itself never mutates an existing job, changes its location,
+starts a recheck, resumes or pauses transfer, removes a job, deletes a source,
+or claims source retirement. Existing-job recheck/start and source retirement
+remain separate downstream authorities with their own journals and
+acknowledgements:
 
 ```text
 explicit client recheck -> bracket result -> optional controlled start
 explicit location change -> current per-file proof -> bracket result
-source-retirement eligibility proof -> separate future deletion authority
+source-retirement eligibility proof -> separately acknowledged per-name journal
 ```
 
-They must support explicit resume, preserve the no-overwrite defaults, and
-never infer source retirement from materialization or stopped-job adoption.
+The implemented activation and retirement paths support explicit resume,
+preserve no-overwrite/no-implicit-selection defaults, and never infer source
+retirement from materialization or stopped-job adoption. Location change and
+job removal remain unimplemented.
 Reflink may eventually be safer than hardlink because a client repair through
 a shared inode can corrupt a media library, but the implemented filesystem
 strategy remains copy only.
@@ -765,9 +767,9 @@ chooses only an explicit operation ID, performs no network request or sync, and
 does not upgrade historical marker presence into current client or durability
 evidence.
 
-## Read-only source-retirement eligibility
+## Source-retirement review and execution
 
-`seed retire plan` closes only the evidence-planning half of source retirement.
+`seed retire plan` is the zero-write evidence half of source retirement.
 It consumes the exact metafile, one complete live
 `seed.Discover` result with its opaque `VerifiedSource`, a current
 `materialize.VerifiedFinal`, and a `clientactivate.VerifiedCompletion` read from
@@ -803,15 +805,61 @@ files and padding have no source deletion candidate; directories are never
 listed. Search roots that include the final normally make discovery ambiguous;
 if the final itself is uniquely selected, the overlap check blocks it.
 
-This is intentionally not an executable serialized plan. Source proof remains
+The serialized plan is intentionally not executable. Source proof remains
 same-invocation and bracketed, client completion is historical, and current
 client state/path evidence is a bounded, bracketed, non-atomic lexical claim.
 It does not prove a remote open inode, raw private variant, or state after the
-last read. A deletion slice will require a new live source/final proof, repeat
-the unique typed-job and effective-file-path observations, an exact expected plan ID, a separate
-deletion acknowledgement, bound no-follow unlink primitives, per-name journal
-receipts, crash recovery, and explicit treatment of partial success. None of
-those authorities are granted here.
+last read. None of those authorities are granted by planning.
+
+`seed retire run` supplies the separate mutation boundary. It accepts the same
+selectors, a full expected review-plan ID, and
+`--acknowledge-source-deletion`. It rebuilds the review with process-local
+source/final/client authority and compares the ID before creating any operation
+state. A deterministic but explicitly reported operation ID selects an
+owner-private `.ptctl-source-retire-<digest>` subtree under the already bound
+materialized target root. Resume and status accept only that full ID; neither
+enumerates or selects a latest operation.
+
+```text
+same-call eligible review + exact expected plan ID + deletion acknowledgement
+  -> bind each source's direct parent and exact ordinary regular-file name
+  -> preflight canonical intent/attempt/completion marker budgets
+  -> durable private intent (absolute source paths remain private)
+  -> for each selected content-bearing name:
+       durable deletion-attempt marker
+       identity + size reobservation
+       no-follow unlink of that one name
+       parent-directory durability observation
+       durable deletion-completion marker
+  -> exact published-final reverify
+  -> same-session live client-use reobservation
+  -> durable operation-completion marker
+```
+
+The durable intent binds the exact plan, normalized search-root scope,
+materialized target/final identities, activation completion, live-use ID,
+source selection, limits, and for every source its parent/name, parent and file
+identity, size, timestamp observation, manifest index, and pseudonymous path
+reference. Absolute paths never enter the public execution DTO. The source
+parents are rebound through filesystem handles on resume; qBittorrent paths
+remain lexical claims and are never used for host I/O.
+
+An absent name is accepted only when its durable attempt marker already
+exists. That crash window produces a recovered completion basis, not a claim
+that the previous process observed unlink success. Absence before an attempt,
+name/identity replacement, parent/root replacement, corrupt/noncanonical
+markers, or disagreement with final/client authority fails closed. Partial
+success is not rolled back: already completed names remain absent and the
+report returns the explicit resumable operation. Status is read-only historical
+journal evidence; it never proves a retired name is still absent. Terminal
+resume rebinds local selectors and confirms the exact names remain absent but
+does not read a password or contact the client.
+
+The remover deliberately does not delete directories, final content, empty or
+padding entries, other hardlink/alias names, or downloader jobs. A successful
+unlink therefore does not prove reclaimed blocks. Source deletion, final
+verification, and client observation are bracketed non-atomic facts rather
+than one frozen cross-system transaction.
 
 ## Plugin direction
 

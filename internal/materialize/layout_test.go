@@ -131,7 +131,7 @@ func TestBuildLayoutRejectsUnicodeSimpleFoldCollisionOnWindows(t *testing.T) {
 }
 
 func TestBuildLayoutReservesEveryControlPrefix(t *testing.T) {
-	for _, prefix := range []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix} {
+	for _, prefix := range []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix} {
 		name := prefix + "content"
 		if runtime.GOOS == "windows" {
 			name = strings.ToUpper(name)

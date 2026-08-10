@@ -44,6 +44,12 @@ func platformInspectObject(*Session, *boundDirectory, string) (*os.File, rawIden
 func platformInspectRootObject(*Session, string) (*os.File, rawIdentity, ObjectKind, error) {
 	return nil, rawIdentity{}, "", ErrUnsupported
 }
+func platformOpenRootRegular(*Session, string, bool) (*os.File, rawIdentity, error) {
+	return nil, rawIdentity{}, ErrUnsupported
+}
+func platformRemoveRootRegular(*Session, string, rawIdentity, int64) (bool, bool, rawIdentity, error) {
+	return false, false, rawIdentity{}, ErrUnsupported
+}
 func platformAcquireOperationLock(*Session, *boundDirectory, bool) (*os.File, rawIdentity, error) {
 	return nil, rawIdentity{}, ErrUnsupported
 }

@@ -1,7 +1,8 @@
 // Package fsbind provides a small, fail-closed filesystem boundary for
-// journaled target materialization. It binds an existing reviewed filesystem
-// root, permits mutations only beneath an exclusively locked private operation
-// subtree, and publishes one top-level file or directory without replacement.
+// journaled filesystem operations. It binds an existing reviewed filesystem
+// root, permits private operation-state mutations beneath an exclusively
+// locked subtree, publishes without replacement, and can remove one explicitly
+// identity-bound regular-file name from a separately bound parent directory.
 package fsbind
 
 import (
@@ -1023,6 +1024,118 @@ func (session *Session) InspectRoot(ctx context.Context, name string) (ObjectInf
 		return ObjectInfo{}, err
 	}
 	return result, nil
+}
+
+// InspectRootRegular observes one ordinary regular-file name immediately
+// beneath the bound root. Unlike private operation-state methods, it does not
+// require owner-only mode or a single link. The returned identity is only an
+// observation; RemoveRootRegularExact must receive it again before unlinking.
+func (session *Session) InspectRootRegular(ctx context.Context, name string) (ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return ObjectInfo{}, err
+	}
+	if validateSingleComponent(name) != nil {
+		return ObjectInfo{}, ErrInvalidPath
+	}
+	if err := session.check("before_root_regular_inspect"); err != nil {
+		return ObjectInfo{}, err
+	}
+	native, raw, err := platformOpenRootRegular(session, name, false)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	info, infoErr := native.Stat()
+	closeErr := native.Close()
+	if infoErr != nil || closeErr != nil || !info.Mode().IsRegular() {
+		return ObjectInfo{}, ErrUnsafeObject
+	}
+	if err := session.check("after_root_regular_inspect"); err != nil {
+		return ObjectInfo{}, err
+	}
+	return ObjectInfo{Identity: identityFromRaw(raw), Kind: ObjectKindRegular, SizeBytes: info.Size()}, nil
+}
+
+// OpenRootRegular opens one ordinary regular-file name without following a
+// link or reparse point. Callers must close the returned handle before any
+// removal attempt; an open bound handle deliberately blocks removal.
+func (session *Session) OpenRootRegular(ctx context.Context, name string) (*File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if validateSingleComponent(name) != nil {
+		return nil, ErrInvalidPath
+	}
+	if err := session.check("before_root_regular_open"); err != nil {
+		return nil, err
+	}
+	native, raw, err := platformOpenRootRegular(session, name, false)
+	if err != nil {
+		return nil, err
+	}
+	file, err := session.wrapFile(native, raw, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := session.check("after_root_regular_open"); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+// RemoveRootRegularExact removes exactly one ordinary regular-file name from
+// the bound root. It verifies the previously observed identity and size, never
+// follows links, never removes a directory, and fsyncs the parent after a
+// visible unlink. An absent name is not treated as a successful first attempt;
+// recovery policy belongs to the caller's durable journal.
+func (session *Session) RemoveRootRegularExact(ctx context.Context, name string, expected Identity, expectedSize int64) (Removal, error) {
+	receipt := Removal{Durability: durabilityNotPublished, Kind: ObjectKindRegular}
+	if err := ctx.Err(); err != nil {
+		return receipt, err
+	}
+	if validateSingleComponent(name) != nil || expected.IsZero() || expectedSize < 0 {
+		return receipt, ErrInvalidPath
+	}
+	if err := session.check("before_root_regular_remove"); err != nil {
+		return receipt, err
+	}
+	probe, raw, err := platformOpenRootRegular(session, name, true)
+	if err != nil {
+		return receipt, err
+	}
+	info, infoErr := probe.Stat()
+	closeErr := probe.Close()
+	if infoErr != nil || closeErr != nil || !info.Mode().IsRegular() || info.Size() != expectedSize ||
+		!identityFromRaw(raw).Equal(expected) {
+		return receipt, ErrUnsafeObject
+	}
+	receipt.Identity, receipt.SizeBytes = expected, expectedSize
+	if session.hasOpenIdentity(raw) {
+		return receipt, fmt.Errorf("remove bound root regular: handle remains open")
+	}
+	receipt.Attempted = true
+	removed, durable, removedRaw, removeErr := platformRemoveRootRegular(session, name, raw, expectedSize)
+	if removed {
+		receipt.Removed = true
+		receipt.Durability = durabilityUnconfirmed
+		if durable {
+			receipt.Durability = durabilityConfirmed
+		}
+		if removedRaw != (rawIdentity{}) && removedRaw != raw {
+			removeErr = errors.Join(removeErr, ErrRemovalAmbiguous)
+		}
+	}
+	if removeErr == nil && !removed {
+		removeErr = ErrRemovalAmbiguous
+	}
+	bindingErr := session.check("after_root_regular_remove")
+	if removeErr != nil && bindingErr != nil {
+		return receipt, errors.Join(removeErr, bindingErr)
+	}
+	if removeErr != nil {
+		return receipt, removeErr
+	}
+	return receipt, bindingErr
 }
 
 func listBoundDirectory(ctx context.Context, session *Session, directory *boundDirectory, limits ListLimits, afterStage string) (ListResult, error) {

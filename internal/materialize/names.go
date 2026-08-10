@@ -25,19 +25,23 @@ const (
 	// recheck/start coordination state downstream of stopped-job adoption.
 	ClientActivateOperationDirectoryPrefix = ".ptctl-client-activate-"
 	clientActivateDirectoryPrefix          = ClientActivateOperationDirectoryPrefix
-	intentFileName                         = "intent.json"
-	journalDirectoryName                   = "journal"
-	stageDirectoryName                     = "stage"
-	scratchDirectoryName                   = "scratch"
-	retentionDirectoryName                 = "retention"
-	retentionIntentFileName                = "intent.json"
-	retentionCompleteName                  = "complete.json"
-	eventFilePrefix                        = "event-"
-	eventFileSuffix                        = ".json"
+	// SourceRetireOperationDirectoryPrefix is reserved for the separately
+	// acknowledged, journaled removal of source names after client activation.
+	SourceRetireOperationDirectoryPrefix = ".ptctl-source-retire-"
+	sourceRetireDirectoryPrefix          = SourceRetireOperationDirectoryPrefix
+	intentFileName                       = "intent.json"
+	journalDirectoryName                 = "journal"
+	stageDirectoryName                   = "stage"
+	scratchDirectoryName                 = "scratch"
+	retentionDirectoryName               = "retention"
+	retentionIntentFileName              = "intent.json"
+	retentionCompleteName                = "complete.json"
+	eventFilePrefix                      = "event-"
+	eventFileSuffix                      = ".json"
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix}
+	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
@@ -49,6 +53,12 @@ func hasReservedControlPrefix(name string) bool {
 	}
 	return false
 }
+
+// IsReservedControlName reports whether one lexical path component belongs to
+// a ptctl operation namespace. Callers that can delete user-selected content
+// use this to ensure a source path can never be reinterpreted as private
+// materialize, adoption, activation, or retirement control state.
+func IsReservedControlName(name string) bool { return hasReservedControlPrefix(name) }
 
 func OperationDirectoryName(id OperationID) (string, error) {
 	parsed, err := ParseOperationID(id.String())

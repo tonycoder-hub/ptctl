@@ -3,11 +3,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
+	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/sourceretire"
 )
 
@@ -15,6 +18,12 @@ type sourceRetireJSONEnvelope struct {
 	Schema string              `json:"schema"`
 	Kind   string              `json:"kind"`
 	Data   sourceretire.Report `json:"data"`
+}
+
+type sourceRetireExecutionJSONEnvelope struct {
+	Schema string                       `json:"schema"`
+	Kind   string                       `json:"kind"`
+	Data   sourceretire.ExecutionReport `json:"data"`
 }
 
 func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
@@ -177,6 +186,28 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 		t.Fatalf("mapping mismatch code=%d read=%t stdout=%q stderr=%q", code, mismatchReader.read, out.String(), errOut.String())
 	}
 
+	// A selected source under any ptctl control prefix is a local policy
+	// conflict, so it must be reported before credential or client I/O.
+	reservedSource := filepath.Join(fixture.materialize.sourceRoot, materialize.SourceRetireOperationDirectoryPrefix+"payload")
+	if err := os.Rename(fixture.materialize.sourcePath, reservedSource); err != nil {
+		t.Fatal(err)
+	}
+	reservedReader := &trackingReader{}
+	requestsBeforeReserved := server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(args, reservedReader, &out, &errOut); code != 0 || reservedReader.read || server.totalRequests() != requestsBeforeReserved {
+		t.Fatalf("reserved source code=%d read=%t requests=%d stdout=%q stderr=%q", code, reservedReader.read,
+			server.totalRequests()-requestsBeforeReserved, out.String(), errOut.String())
+	}
+	reserved := decodeSourceRetireReport(t, out.Bytes())
+	if reserved.Data.Outcome != sourceretire.OutcomeBlocked || !sourceRetireFinding(reserved.Data.Blockers, "source.control_namespace_reserved") {
+		t.Fatalf("reserved source was not blocked locally: %s", out.String())
+	}
+	if err := os.Rename(reservedSource, fixture.materialize.sourcePath); err != nil {
+		t.Fatal(err)
+	}
+
 	// A transport failure is a complete, privacy-safe report with the adapter's
 	// exact attempted-request count. It does not retry or become a fatal default
 	// exit merely because --require-eligible was not requested.
@@ -214,6 +245,137 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	}
 }
 
+func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newClientActivateServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+
+	baseAdopt := clientAdoptBaseArgs(fixture, server.server.URL)
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, baseAdopt...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adoptionPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	adoptionRun := append(append([]string{"client", "adopt", "run"}, baseAdopt...),
+		"--expect-adoption-plan-id", adoptionPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(adoptionRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+
+	baseActivation := clientActivateBaseArgs(fixture, server.server.URL, adopted.Data.Operation.ID, adopted.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "activate", "plan"}, baseActivation...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	activationPlan := decodeClientActivateReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	activationRun := append(append([]string{"client", "activate", "run"}, baseActivation...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, "--acknowledge-client-recheck")
+	if code := Run(activationRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	server.setState("stoppedUP", 1)
+	out.Reset()
+	errOut.Reset()
+	activationResume := append(append([]string{"client", "activate", "resume"}, baseActivation...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, activationPlan.Data.Operation.ID)
+	if code := Run(activationResume, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+
+	planArgs := sourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(planArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	plan := decodeSourceRetireReport(t, out.Bytes())
+
+	missingAck := append([]string(nil), planArgs...)
+	missingAck[2] = "run"
+	missingAck = append(missingAck, "--expect-plan-id", plan.Data.Plan.ID)
+	reader := &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	requestsBefore := server.totalRequests()
+	if code := Run(missingAck, reader, &out, &errOut); code != 2 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("missing ack code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(fixture.materialize.sourcePath); err != nil {
+		t.Fatalf("missing ack changed source: %v", err)
+	}
+
+	runArgs := append(append([]string(nil), missingAck...), "--acknowledge-source-deletion")
+	out.Reset()
+	errOut.Reset()
+	requestsBefore = server.totalRequests()
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retire run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	execution := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if execution.Schema != "ptctl.dev/v1" || execution.Kind != "content.source_retirement" ||
+		execution.Data.Outcome != sourceretire.ExecutionOutcomeRetired || !execution.Data.DeletionPerformed ||
+		execution.Data.Writes.NamesRemoved != 1 || execution.Data.Operation.Resumable ||
+		server.totalRequests()-requestsBefore != 4 {
+		t.Fatalf("unexpected execution report: %s", out.String())
+	}
+	if _, err := os.Lstat(fixture.materialize.sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("retired source remains: %v", err)
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	statusArgs := []string{"seed", "retire", "status", "--target", fixture.materialize.targetRoot, "--output", "json", execution.Data.Operation.ID}
+	if code := Run(statusArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("status code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	status := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if status.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || status.Data.Operation.Status != "historical_complete" || status.Data.WritesPerformed != 0 {
+		t.Fatalf("unexpected status: %s", out.String())
+	}
+
+	resumeArgs := append([]string(nil), runArgs...)
+	resumeArgs[2] = "resume"
+	resumeArgs = append(resumeArgs, execution.Data.Operation.ID)
+	mismatchedResume := append([]string(nil), resumeArgs...)
+	for index := 0; index < len(mismatchedResume)-1; index++ {
+		if mismatchedResume[index] == "--expect-plan-id" {
+			mismatchedResume[index+1] = "sha256:" + strings.Repeat("a", 64)
+			break
+		}
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(mismatchedResume, reader, &out, &errOut); code != 4 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("mismatched resume code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	mismatch := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if mismatch.Data.Outcome != sourceretire.ExecutionOutcomeBlocked || mismatch.Data.WritesPerformed != 0 {
+		t.Fatalf("mismatched resume was not blocked: %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(resumeArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("terminal resume code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	resumed := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if resumed.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || resumed.Data.WritesPerformed != 0 {
+		t.Fatalf("terminal resume was not idempotent: %s", out.String())
+	}
+}
+
 func sourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOperation, activationPlanID string) []string {
 	return []string{"seed", "retire", "plan", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
 		"--search-root", fixture.materialize.sourceRoot, "--target", fixture.materialize.targetRoot,
@@ -229,6 +391,15 @@ func decodeSourceRetireReport(t *testing.T, raw []byte) sourceRetireJSONEnvelope
 	var result sourceRetireJSONEnvelope
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatalf("decode source retirement report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireExecutionReport(t *testing.T, raw []byte) sourceRetireExecutionJSONEnvelope {
+	t.Helper()
+	var result sourceRetireExecutionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement execution report: %v\n%s", err, raw)
 	}
 	return result
 }

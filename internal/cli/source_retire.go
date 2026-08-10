@@ -73,6 +73,12 @@ func (a *app) seedRetire(args []string) error {
 		return nil
 	case "plan":
 		return a.seedRetirePlan(args[1:])
+	case "run":
+		return a.seedRetireRun(args[1:])
+	case "resume":
+		return a.seedRetireResume(args[1:])
+	case "status":
+		return a.seedRetireStatus(args[1:])
 	default:
 		return usageError("unknown seed retire subcommand %q", args[0])
 	}
@@ -81,6 +87,9 @@ func (a *app) seedRetire(args []string) error {
 func (a *app) seedRetireHelp() {
 	fmt.Fprint(a.stdout, `Usage:
   ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [flags]
+  ptctl seed retire run (same live selectors) --expect-plan-id ID --acknowledge-source-deletion [flags]
+  ptctl seed retire resume (same local/live selectors) --expect-plan-id ID --acknowledge-source-deletion [flags] OPERATION_ID
+  ptctl seed retire status --target PATH [--output table|json] OPERATION_ID
 
 The plan command is read-only. It requires one complete live source discovery,
 a current exact materialized-final proof, one canonical terminal client
@@ -88,6 +97,12 @@ activation journal, and stable before/after observations of the exact live
 qBittorrent job in one authenticated read session. It emits only an eligibility
 plan: deletion_authority is always none, it performs zero writes, no file or
 directory is removed, and serialized JSON is never accepted later as proof.
+
+Run repeats the complete live review and must reproduce an explicitly reviewed
+plan ID before creating its private target-root journal. Each exact source name
+gets a durable attempt marker before identity-bound removal and a completion
+marker afterward. Resume accepts only an explicit operation and repeats local
+and live proof. Status is journal-only and makes no current presence claim.
 
 The live-client bracket performs one login plus two bounded job-ledger reads;
 multi-file torrents add at most two bounded file-ledger reads. There are no
@@ -101,8 +116,9 @@ directories, and broader cleanup remain out of scope.
 `)
 }
 
-func addSourceRetireFlags(fs *flag.FlagSet) *sourceRetireFlags {
+func addSourceRetireFlags(fs *flag.FlagSet, planning bool) *sourceRetireFlags {
 	values := &sourceRetireFlags{}
+	showAbsolute, requireEligible := false, false
 	values.output = fs.String("output", "table", "table or json")
 	values.torrentPath = fs.String("torrent", "", "metafile path")
 	values.storeRoot = fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
@@ -120,9 +136,13 @@ func addSourceRetireFlags(fs *flag.FlagSet) *sourceRetireFlags {
 	values.endpoint = fs.String("url", "", "qBittorrent Web API origin")
 	values.username = fs.String("username", "", "qBittorrent username")
 	values.passwordStdin = fs.Bool("password-stdin", false, "read downloader password from stdin")
-	values.showAbsolute = fs.Bool("show-absolute-paths", false, "include selected absolute source paths in output")
+	values.showAbsolute = &showAbsolute
 	values.allowNetwork = fs.Bool("allow-network", false, "allow explicit network/UNC source roots; never applies to target")
-	values.requireEligible = fs.Bool("require-eligible", false, "exit 4 after the report unless outcome is eligible_for_separate_review")
+	values.requireEligible = &requireEligible
+	if planning {
+		values.showAbsolute = fs.Bool("show-absolute-paths", false, "include selected absolute source paths in output")
+		values.requireEligible = fs.Bool("require-eligible", false, "exit 4 after the report unless outcome is eligible_for_separate_review")
+	}
 	values.timeout = fs.Duration("timeout", sourceRetireDefaultTimeout, "shared final, journal, discovery, and proof wall-clock budget")
 
 	inventory := storage.DefaultInventoryLimits()
@@ -162,15 +182,15 @@ type preparedSourceRetire struct {
 	discovery            seed.DiscoverOptions
 }
 
-func (values *sourceRetireFlags) validate(fs *flag.FlagSet) (preparedSourceRetire, error) {
+func (values *sourceRetireFlags) validate(fs *flag.FlagSet, command string) (preparedSourceRetire, error) {
 	var result preparedSourceRetire
 	if len(values.searchRoots) == 0 || *values.targetRoot == "" || *values.materializeOperation == "" ||
 		*values.materializePlanID == "" || *values.activationOperation == "" || *values.activationPlanID == "" ||
 		*values.hostRoot == "" || *values.clientRoot == "" || *values.endpoint == "" || *values.username == "" {
-		return result, usageError("seed retire plan requires every source, materialize, activation, mapping, and downloader selector")
+		return result, usageError("%s requires every source, materialize, activation, mapping, and downloader selector", command)
 	}
 	if !*values.passwordStdin {
-		return result, usageError("seed retire plan requires --password-stdin")
+		return result, usageError("%s requires --password-stdin", command)
 	}
 	if *values.driver != "qbittorrent" {
 		return result, usageError("--driver currently supports only qbittorrent")
@@ -180,7 +200,7 @@ func (values *sourceRetireFlags) validate(fs *flag.FlagSet) (preparedSourceRetir
 	}
 	for _, root := range values.searchRoots {
 		if root == "" {
-			return result, usageError("seed retire plan requires every --search-root to be non-empty")
+			return result, usageError("%s requires every --search-root to be non-empty", command)
 		}
 	}
 	if err := validateOutput(*values.output); err != nil {
@@ -191,45 +211,45 @@ func (values *sourceRetireFlags) validate(fs *flag.FlagSet) (preparedSourceRetir
 	}
 	materializeOperation, err := materialize.ParseOperationID(*values.materializeOperation)
 	if err != nil || !validMaterializePlanID(*values.materializePlanID) {
-		return result, usageError("seed retire plan requires canonical materialize operation and plan IDs")
+		return result, usageError("%s requires canonical materialize operation and plan IDs", command)
 	}
 	activationOperation, err := clientactivate.ParseOperationID(*values.activationOperation)
 	if err != nil || !validMaterializePlanID(*values.activationPlanID) {
-		return result, usageError("seed retire plan requires canonical activation operation and plan IDs")
+		return result, usageError("%s requires canonical activation operation and plan IDs", command)
 	}
-	input, err := flaggedMetafileInput("seed retire plan", *values.torrentPath, *values.storeRoot, *values.variantID,
+	input, err := flaggedMetafileInput(command, *values.torrentPath, *values.storeRoot, *values.variantID,
 		flagWasSet(fs, "torrent"), flagWasSet(fs, "metafile-store"), flagWasSet(fs, "metafile-variant"))
 	if err != nil {
 		return result, err
 	}
 	clientWindows := *values.clientStyle == "windows"
 	if err := storage.ValidatePathMappingConfig(*values.hostRoot, *values.clientRoot, clientWindows); err != nil {
-		return result, usageError("seed retire plan path mapping is invalid: %v", err)
+		return result, usageError("%s path mapping is invalid: %v", command, err)
 	}
 	adapter, err := qbittorrent.New(*values.endpoint)
 	if err != nil {
-		return result, usageError("seed retire plan downloader endpoint is invalid")
+		return result, usageError("%s downloader endpoint is invalid", command)
 	}
 	clientConfigID, err := adapter.ClientConfigID(*values.username)
 	if err != nil {
-		return result, usageError("seed retire plan downloader configuration is invalid")
+		return result, usageError("%s downloader configuration is invalid", command)
 	}
 	inventory := storage.DefaultInventoryLimits()
 	inventory.MaxDepth, inventory.MaxDirectories = *values.maxDepth, *values.maxDirectories
 	inventory.MaxEntries, inventory.MaxEntriesPerDirectory = *values.maxEntries, *values.maxDirectoryEntries
 	inventory.MaxCandidates, inventory.MaxPathBytes = *values.maxCandidates, *values.maxPathBytes
 	if err := inventory.Validate(); err != nil {
-		return result, usageError("seed retire plan discovery limits are invalid: %v", err)
+		return result, usageError("%s discovery limits are invalid: %v", command, err)
 	}
 	if len(values.searchRoots) > inventory.MaxRoots {
-		return result, usageError("seed retire plan accepts at most %d --search-root values", inventory.MaxRoots)
+		return result, usageError("%s accepts at most %d --search-root values", command, inventory.MaxRoots)
 	}
 	match := metafile.DefaultSourceMatchLimits()
 	match.MaxCandidatesPerFile, match.MaxCandidateEdges = *values.maxCandidatesPerFile, *values.maxCandidateEdges
 	match.MaxStates, match.MaxVerifiedLayouts = *values.maxStates, *values.maxVerifiedLayouts
 	match.MaxProofWorkBytes = *values.maxProofBytes
 	if err := match.Validate(); err != nil {
-		return result, usageError("seed retire plan proof limits are invalid: %v", err)
+		return result, usageError("%s proof limits are invalid: %v", command, err)
 	}
 	return preparedSourceRetire{input: input, output: *values.output, targetRoot: *values.targetRoot,
 		materializeOperation: materializeOperation, materializePlanID: *values.materializePlanID,
@@ -255,7 +275,7 @@ func (a *app) seedRetirePlan(args []string) error {
 		fmt.Fprintln(fs.Output(), "Flags:")
 		fs.PrintDefaults()
 	}
-	values := addSourceRetireFlags(fs)
+	values := addSourceRetireFlags(fs, true)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(a.stdout, flagOutput.String())
@@ -270,7 +290,7 @@ func (a *app) seedRetirePlan(args []string) error {
 	if fs.NArg() != 0 {
 		return usageError("seed retire plan accepts flags only")
 	}
-	prepared, err := values.validate(fs)
+	prepared, err := values.validate(fs, "seed retire plan")
 	if err != nil {
 		return err
 	}
@@ -375,7 +395,7 @@ func sourceRetireNeedsClientSession(meta *metafile.MetaInfo, discovery seed.Disc
 		}
 		precondition, preconditionErr := source.SourcePrecondition(binding.FileIndex)
 		cleanSource := filepath.Clean(binding.Path)
-		if preconditionErr != nil || precondition.SizeBytes != manifestFile.Length {
+		if preconditionErr != nil || precondition.SizeBytes != manifestFile.Length || sourceRetireControlPath(cleanSource) {
 			return false
 		}
 		if _, duplicate := seenPaths[cleanSource]; duplicate {
@@ -389,11 +409,23 @@ func sourceRetireNeedsClientSession(meta *metafile.MetaInfo, discovery seed.Disc
 		sourceInfo, sourceErr := os.Lstat(binding.Path)
 		finalInfo, finalErr := os.Lstat(finalPath)
 		if sourceErr != nil || finalErr != nil || !sourceInfo.Mode().IsRegular() || !finalInfo.Mode().IsRegular() ||
+			!sourceInfo.ModTime().Equal(precondition.ModifiedAt) ||
 			os.SameFile(sourceInfo, finalInfo) {
 			return false
 		}
 	}
 	return true
+}
+
+func sourceRetireControlPath(path string) bool {
+	clean := filepath.Clean(path)
+	clean = strings.TrimPrefix(clean, filepath.VolumeName(clean))
+	for _, component := range strings.FieldsFunc(clean, func(value rune) bool { return value == '/' || value == '\\' }) {
+		if materialize.IsReservedControlName(component) {
+			return true
+		}
+	}
+	return false
 }
 
 func sourceRetirePathWithin(base, path string) bool {

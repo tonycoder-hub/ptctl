@@ -209,6 +209,24 @@ func TestBuildFailsClosedWhenSourceChangesAfterDiscovery(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsReservedControlNamespaceAsSource(t *testing.T) {
+	fixture := makeRetireFixture(t)
+	reserved := filepath.Join(fixture.sourceRoot, materialize.SourceRetireOperationDirectoryPrefix+"payload")
+	if err := os.Rename(fixture.sourcePath, reserved); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := seed.Discover(context.Background(), fixture.meta, seed.DiscoverOptions{SearchRoots: []string{fixture.sourceRoot},
+		InventoryLimits: storage.DefaultInventoryLimits(), MatchLimits: metafile.DefaultSourceMatchLimits(),
+		TimeBudget: time.Minute, Strategy: materialize.StrategyCopy})
+	if err != nil || discovery.SourceOutcome != "verified_unique" {
+		t.Fatalf("discovery=%#v err=%v", discovery, err)
+	}
+	report, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &discovery, false))
+	if err != nil || report.Outcome != OutcomeBlocked || !hasFinding(report.Blockers, "source.control_namespace_reserved") || report.WritesPerformed != 0 {
+		t.Fatalf("reserved source report=%#v err=%v", report, err)
+	}
+}
+
 func TestBuildRehashesSourceWhenSizeAndTimestampAreRestored(t *testing.T) {
 	fixture := makeRetireFixture(t)
 	before, err := os.Stat(fixture.sourcePath)

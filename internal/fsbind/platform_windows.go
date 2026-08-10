@@ -272,6 +272,39 @@ func platformInspectRootObject(session *Session, name string) (*os.File, rawIden
 	return inspectWindowsObject(session, session.root, name, false)
 }
 
+func platformOpenRootRegular(session *Session, name string, forDelete bool) (*os.File, rawIdentity, error) {
+	if err := verifyWindowsParent(session, session.root); err != nil {
+		return nil, rawIdentity{}, err
+	}
+	access := uint32(windows.FILE_GENERIC_READ)
+	if forDelete {
+		access |= windows.DELETE
+	}
+	handle, err := ntOpenWindowsRelative(windows.Handle(session.root.file.Fd()), name, access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT, nil)
+	if err != nil {
+		if windowsNotFound(err) {
+			return nil, rawIdentity{}, ErrNotFound
+		}
+		return nil, rawIdentity{}, ErrUnsafeObject
+	}
+	file := os.NewFile(uintptr(handle), "fsbind-root-regular")
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, rawIdentity{}, ErrUnsafeObject
+	}
+	raw, rawErr := windowsRawHandleIdentityAllowLinks(handle, false)
+	if rawErr != nil || raw.volume != session.root.raw.volume {
+		_ = file.Close()
+		if rawErr == nil {
+			rawErr = ErrCrossFilesystem
+		}
+		return nil, rawIdentity{}, rawErr
+	}
+	return file, raw, nil
+}
+
 func inspectWindowsObject(session *Session, parent *boundDirectory, name string, requirePrivate bool) (*os.File, rawIdentity, ObjectKind, error) {
 	if err := verifyWindowsParent(session, parent); err != nil {
 		return nil, rawIdentity{}, "", err
@@ -491,6 +524,46 @@ func platformRemoveObject(session *Session, parent *boundDirectory, name string,
 	return false, false, rawIdentity{}, ErrRemovalAmbiguous
 }
 
+func platformRemoveRootRegular(session *Session, name string, expected rawIdentity, expectedSize int64) (bool, bool, rawIdentity, error) {
+	if verifyWindowsParent(session, session.root) != nil {
+		return false, false, rawIdentity{}, ErrCrossFilesystem
+	}
+	source, actual, err := platformOpenRootRegular(session, name, true)
+	if err != nil || actual != expected {
+		if source != nil {
+			_ = source.Close()
+		}
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	info, statErr := source.Stat()
+	if statErr != nil || !info.Mode().IsRegular() || info.Size() != expectedSize {
+		_ = source.Close()
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	removeErr := markWindowsCreatedForDeletion(windows.Handle(source.Fd()))
+	closeErr := source.Close()
+	remaining, remainingRaw, remainingErr := platformOpenRootRegular(session, name, false)
+	if remaining != nil {
+		_ = remaining.Close()
+	}
+	if removeErr == nil && closeErr == nil {
+		if errors.Is(remainingErr, ErrNotFound) {
+			if platformSyncDirectory(session.root) != nil {
+				return true, false, expected, ErrDurabilityUnconfirmed
+			}
+			return true, true, expected, nil
+		}
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if errors.Is(remainingErr, ErrNotFound) {
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if remainingErr == nil && remainingRaw == expected {
+		return false, false, expected, ErrUnsafeObject
+	}
+	return false, false, rawIdentity{}, ErrRemovalAmbiguous
+}
+
 func openWindowsPrivateRegular(session *Session, parent *boundDirectory, name string, create, exclusiveLock bool) (*os.File, rawIdentity, error) {
 	if err := verifyWindowsParent(session, parent); err != nil {
 		return nil, rawIdentity{}, err
@@ -689,6 +762,14 @@ func windowsRawIdentity(file *os.File, wantDirectory bool) (rawIdentity, error) 
 }
 
 func windowsRawHandleIdentity(handle windows.Handle, wantDirectory bool) (rawIdentity, error) {
+	return windowsRawHandleIdentityWithLinks(handle, wantDirectory, true)
+}
+
+func windowsRawHandleIdentityAllowLinks(handle windows.Handle, wantDirectory bool) (rawIdentity, error) {
+	return windowsRawHandleIdentityWithLinks(handle, wantDirectory, false)
+}
+
+func windowsRawHandleIdentityWithLinks(handle windows.Handle, wantDirectory, requireSingleLink bool) (rawIdentity, error) {
 	var information windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &information); err != nil {
 		return rawIdentity{}, ErrUnsafeObject
@@ -696,7 +777,7 @@ func windowsRawHandleIdentity(handle windows.Handle, wantDirectory bool) (rawIde
 	if information.FileAttributes&forbiddenWindowsAttributes != 0 || (information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) != wantDirectory {
 		return rawIdentity{}, ErrUnsafeObject
 	}
-	if !wantDirectory && information.NumberOfLinks != 1 {
+	if !wantDirectory && requireSingleLink && information.NumberOfLinks != 1 {
 		return rawIdentity{}, ErrUnsafeObject
 	}
 	return rawIdentity{

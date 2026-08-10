@@ -572,6 +572,81 @@ func TestHandlesCloseBeforeRootRemoval(t *testing.T) {
 	}
 }
 
+func TestBoundRootRegularRemovalUsesExactNameIdentityAndSize(t *testing.T) {
+	root, session := newSupportedSession(t)
+	ctx := context.Background()
+	original := filepath.Join(root, "original.bin")
+	selected := filepath.Join(root, "selected.bin")
+	if err := os.WriteFile(original, []byte("verified bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(original, selected); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	observed, err := session.InspectRootRegular(ctx, "selected.bin")
+	if err != nil || observed.Kind != ObjectKindRegular || observed.SizeBytes != int64(len("verified bytes")) || observed.Identity.IsZero() {
+		t.Fatalf("InspectRootRegular = %+v, %v", observed, err)
+	}
+	reader, err := session.OpenRootRegular(ctx, "selected.bin")
+	if err != nil {
+		t.Fatalf("OpenRootRegular: %v", err)
+	}
+	if info, err := reader.Info(); err != nil || !info.Identity.Equal(observed.Identity) || info.SizeBytes != observed.SizeBytes {
+		t.Fatalf("bound reader = %+v, %v", info, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if receipt, err := session.RemoveRootRegularExact(cancelled, "selected.bin", observed.Identity, observed.SizeBytes); !errors.Is(err, context.Canceled) || receipt.Attempted {
+		t.Fatalf("pre-cancelled root removal crossed attempt boundary: %+v, %v", receipt, err)
+	}
+	if receipt, err := session.RemoveRootRegularExact(ctx, "selected.bin", observed.Identity, observed.SizeBytes); err == nil || receipt.Attempted {
+		t.Fatalf("open bound handle did not block removal: %+v, %v", receipt, err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(root, "other.bin")
+	if err := os.WriteFile(other, []byte("verified bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherInfo, err := session.InspectRootRegular(ctx, "other.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := session.RemoveRootRegularExact(ctx, "selected.bin", otherInfo.Identity, observed.SizeBytes); !errors.Is(err, ErrUnsafeObject) || receipt.Attempted {
+		t.Fatalf("wrong identity reached unlink: %+v, %v", receipt, err)
+	}
+	if receipt, err := session.RemoveRootRegularExact(ctx, "selected.bin", observed.Identity, observed.SizeBytes+1); !errors.Is(err, ErrUnsafeObject) || receipt.Attempted {
+		t.Fatalf("wrong size reached unlink: %+v, %v", receipt, err)
+	}
+	receipt, err := session.RemoveRootRegularExact(ctx, "selected.bin", observed.Identity, observed.SizeBytes)
+	if err != nil || !receipt.Attempted || !receipt.Removed || receipt.Durability != DurabilityConfirmed {
+		t.Fatalf("exact removal = %+v, %v", receipt, err)
+	}
+	if _, err := os.Lstat(selected); !os.IsNotExist(err) {
+		t.Fatalf("selected name remains after removal: %v", err)
+	}
+	if raw, err := os.ReadFile(original); err != nil || string(raw) != "verified bytes" {
+		t.Fatalf("unselected hardlink changed: %q, %v", raw, err)
+	}
+	if _, err := session.InspectRootRegular(ctx, "selected.bin"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed name observation = %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "directory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.InspectRootRegular(ctx, "directory"); !errors.Is(err, ErrUnsafeObject) {
+		t.Fatalf("directory accepted as root regular: %v", err)
+	}
+	symlink := filepath.Join(root, "symlink")
+	if err := os.Symlink(other, symlink); err == nil {
+		if _, err := session.InspectRootRegular(ctx, "symlink"); !errors.Is(err, ErrUnsafeObject) {
+			t.Fatalf("link accepted as root regular: %v", err)
+		}
+	}
+}
+
 func TestSessionCloseClosesSubtreeAndPublishedFileAuthorities(t *testing.T) {
 	parent := t.TempDir()
 	root := parent + string(os.PathSeparator) + "authority-close"

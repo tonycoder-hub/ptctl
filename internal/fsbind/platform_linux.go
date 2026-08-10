@@ -238,6 +238,33 @@ func platformInspectRootObject(session *Session, name string) (*os.File, rawIden
 	return inspectLinuxObject(session, session.root, name, false)
 }
 
+func platformOpenRootRegular(session *Session, name string, _ bool) (*os.File, rawIdentity, error) {
+	if err := verifyLinuxDirectory(session, session.root); err != nil {
+		return nil, rawIdentity{}, err
+	}
+	fd, err := unix.Openat(int(session.root.file.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			return nil, rawIdentity{}, ErrNotFound
+		}
+		return nil, rawIdentity{}, ErrUnsafeObject
+	}
+	file := os.NewFile(uintptr(fd), "fsbind-root-regular")
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, rawIdentity{}, ErrUnsafeObject
+	}
+	raw, err := linuxRawIdentity(file, false)
+	if err != nil || raw.volume != session.root.raw.volume || raw.mount != session.root.raw.mount {
+		_ = file.Close()
+		if err == nil {
+			err = ErrCrossFilesystem
+		}
+		return nil, rawIdentity{}, err
+	}
+	return file, raw, nil
+}
+
 func inspectLinuxObject(session *Session, parent *boundDirectory, name string, requirePrivate bool) (*os.File, rawIdentity, ObjectKind, error) {
 	if err := verifyLinuxDirectory(session, parent); err != nil {
 		return nil, rawIdentity{}, "", err
@@ -507,6 +534,48 @@ func platformRemoveObject(session *Session, parent *boundDirectory, name string,
 	if removeErr == nil {
 		if errors.Is(remainingErr, ErrNotFound) {
 			if unix.Fsync(int(parent.file.Fd())) != nil {
+				return true, false, expected, ErrDurabilityUnconfirmed
+			}
+			return true, true, expected, nil
+		}
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if errors.Is(remainingErr, ErrNotFound) {
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if remainingErr == nil && remainingRaw == expected {
+		return false, false, expected, ErrUnsafeObject
+	}
+	return false, false, rawIdentity{}, ErrRemovalAmbiguous
+}
+
+func platformRemoveRootRegular(session *Session, name string, expected rawIdentity, expectedSize int64) (bool, bool, rawIdentity, error) {
+	if verifyLinuxDirectory(session, session.root) != nil {
+		return false, false, rawIdentity{}, ErrCrossFilesystem
+	}
+	source, actual, err := platformOpenRootRegular(session, name, true)
+	if err != nil || actual != expected {
+		if source != nil {
+			_ = source.Close()
+		}
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	info, statErr := source.Stat()
+	if statErr != nil || !info.Mode().IsRegular() || info.Size() != expectedSize {
+		_ = source.Close()
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	if closeErr := source.Close(); closeErr != nil {
+		return false, false, rawIdentity{}, fmt.Errorf("close root removal source failed")
+	}
+	removeErr := unix.Unlinkat(int(session.root.file.Fd()), name, 0)
+	remaining, remainingRaw, remainingErr := platformOpenRootRegular(session, name, false)
+	if remaining != nil {
+		_ = remaining.Close()
+	}
+	if removeErr == nil {
+		if errors.Is(remainingErr, ErrNotFound) {
+			if unix.Fsync(int(session.root.file.Fd())) != nil {
 				return true, false, expected, ErrDurabilityUnconfirmed
 			}
 			return true, true, expected, nil

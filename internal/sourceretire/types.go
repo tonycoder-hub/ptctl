@@ -1,6 +1,6 @@
-// Package sourceretire builds zero-write, same-invocation eligibility plans for
-// retiring explicitly reverified source file names. It deliberately exposes no
-// deletion primitive or durable deletion authority.
+// Package sourceretire builds same-invocation eligibility plans and executes
+// separately acknowledged, journaled retirement of explicitly reverified
+// source file names. Serialized plans never recreate execution authority.
 package sourceretire
 
 import (
@@ -177,6 +177,12 @@ type Report struct {
 	Blockers          []Finding                            `json:"blockers"`
 	Issues            []Finding                            `json:"issues"`
 	Warnings          []string                             `json:"warnings"`
+	execution         *reviewExecutionAuthority
+}
+
+type reviewExecutionAuthority struct {
+	clientBefore *clientactivate.VerifiedCurrentUse
+	currentUse   *clientactivate.CurrentUseAuthority
 }
 
 func newReport() Report {
@@ -198,7 +204,7 @@ func newReport() Report {
 			"live downloader state and effective paths are bounded self-reported lexical claims; they do not prove remote filesystem reachability or an open inode",
 			"typed downloader identity does not make the downloader's raw private metafile variant observable",
 			"source, final, and client observations are same-invocation or historical brackets, not one atomic snapshot",
-			"a future deletion command must rebuild the same plan from live proof and require a separate acknowledgement and journal",
+			"seed retire run must rebuild the same plan from live proof and requires a separate deletion acknowledgement and private journal",
 			"client, job, layout, mapping, and path references are stable pseudonyms and may be dictionary-guessable; they are not anonymization",
 		},
 	}

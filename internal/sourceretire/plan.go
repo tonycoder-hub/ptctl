@@ -175,6 +175,12 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		if manifestFile.Length <= 0 || strings.Contains(manifestFile.Attribute, "p") || binding.Path == "" || !filepath.IsAbs(binding.Path) {
 			return failIntegrity(&report, "verified source contains an invalid physical binding")
 		}
+		if sourcePathUsesReservedControlName(binding.Path) {
+			report.Outcome = OutcomeBlocked
+			report.addBlocker("source.control_namespace_reserved", "a selected source name belongs to a reserved ptctl control namespace")
+			report.finalize()
+			return report, nil
+		}
 		finalPath, finalLength, found := freshFinal.ProcessFilePath(binding.FileIndex)
 		if !found || finalLength != manifestFile.Length {
 			return failIntegrity(&report, "materialized final file mapping disagrees with the metafile")
@@ -323,6 +329,7 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		return failIntegrity(&report, "source retirement plan could not be canonicalized")
 	}
 	report.Outcome = OutcomeEligible
+	report.execution = &reviewExecutionAuthority{clientBefore: clientAfter, currentUse: options.ClientUse}
 	report.finalize()
 	return report, nil
 }

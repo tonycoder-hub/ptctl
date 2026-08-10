@@ -117,6 +117,11 @@ capabilities at the edge, not assumptions in the core domain model.
   client activation journal, plus stable before/after reads of the exact live
   typed-infohash job and its effective paths from one qBittorrent session, with
   explicit final-overlap/alias rejection and no deletion authority;
+- separately acknowledged, journaled source-name retirement that reproduces
+  the same live plan, binds exact source parents/names and identities, records
+  durable per-name attempts/completions, supports explicit crash recovery, and
+  reverifies the final and live client use without deleting directories,
+  aliases, empty/padding entries, or downloader jobs;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -125,7 +130,7 @@ index alone, background refresh/watchers, site torrent-detail reads,
 downloader pause/location/removal or broader existing-job mutation,
 attributed/empty-file client-layout reconciliation,
 reflink/hardlink or cross-filesystem materialization, automatic execution of
-serialized plan reports, source/staging cleanup or rollback, source or
+serialized plan reports, source-parent/staging cleanup or rollback,
 published-layout deletion, site
 writes, browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
@@ -671,8 +676,8 @@ plus a same-invocation exact final proof, not proof of a raw private variant or
 an atomic client/filesystem snapshot. Each invocation sends at most one
 effectful client POST. JSON kind is `client.activation`.
 
-Review which current source file names could be considered for a future,
-separately authorized retirement operation:
+Review which current source file names are eligible for a separately
+acknowledged retirement operation:
 
 ```bash
 printf '%s' "$QBITTORRENT_PASSWORD" | ptctl seed retire plan \
@@ -703,16 +708,68 @@ inside that live-client bracket, and a selected source inside or aliasing the
 final is rejected. Default output
 contains one-way source-path references; raw source paths
 require `--show-absolute-paths`. Only content-bearing regular-file names are
-represented. Empty files, padding, directories, cleanup, and deletion remain
-out of scope. Unselected hardlink or alias names may remain, so the plan never
+represented. Empty files, padding, directories, and cleanup remain out of
+scope. Unselected hardlink or alias names may remain, so the plan never
 claims that storage would be reclaimed. The terminal activation marker remains
 historical; current job identity, state, and effective paths are established
 separately by the bounded live reads. Those values are still non-atomic client
-claims and do not prove a remote open inode. A future deletion command must
-rebuild the same live plan and repeat every client/source/final proof, require a
-separate acknowledgement, and journal
-every unlink result; serialized plan JSON will not be authority. JSON kind is
-`content.source_retirement_plan`.
+claims and do not prove a remote open inode. Serialized plan JSON is not
+execution authority. JSON kind is `content.source_retirement_plan`.
+
+To cross the irreversible boundary, repeat every selector from the plan and
+provide both its full SHA-256 plan ID and the dedicated acknowledgement:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl seed retire run \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --search-root "D:\Media\Original" \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin \
+  --expect-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
+  --acknowledge-source-deletion \
+  --output json
+
+ptctl seed retire status --target "D:\PT" --output json \
+  sha256:SOURCE_RETIREMENT_OPERATION_DIGEST
+```
+
+`resume` takes the same local/live selectors, expected plan ID, deletion
+acknowledgement, and one explicit operation ID. Neither run nor resume accepts
+plan JSON as proof or selects a latest operation.
+
+`run` rebuilds the complete live plan in the same invocation and compares its
+ID before any journal write. It then creates one owner-private operation under
+the materialized target root. The private intent binds exact absolute source
+parents/names, parent and file identities, sizes, the final identity, client
+completion, live-use ID, search-root scope, and fixed protocol budgets. Public
+reports expose only pseudonymous path references.
+
+For each source name, a durable attempt marker precedes an identity-and-size
+bound, no-follow unlink; a durable completion marker follows confirmed
+absence. A crash after the attempt but before completion is recoverable only as
+`absence_after_durable_attempt_and_parent_durability_recovered`. Absence without a prior attempt,
+identity replacement, a changed parent/root, corrupt journal data, final proof
+change, or client identity/layout change fails closed. Once every name is
+retired, the exact final is reverified and the same authenticated client
+session reobserves current use before the terminal marker is published.
+
+A normal single-file run makes one login and three bounded ledger reads (four
+HTTP requests total); ordinary multi-file runs add three bounded file-list
+reads (seven total). Active resume uses one login plus two proof observations,
+or three/five total requests for single/multi-file. There are no retries and no
+client mutations. `status` reads only one explicit private journal and neither
+reads credentials nor contacts the client. Terminal resume also avoids
+credential I/O. No command removes a parent directory, the final, another name
+for a hardlinked inode, an empty/padding entry, or a downloader job, and no
+report claims reclaimed storage or rollback. Execution JSON kind is
+`content.source_retirement`.
 
 Reconcile one exact metafile with verified bytes and qBittorrent's read-only
 ledger. The password is used for one login; two bounded torrent-list reads
