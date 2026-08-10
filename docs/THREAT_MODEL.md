@@ -21,7 +21,10 @@ boundaries. Data crossing one boundary does not grant authority over another.
 Secrets are accepted only through stdin, held in memory, and excluded from
 structured output. Tracker URLs are reduced to origins. Error boundaries redact
 cookies, authorization headers, common token keys, announce URLs, and download
-URLs. HTTP response bodies are not included in errors.
+URLs. HTTP response bodies are not included in errors. Torrent-detail reports
+retain only an allowlisted display title, optional peer counts, and fixed
+evidence codes from a positively recognized page; descriptions, raw HTML, and
+request/download URLs are never report fields.
 
 Discovery output hides absolute roots, source files, and target roots by
 default. It emits stable root IDs, display-safe relative paths, and raw
@@ -64,9 +67,9 @@ Anyone who can read the private store can recover the complete historical invent
 ### SSRF and redirect leakage
 
 Site origins must be HTTPS. DNS answers are checked before dialing and private,
-loopback, link-local, multicast, and unspecified addresses are rejected. Each
-redirect is checked for the same scheme, host, and effective port. Proxies are
-disabled for site reads to avoid silently forwarding cookies.
+loopback, link-local, multicast, and unspecified addresses are rejected.
+Redirects are rejected. Proxies are disabled for site reads to avoid silently
+forwarding cookies.
 
 The effectful metafile fetch is stricter: it rejects every redirect so that one
 acknowledgement cannot expand into another tracker-visible request. The report
@@ -84,6 +87,11 @@ The TJUPT adapter sends at most one bounded GET per command and never retries.
 HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
 callers must not loop or parallelize site commands. There is no Cloudflare or
 CAPTCHA bypass.
+
+Ordinary status, search, bonus, and detail reads use the same fresh HTTP/1.1,
+no-reuse, no-redirect transport as the effectful fetch. The detail route sends
+only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
+parameter and never follows the download reference found in the page.
 
 `site metafile fetch` is scoped to one validated remote ID and one GET. It does
 not perform a preceding detail lookup, follow a redirect, retry, or fan out to
@@ -117,6 +125,13 @@ explicitly return a valid exact artifact reference whose whole-response digest
 and consumed-byte receipt agree. Login, challenge, maintenance, unknown HTML,
 oversized, and partial responses fail closed and never become an empty or
 weaker artifact.
+
+Torrent-detail HTML is separately capped at 4 MiB by default and 8 MiB at the
+hard ceiling, with a 64 KiB response-header cap. Invalid UTF-8, login,
+challenge, redirect, wrong media type, missing authenticated markers, an
+unbounded/invalid heading, or no exact selected-ID action link fails closed.
+Only fixed metadata fields survive parsing; the result never becomes a
+metafile, content, or current-variant proof.
 
 A persistent site binding is attempted only after complete artifact-import
 success. Its canonical record is capped at 256 KiB, rejects duplicate/unknown
@@ -625,6 +640,13 @@ synthetic metafiles; real tracker artifacts are forbidden.
   stores on filesystems where owner-only ACLs cannot be enforced;
 - per-account cross-process site rate-limit coordination;
 - signed releases, SBOM, and build provenance.
+
+qBittorrent location mutation remains deliberately unsupported. Its official
+WebUI contract accepts a job hash and a download location, but does not expose
+the no-clobber precondition, collision result, atomicity, or recoverable commit
+receipt required to distinguish a safe pointer update from a data move:
+[qBittorrent WebUI API 5.0](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#set-torrent-location).
+ptctl will not infer those guarantees from an HTTP 200 response.
 
 No broader deletion or downloader mutation beyond exact private operation-state
 pruning, acknowledged source-name retirement, exact stopped-add, and reviewed

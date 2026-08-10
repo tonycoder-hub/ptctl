@@ -113,6 +113,7 @@ Usage:
   ptctl site status --cookie-stdin [--output table|json] SITE
   ptctl site account --cookie-stdin [--output table|json] SITE
   ptctl site search --cookie-stdin [--output table|json] SITE QUERY...
+  ptctl site detail --cookie-stdin [--output table|json] SITE REMOTE_ID
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
   ptctl site metafile fetch --cookie-stdin --acknowledge-site-effect --metafile-store DIR [--output table|json] SITE REMOTE_ID
 
@@ -205,6 +206,8 @@ func (a *app) site(args []string) error {
 		return a.siteCapabilities(args[1:])
 	case "status", "account", "search", "bonus-catalog":
 		return a.siteRead(args[0], args[1:])
+	case "detail":
+		return a.siteDetail(args[1:])
 	case "metafile":
 		if len(args) >= 2 && args[1] == "fetch" {
 			return a.siteMetafileFetch(args[2:])
@@ -1423,6 +1426,8 @@ func jsonKind(data any) string {
 		return "site.account"
 	case []domain.TorrentSummary:
 		return "site.torrent.list"
+	case siteDetailReport:
+		return typed.kind
 	case domain.BonusCatalog:
 		return "site.bonus.catalog"
 	case *metafile.MetaInfo:

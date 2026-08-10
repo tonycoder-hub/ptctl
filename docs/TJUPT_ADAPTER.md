@@ -2,21 +2,23 @@
 
 TJUPT is the first experimental site implementation, not a special case
 embedded in the content core. It has not had a credentialed live smoke test in
-this repository. The adapter declares three ordinary read capabilities plus
+this repository. The adapter declares four ordinary read capabilities plus
 one explicitly effectful metafile capability:
 
 - session check;
 - torrent search;
+- bounded torrent-detail observation;
 - bonus catalog inspection;
 - acknowledged metafile fetch into the private store.
 
 Each command sends at most one bounded GET, uses the configured TJUPT HTTPS
-origin, does not retry, and never submits a form. Ordinary reads refuse
-cross-origin redirects. The effectful metafile fetch refuses every redirect so
-its explicit acknowledgement authorizes at most one tracker-visible request.
+origin, does not retry, refuses every redirect, and never submits a form. The
+effectful metafile fetch therefore keeps its explicit acknowledgement scoped to
+at most one tracker-visible request.
 Page recognition is fail-closed: a login page is unauthenticated, a positively
-recognized bonus/search page is accepted, and maintenance, challenge, or
-unknown HTML is indeterminate/an error rather than a successful empty result.
+recognized bonus/search/detail page is accepted, and maintenance, challenge,
+or unknown HTML is indeterminate/an error rather than a successful empty
+result.
 Ordinary site reads perform no intentional filesystem write. TJUPT-related
 local store mutations are `metafile store init`, `metafile store import`, and
 the store phase of `site metafile fetch`; storage profile/index commands are a
@@ -57,10 +59,40 @@ not be automatic.
 ## Fixtures
 
 Parser tests use synthetic HTML with fictitious users and values, including
-challenge, maintenance, empty-search, and title-with-size cases. Captured
-TJUPT HTML is deliberately absent because it can contain account information,
-CSRF tokens, or identifiers. Any future fixture must be generated or reviewed
-for secret canaries before commit.
+challenge, maintenance, empty-search, torrent-detail, and title-with-size
+cases. Captured TJUPT HTML is deliberately absent because it can contain
+account information, CSRF tokens, or identifiers. Any future fixture must be
+generated or reviewed for secret canaries before commit.
+
+## Torrent detail observation
+
+The read-only command is intentionally narrow:
+
+```bash
+printf '%s' "$TJUPT_COOKIE" | ptctl site detail --cookie-stdin tjupt REMOTE_ID
+```
+
+Only the exact built-in production origin declares `torrent.detail`. Usage,
+output mode, capability, authentication method, canonical positive-decimal
+remote ID, origin, route, and fixed response budgets are validated before the
+cookie is read. The request is a fresh HTTP/1.1 GET for
+`details.php?id=REMOTE_ID`; it has no redirect, retry, compression, proxy, or
+second request. In particular it omits `hit=1`. The reference NexusPHP
+implementation increments the torrent view counter only when that parameter is
+present, so ptctl deliberately does not authorize it: [NexusPHP
+`details.php`](https://github.com/xiaomlove/nexusphp/blob/master/details.php).
+
+Recognition requires authenticated UI, a bounded display heading, and an
+internal action/download link carrying exactly the requested remote ID.
+Seeder/leecher counts are optional and are retained only from the bounded peer
+counter element. The report never emits the raw HTML, request/download URL,
+description, cookie, redirect location, or arbitrary server diagnostics.
+
+The result is only a same-invocation site-page observation. Its display title
+may include promotion decoration; names, peer counts, and links are site
+claims. It is not a metafile identity, proof of the site's current private
+variant, a site signature, or storage-content proof, and it is not persisted or
+consumed by reconciliation in this slice.
 
 ## Private metafile prerequisite
 
@@ -91,8 +123,8 @@ stored consumers remain zero-write.
 ## B1: effectful metafile fetch
 
 TJUPT declares `torrent.metafile.read_effectful` independently of
-`torrent.detail`; no detail capability or detail request is implied. A
-metafile GET may be recorded by the tracker, and its response contains a
+`torrent.detail`; invoking one does not invoke or upgrade the other. A metafile
+GET may be recorded by the tracker, and its response contains a
 passkey. B1 is gated on the private store above and has no raw stdout,
 arbitrary destination, or caller-chosen sidecar path. Its only durable
 provenance output is an internal allowlisted sealed binding record in that same

@@ -106,6 +106,19 @@ type TorrentSummary struct {
 	Promotion   *Promotion `json:"promotion,omitempty"`
 }
 
+// TorrentDetail is a bounded, public projection of one authenticated site
+// detail page. Every field remains a site claim: it is neither a metafile
+// identity nor content proof. DisplayTitle can include site decorations such
+// as a promotion label and must never be used as a torrent identity.
+type TorrentDetail struct {
+	Ref                       TorrentRef `json:"ref"`
+	DisplayTitle              string     `json:"display_title"`
+	Seeders                   *int       `json:"seeders,omitempty"`
+	Leechers                  *int       `json:"leechers,omitempty"`
+	DownloadReferenceObserved bool       `json:"download_reference_observed"`
+	EvidenceBasis             []string   `json:"evidence_basis"`
+}
+
 type Promotion struct {
 	UploadFactor   string     `json:"upload_factor"`
 	DownloadFactor string     `json:"download_factor"`

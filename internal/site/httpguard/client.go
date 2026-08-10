@@ -3,7 +3,6 @@ package httpguard
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -14,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/tonycoder-hub/ptctl/internal/security"
 )
 
 const (
@@ -39,7 +36,6 @@ type StrictResponse struct {
 type Client struct {
 	base        *url.URL
 	cookie      string
-	http        *http.Client
 	strictHTTP  *http.Client
 	minInterval time.Duration
 	maxBody     int64
@@ -59,23 +55,9 @@ func New(baseURL, cookie string, minInterval time.Duration) (*Client, error) {
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/"
 
-	transport := newTransport(false)
-	strictTransport := newTransport(true)
+	strictTransport := newStrictTransport()
 
 	c := &Client{base: base, cookie: cookie, minInterval: minInterval, maxBody: defaultMaxBody}
-	c.http = &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("too many redirects")
-			}
-			if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Hostname(), base.Hostname()) || effectivePort(req.URL) != effectivePort(base) {
-				return errors.New("cross-origin or HTTPS-downgrade redirect blocked")
-			}
-			return nil
-		},
-	}
 	c.strictHTTP = &http.Client{
 		Transport: strictTransport,
 		Timeout:   30 * time.Second,
@@ -86,12 +68,12 @@ func New(baseURL, cookie string, minInterval time.Duration) (*Client, error) {
 	return c, nil
 }
 
-func newTransport(strict bool) *http.Transport {
+func newStrictTransport() *http.Transport {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}}
 	transport := &http.Transport{
 		Proxy:                  nil,
-		ForceAttemptHTTP2:      !strict,
+		ForceAttemptHTTP2:      false,
 		TLSClientConfig:        tlsConfig,
 		TLSHandshakeTimeout:    10 * time.Second,
 		ResponseHeaderTimeout:  20 * time.Second,
@@ -100,15 +82,12 @@ func newTransport(strict bool) *http.Transport {
 		MaxIdleConnsPerHost:    1,
 		MaxResponseHeaderBytes: hardMaxResponseHeaders,
 		DisableCompression:     true,
-		DisableKeepAlives:      strict,
+		DisableKeepAlives:      true,
 	}
-	if strict {
-		// A dedicated HTTP/1.1 transport with no connection reuse makes the one
-		// effect map to one RoundTrip. In particular, it cannot transparently
-		// replay an idempotent GET on a stale pooled connection.
-		tlsConfig.NextProtos = []string{"http/1.1"}
-		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
-	}
+	// A dedicated HTTP/1.1 transport with no connection reuse makes one site
+	// read map to one RoundTrip. In particular, it cannot transparently replay
+	// an idempotent GET on a stale pooled connection.
+	transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
@@ -139,44 +118,20 @@ func (c *Client) Get(ctx context.Context, relativePath string, query url.Values)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	if err := c.wait(ctx); err != nil {
-		return nil, nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	response, err := c.GetOnce(ctx, relativePath, query, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", c.maxBody, hardMaxResponseHeaders)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build site request: %w", err)
+		return nil, nil, fmt.Errorf("site read failed: %w", err)
 	}
-	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1")
-	req.Header.Set("User-Agent", "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; conservative-read-only-client)")
-	if c.cookie != "" {
-		req.Header.Set("Cookie", c.cookie)
+	if response.StatusCode == http.StatusTooManyRequests {
+		return nil, target, fmt.Errorf("site rate limited the request (HTTP 429); retry manually after the server-specified interval")
 	}
-
-	c.recordRequest()
-	resp, err := c.http.Do(req)
-	if err != nil {
-		message := err.Error()
-		if urlErr, ok := err.(*url.Error); ok {
-			message = urlErr.Err.Error()
-		}
-		return nil, nil, fmt.Errorf("site read failed: %s", security.Redact(message))
+	if response.StatusCode >= 300 && response.StatusCode <= 399 {
+		return nil, target, fmt.Errorf("site redirect was rejected")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, resp.Request.URL, fmt.Errorf("site rate limited the request (HTTP 429); retry manually after the server-specified interval")
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return nil, target, fmt.Errorf("site returned HTTP %d", response.StatusCode)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, resp.Request.URL, fmt.Errorf("site returned HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
-	if err != nil {
-		return nil, resp.Request.URL, fmt.Errorf("read site response: %w", err)
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, resp.Request.URL, fmt.Errorf("site response exceeded %d bytes", c.maxBody)
-	}
-	return body, resp.Request.URL, nil
+	return response.Body, target, nil
 }
 
 // GetOnce performs one non-following, non-retrying GET and bounds both
@@ -294,9 +249,6 @@ func (c *Client) RequestsMade() int {
 func (c *Client) Close() error {
 	if c == nil {
 		return nil
-	}
-	if c.http != nil {
-		c.http.CloseIdleConnections()
 	}
 	if c.strictHTTP != nil {
 		c.strictHTTP.CloseIdleConnections()

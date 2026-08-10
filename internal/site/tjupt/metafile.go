@@ -31,7 +31,7 @@ func (a *Adapter) ValidateMetafileRef(ref domain.TorrentRef) error {
 	if _, err := a.MetafileFetchConfig(); err != nil {
 		return err
 	}
-	return validateCanonicalMetafileRef(ref)
+	return validateCanonicalTorrentRef(ref)
 }
 
 func (a *Adapter) MetafileFetchConfig() (site.MetafileFetchConfig, error) {
@@ -45,18 +45,18 @@ func (a *Adapter) MetafileFetchConfig() (site.MetafileFetchConfig, error) {
 	return config, nil
 }
 
-func validateCanonicalMetafileRef(ref domain.TorrentRef) error {
+func validateCanonicalTorrentRef(ref domain.TorrentRef) error {
 	if ref.SiteID != "tjupt" || ref.RemoteID == "" || len(ref.RemoteID) > 20 || ref.RemoteID[0] == '0' {
-		return fmt.Errorf("TJUPT metafile reference is invalid")
+		return fmt.Errorf("TJUPT torrent reference is invalid")
 	}
 	for i := 0; i < len(ref.RemoteID); i++ {
 		if ref.RemoteID[i] < '0' || ref.RemoteID[i] > '9' {
-			return fmt.Errorf("TJUPT metafile reference is invalid")
+			return fmt.Errorf("TJUPT torrent reference is invalid")
 		}
 	}
 	parsed, err := strconv.ParseUint(ref.RemoteID, 10, 64)
 	if err != nil || parsed == 0 || strconv.FormatUint(parsed, 10) != ref.RemoteID {
-		return fmt.Errorf("TJUPT metafile reference is invalid")
+		return fmt.Errorf("TJUPT torrent reference is invalid")
 	}
 	return nil
 }
@@ -107,7 +107,7 @@ func (session *metafileFetchSession) FetchMetafile(ctx context.Context, ref doma
 		receipt.StopReason = "invalid_limits"
 		return nil, receipt, fmt.Errorf("TJUPT metafile fetch limits are invalid")
 	}
-	if err := validateCanonicalMetafileRef(ref); err != nil {
+	if err := validateCanonicalTorrentRef(ref); err != nil {
 		receipt.StopReason = "invalid_reference"
 		return nil, receipt, err
 	}

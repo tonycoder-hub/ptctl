@@ -28,7 +28,6 @@ func strictTestClient(t *testing.T, transport http.RoundTripper, cookie string) 
 		base:       base,
 		cookie:     cookie,
 		maxBody:    defaultMaxBody,
-		http:       &http.Client{Transport: transport},
 		strictHTTP: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
@@ -75,10 +74,6 @@ func TestStrictTransportIsFreshH1Only(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	regular, ok := client.http.Transport.(*http.Transport)
-	if !ok || !regular.ForceAttemptHTTP2 || regular.DisableKeepAlives {
-		t.Fatalf("regular transport changed unexpectedly: %#v", regular)
-	}
 	strict, ok := client.strictHTTP.Transport.(*http.Transport)
 	if !ok || strict.ForceAttemptHTTP2 || !strict.DisableKeepAlives || strict.TLSNextProto == nil ||
 		len(strict.TLSClientConfig.NextProtos) != 1 || strict.TLSClientConfig.NextProtos[0] != "http/1.1" || !strict.DisableCompression {
@@ -160,6 +155,33 @@ func TestGetOnceDoesNotFollowRedirectOrRetry(t *testing.T) {
 	}), "")
 	_, err = client.GetOnce(context.Background(), "download.php", url.Values{"id": {"CANARY-ID"}}, "application/x-bittorrent", 1024, 1024)
 	if err == nil || strings.Contains(err.Error(), "CANARY") || calls != 1 || client.RequestsMade() != 1 {
+		t.Fatalf("err=%v calls=%d requests=%d", err, calls, client.RequestsMade())
+	}
+}
+
+func TestOrdinaryGetAlsoUsesOneStrictAttempt(t *testing.T) {
+	calls := 0
+	client := strictTestClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if !request.Close || request.Header.Get("Accept-Encoding") != "identity" {
+			t.Fatalf("ordinary request did not use the strict transport contract: %#v", request)
+		}
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": {"https://example.test/second?secret=CANARY"}},
+			Body:       io.NopCloser(strings.NewReader("CANARY-REDIRECT-BODY")),
+		}, nil
+	}), "sid=secret")
+	if _, _, err := client.Get(context.Background(), "first", nil); err == nil || calls != 1 || client.RequestsMade() != 1 || strings.Contains(err.Error(), "CANARY") {
+		t.Fatalf("err=%v calls=%d requests=%d", err, calls, client.RequestsMade())
+	}
+
+	calls = 0
+	client = strictTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("https://example.test/path?COOKIE-CANARY")
+	}), "sid=COOKIE-CANARY")
+	if _, _, err := client.Get(context.Background(), "first", nil); err == nil || calls != 1 || client.RequestsMade() != 1 || strings.Contains(err.Error(), "CANARY") {
 		t.Fatalf("err=%v calls=%d requests=%d", err, calls, client.RequestsMade())
 	}
 }

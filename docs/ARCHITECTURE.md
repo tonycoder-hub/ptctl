@@ -154,6 +154,26 @@ action schema. They will not be forced into universal fields. The effectful
 metafile capability is instead a tracker-visible GET plus a private-store
 publication boundary; it grants no general site-write or detail-read authority.
 
+## Read-only torrent detail
+
+`site detail` is the first concrete `torrent.detail` port. It validates the
+built-in TJUPT production origin, stable route ID, canonical positive-decimal
+remote ID, fixed request/body/header budgets, and cookie authentication method
+before reading stdin. One fresh HTTP/1.1 request reads
+`details.php?id=REMOTE_ID`; redirects, retries, compression, proxies, and
+`hit=1` are absent. The reference NexusPHP implementation uses `hit` to update
+the view counter, so its omission is an explicit no-counter-effect choice.
+
+The adapter accepts only a recognized authenticated page with a bounded heading
+and an internal action/download link carrying exactly the selected ID. The
+public projection retains a display title, optional peer counts, whether a
+matching download reference was present, and a separate request receipt. It
+does not retain raw HTML, descriptions, URLs, or arbitrary server text.
+
+This observation is a site claim at one non-atomic interval. It does not bind
+the site ID to a whole-raw metafile variant, cannot replace the historical exact
+fetch binding, and does not participate in the reconciliation lattice yet.
+
 Downloader ledgers negotiate normalized capabilities separately:
 algorithm-tagged infohashes, content paths, raw metafiles, and indexed job
 files. The qBittorrent adapter declares indexed job files only when it can
