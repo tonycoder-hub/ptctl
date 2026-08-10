@@ -14,10 +14,13 @@ import (
 )
 
 const (
-	executionJournalDirectory = "journal"
-	executionScratchDirectory = "scratch"
-	executionIntentFile       = "intent.json"
-	executionCompleteFile     = "complete.json"
+	executionJournalDirectory      = "journal"
+	executionScratchDirectory      = "scratch"
+	executionIntentFile            = "intent.json"
+	executionCompleteFile          = "complete.json"
+	executionRetentionDirectory    = "retention"
+	executionRetentionIntentFile   = "intent.json"
+	executionRetentionCompleteFile = "complete.json"
 )
 
 type executionJournalWrite struct {
@@ -112,6 +115,14 @@ func initializeExecutionJournal(ctx context.Context, target *fsbind.Session, int
 }
 
 func openExecutionJournal(ctx context.Context, target *fsbind.Session, operation OperationID, limits ExecutionLimits) (*executionJournal, error) {
+	return openExecutionJournalMode(ctx, target, operation, limits, false)
+}
+
+func openExecutionJournalForRetention(ctx context.Context, target *fsbind.Session, operation OperationID, limits ExecutionLimits) (*executionJournal, error) {
+	return openExecutionJournalMode(ctx, target, operation, limits, true)
+}
+
+func openExecutionJournalMode(ctx context.Context, target *fsbind.Session, operation OperationID, limits ExecutionLimits, allowRetention bool) (*executionJournal, error) {
 	name, err := OperationDirectoryName(operation)
 	if err != nil {
 		return nil, err
@@ -123,7 +134,7 @@ func openExecutionJournal(ctx context.Context, target *fsbind.Session, operation
 	if err != nil {
 		return nil, err
 	}
-	journal, err := loadExecutionJournalFromSubtree(ctx, target, subtree, limits)
+	journal, err := loadExecutionJournalFromSubtreeMode(ctx, target, subtree, limits, allowRetention)
 	if err != nil {
 		_ = subtree.Close()
 		return nil, err
@@ -136,22 +147,36 @@ func openExecutionJournal(ctx context.Context, target *fsbind.Session, operation
 }
 
 func loadExecutionJournalFromSubtree(ctx context.Context, target *fsbind.Session, subtree *fsbind.Subtree, limits ExecutionLimits) (*executionJournal, error) {
+	return loadExecutionJournalFromSubtreeMode(ctx, target, subtree, limits, false)
+}
+
+func loadExecutionJournalFromSubtreeMode(ctx context.Context, target *fsbind.Session, subtree *fsbind.Subtree, limits ExecutionLimits, allowRetention bool) (*executionJournal, error) {
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
 	journalPath, _ := fsbind.PathFromComponents([]string{executionJournalDirectory})
 	scratchPath, _ := fsbind.PathFromComponents([]string{executionScratchDirectory})
-	root, err := subtree.List(ctx, fsbind.Path{}, fsbind.ListLimits{MaxEntries: 4, MaxNameBytes: 1 << 20})
+	root, err := subtree.List(ctx, fsbind.Path{}, fsbind.ListLimits{MaxEntries: 5, MaxNameBytes: 1 << 20})
 	if err != nil {
 		return nil, classifyExecutionBindingError(err)
 	}
 	allowedRoot := map[string]string{".fsbind-operation.lock": "regular", executionJournalDirectory: "directory", executionScratchDirectory: "directory"}
-	if !root.Complete || len(root.Entries) != len(allowedRoot) {
+	if allowRetention {
+		allowedRoot[executionRetentionDirectory] = "directory"
+	}
+	if !root.Complete || len(root.Entries) < 3 || len(root.Entries) > len(allowedRoot) {
 		return nil, fmt.Errorf("%w: source retirement operation namespace is incomplete", ErrExecutionIntegrity)
 	}
+	seenRoot := make(map[string]bool, len(root.Entries))
 	for _, entry := range root.Entries {
 		if allowedRoot[entry.Name] != entry.Kind {
 			return nil, fmt.Errorf("%w: source retirement operation namespace contains an unexpected object", ErrExecutionIntegrity)
+		}
+		seenRoot[entry.Name] = true
+	}
+	for _, required := range []string{".fsbind-operation.lock", executionJournalDirectory, executionScratchDirectory} {
+		if !seenRoot[required] {
+			return nil, fmt.Errorf("%w: source retirement operation namespace is incomplete", ErrExecutionIntegrity)
 		}
 	}
 	handle := &executionJournal{target: target, subtree: subtree, limits: limits}

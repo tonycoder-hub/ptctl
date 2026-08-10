@@ -64,6 +64,21 @@ func (a *app) seedRetireRun(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), prepared.timeout)
 	defer cancel()
+	operation, err := sourceretire.OperationIDForPlanID(*expected)
+	if err != nil {
+		return usageError("seed retire run requires a canonical --expect-plan-id")
+	}
+	status, statusErr := sourceretire.Status(ctx, sourceretire.StatusOptions{TargetRoot: prepared.targetRoot,
+		OperationID: operation, Limits: sourceretire.DefaultExecutionLimits()})
+	if status.Operation.Status != "not_found" {
+		switch status.Operation.Status {
+		case "retained", "pruning", "retention_initializing", "historical_complete":
+			return a.finishSourceRetireExecution(prepared.output, status, statusErr)
+		}
+		if statusErr != nil || status.Outcome == sourceretire.ExecutionOutcomeIntegrity || status.Outcome == sourceretire.ExecutionOutcomeBlocked {
+			return a.finishSourceRetireExecution(prepared.output, status, statusErr)
+		}
+	}
 	local, err := a.prepareSourceRetireLocal(ctx, prepared, true)
 	if err != nil {
 		return err
@@ -130,6 +145,9 @@ func (a *app) seedRetireResume(args []string) error {
 		OperationID: operation, Limits: sourceretire.DefaultExecutionLimits()})
 	if statusErr != nil || status.Outcome == sourceretire.ExecutionOutcomeIntegrity || status.Outcome == sourceretire.ExecutionOutcomeBlocked {
 		return a.finishSourceRetireExecution(prepared.output, status, statusErr)
+	}
+	if status.Operation.Status == "retained" || status.Operation.Status == "pruning" || status.Operation.Status == "retention_initializing" {
+		return a.finishSourceRetireExecution(prepared.output, status, nil)
 	}
 	if status.Operation.PlanID != *expected {
 		report, operationErr := sourceretire.Resume(ctx, sourceretire.ResumeOptions{TargetRoot: prepared.targetRoot,
@@ -204,6 +222,56 @@ func (a *app) seedRetireStatus(args []string) error {
 	}
 	if operationErr != nil {
 		return fmt.Errorf("source retirement status was interrupted; see report")
+	}
+	return nil
+}
+
+func (a *app) seedRetirePrune(args []string) error {
+	fs := newFlagSet("seed retire prune")
+	output := fs.String("output", "table", "table or json")
+	target := fs.String("target", "", "existing local materialized target root")
+	expected := fs.String("expect-plan-id", "", "reviewed sha256 source-retirement plan ID")
+	acknowledge := fs.Bool("acknowledge-operation-state-deletion", false, "acknowledge deletion of private operation state and retention of a tombstone")
+	timeout := fs.Duration("timeout", time.Minute, "operation-state pruning wall-clock budget")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *target == "" {
+		return usageError("seed retire prune requires --target and exactly one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validSourceRetireExecutionPlanID(*expected) {
+		return usageError("seed retire prune requires a canonical --expect-plan-id")
+	}
+	if !*acknowledge {
+		return usageError("seed retire prune requires --acknowledge-operation-state-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("seed retire prune --timeout must be greater than zero and no more than 1h")
+	}
+	operation, err := sourceretire.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("seed retire prune requires a canonical sha256 OPERATION_ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := sourceretire.PruneExecution(ctx, sourceretire.ExecutionPruneOptions{
+		TargetRoot: *target, OperationID: operation, ExpectedPlanID: *expected, Acknowledge: true,
+		JournalLimits: sourceretire.DefaultExecutionLimits(), RetentionLimits: sourceretire.DefaultExecutionRetentionLimits(),
+	})
+	if err := a.writeSourceRetireRetentionReport(*output, report); err != nil {
+		return err
+	}
+	if errors.Is(operationErr, sourceretire.ErrExecutionIntegrity) || report.Outcome == sourceretire.ExecutionRetentionOutcomeIntegrityFailed {
+		return &integrityErr{message: "source retirement retention state failed integrity validation; see report"}
+	}
+	if report.Outcome == sourceretire.ExecutionRetentionOutcomeBlocked {
+		return &inconclusiveErr{message: "source retirement operation-state pruning was blocked; see report"}
+	}
+	if operationErr != nil || report.Outcome == sourceretire.ExecutionRetentionOutcomeInterrupted {
+		return fmt.Errorf("source retirement operation-state pruning was interrupted; see report")
 	}
 	return nil
 }
@@ -285,6 +353,47 @@ func (a *app) writeSourceRetireExecutionReport(output string, report sourceretir
 		return usageError("--output must be table or json")
 	}
 	return writeSourceRetireExecutionHuman(a.stdout, report)
+}
+
+func (a *app) writeSourceRetireRetentionReport(output string, report sourceretire.ExecutionRetentionReport) error {
+	if output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	if output != "table" {
+		return usageError("--output must be table or json")
+	}
+	return writeSourceRetireRetentionHuman(a.stdout, report)
+}
+
+func writeSourceRetireRetentionHuman(out io.Writer, report sourceretire.ExecutionRetentionReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\n",
+		terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain)
+	writeSourceRetireFindings(w, "BLOCKERS", report.Blockers)
+	writeSourceRetireFindings(w, "ISSUES", report.Issues)
+	fmt.Fprintf(w, "\nOPERATION\nID\t%s\nPLAN\t%s\nSTATUS\t%s\nPHASE\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.PlanID), terminalSafe(report.Operation.Status),
+		terminalSafe(report.Operation.Phase), report.Operation.Resumable)
+	fmt.Fprintf(w, "\nTOMBSTONE\nSTATE\t%s\nINTENT MARKER\t%s\nCOMPLETE MARKER\t%s\nINTENT DURABLE\t%t\nCOMPLETION DURABLE\t%t\nEXACT\t%t\nPRUNE RESUMABLE\t%t\n",
+		terminalSafe(report.Markers.State), terminalSafe(report.Markers.IntentMarkerID), terminalSafe(report.Markers.CompleteMarkerID),
+		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.PruneResumable)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nINTENT\t%s\nTERMINAL COMPLETION\t%s\nFILES RETIRED\t%d\nBYTES RETIRED\t%d\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(report.Proof.IntentID), terminalSafe(report.Proof.TerminalCompletionID),
+		report.Proof.FilesRetired, report.Proof.BytesRetired, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nCONTROL DIRECTORIES\t%d\nMARKER TEMPORARIES\t%d\nMARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\n",
+		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications,
+		report.Writes.RemovalAttempts, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved,
+		report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals)
+	fmt.Fprintf(w, "\nLIMITS / USED\nMAX OBJECTS\t%d\nMAX PATH BYTES\t%d\nMAX BYTES\t%d\nMAX MEMORY BYTES\t%d\nOBJECTS\t%d\nPATH BYTES\t%d\nBYTES\t%d\nMEMORY BYTES\t%d\n",
+		report.Limits.MaxObjects, report.Limits.MaxPathBytes, report.Limits.MaxBytes, report.Limits.MaxMemoryBytes,
+		report.Used.ObjectsConsidered, report.Used.PathBytesConsidered, report.Used.BytesConsidered, report.Used.MemoryBytesConsidered)
+	if len(report.Warnings) > 0 {
+		fmt.Fprintln(w, "\nWARNINGS")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+		}
+	}
+	return w.Flush()
 }
 
 func writeSourceRetireExecutionHuman(out io.Writer, report sourceretire.ExecutionReport) error {

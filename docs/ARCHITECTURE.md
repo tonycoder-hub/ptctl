@@ -884,6 +884,20 @@ journal evidence; it never proves a retired name is still absent. Terminal
 resume rebinds local selectors and confirms the exact names remain absent but
 does not read a password or contact the client.
 
+Terminal source-retirement journals may be retired only through the separate
+`seed retire prune` transition. The selector is one full operation ID plus its
+reviewed plan ID; no list/latest or age-based selection exists. A canonical
+retention intent, bound to the operation-root and target-root identities,
+preserves the exact intent/completion digests, metafile/materialize/activation
+lineage, source-selection ID, final identity, client snapshot, and retired
+file/byte totals before any private marker is removed. The implementation then
+performs one bounded exact inventory of the flat journal namespace, requires an
+empty scratch directory, removes identity-bound private objects in post-order,
+and publishes a completion marker only after the operation root is exactly the
+lock plus retention directory. An intent-only crash state is interpreted only
+by explicit prune; run/resume/status never cross it. The completed tombstone is
+historical audit evidence, not current source-absence proof.
+
 The remover deliberately does not delete directories, final content, empty or
 padding entries, other hardlink/alias names, or downloader jobs. A successful
 unlink therefore does not prove reclaimed blocks. Source deletion, final

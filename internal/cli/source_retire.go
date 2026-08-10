@@ -79,6 +79,8 @@ func (a *app) seedRetire(args []string) error {
 		return a.seedRetireResume(args[1:])
 	case "status":
 		return a.seedRetireStatus(args[1:])
+	case "prune":
+		return a.seedRetirePrune(args[1:])
 	default:
 		return usageError("unknown seed retire subcommand %q", args[0])
 	}
@@ -90,6 +92,7 @@ func (a *app) seedRetireHelp() {
   ptctl seed retire run (same live selectors) --expect-plan-id ID --acknowledge-source-deletion [flags]
   ptctl seed retire resume (same local/live selectors) --expect-plan-id ID --acknowledge-source-deletion [flags] OPERATION_ID
   ptctl seed retire status --target PATH [--output table|json] OPERATION_ID
+  ptctl seed retire prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
 
 The plan command is read-only. It requires one complete live source discovery,
 a current exact materialized-final proof, one canonical terminal client
@@ -102,7 +105,10 @@ Run repeats the complete live review and must reproduce an explicitly reviewed
 plan ID before creating its private target-root journal. Each exact source name
 gets a durable attempt marker before identity-bound removal and a completion
 marker afterward. Resume accepts only an explicit operation and repeats local
-and live proof. Status is journal-only and makes no current presence claim.
+and live proof. Status reads only the selected private journal or retained
+tombstone and makes no current presence claim.
+Prune is a separate acknowledged boundary for one terminal operation: it
+deletes only that operation's private journal and retains an exact tombstone.
 
 The live-client bracket performs one login plus two bounded job-ledger reads;
 multi-file torrents add at most two bounded file-ledger reads. There are no

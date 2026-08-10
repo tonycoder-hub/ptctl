@@ -26,6 +26,12 @@ type sourceRetireExecutionJSONEnvelope struct {
 	Data   sourceretire.ExecutionReport `json:"data"`
 }
 
+type sourceRetireRetentionJSONEnvelope struct {
+	Schema string                                `json:"schema"`
+	Kind   string                                `json:"kind"`
+	Data   sourceretire.ExecutionRetentionReport `json:"data"`
+}
+
 func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 	fixture := newClientAdoptCLIFixture(t)
 	server := newClientActivateServer(t, fixture.meta, fixture.raw)
@@ -240,8 +246,15 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	errOut.Reset()
 	if code := Run([]string{"seed", "retire", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
 		!strings.Contains(out.String(), "deletion_authority") || !strings.Contains(out.String(), "zero writes") ||
-		!strings.Contains(out.String(), "two bounded job-ledger reads") {
+		!strings.Contains(out.String(), "two bounded job-ledger reads") || !strings.Contains(out.String(), "retains an exact tombstone") {
 		t.Fatalf("help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	operation := "sha256:" + strings.Repeat("a", 64)
+	plan := "sha256:" + strings.Repeat("b", 64)
+	if code := Run([]string{"seed", "retire", "prune", "--target", "missing", "--expect-plan-id", plan, operation}, reader, &out, &errOut); code != 2 || reader.read {
+		t.Fatalf("missing prune acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
 	}
 }
 
@@ -341,6 +354,17 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 	if status.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || status.Data.Operation.Status != "historical_complete" || status.Data.WritesPerformed != 0 {
 		t.Fatalf("unexpected status: %s", out.String())
 	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(runArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("terminal rerun code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	rerun := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if rerun.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || rerun.Data.Operation.Status != "historical_complete" || rerun.Data.WritesPerformed != 0 {
+		t.Fatalf("terminal rerun was not local and idempotent: %s", out.String())
+	}
 
 	resumeArgs := append([]string(nil), runArgs...)
 	resumeArgs[2] = "resume"
@@ -374,6 +398,54 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 	if resumed.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || resumed.Data.WritesPerformed != 0 {
 		t.Fatalf("terminal resume was not idempotent: %s", out.String())
 	}
+
+	pruneArgs := []string{"seed", "retire", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-plan-id", plan.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", execution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(pruneArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("prune code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	pruned := decodeSourceRetireRetentionReport(t, out.Bytes())
+	if pruned.Schema != "ptctl.dev/v1" || pruned.Kind != "content.source_retirement.retention" ||
+		pruned.Data.Outcome != sourceretire.ExecutionRetentionOutcomePruned || !pruned.Data.Markers.ExactTombstone ||
+		pruned.Data.Writes.FilesRemoved == 0 || pruned.Data.WritesPerformed == 0 {
+		t.Fatalf("unexpected prune report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(statusArgs, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("retained status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retained := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if retained.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || retained.Data.Operation.Status != "retained" || retained.Data.WritesPerformed != 0 {
+		t.Fatalf("retained status disagrees: %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(resumeArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("retained resume code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	retainedResume := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if retainedResume.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || retainedResume.Data.Operation.Status != "retained" || retainedResume.Data.WritesPerformed != 0 {
+		t.Fatalf("retained resume disagrees: %s", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(pruneArgs, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("idempotent prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	repeated := decodeSourceRetireRetentionReport(t, out.Bytes())
+	if repeated.Data.Outcome != sourceretire.ExecutionRetentionOutcomeAlreadyPruned || repeated.Data.WritesPerformed != 0 {
+		t.Fatalf("idempotent prune changed state: %s", out.String())
+	}
 }
 
 func sourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOperation, activationPlanID string) []string {
@@ -400,6 +472,15 @@ func decodeSourceRetireExecutionReport(t *testing.T, raw []byte) sourceRetireExe
 	var result sourceRetireExecutionJSONEnvelope
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatalf("decode source retirement execution report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireRetentionReport(t *testing.T, raw []byte) sourceRetireRetentionJSONEnvelope {
+	t.Helper()
+	var result sourceRetireRetentionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement retention report: %v\n%s", err, raw)
 	}
 	return result
 }

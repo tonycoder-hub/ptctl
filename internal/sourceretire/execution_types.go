@@ -100,6 +100,13 @@ func executionOperationID(planID string) (OperationID, error) {
 	return OperationID(markerIDPrefix + hex.EncodeToString(digest[:])), nil
 }
 
+// OperationIDForPlanID deterministically derives the only operation selector
+// a reviewed source-retirement plan may use. It grants no journal, source, or
+// deletion authority.
+func OperationIDForPlanID(planID string) (OperationID, error) {
+	return executionOperationID(planID)
+}
+
 func OperationDirectoryName(id OperationID) (string, error) {
 	parsed, err := ParseOperationID(id.String())
 	if err != nil || parsed != id {

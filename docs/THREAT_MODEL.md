@@ -355,8 +355,11 @@ source roots. `run` repeats the complete source/final/client proof and compares
 the fresh plan ID before its first write. It ignores any path-disclosure request
 and never parses plan JSON as authority. `resume` first validates the explicit
 private journal, root scope, and all local authorities before password stdin or
-network access. Status reads only one explicit journal and never reads source
-roots or credentials.
+network access. Status reads only one explicit journal or retained tombstone
+and never reads source roots or credentials. `prune` has a different
+`--acknowledge-operation-state-deletion` boundary and accepts only the explicit
+operation plus reviewed plan ID; it does not inherit source-unlink authority or
+read a client credential.
 
 The target-root-local operation subtree is protected by the same bound-root,
 owner-private, no-follow journal primitives as materialization, with its own
@@ -473,6 +476,13 @@ empty-directory removal is identity-bound and separately reports visibility
 and parent-directory durability. The intent marker precedes deletion; the
 completion marker follows an exact tombstone audit. A crash therefore resumes
 from the same explicit operation ID rather than selecting or sweeping state.
+The same ordering applies to a terminal source-retirement operation. Its
+retention marker is authorized only by the complete canonical per-name journal;
+ordinary source-retirement resume cannot cross the durable prune boundary.
+Only the flat private journal and empty scratch directory are eligible for
+removal. Source names, parents, the materialized final, downloader state, other
+operations, and the retained tombstone remain out of scope. The source-retire
+tombstone is historical and never asserts current source absence.
 
 Allowlisted sealed state records share the private store's root binding,
 owner-only staging, no-replace, durability, and corruption controls, but use a
@@ -641,8 +651,10 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- explicit retained-tombstone retirement and broader quota/age policy (heavy
-  terminal operation state now has only exact single-operation pruning);
+- explicit retained-tombstone retirement and broader quota/age policy
+  (materialize and source-retirement heavy terminal state now have exact
+  single-operation pruning; tombstones and smaller client journals are not yet
+  retired or selected by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal

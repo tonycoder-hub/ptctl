@@ -19,7 +19,8 @@ domains and reconciles them around verifiable torrent metadata.
 > optional start transitions. Outside the separately acknowledged source-name
 > retirement workflow, no listed operation overwrites, moves, rewrites, or
 > deletes a source or published final layout. Retirement can unlink only the
-> reviewed exact source names; reads
+> reviewed exact source names; `seed retire prune` separately deletes only one
+> terminal retirement operation's private journal and retains its tombstone; reads
 > may still update atime or hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
@@ -748,11 +749,31 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl seed retire run \
 
 ptctl seed retire status --target "D:\PT" --output json \
   sha256:SOURCE_RETIREMENT_OPERATION_DIGEST
+
+ptctl seed retire prune --target "D:\PT" \
+  --expect-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
+  --acknowledge-operation-state-deletion \
+  --output json \
+  sha256:SOURCE_RETIREMENT_OPERATION_DIGEST
 ```
 
 `resume` takes the same local/live selectors, expected plan ID, deletion
 acknowledgement, and one explicit operation ID. Neither run nor resume accepts
 plan JSON as proof or selects a latest operation.
+
+`prune` is a second, narrower deletion boundary. It accepts only one explicit
+terminal operation ID, the exact reviewed plan ID, and
+`--acknowledge-operation-state-deletion`. Before removing anything it validates
+the complete canonical retirement journal, publishes a durable private
+retention intent, and inventories the flat `journal/` plus empty `scratch/`
+namespace within fixed object/path/byte/memory limits. It then removes only
+those identity-bound private control objects and publishes an exact completion
+marker. A crash resumes from the same explicit ID and durable intent; it never
+selects by age or latest state. The final, downloader job, source parents, and
+all content names are outside this authority. The retained tombstone preserves
+the plan, intent/completion digests, final/client lineage, and retired counts as
+historical evidence; it does not prove that a retired source name remains
+absent now. JSON kind is `content.source_retirement.retention`.
 
 `run` rebuilds the complete live plan in the same invocation and compares its
 ID before any journal write. It then creates one owner-private operation under
@@ -774,8 +795,8 @@ A normal single-file run makes one login and three bounded ledger reads (four
 HTTP requests total); ordinary multi-file runs add three bounded file-list
 reads (seven total). Active resume uses one login plus two proof observations,
 or three/five total requests for single/multi-file. There are no retries and no
-client mutations. `status` reads only one explicit private journal and neither
-reads credentials nor contacts the client. Terminal resume also avoids
+client mutations. `status` reads only one explicit private journal or retained
+tombstone and neither reads credentials nor contacts the client. Terminal resume also avoids
 credential I/O. No command removes a parent directory, the final, another name
 for a hardlinked inode, an empty/padding entry, or a downloader job, and no
 report claims reclaimed storage or rollback. Execution JSON kind is
@@ -891,6 +912,14 @@ listing returns `4`. Non-usage outcomes are written before the exit. A failure
 may have nonzero or uncertain writes, and a reported operation ID is the only
 recovery handoff; retries never choose an operation automatically.
 
+Source-retirement pruning uses the same report-first exit lattice:
+`pruned`/`already_pruned` return `0`, operational interruption or uncertain
+durability/removal returns `1`, invalid usage or a missing acknowledgement
+returns `2`, marker/journal/namespace integrity failure returns `3`, and an
+explicit selector, terminal-state, filesystem, or bounded-inventory policy
+blocker returns `4`. It never reads downloader credentials or contacts the
+client.
+
 For the metafile store, exit `0` includes idempotent `already_initialized` and
 `already_present` outcomes. Missing/uninitialized stores, absent objects, I/O
 failures, unsupported store formats, or inability to enforce the required
@@ -930,16 +959,18 @@ network cost. `ptctl` keeps credentials in memory, rejects secret arguments,
 emits no request bodies, blocks cross-origin/downgrade redirects, never retries
 site reads, bounds network and filesystem work, hides private store/object and
 discovery/reconciliation absolute paths by default, never exposes materialize
-paths, defaults conflicts to failure, and confines deletion to the separately
-acknowledged operation-state-only materialize prune command. Commands such
+paths, defaults conflicts to failure, and confines private operation-state
+deletion to the separately acknowledged materialize/source-retirement prune
+commands while source-name unlink has its own narrower acknowledgement. Commands such
 as `storage probe` and `seed plan` keep their documented path-display
 contracts. The private store uses owner-only permissions and atomic no-clobber
 publication for both metafiles and allowlisted sealed state records; this is
 access control, not encryption. Store init/import, storage profile
 creation/index refresh, the artifact plus sealed-binding phases of an
 acknowledged site metafile fetch, and acknowledged target-root-local
-materialize operations (including explicit retention pruning), plus
-acknowledged exact stopped-job adoption and its private request journal, are
+materialize operations (including explicit retention pruning), acknowledged
+exact stopped-job adoption, reviewed client recheck/start, and acknowledged
+source-name retirement (including its separate journal pruning), are
 the explicit write exceptions to the otherwise
 zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).

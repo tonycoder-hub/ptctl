@@ -76,6 +76,12 @@ func Run(ctx context.Context, options RunOptions) (ExecutionReport, error) {
 		return executionIntegrity(&report, "the source retirement operation ID could not be derived")
 	}
 	report.Operation = ExecutionOperationReport{ID: operation.String(), PlanID: review.Plan.ID, Status: "initializing", Phase: "planned"}
+	if retained, retentionErr := applyExecutionRetentionControl(ctx, target, operation, &report); retained {
+		if retentionErr != nil {
+			return mapExecutionError(&report, retentionErr, "source retirement retention state could not be inspected")
+		}
+		return report, nil
+	}
 	intent := executionIntentFromPlan(operation, scopeID, review.Plan, options.Limits, intentFiles)
 	if err := preflightExecutionJournalEncoding(intent, targetInfo.Identity.String()); err != nil {
 		return mapExecutionError(&report, err, "source retirement journal protocol exceeds its reviewed limits")
@@ -116,6 +122,12 @@ func Resume(ctx context.Context, options ResumeOptions) (ExecutionReport, error)
 	}
 	defer target.Close()
 	report.addEffect("read_private_source_retirement_journal")
+	if retained, retentionErr := applyExecutionRetentionControl(ctx, target, options.OperationID, &report); retained {
+		if retentionErr != nil {
+			return mapExecutionError(&report, retentionErr, "source retirement retention state could not be inspected")
+		}
+		return report, nil
+	}
 	journal, err := openExecutionJournal(ctx, target, options.OperationID, options.Limits)
 	if err != nil {
 		return mapExecutionError(&report, err, "source retirement journal could not be opened")
@@ -175,9 +187,9 @@ func Resume(ctx context.Context, options ResumeOptions) (ExecutionReport, error)
 	return continueSourceRetirement(ctx, &report, journal, sources, options.Meta, freshFinal, options.ClientUse, options.ClientSession, before)
 }
 
-// Status reads only the explicit private journal. It does not access source
-// roots, reverify the final, read credentials, contact a downloader, or infer
-// that a historically retired name remains absent.
+// Status reads only the explicit private journal or retained tombstone. It
+// does not access source roots, reverify the final, read credentials, contact
+// a downloader, or infer that a historically retired name remains absent.
 func Status(ctx context.Context, options StatusOptions) (ExecutionReport, error) {
 	report := newExecutionReport(options.Limits)
 	report.Operation = ExecutionOperationReport{ID: options.OperationID.String(), Status: "inspection_incomplete", Phase: "unknown"}
@@ -193,6 +205,12 @@ func Status(ctx context.Context, options StatusOptions) (ExecutionReport, error)
 	}
 	defer target.Close()
 	report.addEffect("read_private_source_retirement_journal")
+	if retained, retentionErr := applyExecutionRetentionControl(ctx, target, options.OperationID, &report); retained {
+		if retentionErr != nil {
+			return mapExecutionError(&report, retentionErr, "source retirement retention state could not be inspected")
+		}
+		return report, nil
+	}
 	journal, err := openExecutionJournal(ctx, target, options.OperationID, options.Limits)
 	if err != nil {
 		return mapExecutionError(&report, err, "source retirement journal could not be opened")
