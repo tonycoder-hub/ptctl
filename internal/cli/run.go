@@ -64,6 +64,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = a.site(args[1:])
 	case "torrent":
 		err = a.torrent(args[1:])
+	case "metafile":
+		err = a.metafileCommand(args[1:])
 	case "storage":
 		err = a.storage(args[1:])
 	case "client":
@@ -106,8 +108,12 @@ Usage:
   ptctl site search --cookie-stdin [--output table|json] SITE QUERY...
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
 
-  ptctl torrent inspect [--output table|json] FILE.torrent
-  ptctl torrent verify --content PATH [--output table|json] FILE.torrent
+  ptctl torrent inspect [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)
+  ptctl torrent verify --content PATH [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)
+
+  ptctl metafile store init --store DIR [--output table|json]
+  ptctl metafile store import --store DIR [--output table|json] FILE.torrent
+  ptctl metafile store inspect --store DIR [--output table|json] METAFILE_VARIANT_ID
 
   ptctl storage probe [--output table|json] PATH
   ptctl storage map --host-root PATH --client-root PATH [--client-style posix|windows] HOST_PATH
@@ -115,16 +121,17 @@ Usage:
   ptctl client status --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
   ptctl client list --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
 
-  ptctl reconcile report --torrent FILE.torrent --search-root PATH [--search-root PATH...] [--output table|json]
+  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [--output table|json]
 
-  ptctl seed plan --torrent FILE.torrent --source PATH --target PATH [--output table|json]
-  ptctl seed discover --torrent FILE.torrent --search-root PATH [--search-root PATH...] [--target PATH] [--output table|json]
+  ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
+  ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [--target PATH] [--output table|json]
   ptctl version [--output table|json]
 
 Safety defaults:
   * Site operations are one bounded GET per invocation, with no automatic retry.
   * Session cookies are accepted only through stdin and are never persisted.
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
+  * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
@@ -234,7 +241,7 @@ func (a *app) reconcileReport(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl reconcile report --torrent FILE.torrent --search-root PATH [--search-root PATH...] [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [flags]")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "The report brackets optional downloader reads around bounded, exact storage discovery. It performs zero writes. Downloader identity cannot expose the private metafile variant, and host/client path comparison is lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
@@ -246,6 +253,8 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	output := fs.String("output", "table", "table or json")
 	torrentPath := fs.String("torrent", "", "metafile path")
+	storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
+	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
 	driverName := fs.String("driver", "qbittorrent", "downloader driver; part of the optional client group")
@@ -296,8 +305,12 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
-	if *torrentPath == "" || len(searchRoots) == 0 {
-		return usageError("reconcile report requires --torrent and at least one --search-root")
+	if len(searchRoots) == 0 {
+		return usageError("reconcile report requires at least one --search-root")
+	}
+	input, err := flaggedMetafileInput("reconcile report", *torrentPath, *storeRoot, *variantID, explicit["torrent"], explicit["metafile-store"], explicit["metafile-variant"])
+	if err != nil {
+		return err
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
@@ -398,7 +411,7 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("reconcile report downloader endpoint is invalid: %v", err)
 		}
 	}
-	meta, err := metafile.Read(*torrentPath)
+	meta, err := loadMetafileInput(context.Background(), input)
 	if err != nil {
 		return err
 	}
@@ -716,13 +729,19 @@ func (a *app) torrent(args []string) error {
 	case "inspect":
 		fs := newFlagSet("torrent inspect")
 		output := fs.String("output", "table", "table or json")
-		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 1 {
-			return usageError("torrent inspect requires one FILE.torrent")
+		storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
+		variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
+		if err := fs.Parse(args[1:]); err != nil {
+			return usageError("torrent inspect: %v", err)
 		}
 		if err := validateOutput(*output); err != nil {
 			return err
 		}
-		meta, err := metafile.Read(fs.Arg(0))
+		input, err := positionalMetafileInput("torrent inspect", fs.Args(), *storeRoot, *variantID, flagWasSet(fs, "metafile-store"), flagWasSet(fs, "metafile-variant"))
+		if err != nil {
+			return err
+		}
+		meta, err := loadMetafileInput(context.Background(), input)
 		if err != nil {
 			return err
 		}
@@ -737,13 +756,22 @@ func (a *app) torrent(args []string) error {
 		fs := newFlagSet("torrent verify")
 		output := fs.String("output", "table", "table or json")
 		content := fs.String("content", "", "exact file (single-file) or torrent root directory (multi-file)")
-		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 1 || *content == "" {
-			return usageError("torrent verify requires --content PATH and one FILE.torrent")
+		storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
+		variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
+		if err := fs.Parse(args[1:]); err != nil {
+			return usageError("torrent verify: %v", err)
+		}
+		if *content == "" {
+			return usageError("torrent verify requires --content PATH")
 		}
 		if *output != "table" && *output != "json" {
 			return usageError("--output must be table or json")
 		}
-		meta, err := metafile.Read(fs.Arg(0))
+		input, err := positionalMetafileInput("torrent verify", fs.Args(), *storeRoot, *variantID, flagWasSet(fs, "metafile-store"), flagWasSet(fs, "metafile-variant"))
+		if err != nil {
+			return err
+		}
+		meta, err := loadMetafileInput(context.Background(), input)
 		if err != nil {
 			return err
 		}
@@ -840,16 +868,25 @@ func (a *app) seed(args []string) error {
 	fs := newFlagSet("seed plan")
 	output := fs.String("output", "table", "table or json")
 	torrentPath := fs.String("torrent", "", "metafile path")
+	storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
+	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
 	source := fs.String("source", "", "verified source content")
 	target := fs.String("target", "", "target storage root")
 	strategy := fs.String("strategy", "copy", "copy")
-	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *torrentPath == "" || *source == "" || *target == "" {
-		return usageError("seed plan requires --torrent, --source, and --target")
+	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *source == "" || *target == "" {
+		return usageError("seed plan requires a metafile input, --source, and --target")
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
 	}
-	meta, err := metafile.Read(*torrentPath)
+	if *strategy != "copy" {
+		return usageError("seed plan --strategy must be copy")
+	}
+	input, err := flaggedMetafileInput("seed plan", *torrentPath, *storeRoot, *variantID, flagWasSet(fs, "torrent"), flagWasSet(fs, "metafile-store"), flagWasSet(fs, "metafile-variant"))
+	if err != nil {
+		return err
+	}
+	meta, err := loadMetafileInput(context.Background(), input)
 	if err != nil {
 		return err
 	}
@@ -875,7 +912,7 @@ func (a *app) seedDiscover(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl seed discover --torrent FILE.torrent --search-root PATH [--search-root PATH...] [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] [flags]")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Discovery performs bounded metadata/content reads and zero writes. Host/client mapping applies to discovered sources, or to planned targets when --target is set.")
 		fmt.Fprintln(fs.Output(), "")
@@ -884,6 +921,8 @@ func (a *app) seedDiscover(args []string) error {
 	}
 	output := fs.String("output", "table", "table or json")
 	torrentPath := fs.String("torrent", "", "metafile path")
+	storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
+	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
 	target := fs.String("target", "", "optional target storage root for a layout-only plan")
@@ -926,8 +965,12 @@ func (a *app) seedDiscover(args []string) error {
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
-	if *torrentPath == "" || len(searchRoots) == 0 {
-		return usageError("seed discover requires --torrent and at least one --search-root")
+	if len(searchRoots) == 0 {
+		return usageError("seed discover requires at least one --search-root")
+	}
+	input, err := flaggedMetafileInput("seed discover", *torrentPath, *storeRoot, *variantID, explicit["torrent"], explicit["metafile-store"], explicit["metafile-variant"])
+	if err != nil {
+		return err
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
@@ -974,7 +1017,7 @@ func (a *app) seedDiscover(args []string) error {
 			return usageError("seed discover path mapping is invalid: %v", err)
 		}
 	}
-	meta, err := metafile.Read(*torrentPath)
+	meta, err := loadMetafileInput(context.Background(), input)
 	if err != nil {
 		return err
 	}
@@ -1070,7 +1113,7 @@ func writeJSON(out io.Writer, data any, warnings []string) error {
 }
 
 func jsonKind(data any) string {
-	switch data.(type) {
+	switch typed := data.(type) {
 	case map[string]string:
 		return "version"
 	case []domain.SiteDescriptor:
@@ -1085,6 +1128,8 @@ func jsonKind(data any) string {
 		return "site.bonus.catalog"
 	case *metafile.MetaInfo:
 		return "metafile.manifest"
+	case metafileStoreReport:
+		return typed.kind
 	case metafile.VerificationResult:
 		return "content.verification"
 	case storage.ProbeResult:

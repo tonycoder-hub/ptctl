@@ -4,9 +4,12 @@
 It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and reconciles them around verifiable torrent metadata.
 
-> Status: `v0.3.0-alpha` development. The implemented surface is intentionally
-> read-only. `seed discover`, `seed plan`, and `reconcile report` verify and
-> explain layouts and ledgers but do not apply them.
+> Status: `v0.3.0-alpha` development. Site, downloader, content, discovery,
+> planning, and reconciliation operations are intentionally read-only. The only
+> persistent writes are explicit `metafile store init` and `metafile store
+> import` operations into a private artifact store; they never mutate content or
+> move, rewrite, or delete the import source. Reading the source can still update
+> atime or hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
@@ -33,6 +36,11 @@ capabilities at the edge, not assumptions in the core domain model.
 - strict, bounded bencode parsing;
 - exact v1 infohash calculation from the original `info` byte slice;
 - exact whole-metafile SHA-256 variant identity, kept distinct from infohashes;
+- a versioned private metafile store with explicit initialization, exact-byte
+  import, content-addressed no-clobber objects, and verified inspection;
+- one mutually exclusive metafile selector across inspect, verify, seed, and
+  reconciliation commands: an ordinary file, or an initialized store plus its
+  whole-metafile variant ID;
 - structural v1/v2 validation, including cryptographic reduction of each v2
   piece layer back to its file `pieces root`;
 - hybrid inspection that parses both layouts and rejects disagreements;
@@ -75,11 +83,11 @@ capabilities at the edge, not assumptions in the core domain model.
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
-Not implemented yet: metafile download, a persistent storage index, downloader
-mutation, attributed/empty-file client-layout reconciliation, journaled
-plan application, deletion, automatic plan execution, site writes, browser
-login, third-party executable plugins, ratio manipulation, or Cloudflare
-bypass.
+Not implemented yet: the B1 effectful site metafile fetch, a persistent storage
+index, downloader mutation, attributed/empty-file client-layout reconciliation,
+journaled plan application, deletion, automatic plan execution, site writes,
+browser login, third-party executable plugins, ratio manipulation, or
+Cloudflare bypass.
 
 ## Install
 
@@ -104,6 +112,72 @@ Inspect a metafile without exposing its announce path or query string:
 ptctl torrent inspect release.torrent
 ptctl torrent inspect --output json release.torrent
 ```
+
+Preserve a private metafile as an immutable exact-byte artifact. Initialization
+is explicit because the store must enforce private permissions and atomic
+no-clobber commits. Import copies the accepted raw bytes and leaves the source
+file in place without rewriting or deleting it; the source read may still
+update atime, hydrate a placeholder, or incur remote-filesystem cost:
+
+```bash
+ptctl metafile store init --store "D:\Private\ptctl-metafiles"
+ptctl metafile store import --store "D:\Private\ptctl-metafiles" release.torrent
+ptctl metafile store inspect \
+  --store "D:\Private\ptctl-metafiles" \
+  sha256:WHOLE_METAFILE_SHA256
+```
+
+The artifact ID hashes the complete raw `.torrent` byte stream, not just its
+`info` dictionary. Two private variants with the same infohash therefore remain
+different artifacts. Import is idempotent: an already present, byte-identical
+variant succeeds without another write. The store is permission-isolated, not
+encrypted; anyone who can read the store can read the embedded announce
+passkey. Store and import-source absolute paths are hidden unless
+`--show-absolute-paths` is explicitly requested; object paths are never
+emitted.
+
+No-clobber publication and durability confirmation are distinct. If the object
+was completely published but the following directory durability check fails,
+the report uses `published_durability_unconfirmed` and `writes_performed` may be
+`1`; the complete object may remain visible. `ptctl` never reports that case as
+zero-write or removes the published object as rollback.
+
+Before creating store layout entries or staging an artifact, the operation
+binds one reviewed root identity. The root, `objects`, `tmp`, staging file, and
+final object must then remain on that same reviewed local filesystem; POSIX uses
+handle-relative operations and Windows pins the path namespace with no-delete
+directory guards. A rename, replacement, mount change, or volume change fails
+closed. Volatile memory filesystems such as tmpfs and ramfs are not accepted as
+durable stores.
+
+Publication assurance is invocation-scoped. A newly initialized store or newly
+stored object can report `confirmed_this_invocation`. Read-only inspection and
+idempotent `already_*` outcomes verify current bytes and privacy, but label the
+historical publication as unobservable instead of inferring an old no-clobber
+or durability event. A failure after publication and durability but before all
+post-commit checks is reported as `published_post_commit_failure`.
+
+Every existing metafile consumer accepts exactly one source. Legacy file forms
+remain unchanged. The stored form replaces the positional file or `--torrent`
+with the following pair:
+
+```bash
+ptctl torrent inspect \
+  --metafile-store "D:\Private\ptctl-metafiles" \
+  --metafile-variant sha256:WHOLE_METAFILE_SHA256
+
+ptctl seed discover \
+  --metafile-store "D:\Private\ptctl-metafiles" \
+  --metafile-variant sha256:WHOLE_METAFILE_SHA256 \
+  --search-root "D:\Media"
+```
+
+The same pair is supported by `torrent verify`, `seed plan`, and `reconcile
+report`. Supplying only half the pair, mixing it with a file/`--torrent`, or
+adding a positional metafile to the stored form is invalid usage. Loading from
+the store rechecks the object digest and parses the exact bytes before invoking
+the same verifier, discovery, planning, or reconciliation core. Those consumer
+commands remain zero-write.
 
 Verify an exact content root. v1 uses its cross-file piece stream, v2 uses
 per-file Merkle trees, and hybrid requires both proofs. For a multi-file
@@ -236,7 +310,7 @@ invocation mapping; mutable discovery JSON is never path authority. Reports
 name the exact POSIX/Windows comparison mode and an opaque mapping ID. Client
 paths remain remote, non-atomic lexical claims and are never opened on the host.
 
-Run `ptctl help`, `ptctl seed discover --help`, or
+Run `ptctl help`, `ptctl metafile store`, `ptctl seed discover --help`, or
 `ptctl reconcile report --help` for the complete surface.
 
 Exit code `0` means a report or requested read succeeded, `1` an operational
@@ -249,6 +323,15 @@ Reconciliation is also report-oriented. Add `--require-reconciled` to return
 `4` unless the independently reported local axes are `consistent`; the report
 is still printed first.
 
+For the metafile store, exit `0` includes idempotent `already_initialized` and
+`already_present` outcomes. Missing/uninitialized stores, absent objects, I/O
+failures, unsupported store formats, or inability to enforce the required
+privacy/atomicity controls return `1`; selector conflicts return `2`; invalid
+input artifacts or a stored digest/parse mismatch return `3`. Exit `4` is not
+repurposed and remains the report-first requirement failure described above. A
+post-publication durability failure reports `published_durability_unconfirmed`
+and returns `1`, even though its write count may already be `1`.
+
 ## Security model in one paragraph
 
 A private `.torrent` is secret-bearing because its announce URL often contains
@@ -256,8 +339,13 @@ a personal passkey. Site cookies and downloader credentials are also secrets,
 while filesystem reads can update atime, hydrate cloud placeholders, or incur
 network cost. `ptctl` keeps credentials in memory, rejects secret arguments,
 emits no request bodies, blocks cross-origin/downgrade redirects, never retries
-site reads, bounds network and filesystem work, hides absolute discovery paths
-by default, defaults conflicts to failure, and has no delete or apply command.
+site reads, bounds network and filesystem work, hides private store/object and
+discovery/reconciliation absolute paths by default, defaults conflicts to
+failure, and has no delete or apply command. Commands such as `storage probe`
+and `seed plan` keep their documented path-display contracts. The private
+metafile store uses owner-only permissions and atomic no-clobber publication;
+this is access control, not encryption. Its init/import writes are the explicit
+exception to the otherwise zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Architecture

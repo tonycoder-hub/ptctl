@@ -40,6 +40,15 @@ not anonymity, and a guessable path may still be tested by dictionary attack.
 The redactor and path hiding are defense in depth, not permission to log secret
 structures or publish private reports.
 
+Private metafile-store reports expose only an opaque store ID, the
+whole-metafile SHA-256 variant ID, and safe parsed metadata by default. Source,
+and store-root absolute paths require `--show-absolute-paths`; object paths are
+never report fields. Raw artifact bytes, announce URLs, web seeds, passkeys,
+and temporary paths are also never report fields. The store protects artifacts
+with filesystem permissions; it does not encrypt them, so a process or
+administrator that can read the store can recover every embedded tracker
+secret.
+
 ### SSRF and redirect leakage
 
 Site origins must be HTTPS. DNS answers are checked before dialing and private,
@@ -75,6 +84,9 @@ connections.
 
 Bencode input, string size, depth, and node count are bounded. HTTP bodies and
 qBittorrent responses have explicit limits. Torrent piece length is capped.
+Metafile-store import and inspection use the same bounded parser and cap raw
+artifact bytes before hashing or retaining them. An on-disk object name or
+side record is never trusted as its digest or parsed identity.
 
 The qBittorrent ledger is capped at 8 MiB and 25,000 jobs. Each magnet claim
 is capped at 64 KiB, 256 query pairs, eight `xt` values, and 256 bytes per
@@ -136,6 +148,61 @@ filesystem snapshot or OS-specific `openat`/Windows-handle implementation is
 needed for stronger guarantees. Reports and plans label this assurance
 non-atomic.
 
+The private metafile store has a narrower, stronger write boundary than content
+discovery. `metafile store init` creates or validates a versioned store with
+owner-only access. `metafile store import` first validates the complete input,
+writes a private temporary object inside the same store and filesystem, flushes
+it, and publishes it with a no-replace operation. POSIX uses a no-replace link
+and then `fsync`s the final directory; Windows uses no-replace `MoveFileEx` with
+write-through. The source is never moved, rewritten, or deleted, although its
+read may update atime, hydrate a placeholder, or incur remote-filesystem cost.
+A concurrent identical import is idempotent; a digest or content disagreement
+is an integrity failure, never permission to overwrite.
+
+After an initialization root exists, validation and store-layout/artifact
+mutation are tied to one operation-bound root identity. POSIX uses held
+directory handles for subdirectory creation, reads, staging, publication,
+cleanup, and durability flushes; Linux checks both device and mount ID, and
+macOS checks device plus filesystem ID. Windows holds no-delete guards
+for every path prefix and for the root, `objects`, and `tmp`, verifies the volume
+identity, and brackets `MoveFileEx` with identity checks. Root replacement,
+subdirectory replacement, mount substitution, or a cross-volume object fails
+closed. If identity is lost after publication, the receipt still records the
+visible write and the operation cannot return ordinary success. tmpfs, ramfs,
+and other volatile or unreviewed filesystems are rejected as durable stores.
+
+Publication and durability confirmation are not one fact. A failure before
+publication cannot create an accepted final object. After a complete object has
+become visible, however, final-directory `fsync` or write-through confirmation
+can fail. That result is `published_durability_unconfirmed` and
+`writes_performed` may be `1`; the implementation must not claim zero visible
+writes, overwrite the object, or delete it as rollback. A subsequent operation
+must treat the object as untrusted until the normal bounded digest and parse
+checks succeed.
+
+Nor can a later read reconstruct historical publication evidence. Inspection
+and idempotent import revalidate current digest, parse, and privacy properties,
+but label historical no-clobber/durability as unobservable. A publication that
+crossed its durability boundary but then failed cleanup or final validation is
+reported separately as `published_post_commit_failure`; it is never folded into
+an ordinary success.
+
+POSIX stores require verified ownership plus owner-only directory/file modes.
+Windows stores require a verified owner-only DACL, and reparse traversal is
+rejected. Object path components are fixed ASCII digest material, avoiding
+case-folding, Unicode-normalization, reserved-name, and server-filename
+injection. An unsupported format, an existing unrecognized directory, or a
+filesystem whose privacy/no-clobber behavior cannot be established fails
+closed. The first format does not accept UNC/network stores. Unknown future
+formats are not migrated in place automatically.
+
+Every stored-artifact open re-hashes and parses the bounded original bytes.
+Selecting a store object for inspect, verify, seed, or reconciliation grants no
+write authority to that command. The paired `--metafile-store` and
+`--metafile-variant` selector is mutually exclusive with a positional metafile
+or `--torrent`; selector validation happens before reconciliation reads a
+downloader password from stdin.
+
 Downloader reconciliation takes one identity snapshot before storage proof and
 another afterward using the same authenticated session. For eligible ordinary
 multi-file jobs, a file snapshot is taken after the first identity read and a
@@ -170,19 +237,37 @@ verification.
 
 ### Read side effects and remote storage
 
-"Read-only" means zero intentional filesystem mutation, not zero observable
-side effect. Metadata and content reads may update atime, wake disks, hydrate a
-cloud placeholder, traverse a FUSE/SMB backend, or incur network cost. Network
-paths that can be recognized syntactically are opt-in, and scans use one
-goroutine with no retry. Context cancellation is checked between operations,
-but a blocked filesystem syscall may not be interruptible. Users should narrow
-roots and budgets before scanning mounted remote storage.
+For inspect, verify, discovery, planning, reconciliation, and current site or
+downloader reads, "read-only" means zero intentional filesystem mutation, not
+zero observable side effect. Metadata and content reads may update atime, wake
+disks, hydrate a cloud placeholder, traverse a FUSE/SMB backend, or incur
+network cost. Network paths that can be recognized syntactically are opt-in,
+and scans use one goroutine with no retry. Context cancellation is checked
+between operations, but a blocked filesystem syscall may not be interruptible.
+Users should narrow roots and budgets before scanning mounted remote storage.
+
+`metafile store init` and `metafile store import` are the explicit exception:
+their reported effect includes private-store writes. `writes_performed` counts
+the logical publication of an accepted store marker or immutable object, not
+private temporary or uninitialized staging entries. It is nonzero when that
+accepted state became visible, including a possible count of `1` for
+`published_durability_unconfirmed`. Store inspect and every existing artifact
+consumer remain zero-write.
+
+The future B1 site metafile fetch crosses both boundaries. It may be recorded by
+the tracker and returns a passkey-bearing artifact, so it must require an
+explicit site-effect acknowledgement and an initialized private store. Store,
+usage, limits, and destination assurances must be validated before the cookie
+is read; the bounded same-origin response must be strictly parsed and imported
+through the same no-clobber primitive. No raw response may be written to stdout
+or to an arbitrary destination, and no retry is allowed.
 
 ### Supply chain
 
-The runtime currently uses the Go standard library only. GitHub Actions are
-pinned to full commit SHAs and receive read-only repository permission. Tests
-construct synthetic metafiles; real tracker artifacts are forbidden.
+The runtime uses the Go standard library plus `golang.org/x/sys` for audited
+OS-specific filesystem security primitives. GitHub Actions are pinned to full
+commit SHAs and receive read-only repository permission. Tests construct
+synthetic metafiles; real tracker artifacts are forbidden.
 
 ## Known gaps before mutation support
 
@@ -192,8 +277,12 @@ construct synthetic metafiles; real tracker artifacts are forbidden.
 - journaled copy/reflink workflows with crash injection and rollback;
 - downloader add/recheck/location transitions and private-mode verification;
 - persistent storage profiles/index with stale-observation invalidation;
+- encryption-at-rest or an audited external-key design for private metafile
+  stores on filesystems where owner-only ACLs cannot be enforced;
 - per-account cross-process site rate-limit coordination;
 - signed releases, SBOM, and build provenance.
 
-No filesystem or tracker mutation should be added until the relevant gap has a
-testable control and a failure-recovery story.
+No content, downloader, or tracker mutation should be added until the relevant
+gap has a testable control and a failure-recovery story. The private metafile
+store is limited to immutable, no-clobber artifact publication and grants no
+authority over seeded content.
