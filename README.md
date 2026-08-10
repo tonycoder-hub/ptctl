@@ -10,7 +10,7 @@ domains and reconciles them around verifiable torrent metadata.
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
 > workflow, exact `client adopt run|resume|prune` stopped-add operations, and
-> explicit `client activate run|resume` recheck/start operations. The
+> explicit `client activate run|resume|prune` recheck/start operations. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
@@ -20,8 +20,11 @@ domains and reconciles them around verifiable torrent metadata.
 > existing job; activation is limited to the reviewed exact job's recheck and
 > optional start transitions. `client adopt prune` separately seals one
 > terminal completion tombstone before deleting only that operation's private
-> request journal. Outside the separately acknowledged source-name
-> retirement workflow, no listed operation overwrites, moves, rewrites, or
+> request journal. `client activate prune` does the same for one explicitly
+> selected terminal recheck/start journal while retaining the exact historical
+> completion needed by source-retirement review. Outside the separately
+> acknowledged source-name retirement workflow, no listed operation
+> overwrites, moves, rewrites, or
 > deletes a source or published final layout. Retirement can unlink only the
 > reviewed exact source names; `seed retire prune` separately deletes only one
 > terminal retirement operation's private journal and retains its tombstone;
@@ -722,6 +725,15 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client activate resume \
 
 ptctl client activate status --target "D:\PT" \
   sha256:ACTIVATION_OPERATION_DIGEST
+
+# Once activation is terminal, retain its exact historical completion while
+# deleting only this operation's original recheck/start marker chain.
+ptctl client activate prune \
+  --target "D:\PT" \
+  --expect-activation-plan-id ACTIVATION_PLAN_ID \
+  --acknowledge-operation-state-deletion \
+  --output json \
+  sha256:ACTIVATION_OPERATION_DIGEST
 ```
 
 Activation never treats a successful POST as a completed recheck. It records
@@ -737,6 +749,22 @@ unsupported rather than guessed. Completion remains a bracketed client claim
 plus a same-invocation exact final proof, not proof of a raw private variant or
 an atomic client/filesystem snapshot. Each invocation sends at most one
 effectful client POST. JSON kind is `client.activation`.
+
+Activation `prune` is a distinct local-only deletion boundary. It takes one
+full activation operation ID, the reviewed activation plan ID, and
+`--acknowledge-operation-state-deletion`; it accepts no downloader credential
+and performs no network request. Before deleting anything, it seals the exact
+canonical activation intent, terminal completion, and a bounded manifest of
+every original marker's name, domain-separated ID, and size into an
+owner-private retention intent. It then removes only those exact marker files
+and the empty scratch directory, audits the remaining namespace, and publishes
+a retention completion. An intent-only crash state blocks ordinary resume and
+is advanced only by repeating the same explicit prune selector. A complete
+tombstone can recreate process-local `clientactivate.VerifiedCompletion`
+authority for source-retirement review through a fresh bound read; copied JSON
+cannot. It is historical evidence, not proof of current downloader state.
+JSON kind is `client.activation.retention`; `pruned` and `already_pruned`
+return `0`.
 
 Review which current source file names are eligible for a separately
 acknowledged retirement operation:
@@ -964,7 +992,8 @@ paths remain remote, non-atomic lexical claims and are never opened on the host.
 
 Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
 `ptctl storage profile`, `ptctl storage index`, `ptctl seed discover --help`,
-`ptctl seed materialize --help`, `ptctl seed retire --help`, or
+`ptctl seed materialize --help`, `ptctl client activate --help`,
+`ptctl seed retire --help`, or
 `ptctl reconcile report --help` for the
 complete surface.
 
@@ -1002,6 +1031,13 @@ returns `2`, marker/journal/namespace integrity failure returns `3`, and an
 explicit selector, terminal-state, filesystem, or bounded-inventory policy
 blocker returns `4`. It never reads downloader credentials or contacts the
 client.
+
+Client-activation pruning uses the same local report-first lattice:
+`pruned`/`already_pruned` return `0`, interruption or uncertain durability or
+removal returns `1`, invalid usage or a missing acknowledgement returns `2`,
+marker/journal/namespace integrity failure returns `3`, and an explicit
+selector, terminal-state, filesystem, or bounded-inventory policy blocker
+returns `4`. It never reads downloader credentials or contacts the client.
 
 For the metafile store, exit `0` includes idempotent `already_initialized` and
 `already_present` outcomes. Missing/uninitialized stores, absent objects, I/O

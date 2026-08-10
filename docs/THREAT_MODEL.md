@@ -340,11 +340,28 @@ mapping. `run` requires `--acknowledge-client-recheck`; optional start requires
 requires the matching repeat acknowledgement. No acknowledgement grants pause,
 move, removal, deletion, source retirement, or a different job selector.
 
+Activation pruning is a separate local deletion authority. It requires one
+full activation operation ID, its reviewed plan ID, and
+`--acknowledge-operation-state-deletion`; all syntax and hard limits are
+checked without password stdin or network access. It first seals the exact
+terminal activation intent and completion plus a bounded manifest of every
+original marker's canonical name, domain-separated ID, and size. Only after
+that retention intent is durable and rebound may it remove those exact files
+and the empty scratch directory. It then audits the exact remaining namespace
+and publishes a retention completion. A crash after the intent blocks ordinary
+resume and can be advanced only by the same explicit prune selector. There is
+no latest/by-age selection, downloader request, content write, source unlink,
+or cross-operation deletion authority. A complete tombstone can recreate
+downstream activation-completion authority only through a fresh bound read;
+its public DTO and JSON round trip remain powerless and it does not establish
+current downloader state.
+
 Source-retirement planning is a separate read-only boundary. It accepts a
 downloader password only from stdin but accepts no mutation acknowledgement and
 always reports zero writes, zero deletion, and `deletion_authority: none`. Eligibility requires a
 new complete unique live source verification, a current exact final proof, and
-one canonical terminal activation marker chain. Recheck-only is terminal at
+one canonical terminal activation marker chain or complete retention tombstone.
+Recheck-only is terminal at
 recheck completion; reviewed start requires activation completion. The client
 marker remains historical. Current use is proved separately with one login and
 two bounded typed-job reads in one session; ordinary multi-file layouts add two
@@ -692,11 +709,11 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- activation-journal retirement, adoption-tombstone forgetting, and broader
-  quota/age policy (materialize, adoption, and source-retirement heavy state
-  have exact explicit pruning; materialize and source-retirement tombstones
-  also have separately acknowledged forget transitions; no operation is
-  selected automatically by policy);
+- activation/adoption-tombstone forgetting and broader quota/age policy
+  (materialize, adoption, activation, and source-retirement heavy state have
+  exact explicit pruning; materialize and source-retirement tombstones also
+  have separately acknowledged forget transitions; no operation is selected
+  automatically by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal

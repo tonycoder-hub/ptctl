@@ -91,6 +91,11 @@ type JournalReport struct {
 	StartAttempts               int    `json:"start_attempts"`
 	ActivationCompletionDurable bool   `json:"activation_completion_durable"`
 	PendingRecoveryMarker       bool   `json:"pending_recovery_marker"`
+	RetentionState              string `json:"retention_state"`
+	RetentionIntentPresent      bool   `json:"retention_intent_present"`
+	RetentionCompletionPresent  bool   `json:"retention_completion_present"`
+	RetentionIntentDurable      bool   `json:"retention_intent_durable"`
+	RetentionCompletionDurable  bool   `json:"retention_completion_durable"`
 }
 
 type WriteReport struct {
@@ -126,7 +131,7 @@ func newReport(authority *PreparedAuthority, expectedID string) Report {
 		Operation: OperationReport{Status: "not_created", PhaseBefore: "planned", PhaseAfter: "planned"},
 		Client: ClientReport{Status: "not_observed", IdentityStatus: "not_observed", Assurance: "not_observed",
 			ActionReceipt: downloader.ExistingJobMutationReceipt{RequestsAttempted: -1, AutomaticRetries: -1, RedirectsFollowed: -1}},
-		Journal: JournalReport{Status: "not_created"}, Blockers: []Finding{}, Issues: []Finding{},
+		Journal: JournalReport{Status: "not_created", RetentionState: "not_requested"}, Blockers: []Finding{}, Issues: []Finding{},
 		Warnings: []string{
 			"qBittorrent state, progress, and per-file completion remain untrusted bracketed client claims",
 			"a successful recheck observation does not reveal the raw private metafile variant",

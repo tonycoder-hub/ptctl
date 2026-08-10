@@ -157,6 +157,15 @@ func TestBuildProducesZeroWriteEligibilityWithoutPathDisclosure(t *testing.T) {
 	}
 }
 
+func TestBuildAcceptsBoundRetainedActivationCompletion(t *testing.T) {
+	fixture := makeRetireFixtureMode(t, true)
+	report, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
+	if err != nil || report.Outcome != OutcomeEligible || fixture.activation == nil || !fixture.activation.Verified() ||
+		!strings.Contains(fixture.activation.Observation().Assurance, "retention_tombstone") {
+		t.Fatalf("retained activation retirement report=%#v activation=%#v err=%v", report, fixture.activation, err)
+	}
+}
+
 func TestBuildRejectsDetachedDiscoveryAndFinalOverlap(t *testing.T) {
 	fixture := makeRetireFixture(t)
 	mutatedMeta := fixture.meta.Clone()
@@ -287,6 +296,10 @@ func TestBuildTreatsCurrentClientPathChangeAsBlockedEvidence(t *testing.T) {
 }
 
 func makeRetireFixture(t *testing.T) retireFixture {
+	return makeRetireFixtureMode(t, false)
+}
+
+func makeRetireFixtureMode(t *testing.T, retainActivation bool) retireFixture {
 	t.Helper()
 	ctx := context.Background()
 	content := []byte("retirement source fixture")
@@ -401,6 +414,14 @@ func makeRetireFixture(t *testing.T) retireFixture {
 	activationOperation, err := clientactivate.ParseOperationID(activated.Operation.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if retainActivation {
+		retention, pruneErr := clientactivate.Prune(ctx, clientactivate.PruneOptions{TargetRoot: targetRoot,
+			OperationID: activationOperation, ExpectedPlanID: preview.Plan.ID, Acknowledge: true,
+			Limits: clientactivate.DefaultRetentionLimits()})
+		if pruneErr != nil || retention.Outcome != clientactivate.RetentionOutcomePruned || !retention.Markers.ExactTombstone {
+			t.Fatalf("activation retention=%#v err=%v", retention, pruneErr)
+		}
 	}
 	completion, _, err := clientactivate.VerifyCompletion(ctx, clientactivate.CompletionProofOptions{TargetRoot: targetRoot,
 		OperationID: activationOperation, ExpectedPlanID: preview.Plan.ID})

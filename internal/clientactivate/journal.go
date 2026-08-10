@@ -60,12 +60,18 @@ type journalState struct {
 	ActivationCompletionID MarkerID
 	Pending                string
 	Durable                bool
+	Retained               bool
+	RetentionIntentDurable bool
+	RetentionComplete      bool
+	RetentionIntentID      RetentionMarkerID
+	RetentionCompleteID    RetentionMarkerID
 }
 
 type journalHandle struct {
-	session *fsbind.Session
-	subtree *fsbind.Subtree
-	state   journalState
+	session   *fsbind.Session
+	subtree   *fsbind.Subtree
+	state     journalState
+	retention retentionState
 }
 
 type namedMarkerObservation struct {
@@ -197,6 +203,33 @@ func openJournal(ctx context.Context, targetRoot string, operationID OperationID
 		return nil, recovery, classifyJournalError(err)
 	}
 	handle := &journalHandle{session: session, subtree: subtree}
+	retention, retentionErr := loadRetentionState(ctx, handle, operationID, rootInfo.Identity)
+	if retentionErr != nil {
+		_ = handle.Close()
+		return nil, recovery, retentionErr
+	}
+	if retention.DirectoryPresent {
+		if retention.IntentID != "" {
+			if _, auditErr := auditRetentionNamespace(ctx, handle, retention.Intent, DefaultRetentionLimits(), true,
+				retention.IntentPresent, retention.CompletePresent); auditErr != nil {
+				_ = handle.Close()
+				return nil, recovery, auditErr
+			}
+		} else {
+			live, liveErr := handle.readStateForRetention(ctx)
+			if liveErr != nil {
+				_ = handle.Close()
+				return nil, recovery, liveErr
+			}
+			if !terminalActivationState(live) {
+				_ = handle.Close()
+				return nil, recovery, fmt.Errorf("%w: empty activation retention boundary is not attached to terminal state", ErrIntegrity)
+			}
+		}
+		handle.retention = retention
+		handle.state = retention.journalState()
+		return handle, recovery, nil
+	}
 	state, err := handle.readState(ctx)
 	if errors.Is(err, ErrInitializationIncomplete) && recoverPending && recoveryPlan != nil {
 		recovery, err = handle.recoverInitialization(ctx, operationID, rootInfo, *recoveryPlan)
@@ -290,6 +323,14 @@ func (handle *journalHandle) confirmDurability(ctx context.Context) error {
 }
 
 func (handle *journalHandle) readState(ctx context.Context) (journalState, error) {
+	return handle.readStateWithRetention(ctx, false)
+}
+
+func (handle *journalHandle) readStateForRetention(ctx context.Context) (journalState, error) {
+	return handle.readStateWithRetention(ctx, true)
+}
+
+func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRetention bool) (journalState, error) {
 	state := journalState{RecheckAttempts: []Attempt{}, RecheckAttemptIDs: []MarkerID{}, StartAttempts: []Attempt{}, StartAttemptIDs: []MarkerID{}}
 	root, _ := fsbind.PathFromComponents(nil)
 	listing, err := handle.subtree.List(ctx, root, fsbind.ListLimits{MaxEntries: 2*maximumActionAttempts + 8, MaxNameBytes: 1 << 20})
@@ -305,6 +346,9 @@ func (handle *journalHandle) readState(ctx context.Context) (journalState, error
 			continue
 		}
 		if entry.Name == scratchDirectory && entry.Kind == string(fsbind.ObjectKindDirectory) {
+			continue
+		}
+		if allowRetention && entry.Name == retentionDirectoryName && entry.Kind == string(fsbind.ObjectKindDirectory) {
 			continue
 		}
 		if entry.Kind != string(fsbind.ObjectKindRegular) || !knownMarkerName(entry.Name) {

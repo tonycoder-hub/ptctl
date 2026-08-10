@@ -832,13 +832,37 @@ chooses only an explicit operation ID, performs no network request or sync, and
 does not upgrade historical marker presence into current client or durability
 evidence.
 
+Terminal activation state has a separate retention transition:
+
+```text
+exact terminal activation intent + completion + bounded original-marker manifest
+  -> durable owner-private retention intent
+  -> remove only the selected original markers and empty scratch
+  -> exact remaining namespace audit
+  -> durable retention completion
+```
+
+`client activate prune` is selected only by one full operation ID plus its
+reviewed activation plan ID and requires the separate operation-state-deletion
+acknowledgement. It never opens a downloader session, reads a credential,
+touches the published final or source files, or selects latest/by-age state.
+The intent records each original canonical marker's fixed name,
+domain-separated ID, and exact size, so partial deletion is recoverable without
+letting a retained DTO choose new names. An intent-only crash state is advanced
+only by prune; ordinary resume stops before credential or network access. The
+complete tombstone can create `clientactivate.VerifiedCompletion` only through
+a same-invocation bound read of the exact target, operation, intent, and
+completion. JSON round trips remain powerless, and the tombstone does not claim
+that the downloader job or final layout is currently unchanged.
+
 ## Source-retirement review and execution
 
 `seed retire plan` is the zero-write evidence half of source retirement.
 It consumes the exact metafile, one complete live
 `seed.Discover` result with its opaque `VerifiedSource`, a current
 `materialize.VerifiedFinal`, and a `clientactivate.VerifiedCompletion` read from
-one explicit terminal activation journal. That completion and final establish
+one explicit terminal activation journal or complete retention tombstone. That
+completion and final establish
 a process-local `CurrentUseAuthority`; one authenticated read-only downloader
 session then supplies two bounded observations of the exact typed-infohash job
 and, for ordinary multi-file layouts, its indexed effective paths. Recheck-only plans become terminal at

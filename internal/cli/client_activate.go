@@ -72,6 +72,8 @@ func (a *app) clientActivate(args []string) error {
 		return a.clientActivateResume(args[1:])
 	case "status":
 		return a.clientActivateStatus(args[1:])
+	case "prune":
+		return a.clientActivatePrune(args[1:])
 	default:
 		return usageError("unknown client activate subcommand %q", args[0])
 	}
@@ -83,6 +85,7 @@ func (a *app) clientActivateHelp() {
   ptctl client activate run [same selectors] --expect-activation-plan-id ID --acknowledge-client-recheck [--output table|json]
   ptctl client activate resume [same selectors] --expect-activation-plan-id ID [--acknowledge-client-recheck --acknowledge-repeat-recheck] [--acknowledge-client-start --acknowledge-repeat-start] [--output table|json] OPERATION_ID
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
+  ptctl client activate prune --target PATH --expect-activation-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
 
 This workflow only targets one exact typed-infohash job established by a
 canonical stopped-adoption journal and a current exact materialized-final
@@ -95,6 +98,10 @@ explicit repeat acknowledgement. --start-after-recheck reviews an optional
 start action; a later resume still requires --acknowledge-client-start and can
 announce to trackers or transfer data. Each invocation sends at most one
 effectful client POST. No source data is retired or deleted.
+
+Prune is local-only. It seals one terminal activation journal into an exact
+owner-private tombstone before deleting only that operation's original markers
+and empty scratch. The tombstone remains usable by source-retirement proof.
 `)
 }
 
@@ -305,17 +312,23 @@ func (a *app) clientActivateResume(args []string) error {
 	}
 	preflight, preflightErr := clientactivate.PreflightResume(ctx, prepared.authority, prepared.targetRoot, operationID, *values.expectedPlanID)
 	initializationIncomplete := errors.Is(preflightErr, clientactivate.ErrInitializationIncomplete)
-	if preflightErr != nil && !initializationIncomplete {
-		return a.finishClientActivate(prepared.output, preflight, preflightErr)
-	}
 	wantAction := clientactivate.ActionRecheckOnly
 	if *values.startAfterRecheck {
 		wantAction = clientactivate.ActionRecheckThenStart
 	}
-	if !initializationIncomplete && preflight.Plan.Action != wantAction {
+	if !initializationIncomplete && preflight.Plan.Action != "" && preflight.Plan.Action != wantAction {
 		preflightErr = fmt.Errorf("%w: --start-after-recheck differs from the reviewed activation journal", clientactivate.ErrPolicy)
 		report := clientactivate.FailureReport(prepared.authority, *values.expectedPlanID, "resume", 0, preflightErr)
 		return a.finishClientActivate(prepared.output, report, preflightErr)
+	}
+	if preflight.Operation.Status == "retained" {
+		return a.finishClientActivate(prepared.output, preflight, nil)
+	}
+	if preflight.Operation.Status == "pruning" || preflight.Operation.Status == "retention_initializing" {
+		return a.finishClientActivate(prepared.output, preflight, preflightErr)
+	}
+	if preflightErr != nil && !initializationIncomplete {
+		return a.finishClientActivate(prepared.output, preflight, preflightErr)
 	}
 	if (initializationIncomplete || preflight.Journal.RecheckAttempts == 0) && !*values.acknowledgeRecheck {
 		preflightErr = fmt.Errorf("%w: operation has no recheck request intent; explicit acknowledgement is required", clientactivate.ErrPolicy)
@@ -338,6 +351,36 @@ func (a *app) clientActivateResume(args []string) error {
 		AcknowledgeRecheck: *values.acknowledgeRecheck, RepeatRecheck: *values.repeatRecheck,
 		AcknowledgeStart: *values.acknowledgeStart, RepeatStart: *values.repeatStart})
 	return a.finishClientActivate(prepared.output, report, operationErr)
+}
+
+func (a *app) clientActivatePrune(args []string) error {
+	fs := newFlagSet("client activate prune")
+	output := fs.String("output", "table", "table or json")
+	targetRoot := fs.String("target", "", "materialized target root")
+	expectedPlanID := fs.String("expect-activation-plan-id", "", "reviewed 24-hex client activation plan ID")
+	acknowledge := fs.Bool("acknowledge-operation-state-deletion", false, "acknowledge deletion of one terminal activation journal")
+	timeout := fs.Duration("timeout", time.Hour, "bounded private retention transition timeout")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *targetRoot == "" {
+		return usageError("client activate prune requires --target, --expect-activation-plan-id, acknowledgement, and one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validMaterializePlanID(*expectedPlanID) || !*acknowledge {
+		return usageError("client activate prune requires canonical --expect-activation-plan-id and --acknowledge-operation-state-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("client activate prune --timeout must be in (0,1h]")
+	}
+	operationID, err := clientactivate.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("client activate prune requires a canonical OPERATION_ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := clientactivate.Prune(ctx, clientactivate.PruneOptions{TargetRoot: *targetRoot, OperationID: operationID,
+		ExpectedPlanID: *expectedPlanID, Acknowledge: true, Limits: clientactivate.DefaultRetentionLimits()})
+	return a.finishClientActivateRetention(*output, report, operationErr)
 }
 
 func (a *app) clientActivateStatus(args []string) error {
@@ -381,6 +424,26 @@ func (a *app) finishClientActivate(output string, report clientactivate.Report, 
 	return fmt.Errorf("client activation was interrupted; see report")
 }
 
+func (a *app) finishClientActivateRetention(output string, report clientactivate.RetentionReport, operationErr error) error {
+	if output == "json" {
+		if err := writeJSON(a.stdout, report, nil); err != nil {
+			return err
+		}
+	} else if err := writeClientActivateRetentionHuman(a.stdout, report); err != nil {
+		return err
+	}
+	if operationErr == nil {
+		return nil
+	}
+	if report.Outcome == clientactivate.RetentionOutcomeIntegrityFailed {
+		return &integrityErr{message: "client activation retention failed integrity validation; see report"}
+	}
+	if report.Outcome == clientactivate.RetentionOutcomeBlocked {
+		return &inconclusiveErr{message: "client activation retention is blocked; see report"}
+	}
+	return fmt.Errorf("client activation retention was interrupted; see report")
+}
+
 func (a *app) writeClientActivateReport(output string, report clientactivate.Report) error {
 	if output == "json" {
 		return writeJSON(a.stdout, report, nil)
@@ -414,12 +477,45 @@ func writeClientActivateHuman(out io.Writer, report clientactivate.Report) error
 		terminalSafe(materializeValueOr(report.Client.FileLayoutID, "not_observed")), report.Client.AllFilesSelected, report.Client.AllFilesComplete,
 		terminalSafe(materializeValueOr(report.Client.ActionAttempted, "not_attempted")), report.Client.ActionReceipt.Complete,
 		report.Client.ActionReceipt.AutomaticRetries, report.Client.ActionReceipt.RedirectsFollowed, terminalSafe(report.Client.Assurance))
-	fmt.Fprintf(w, "\nJOURNAL / WRITES\nSTATUS\t%s\nINTENT DURABLE\t%t\nRECHECK ATTEMPTS\t%d\nRECHECK STARTED DURABLE\t%t\nRECHECK COMPLETION DURABLE\t%t\nSTART ATTEMPTS\t%d\nACTIVATION COMPLETION DURABLE\t%t\nPENDING RECOVERY MARKER\t%t\nOPERATION DIRECTORIES\t%d\nCONTROL DIRECTORIES\t%d\nTEMPORARY FILES\t%d\nTEMPORARY BYTES\t%d\nMARKER PUBLICATIONS\t%d\nTEMPORARY REMOVALS\t%d\nAMBIGUOUS PUBLICATIONS\t%d\n",
+	fmt.Fprintf(w, "\nJOURNAL / WRITES\nSTATUS\t%s\nINTENT DURABLE\t%t\nRECHECK ATTEMPTS\t%d\nRECHECK STARTED DURABLE\t%t\nRECHECK COMPLETION DURABLE\t%t\nSTART ATTEMPTS\t%d\nACTIVATION COMPLETION DURABLE\t%t\nPENDING RECOVERY MARKER\t%t\nRETENTION STATE\t%s\nRETENTION INTENT PRESENT\t%t\nRETENTION COMPLETE PRESENT\t%t\nRETENTION INTENT DURABLE\t%t\nRETENTION COMPLETE DURABLE\t%t\nOPERATION DIRECTORIES\t%d\nCONTROL DIRECTORIES\t%d\nTEMPORARY FILES\t%d\nTEMPORARY BYTES\t%d\nMARKER PUBLICATIONS\t%d\nTEMPORARY REMOVALS\t%d\nAMBIGUOUS PUBLICATIONS\t%d\n",
 		terminalSafe(report.Journal.Status), report.Journal.IntentDurable, report.Journal.RecheckAttempts, report.Journal.RecheckStartedDurable,
 		report.Journal.RecheckCompletionDurable, report.Journal.StartAttempts, report.Journal.ActivationCompletionDurable,
-		report.Journal.PendingRecoveryMarker, report.Writes.OperationDirectories, report.Writes.ControlDirectories,
+		report.Journal.PendingRecoveryMarker, terminalSafe(report.Journal.RetentionState), report.Journal.RetentionIntentPresent,
+		report.Journal.RetentionCompletionPresent, report.Journal.RetentionIntentDurable, report.Journal.RetentionCompletionDurable,
+		report.Writes.OperationDirectories, report.Writes.ControlDirectories,
 		report.Writes.TemporaryFiles, report.Writes.TemporaryBytes, report.Writes.MarkerPublications,
 		report.Writes.TemporaryRemovals, report.Writes.AmbiguousPublications)
+	fmt.Fprintln(w, "\nISSUES")
+	writeClientActivateFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	if len(report.Warnings) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
+}
+
+func writeClientActivateRetentionHuman(out io.Writer, report clientactivate.RetentionReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nPHASE BEFORE\t%s\nPHASE AFTER\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseBefore), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeClientActivateFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / TARGET\nPLAN ID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nACTION\t%s\nEXPECTED ROOT IDENTITY\t%s\nOBSERVED ROOT IDENTITY\t%s\nROOT BOUND\t%t\nSTABILITY\t%s\n",
+		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(valueOrUnknown(report.Plan.ExpectedID)), report.Plan.Matches,
+		terminalSafe(report.Plan.Action), terminalSafe(valueOrUnknown(report.Target.ExpectedRootIdentity)), terminalSafe(valueOrUnknown(report.Target.ObservedRootIdentity)),
+		report.Target.RootIdentityBound, terminalSafe(report.Target.StabilityAssurance))
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nACTIVATION INTENT\t%s\nTERMINAL MARKER\t%s\nMARKERS RECORDED\t%d\nAUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(valueOrUnknown(report.Proof.IntentID)), terminalSafe(valueOrUnknown(report.Proof.TerminalMarkerID)),
+		report.Proof.MarkersRecorded, report.Proof.HistoricalAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nRETENTION / WRITES\nSTATE\t%s\nINTENT MARKER\t%s\nCOMPLETE MARKER\t%s\nINTENT DURABLE\t%t\nCOMPLETION DURABLE\t%t\nEXACT TOMBSTONE\t%t\nPRUNE RESUMABLE\t%t\nCONTROL DIRECTORIES\t%d\nTEMPORARY FILES\t%d\nTEMPORARY BYTES\t%d\nMARKER PUBLICATIONS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\n",
+		terminalSafe(report.Markers.State), terminalSafe(valueOrUnknown(report.Markers.IntentMarkerID)), terminalSafe(valueOrUnknown(report.Markers.CompleteMarkerID)),
+		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.PruneResumable,
+		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerTemporaryBytes,
+		report.Writes.MarkerPublications, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved)
 	fmt.Fprintln(w, "\nISSUES")
 	writeClientActivateFindings(w, report.Issues)
 	fmt.Fprintln(w, "\nWARNINGS")

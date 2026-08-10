@@ -142,6 +142,7 @@ Usage:
   ptctl client activate run [same selectors] --expect-activation-plan-id ID --acknowledge-client-recheck [--output table|json]
   ptctl client activate resume [same selectors] --expect-activation-plan-id ID [explicit acknowledgement flags] [--output table|json] OPERATION_ID
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
+  ptctl client activate prune --target PATH --expect-activation-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
 
   ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
@@ -171,6 +172,7 @@ Safety defaults:
   * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone; forget has a third acknowledgement and irreversibly deletes only that exact tombstone plus its last recovery marker.
   * Seed retire plan performs fresh proof reads only and grants no deletion authority. Run/resume require a separate exact plan ID and deletion acknowledgement, journal every explicit name, and never remove directories, aliases, padding, empty files, or final content. Prune has its own acknowledgement and deletes only one terminal operation's private journal while retaining a tombstone; forget has a third acknowledgement and deletes only that exact tombstone plus its last recovery marker.
   * Client adoption only adds an absent exact-infohash qBittorrent job in stopped mode. It journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
+  * Client activation only rechecks or starts the reviewed exact existing job, with at most one non-retried mutation per invocation. Its separately acknowledged local prune deletes only one terminal private journal after sealing an exact tombstone and never reads a credential or contacts the client.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
 `)
@@ -1536,6 +1538,8 @@ func jsonKind(data any) string {
 		return "client.adoption.retention"
 	case clientactivate.Report:
 		return "client.activation"
+	case clientactivate.RetentionReport:
+		return "client.activation.retention"
 	case sourceretire.Report:
 		return "content.source_retirement_plan"
 	case sourceretire.ExecutionReport:

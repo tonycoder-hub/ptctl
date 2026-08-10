@@ -56,6 +56,7 @@ type verifiedCompletionAuthority struct {
 	recheckID    MarkerID
 	activation   *ActivationCompletion
 	activationID MarkerID
+	retained     bool
 }
 
 // VerifyCompletion requires the terminal marker selected by the reviewed plan:
@@ -66,7 +67,7 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 	if options.TargetRoot == "" || !canonicalPlanID(options.ExpectedPlanID) {
 		return nil, CompletionObservation{}, fmt.Errorf("%w: activation completion selector is invalid", ErrPolicy)
 	}
-	if _, err := ParseOperationID(options.OperationID.String()); err != nil {
+	if _, err := ParseOperationID(options.OperationID.String()); err != nil || OperationIDForPlan(options.ExpectedPlanID) != options.OperationID {
 		return nil, CompletionObservation{}, fmt.Errorf("%w: activation completion selector is invalid", ErrPolicy)
 	}
 	handle, _, err := openJournal(ctx, options.TargetRoot, options.OperationID, false, nil)
@@ -76,6 +77,7 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 	defer handle.Close()
 	state := handle.state
 	if state.Pending != "" || state.RecheckCompletion == nil || state.RecheckCompletionID == "" ||
+		state.Retained && !state.RetentionComplete ||
 		state.Intent.PlanID != options.ExpectedPlanID || state.Intent.OperationID != options.OperationID ||
 		state.RecheckCompletion.PlanID != options.ExpectedPlanID || state.RecheckCompletion.OperationID != options.OperationID {
 		return nil, CompletionObservation{}, fmt.Errorf("%w: terminal activation completion is unavailable or disagrees with the selector", ErrPolicy)
@@ -90,7 +92,7 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 	}
 	authority := &verifiedCompletionAuthority{
 		plan: state.Intent.Plan, planID: state.Intent.PlanID, operationID: state.Intent.OperationID,
-		recheck: *state.RecheckCompletion, recheckID: state.RecheckCompletionID,
+		recheck: *state.RecheckCompletion, recheckID: state.RecheckCompletionID, retained: state.Retained,
 	}
 	if state.ActivationCompletion != nil {
 		value := *state.ActivationCompletion
@@ -143,8 +145,15 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 		ObservedAtEnd:       observedAtEnd.UTC().Format(time.RFC3339Nano),
 		RecheckCompletionID: authority.recheckID.String(), ActivationCompletionID: activationID,
 		FinalObjectIdentity: plan.FinalObjectIdentity, FinalVerificationBasis: finalBasis,
-		Assurance: "same_invocation_bound_canonical_terminal_activation_read_without_durability_or_client_refresh",
+		Assurance: completionAssurance(authority),
 	}
+}
+
+func completionAssurance(authority *verifiedCompletionAuthority) string {
+	if authority != nil && authority.retained {
+		return "same_invocation_bound_canonical_activation_retention_tombstone_read_without_durability_or_client_refresh"
+	}
+	return "same_invocation_bound_canonical_terminal_activation_read_without_durability_or_client_refresh"
 }
 
 func (verified *VerifiedCompletion) Matches(operation OperationID, planID, variantID, materializeOperationID, materializePlanID, finalObjectIdentity string) bool {

@@ -80,9 +80,21 @@ func PreflightResume(ctx context.Context, authority *PreparedAuthority, targetRo
 	}
 	defer handle.Close()
 	reportFromState(&report, handle.state)
+	if handle.state.Retained && !handle.state.RetentionIntentDurable {
+		applyRetainedJournalReport(&report, handle.state)
+		err = fmt.Errorf("%w: client activation retention initialization requires explicit prune", ErrPolicy)
+		report.finalize()
+		return report, err
+	}
 	if handle.state.Intent.PlanID != expectedPlanID || validateAuthorityAgainstPlan(authority, handle.state.Intent.Plan) != nil {
 		err = fmt.Errorf("%w: activation journal differs from the current reviewed authority", ErrPolicy)
 		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	if handle.state.Retained {
+		applyRetainedJournalReport(&report, handle.state)
+		err = fmt.Errorf("%w: retained client activation state cannot be resumed", ErrPolicy)
 		report.finalize()
 		return report, err
 	}
@@ -270,9 +282,23 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 			}
 		}()
 		reportFromState(&report, handle.state)
+		if handle.state.Retained && !handle.state.RetentionIntentDurable {
+			applyRetainedJournalReport(&report, handle.state)
+			err := fmt.Errorf("%w: client activation retention initialization requires explicit prune", ErrPolicy)
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
 		if handle.state.Intent.PlanID != options.ExpectedPlanID || handle.state.Intent.OperationID != operationID ||
 			validateAuthorityAgainstPlan(options.Authority, handle.state.Intent.Plan) != nil {
 			err := fmt.Errorf("%w: activation operation belongs to a different reviewed authority", ErrPolicy)
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+		if handle.state.Retained {
+			applyRetainedJournalReport(&report, handle.state)
+			err := fmt.Errorf("%w: retained client activation state cannot be resumed", ErrPolicy)
 			classifyFailure(&report, err)
 			report.finalize()
 			return report, err
@@ -681,6 +707,11 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 		return report, err
 	}
 	defer handle.Close()
+	if handle.state.Retained {
+		applyRetainedJournalReport(&report, handle.state)
+		report.finalize()
+		return report, nil
+	}
 	reportFromState(&report, handle.state)
 	phase := phaseForState(handle.state)
 	switch {
@@ -723,14 +754,24 @@ func reportFromState(report *Report, state journalState) {
 }
 
 func journalReport(state journalState) JournalReport {
-	return JournalReport{Status: phaseForState(state), IntentDurable: state.IntentID != "" && state.Durable,
-		RecheckAttempts: len(state.RecheckAttempts), RecheckStartedDurable: state.RecheckStarted != nil && state.Durable,
-		RecheckCompletionDurable: state.RecheckCompletion != nil && state.Durable, StartAttempts: len(state.StartAttempts),
-		ActivationCompletionDurable: state.ActivationCompletion != nil && state.Durable, PendingRecoveryMarker: state.Pending != ""}
+	legacyDurable := state.Durable && !state.Retained
+	return JournalReport{Status: phaseForState(state), IntentDurable: state.IntentID != "" && legacyDurable,
+		RecheckAttempts: len(state.RecheckAttempts), RecheckStartedDurable: state.RecheckStarted != nil && legacyDurable,
+		RecheckCompletionDurable: state.RecheckCompletion != nil && legacyDurable, StartAttempts: len(state.StartAttempts),
+		ActivationCompletionDurable: state.ActivationCompletion != nil && legacyDurable, PendingRecoveryMarker: state.Pending != "",
+		RetentionState: retentionStateLabel(state), RetentionIntentPresent: state.Retained && state.RetentionIntentDurable,
+		RetentionCompletionPresent: state.Retained && state.RetentionComplete && state.RetentionCompleteID != "",
+		RetentionIntentDurable:     false, RetentionCompletionDurable: false}
 }
 
 func phaseForState(state journalState) string {
 	switch {
+	case state.Retained && state.RetentionComplete:
+		return "retained_activation_completion"
+	case state.Retained && state.RetentionIntentDurable:
+		return "retention_intent_recorded"
+	case state.Retained:
+		return "retention_initializing"
 	case state.Pending != "":
 		return "marker_recovery_required"
 	case state.ActivationCompletion != nil:
@@ -748,6 +789,44 @@ func phaseForState(state journalState) string {
 	default:
 		return "initialization_incomplete"
 	}
+}
+
+func retentionStateLabel(state journalState) string {
+	switch {
+	case state.Retained && state.RetentionComplete:
+		return "complete"
+	case state.Retained && state.RetentionIntentDurable:
+		return "intent_recorded"
+	case state.Retained:
+		return "initializing"
+	default:
+		return "not_requested"
+	}
+}
+
+func applyRetainedJournalReport(report *Report, state journalState) {
+	if report == nil {
+		return
+	}
+	reportFromState(report, state)
+	report.Operation.Resumable = false
+	report.Journal = journalReport(state)
+	report.Effect = append(report.Effect, "read_private_client_activation_retention_state")
+	switch {
+	case state.RetentionComplete && state.ActivationCompletion != nil:
+		report.Outcome, report.Operation.Status = OutcomeHistoricalStarted, "retained"
+		report.Client.Status = "historical_activation_tombstone_current_client_not_observed"
+	case state.RetentionComplete:
+		report.Outcome, report.Operation.Status = OutcomeHistoricalChecked, "retained"
+		report.Client.Status = "historical_recheck_tombstone_current_client_not_observed"
+	case state.RetentionIntentDurable:
+		report.Outcome, report.Operation.Status = OutcomeIncomplete, "pruning"
+		report.addBlocker("operation.prune_required", "a durable retention intent exists; only explicit client activate prune may complete deletion")
+	default:
+		report.Outcome, report.Operation.Status = OutcomeIncomplete, "retention_initializing"
+		report.addBlocker("operation.prune_required", "a reserved retention boundary exists; only explicit client activate prune may recover it")
+	}
+	report.Warnings = append(report.Warnings, "retained activation evidence is historical and does not establish current downloader state or marker durability")
 }
 
 func validateAuthorityAgainstPlan(authority *PreparedAuthority, plan Plan) error {

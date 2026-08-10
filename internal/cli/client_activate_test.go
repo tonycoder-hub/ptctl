@@ -22,6 +22,12 @@ type clientActivateJSONEnvelope struct {
 	Data   clientactivate.Report `json:"data"`
 }
 
+type clientActivateRetentionJSONEnvelope struct {
+	Schema string                         `json:"schema"`
+	Kind   string                         `json:"kind"`
+	Data   clientactivate.RetentionReport `json:"data"`
+}
+
 type clientActivateServer struct {
 	server *httptest.Server
 	meta   *metafile.MetaInfo
@@ -123,6 +129,44 @@ func TestClientActivatePlanRunResumeStatusAndPrivacy(t *testing.T) {
 		t.Fatalf("unexpected activation status: %s", out.String())
 	}
 	assertClientActivatePrivate(t, out.Bytes(), fixture, activationServer.server.URL)
+
+	requestsBeforePrune := activationServer.totalRequests()
+	reader := &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	pruneArgs := []string{"client", "activate", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-activation-plan-id", planned.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", planned.Data.Operation.ID}
+	if code := Run(pruneArgs, reader, &out, &errOut); code != 0 || reader.read || activationServer.totalRequests() != requestsBeforePrune {
+		t.Fatalf("activation prune code=%d read=%t requests=%d stdout=%q stderr=%q", code, reader.read,
+			activationServer.totalRequests()-requestsBeforePrune, out.String(), errOut.String())
+	}
+	retained := decodeClientActivateRetentionReport(t, out.Bytes())
+	if retained.Data.Outcome != clientactivate.RetentionOutcomePruned || !retained.Data.Markers.ExactTombstone || retained.Data.WritesPerformed == 0 {
+		t.Fatalf("activation retention=%#v", retained.Data)
+	}
+	assertClientActivatePrivate(t, out.Bytes(), fixture, activationServer.server.URL)
+
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	retainedResume := append([]string{"client", "activate", "resume"}, base...)
+	retainedResume = append(retainedResume, "--start-after-recheck", "--expect-activation-plan-id", planned.Data.Plan.ID, planned.Data.Operation.ID)
+	if code := Run(retainedResume, reader, &out, &errOut); code != 0 || reader.read || activationServer.totalRequests() != requestsBeforePrune {
+		t.Fatalf("retained activation resume code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	retainedStatus := decodeClientActivateReport(t, out.Bytes())
+	if retainedStatus.Data.Outcome != clientactivate.OutcomeHistoricalStarted || retainedStatus.Data.Operation.Status != "retained" ||
+		retainedStatus.Data.Journal.RetentionState != "complete" {
+		t.Fatalf("retained activation resume=%#v", retainedStatus.Data)
+	}
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	mismatchedRetainedResume := append([]string{"client", "activate", "resume"}, base...)
+	mismatchedRetainedResume = append(mismatchedRetainedResume, "--expect-activation-plan-id", planned.Data.Plan.ID, planned.Data.Operation.ID)
+	if code := Run(mismatchedRetainedResume, reader, &out, &errOut); code != 4 || reader.read || activationServer.totalRequests() != requestsBeforePrune {
+		t.Fatalf("mismatched retained resume code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
 	if activationServer.login.Load() != 5 || activationServer.version.Load() != 3 || activationServer.ledger.Load() != 8 ||
 		activationServer.add.Load() != 1 || activationServer.recheck.Load() != 1 || activationServer.start.Load() != 1 {
 		t.Fatalf("requests login=%d version=%d ledger=%d add=%d recheck=%d start=%d", activationServer.login.Load(), activationServer.version.Load(),
@@ -130,13 +174,31 @@ func TestClientActivatePlanRunResumeStatusAndPrivacy(t *testing.T) {
 	}
 }
 
+func decodeClientActivateRetentionReport(t *testing.T, raw []byte) clientActivateRetentionJSONEnvelope {
+	t.Helper()
+	var result clientActivateRetentionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode client activation retention report: %v\n%s", err, raw)
+	}
+	if result.Schema != "ptctl.dev/v1" || result.Kind != "client.activation.retention" {
+		t.Fatalf("unexpected client activation retention envelope: %s", raw)
+	}
+	return result
+}
+
 func TestClientActivateBadUsageDoesNotReadPassword(t *testing.T) {
-	reader := &trackingReader{}
-	var out, errOut bytes.Buffer
-	code := Run([]string{"client", "activate", "run", "--password-stdin", "--expect-activation-plan-id", strings.Repeat("f", 24),
-		"--acknowledge-client-recheck"}, reader, &out, &errOut)
-	if code != 2 || reader.read {
-		t.Fatalf("code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	planID := strings.Repeat("f", 24)
+	operationID := clientactivate.OperationIDForPlan(planID).String()
+	for _, args := range [][]string{
+		{"client", "activate", "run", "--password-stdin", "--expect-activation-plan-id", planID, "--acknowledge-client-recheck"},
+		{"client", "activate", "prune", "--target", `C:\not-opened`, "--expect-activation-plan-id", planID, operationID},
+	} {
+		reader := &trackingReader{}
+		var out, errOut bytes.Buffer
+		code := Run(args, reader, &out, &errOut)
+		if code != 2 || reader.read {
+			t.Fatalf("args=%v code=%d read=%t stdout=%q stderr=%q", args, code, reader.read, out.String(), errOut.String())
+		}
 	}
 }
 
