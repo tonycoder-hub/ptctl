@@ -40,7 +40,7 @@ internal/reconcile
 
 internal/site
     optional AuthChecker / AccountReader / TorrentSearcher /
-    BonusCatalogReader ports
+    BonusCatalogReader ports and a capability-gated effectful metafile port
         `-- tjupt
 
 internal/downloader
@@ -135,9 +135,10 @@ Capabilities are small and explicit:
 - `torrent.metafile.read_effectful`
 - `bonus.catalog.read`
 
-Site-specific writes will eventually live under a namespaced action schema.
-They will not be forced into universal fields. The alpha exposes no site
-writes.
+Site-specific form or action writes will eventually live under a namespaced
+action schema. They will not be forced into universal fields. The effectful
+metafile capability is instead a tracker-visible GET plus a private-store
+publication boundary; it grants no general site-write or detail-read authority.
 
 Downloader ledgers negotiate normalized capabilities separately:
 algorithm-tagged infohashes, content paths, raw metafiles, and indexed job
@@ -261,12 +262,52 @@ The write count is a logical commit count: it records publication of the
 accepted format marker or immutable object, while private temporary and
 uninitialized staging entries are not counted as committed artifacts.
 
-This store is the required B1 gate for a future
-`torrent.metafile.read_effectful` site method. That method must validate the
-store and usage before reading credentials, label and require acknowledgement
-of the tracker-visible GET, validate the bounded response, and pass its exact
-bytes through the same no-clobber import primitive. It must not introduce a
-second arbitrary-destination or overwrite path.
+## B1: effectful site metafile fetch
+
+`site metafile fetch` is the only path from the site ledger to a new private
+metafile artifact:
+
+```text
+site metafile fetch --cookie-stdin --acknowledge-site-effect
+    --metafile-store DIR SITE REMOTE_ID
+    -> validate one site, one remote ID, limits, capability, and store
+    -> read the cookie only after that zero-write preflight succeeds
+    -> send one bounded GET, with no redirect and no retry
+    -> strictly validate the complete exact response
+    -> publish only through the existing private, no-clobber store primitive
+```
+
+The command does not fetch a torrent-detail page and does not infer another
+remote ID. It has no raw stdout, arbitrary destination, overwrite, or sidecar
+mode. The store must already be initialized; fetch never turns an arbitrary
+directory into a store. A site adapter must explicitly declare
+`torrent.metafile.read_effectful`, support the selected stdin authentication
+method, and validate its own remote-ID syntax without credentials. This keeps
+the CLI and report generic when a second site adapter is added.
+
+The site-to-metafile relation may become an invocation-scoped, report-only
+`observed_exact_variant` only when the store import explicitly returns a valid
+exact `ArtifactRef` and its whole-response digest and consumed-byte receipt
+agree. The CLI does not independently re-hash a response to upgrade a
+pre-publication or import failure into that relation. Such a failure retains
+only its bounded request/response receipt. Once the import has established the
+exact reference, a later durability or post-publication failure does not erase
+the observation. It remains neither a durable site ledger nor a store alias or
+replayable capability.
+
+The site observation and store publication/durability facts remain independent
+report axes. A GET may complete with no exact relation or published object,
+while an exact reference may exist even when the publication's durability or
+post-commit completion is not confirmed. Request attempts and logical store
+writes are therefore reported separately; neither is inferred from the other
+or from the overall outcome.
+
+Raw response bytes, request and redirect URLs, cookies, announce URLs,
+passkeys, server filenames, object paths, and temporary paths never enter JSON,
+human output, errors, or a side record. The ordinary store-root path disclosure
+remains opt-in. Non-usage failures are reported before the command returns its
+operational or integrity exit; exit `4` remains reserved for existing
+verification and reconciliation requirement flags.
 
 ## Read-only storage discovery
 

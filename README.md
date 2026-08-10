@@ -4,12 +4,14 @@
 It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and reconciles them around verifiable torrent metadata.
 
-> Status: `v0.3.0-alpha` development. Site, downloader, content, discovery,
-> planning, and reconciliation operations are intentionally read-only. The only
-> persistent writes are explicit `metafile store init` and `metafile store
-> import` operations into a private artifact store; they never mutate content or
-> move, rewrite, or delete the import source. Reading the source can still update
-> atime or hydrate an offline placeholder.
+> Status: `v0.3.0-alpha` development. Inspection, downloader, content,
+> discovery, planning, and reconciliation operations are intentionally
+> zero-write. Persistent writes are confined to explicit private-store
+> operations: `metafile store init`, `metafile store import`, and the
+> acknowledged `site metafile fetch`. The fetch also crosses a separate,
+> tracker-visible read boundary. None of these operations mutates content or
+> moves, rewrites, or deletes an import source; reads may still update atime or
+> hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
@@ -70,6 +72,9 @@ capabilities at the edge, not assumptions in the core domain model.
 - an experimental TJUPT session check, torrent search, and bonus catalog parser
   through one bounded, same-origin HTTPS GET per invocation, with fail-closed
   page recognition and no retry;
+- an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
+  bounded GET with no redirect or retry and publishing the strictly validated
+  exact response only into an initialized private metafile store;
 - qBittorrent status and torrent-list reads over HTTPS (or explicit numeric
   loopback HTTP), with passwords accepted only through stdin;
 - read-only reconciliation that brackets storage proof with two qBittorrent
@@ -83,8 +88,8 @@ capabilities at the edge, not assumptions in the core domain model.
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
-Not implemented yet: the B1 effectful site metafile fetch, a persistent storage
-index, downloader mutation, attributed/empty-file client-layout reconciliation,
+Not implemented yet: a persistent storage index, site torrent-detail reads,
+downloader mutation, attributed/empty-file client-layout reconciliation,
 journaled plan application, deletion, automatic plan execution, site writes,
 browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
@@ -126,6 +131,31 @@ ptctl metafile store inspect \
   --store "D:\Private\ptctl-metafiles" \
   sha256:WHOLE_METAFILE_SHA256
 ```
+
+Fetch one exact private metafile directly into that initialized store. This is
+an effectful operation: the tracker may record the GET, so the acknowledgement
+must be explicit. All usage, the single remote ID, limits, capability, and
+store assurances are checked before the cookie is read from stdin:
+
+```bash
+printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch \
+  --cookie-stdin \
+  --acknowledge-site-effect \
+  --metafile-store "D:\Private\ptctl-metafiles" \
+  tjupt REMOTE_ID
+```
+
+The command performs no torrent-detail lookup and sends at most one GET. It
+follows no redirect, performs no retry, and offers no raw stdout or arbitrary
+destination. The validated response goes through the ordinary exact-byte,
+no-clobber store publication path. Its report may record the invocation-scoped
+`observed_exact_variant` relation only when that store import explicitly
+returns a valid exact artifact reference and its whole-response digest and
+consumed-byte receipt agree. A pre-publication or import failure retains only
+the bounded request/response receipt; the CLI never hashes the response again
+to promote it into a site-to-variant observation. Once an exact reference has
+been established, a later durability or post-publication failure does not erase
+that observation. No persistent binding or sidecar is created.
 
 The artifact ID hashes the complete raw `.torrent` byte stream, not just its
 `info` dictionary. Two private variants with the same infohash therefore remain
@@ -310,8 +340,9 @@ invocation mapping; mutable discovery JSON is never path authority. Reports
 name the exact POSIX/Windows comparison mode and an opaque mapping ID. Client
 paths remain remote, non-atomic lexical claims and are never opened on the host.
 
-Run `ptctl help`, `ptctl metafile store`, `ptctl seed discover --help`, or
-`ptctl reconcile report --help` for the complete surface.
+Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
+`ptctl seed discover --help`, or `ptctl reconcile report --help` for the
+complete surface.
 
 Exit code `0` means a report or requested read succeeded, `1` an operational
 failure, `2` invalid usage, and `3` an explicit integrity mismatch. Discovery
@@ -332,6 +363,16 @@ repurposed and remains the report-first requirement failure described above. A
 post-publication durability failure reports `published_durability_unconfirmed`
 and returns `1`, even though its write count may already be `1`.
 
+`site metafile fetch` returns `0` when the exact response is newly stored or
+already present, `1` for site, credential, store, or publication failures, `2`
+for invalid usage or a missing acknowledgement, and `3` for an invalid exact
+metafile response or corrupt existing artifact. It does not redefine exit `4`.
+After usage validation, failures remain report-first: site request accounting
+and private-store write accounting are separate facts, and a successful site
+observation never implies confirmed store durability. An import failure without
+an exact store reference never becomes an observation merely because response
+bytes were received.
+
 ## Security model in one paragraph
 
 A private `.torrent` is secret-bearing because its announce URL often contains
@@ -344,8 +385,9 @@ discovery/reconciliation absolute paths by default, defaults conflicts to
 failure, and has no delete or apply command. Commands such as `storage probe`
 and `seed plan` keep their documented path-display contracts. The private
 metafile store uses owner-only permissions and atomic no-clobber publication;
-this is access control, not encryption. Its init/import writes are the explicit
-exception to the otherwise zero-write operational surface.
+this is access control, not encryption. Store init/import and the store phase
+of an acknowledged site metafile fetch are the explicit write exceptions to
+the otherwise zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Architecture
