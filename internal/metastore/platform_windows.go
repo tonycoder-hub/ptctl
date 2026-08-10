@@ -19,6 +19,12 @@ const forbiddenWindowsAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT |
 	windows.FILE_ATTRIBUTE_RECALL_ON_OPEN |
 	windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 
+// setWindowsPrivateOwner is a narrow test seam around the post-creation owner
+// assignment. Supplying O: in the creation descriptor can require
+// SeRestorePrivilege; assigning the caller's enabled user SID through a
+// WRITE_OWNER handle does not.
+var setWindowsPrivateOwner = setCurrentUserAsOwner
+
 func platformCommitAssurance() string {
 	return "same_fixed_drive_movefileex_no_replace_write_through_and_file_flush"
 }
@@ -96,12 +102,29 @@ func platformCreatePrivateDirectory(path string) error {
 		}
 		return fmt.Errorf("create private directory failed")
 	}
-	file, err := os.Open(path)
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = os.Remove(path)
+		}
+	}()
+	file, err := openCreatedPrivateDirectory(path)
 	if err != nil {
 		return fmt.Errorf("open private directory failed")
 	}
-	defer file.Close()
-	return platformValidateOpenFile(file, true)
+	if err := setWindowsPrivateOwner(windows.Handle(file.Fd())); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("assign private directory owner failed")
+	}
+	if err := platformValidateOpenFile(file, true); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("validate private directory security failed")
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close private directory failed")
+	}
+	succeeded = true
+	return nil
 }
 
 func platformCreatePrivateFile(path string) (*os.File, error) {
@@ -115,7 +138,7 @@ func platformCreatePrivateFile(path string) (*os.File, error) {
 	}
 	handle, err := windows.CreateFile(
 		pointer,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL|windows.WRITE_OWNER,
 		windows.FILE_SHARE_READ,
 		securityAttributes,
 		windows.CREATE_NEW,
@@ -131,12 +154,67 @@ func platformCreatePrivateFile(path string) (*os.File, error) {
 		_ = os.Remove(path)
 		return nil, fmt.Errorf("wrap private file handle failed")
 	}
+	if err := setWindowsPrivateOwner(handle); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("assign private file owner failed")
+	}
 	if err := platformValidateOpenFile(file, false); err != nil {
 		_ = file.Close()
 		_ = os.Remove(path)
 		return nil, err
 	}
 	return file, nil
+}
+
+func openCreatedPrivateDirectory(path string) (*os.File, error) {
+	pointer, err := windows.UTF16PtrFromString(windowsAPIPath(path))
+	if err != nil {
+		return nil, fmt.Errorf("private directory path encoding failed")
+	}
+	handle, err := windows.CreateFile(
+		pointer,
+		windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_OWNER,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open private directory owner handle failed")
+	}
+	file := os.NewFile(uintptr(handle), "private-metastore-owner-assignment")
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("wrap private directory owner handle failed")
+	}
+	named, namedErr := os.Lstat(path)
+	handleInfo, statErr := file.Stat()
+	if namedErr != nil || statErr != nil || platformRejectNamedInfo(named) || !named.IsDir() || !os.SameFile(named, handleInfo) || validateWindowsHandleAttributes(handle, true) != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("private directory owner handle is unsafe")
+	}
+	return file, nil
+}
+
+func setCurrentUserAsOwner(handle windows.Handle) error {
+	current, err := currentUserSID()
+	if err != nil {
+		return err
+	}
+	if err := windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		current,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		return err
+	}
+	return nil
 }
 
 func privateSecurityAttributes() (*windows.SecurityAttributes, error) {
@@ -146,9 +224,10 @@ func privateSecurityAttributes() (*windows.SecurityAttributes, error) {
 	}
 	// Do not set OWNER_SECURITY_INFORMATION at creation time. Asking the
 	// kernel to assign even the caller's SID explicitly can require
-	// SeRestorePrivilege. The object manager assigns the current token owner;
-	// platformValidateOpenFile verifies that result immediately afterwards.
-	// SDDL's D:P supplies only a protected DACL and deliberately omits O:.
+	// SeRestorePrivilege, and a token's default owner may be a group such as
+	// Administrators. SDDL's D:P therefore supplies only a protected DACL;
+	// creation is followed immediately by WRITE_OWNER assignment through the
+	// new object's handle and then strict owner/DACL validation.
 	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;" + current.String() + ")")
 	if err != nil {
 		return nil, err
