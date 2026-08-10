@@ -14,8 +14,8 @@ import (
 
 func TestProfileCanonicalRoundTripAndStableDeclarationIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 10, 1, 2, 3, 4, time.UTC)
-	rootA := t.TempDir()
-	rootB := t.TempDir()
+	rootA := physicalIndexTempDir(t)
+	rootB := physicalIndexTempDir(t)
 	first, err := NewProfile("media", []string{rootB, rootA}, false, DefaultScanLimits(), now)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestSnapshotRejectsMissingZeroValuedFields(t *testing.T) {
 
 func testProfile(t *testing.T) Profile {
 	t.Helper()
-	profile, err := NewProfile("media", []string{t.TempDir()}, false, DefaultScanLimits(), time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC))
+	profile, err := NewProfile("media", []string{physicalIndexTempDir(t)}, false, DefaultScanLimits(), time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}

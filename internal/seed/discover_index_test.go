@@ -15,14 +15,14 @@ func TestDiscoverFromIndexPreservesExactMatchButBlocksUniqueSelectionAndPlan(t *
 	ctx := context.Background()
 	content := []byte("indexed-proof")
 	meta := discoverV1SingleMeta(t, "source.bin", content)
-	root := t.TempDir()
+	root := physicalSeedIndexTempDir(t)
 	writeSeedFile(t, filepath.Join(root, "renamed.bin"), content)
 	repository, profile, descriptorID := indexedFixture(t, root)
 	query, err := repository.LoadCandidates(ctx, profile, descriptorID, []int64{int64(len(content))}, storageindex.DefaultCandidateLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := defaultDiscoverOptions(nil, t.TempDir())
+	options := defaultDiscoverOptions(nil, physicalSeedIndexTempDir(t))
 	result, err := DiscoverFromIndex(ctx, meta, profile, query, options)
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +42,7 @@ func TestDiscoverFromIndexZeroLiveCandidatesNeverClaimsNotFound(t *testing.T) {
 	ctx := context.Background()
 	content := []byte("gone")
 	meta := discoverV1SingleMeta(t, "source.bin", content)
-	root := t.TempDir()
+	root := physicalSeedIndexTempDir(t)
 	path := filepath.Join(root, "old.bin")
 	writeSeedFile(t, path, content)
 	repository, profile, descriptorID := indexedFixture(t, root)
@@ -64,7 +64,7 @@ func TestDiscoverFromIndexZeroLiveCandidatesNeverClaimsNotFound(t *testing.T) {
 
 func indexedFixture(t *testing.T, root string) (*storageindex.Repository, storageindex.Profile, metastore.RecordID) {
 	t.Helper()
-	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "state"))
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,4 +85,14 @@ func indexedFixture(t *testing.T, root string) (*storageindex.Repository, storag
 		t.Fatalf("index refresh failed: result=%#v err=%v", refresh, err)
 	}
 	return repository, profileReceipt.Profile, refresh.DescriptorRecord.ID
+}
+
+func physicalSeedIndexTempDir(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("resolve temporary directory: %v", err)
+	}
+	return resolved
 }

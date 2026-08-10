@@ -24,11 +24,11 @@ import (
 )
 
 func TestStorageProfileRefreshAndSnapshotOnlyDiscoveryArePrivateAndFailClosed(t *testing.T) {
-	stateRoot := filepath.Join(t.TempDir(), "private-state")
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
 	if _, _, err := metastore.Init(stateRoot); err != nil {
 		t.Fatal(err)
 	}
-	contentRoot := t.TempDir()
+	contentRoot := physicalCLITempDir(t)
 	content := []byte("indexed-content")
 	if err := os.WriteFile(filepath.Join(contentRoot, "renamed.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestStorageProfileRefreshAndSnapshotOnlyDiscoveryArePrivateAndFailClosed(t 
 		t.Fatalf("unexpected refresh result: %#v", refreshData)
 	}
 
-	torrentPath := filepath.Join(t.TempDir(), "source.torrent")
+	torrentPath := filepath.Join(physicalCLITempDir(t), "source.torrent")
 	if err := os.WriteFile(torrentPath, testV1Metafile("source.bin", content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -94,11 +94,11 @@ func TestStorageProfileRefreshAndSnapshotOnlyDiscoveryArePrivateAndFailClosed(t 
 }
 
 func TestSeedDiscoverStoredProfileUsageIsValidatedBeforeStoreRead(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "missing-state")
+	missing := filepath.Join(physicalCLITempDir(t), "missing-state")
 	var out, errOut bytes.Buffer
 	code := Run([]string{
 		"seed", "discover", "--torrent", "missing.torrent", "--state-store", missing,
-		"--storage-profile", "media", "--search-root", t.TempDir(),
+		"--storage-profile", "media", "--search-root", physicalCLITempDir(t),
 	}, strings.NewReader(""), &out, &errOut)
 	if code != 2 || !strings.Contains(errOut.String(), "mutually exclusive") || strings.Contains(errOut.String(), missing) {
 		t.Fatalf("usage validation touched private state: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
@@ -106,11 +106,11 @@ func TestSeedDiscoverStoredProfileUsageIsValidatedBeforeStoreRead(t *testing.T) 
 }
 
 func TestReconcileStoredProfileCannotBecomeConsistentWithoutCurrentSearchCompleteness(t *testing.T) {
-	stateRoot := filepath.Join(t.TempDir(), "private-state")
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
 	if _, _, err := metastore.Init(stateRoot); err != nil {
 		t.Fatal(err)
 	}
-	contentRoot := t.TempDir()
+	contentRoot := physicalCLITempDir(t)
 	content := []byte("reconcile-index")
 	if err := os.WriteFile(filepath.Join(contentRoot, "copy.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestReconcileStoredProfileCannotBecomeConsistentWithoutCurrentSearchComplet
 	if code := Run([]string{"storage", "index", "refresh", "--state-store", stateRoot, "--profile", "media"}, strings.NewReader(""), &out, &errOut); code != 0 {
 		t.Fatalf("index refresh failed: %d %s", code, errOut.String())
 	}
-	torrentPath := filepath.Join(t.TempDir(), "source.torrent")
+	torrentPath := filepath.Join(physicalCLITempDir(t), "source.torrent")
 	if err := os.WriteFile(torrentPath, testV1Metafile("source.bin", content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestReconcileStoredProfileCannotBecomeConsistentWithoutCurrentSearchComplet
 }
 
 func TestReconcileStoredProfilePreflightsStateBeforePasswordRead(t *testing.T) {
-	torrentPath := filepath.Join(t.TempDir(), "source.torrent")
+	torrentPath := filepath.Join(physicalCLITempDir(t), "source.torrent")
 	if err := os.WriteFile(torrentPath, testV1Metafile("source.bin", []byte("x")), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestReconcileStoredProfilePreflightsStateBeforePasswordRead(t *testing.T) {
 	var out, errOut bytes.Buffer
 	code := Run([]string{
 		"reconcile", "report", "--torrent", torrentPath,
-		"--state-store", filepath.Join(t.TempDir(), "missing"), "--storage-profile", "media",
+		"--state-store", filepath.Join(physicalCLITempDir(t), "missing"), "--storage-profile", "media",
 		"--driver", "qbittorrent", "--url", "https://seedbox.invalid", "--username", "alice", "--password-stdin",
 	}, reader, &out, &errOut)
 	if code == 0 || reader.read {
@@ -166,12 +166,12 @@ func TestReconcileStoredProfilePreflightsStateBeforePasswordRead(t *testing.T) {
 }
 
 func TestReconcileRejectsInvalidLiveProfileBeforeCredentialOrClientRequest(t *testing.T) {
-	stateRoot := filepath.Join(t.TempDir(), "private-state")
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
 	store, _, err := metastore.Init(stateRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := storageindex.NewProfile("relative", []string{t.TempDir()}, false, storageindex.DefaultScanLimits(), time.Now())
+	profile, err := storageindex.NewProfile("relative", []string{physicalCLITempDir(t)}, false, storageindex.DefaultScanLimits(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestReconcileRejectsInvalidLiveProfileBeforeCredentialOrClientRequest(t *te
 		t.Fatal(err)
 	}
 
-	torrentPath := filepath.Join(t.TempDir(), "source.torrent")
+	torrentPath := filepath.Join(physicalCLITempDir(t), "source.torrent")
 	if err := os.WriteFile(torrentPath, testV1Metafile("source.bin", []byte("x")), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -242,8 +242,8 @@ func TestStorageProfileCreateRejectsUnrepresentableScanPolicyBeforeStoreRead(t *
 		"components": {"--max-depth", "64"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			missingStore := filepath.Join(t.TempDir(), "must-not-be-read")
-			args := []string{"storage", "profile", "create", "--state-store", missingStore, "--name", "media", "--search-root", t.TempDir()}
+			missingStore := filepath.Join(physicalCLITempDir(t), "must-not-be-read")
+			args := []string{"storage", "profile", "create", "--state-store", missingStore, "--name", "media", "--search-root", physicalCLITempDir(t)}
 			args = append(args, option...)
 			var out, errOut bytes.Buffer
 			code := Run(args, strings.NewReader(""), &out, &errOut)
