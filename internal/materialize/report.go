@@ -22,6 +22,7 @@ const (
 	OutcomePublicationAmbiguous           Outcome = "publication_ambiguous"
 	OutcomePruning                        Outcome = "pruning"
 	OutcomeRetained                       Outcome = "retained"
+	OutcomeForgetting                     Outcome = "forgetting"
 )
 
 type Finding struct {

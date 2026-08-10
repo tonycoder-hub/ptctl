@@ -277,7 +277,10 @@ before any metafile, search-root, target-root, or journal I/O. An acknowledgemen
 does not authorize overwrite, downloader mutation, or source changes. Only the
 prune acknowledgement authorizes deletion, and only inside the selected
 owner-private operation subtree; the final layout, source, other operations,
-and retained tombstone remain outside that authority.
+and retained tombstone remain outside that authority. Deleting that exact
+tombstone is a separate `forget` operation requiring the same explicit full
+selectors plus `--acknowledge-historical-evidence-deletion`; it cannot select
+latest/by-age state or touch content.
 
 Client adoption has a separate downloader-write boundary. `plan` performs one
 complete typed ledger observation but writes nothing. `run` requires
@@ -467,12 +470,13 @@ and scratch bytes. It must never be described as cleanup or rollback. Source
 files are only read: materialize does not move, rewrite, link, or delete them,
 although their reads can still update atime or hydrate placeholders.
 
-A source-retirement `status` call without an ID is only a bounded root-name
-inventory. It returns canonical operation directories as `not_inspected` and
-canonical root forget markers as `forget_in_progress_not_inspected`, never opens
-their contents, never chooses a latest operation, and emits no unrelated root
-name. N+1 entry, name-byte, or retained-operation limits make the result
-incomplete; malformed objects under the reserved operation prefix fail closed.
+A materialize or source-retirement `status` call without an ID is only a
+bounded root-name inventory. It returns canonical operation directories as
+`not_inspected` and canonical root forget markers as
+`forget_in_progress_not_inspected`, never opens their contents, never chooses a
+latest operation, and emits no unrelated root name. N+1 entry, name-byte, or
+retained-operation limits make the result incomplete; malformed objects under
+the reserved operation prefix fail closed.
 
 Retention pruning never treats an absent object as proof that it removed it.
 Before deletion it binds the terminal journal or an already durable retention
@@ -491,8 +495,9 @@ removal. Source names, parents, the materialized final, downloader state, other
 operations, and the retained tombstone remain out of scope. The source-retire
 tombstone is historical and never asserts current source absence.
 
-Forgetting that tombstone is a distinct irreversible authority. It is allowed
-only for one explicit complete tombstone after a dedicated acknowledgement.
+Forgetting either a materialize or source-retirement tombstone is a distinct
+irreversible authority. It is allowed only for one explicit complete tombstone
+after that workflow's dedicated acknowledgement.
 The implementation publishes a private root-level intent containing the exact
 no-path tombstone evidence before removing any retained marker. It removes the
 operation subtree by bound identity while holding its cooperative lock, uses
@@ -672,10 +677,10 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- materialize-tombstone retirement, smaller client-journal retirement, and
-  broader quota/age policy (source-retirement heavy state has exact pruning and
-  its retained tombstone now has a separately acknowledged explicit forget
-  transition; no operation is selected automatically by policy);
+- smaller client-journal retirement and broader quota/age policy (materialize
+  and source-retirement heavy state have exact pruning, and each retained
+  tombstone has a separately acknowledged explicit forget transition; no
+  operation is selected automatically by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal
@@ -698,8 +703,8 @@ receipt required to distinguish a safe pointer update from a data move:
 ptctl will not infer those guarantees from an HTTP 200 response.
 
 No broader deletion or downloader mutation beyond exact private operation-state
-pruning, acknowledged source-name retirement, exact stopped-add, and reviewed
-recheck/start slices,
+pruning and explicitly selected tombstone forgetting, acknowledged source-name
+retirement, exact stopped-add, and reviewed recheck/start slices,
 tracker write, or broader content strategy should be added until the relevant
 gap has a testable control and a failure-recovery story. The private metafile
 store grants no authority over seeded content, a materialize acknowledgement

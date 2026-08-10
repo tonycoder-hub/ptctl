@@ -66,6 +66,8 @@ func (a *app) seedMaterialize(args []string) error {
 		return a.seedMaterializeAbandon(args[1:])
 	case "prune":
 		return a.seedMaterializePrune(args[1:])
+	case "forget":
+		return a.seedMaterializeForget(args[1:])
 	default:
 		return usageError("unknown seed materialize subcommand %q", args[0])
 	}
@@ -78,6 +80,7 @@ func (a *app) seedMaterializeHelp() {
   ptctl seed materialize status --target PATH [flags] [OPERATION_ID]
   ptctl seed materialize abandon --target PATH --acknowledge-abandon [flags] OPERATION_ID
   ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [flags] OPERATION_ID
+  ptctl seed materialize forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [flags] OPERATION_ID
 
 Materialize is copy-only and target-root-local. Run requires one complete live
 discovery and the reviewed plan ID from seed discover --target with the same
@@ -88,11 +91,14 @@ name-only listing and never selects a latest operation. Abandon is terminal,
 writes one journal event, retains staged and scratch bytes, and never deletes
 source, staging, or published content.
 
-Prune is the only deletion-capable materialize command. It accepts exactly one
-terminal operation, deletes only its owner-private heavy state, never touches
-the source or final layout, and retains an exact private tombstone. A newly
-started committed prune requires the exact metafile; an abandoned operation or
-a retry with a durable retention intent does not.
+Prune deletes only one terminal operation's owner-private heavy state and
+retains an exact private tombstone. A newly started committed prune requires
+the exact metafile; an abandoned operation or a retry with a durable retention
+intent does not. Forget is a separate irreversible boundary: it requires the
+same full operation and plan selectors plus a third acknowledgement, then
+deletes only that exact tombstone and its last recovery marker. Neither command
+touches source bytes, the published final layout, downloader state, or another
+operation.
 
 Reports never include absolute source, target, journal, scratch, or staging paths.
 Use each subcommand's --help for its complete bounded flag surface.
@@ -294,6 +300,13 @@ func (a *app) seedMaterializeResume(args []string) error {
 	})
 	if statusErr != nil {
 		return a.finishMaterialize(*values.output, status, statusErr)
+	}
+	if status.Outcome == materialize.OutcomeForgetting {
+		report, operationErr := materialize.Resume(ctx, materialize.ResumeOptions{
+			TargetRoot: *values.targetRoot, OperationID: operationID,
+			ExpectedPlanID: *values.expectedPlanID, Limits: materialize.DefaultLimits(),
+		})
+		return a.finishMaterialize(*values.output, report, operationErr)
 	}
 	meta, err := loadMetafileInput(ctx, input)
 	if err != nil {
@@ -579,6 +592,112 @@ func (a *app) seedMaterializePrune(args []string) error {
 	return a.finishMaterializeRetention(*output, report, operationErr)
 }
 
+func (a *app) seedMaterializeForget(args []string) error {
+	fs := newFlagSet("seed materialize forget")
+	output := fs.String("output", "table", "table or json")
+	targetRoot := fs.String("target", "", "existing target root containing the retained materialize tombstone")
+	expectedPlanID := fs.String("expect-plan-id", "", "reviewed 24-hex plan ID recorded by the retained operation")
+	acknowledge := fs.Bool("acknowledge-historical-evidence-deletion", false, "acknowledge irreversible deletion of the retained tombstone and final historical attribution")
+	timeout := fs.Duration("timeout", materializeControlDefaultTimeout, "historical-evidence deletion wall-clock budget")
+	if handled, err := parseStorageFlags(a, fs, args,
+		"ptctl seed materialize forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID",
+		"Irreversibly deletes one explicit complete materialize tombstone. A durable root-level recovery marker precedes deletion and is itself removed last. Source bytes, the published final layout, downloader state, and all other operations remain untouched."); handled || err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *targetRoot == "" {
+		return usageError("seed materialize forget requires --target and exactly one OPERATION_ID")
+	}
+	if !*acknowledge {
+		return usageError("seed materialize forget requires --acknowledge-historical-evidence-deletion")
+	}
+	if !validMaterializePlanID(*expectedPlanID) {
+		return usageError("seed materialize forget requires a canonical 24-hex --expect-plan-id")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if *timeout <= 0 || *timeout > materializeControlMaxTimeout {
+		return usageError("seed materialize forget --timeout must be greater than zero and no more than 1h")
+	}
+	operationID, err := materialize.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("seed materialize forget requires a canonical sha256 OPERATION_ID")
+	}
+	limits := materialize.DefaultForgetLimits()
+	if err := limits.Validate(); err != nil {
+		return fmt.Errorf("materialize forget default limits are invalid")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := materialize.Forget(ctx, materialize.ForgetOptions{
+		TargetRoot: *targetRoot, OperationID: operationID, ExpectedPlanID: *expectedPlanID,
+		Acknowledge: true, Limits: limits,
+	})
+	return a.finishMaterializeForget(*output, report, operationErr)
+}
+
+func (a *app) finishMaterializeForget(output string, report materialize.ForgetReport, operationErr error) error {
+	if writeErr := a.writeMaterializeForgetReport(output, report); writeErr != nil {
+		return writeErr
+	}
+	if operationErr == nil && report.Outcome == materialize.ForgetOutcomeForgotten {
+		return nil
+	}
+	switch report.Outcome {
+	case materialize.ForgetOutcomeBlocked:
+		return &inconclusiveErr{message: "materialize historical-evidence deletion was blocked; see report"}
+	case materialize.ForgetOutcomeIntegrityFailed:
+		return &integrityErr{message: "materialize historical evidence failed integrity validation; see report"}
+	case materialize.ForgetOutcomeAbsentUnattributed:
+		return fmt.Errorf("materialize historical evidence is absent without a remaining attribution marker; see report")
+	default:
+		return fmt.Errorf("materialize historical-evidence deletion was interrupted or its durability is unconfirmed; see report")
+	}
+}
+
+func (a *app) writeMaterializeForgetReport(output string, report materialize.ForgetReport) error {
+	if output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	return writeMaterializeForgetHuman(a.stdout, report)
+}
+
+func writeMaterializeForgetHuman(out io.Writer, report materialize.ForgetReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nPHASE\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(valueOrUnknown(report.Operation.ID)), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeMaterializeFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / TARGET\nEXPECTED PLAN\t%s\nOBSERVED PLAN\t%s\nMATCHES\t%t\nROOT IDENTITY BOUND\t%t\nFINAL STATE\t%s\nSTABILITY\t%s\n",
+		terminalSafe(report.Plan.ExpectedID), terminalSafe(valueOrUnknown(report.Plan.ObservedID)), report.Plan.Matches,
+		report.Target.RootIdentityBound, terminalSafe(report.Target.FinalState), terminalSafe(report.Target.StabilityAssurance))
+	fmt.Fprintf(w, "\nAUTHORITY\nSTATE\t%s\nFORGET MARKER\t%s\nMARKER DURABLE\t%t\nRETENTION INTENT\t%s\nRETENTION COMPLETE\t%s\nEXACT TOMBSTONE EVIDENCE AVAILABLE\t%t\nTARGET HISTORICAL EVIDENCE ERASED\t%t\n",
+		terminalSafe(report.Authority.State), terminalSafe(valueOrUnknown(report.Authority.MarkerID)), report.Authority.MarkerDurable,
+		terminalSafe(valueOrUnknown(report.Authority.RetentionIntentMarkerID)), terminalSafe(valueOrUnknown(report.Authority.RetentionCompleteMarkerID)),
+		report.Authority.ExactTombstoneEvidenceAvailable, report.Authority.TargetHistoricalEvidenceErased)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nTERMINAL EVENT\t%s\nTERMINAL PHASE\t%s\nMETAFILE VARIANT\t%s\nHISTORICAL AUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(materializeValueOr(report.Proof.Basis, "not_observed")), terminalSafe(valueOrUnknown(report.Proof.TerminalEventID)),
+		terminalSafe(valueOrUnknown(report.Proof.TerminalPhase)), terminalSafe(valueOrUnknown(report.Proof.MetafileVariantID)),
+		report.Proof.HistoricalAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE / REMOVAL RECEIPTS\nMARKER TEMP FILES\t%d\nMARKER TEMP BYTES\t%d\nMARKER PUBLICATION ATTEMPTS\t%d\nMARKER PUBLICATIONS\t%d\nAMBIGUOUS MARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\n",
+		report.Writes.MarkerTemporaryFiles, report.Writes.MarkerTemporaryBytes, report.Writes.MarkerPublicationAttempts,
+		report.Writes.MarkerPublications, report.Writes.AmbiguousMarkerPublications, report.Writes.RemovalAttempts,
+		report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals)
+	fmt.Fprintf(w, "\nLIMITS\nMAX MARKER BYTES\t%d\n", report.Limits.MaxMarkerBytes)
+	fmt.Fprintln(w, "\nISSUES")
+	writeMaterializeFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	if len(report.Warnings) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
+}
+
 func materializeRetentionInputFailureReport(operationID materialize.OperationID, expectedPlanID string, retentionLimits materialize.RetentionLimits, failure error) materialize.RetentionReport {
 	report := materialize.RetentionReport{
 		Outcome: materialize.RetentionOutcomeInterrupted,
@@ -674,7 +793,7 @@ func (a *app) finishMaterialize(output string, report materialize.Report, operat
 		return &inconclusiveErr{message: "materialize operation was not found; see report"}
 	}
 	switch report.Outcome {
-	case materialize.OutcomeBlocked, materialize.OutcomeAbandoned:
+	case materialize.OutcomeBlocked, materialize.OutcomeAbandoned, materialize.OutcomeForgetting:
 		return &inconclusiveErr{message: "materialize operation was blocked; see report"}
 	case materialize.OutcomeIntegrityFailed, materialize.OutcomePublishedIntegrityFailed:
 		return &integrityErr{message: "materialize operation failed integrity verification; see report"}

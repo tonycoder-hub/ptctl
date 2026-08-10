@@ -165,6 +165,33 @@ func Prune(ctx context.Context, options PruneOptions) (RetentionReport, error) {
 	report.Target.ObservedRootIdentity = rootInfo.Identity.String()
 	report.Target.RootIdentityBound = true
 	report.Target.StabilityAssurance = "non_atomic_bound_filesystem"
+	forgetName, _ := ForgetRootName(options.OperationID)
+	forgetMarker, _, _, _, forgetErr := readForgetRootIntent(ctx, session, forgetName, maxForgetMarkerBytes)
+	if forgetErr == nil {
+		if forgetMarker.OperationID != options.OperationID || forgetMarker.TargetRootIdentity != rootInfo.Identity.String() {
+			classifyRetentionFailure(&report, ErrIntegrity)
+			return report, fmt.Errorf("%w: durable forget intent is bound to another filesystem object", ErrIntegrity)
+		}
+		report.Plan.ObservedID = forgetMarker.PlanID
+		report.Plan.Matches = forgetMarker.PlanID == options.ExpectedPlanID
+		report.Plan.MetafileVariantID = forgetMarker.RetentionIntent.MetafileVariantID
+		if forgetMarker.PlanID != options.ExpectedPlanID {
+			report.Outcome = RetentionOutcomeBlocked
+			report.Operation.Status, report.Operation.PhaseAfter, report.Operation.Resumable = "forgetting", "forget_intent_recorded", false
+			report.Markers.State = "forget_intent_published"
+			report.addRetentionBlocker("plan.id_mismatch", "the reviewed plan ID does not select this materialize forget intent")
+			return report, fmt.Errorf("%w: durable forget intent differs from the explicit prune selector", ErrPolicy)
+		}
+		report.Operation.Status, report.Operation.PhaseAfter, report.Operation.Resumable = "forgetting", "forget_intent_recorded", false
+		report.Markers.State = "forget_intent_published"
+		report.Outcome = RetentionOutcomeBlocked
+		report.addRetentionBlocker("operation.forget_required", "a private forget intent is visible; prune may no longer advance this operation")
+		return report, fmt.Errorf("%w: materialize historical evidence deletion is in progress", ErrPolicy)
+	}
+	if !errors.Is(forgetErr, fsbind.ErrNotFound) {
+		classifyRetentionFailure(&report, forgetErr)
+		return report, forgetErr
+	}
 
 	handle, journalErr := openJournalForRetention(ctx, session, options.OperationID, options.JournalLimits)
 	var subtree *fsbind.Subtree

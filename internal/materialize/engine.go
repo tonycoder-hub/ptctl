@@ -183,6 +183,12 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		report.addBlocker("intent.operation_id_failed", "the operation identity could not be derived")
 		return report, err
 	}
+	if forgetting, forgetErr := applyForgetControl(ctx, session, intendedOperationID, options.ExpectedPlanID, &report); forgetting {
+		if forgetErr != nil {
+			return report, forgetErr
+		}
+		return report, fmt.Errorf("%w: materialize historical evidence deletion is in progress", ErrPolicy)
+	}
 	handle, journalCreation, err := createJournal(ctx, session, intent)
 	if journalCreation.SubtreeCreated {
 		report.Operation.ID = intendedOperationID.String()
@@ -254,12 +260,6 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 	}
 	setOperationInspectionSelector(&report, options.OperationID)
 	report.Source = SourceReport{Mode: "phase_unknown", Outcome: "not_observed"}
-	layout, err := BuildLayout(options.Meta, options.Limits)
-	if err != nil {
-		report.Outcome = OutcomeBlocked
-		report.addBlocker("manifest.unsupported_layout", "the metafile layout is outside materialize v1")
-		return report, err
-	}
 	targetRoot, err := filepath.Abs(options.TargetRoot)
 	if err != nil {
 		report.Outcome = OutcomeBlocked
@@ -278,6 +278,18 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 	report.Target.ObservedRootIdentity = rootInfo.Identity.String()
 	report.Target.NoClobberCapable = true
 	report.Target.StabilityAssurance = "non_atomic_bound_filesystem"
+	if forgetting, forgetErr := applyForgetControl(ctx, session, options.OperationID, options.ExpectedPlanID, &report); forgetting {
+		if forgetErr != nil {
+			return report, forgetErr
+		}
+		return report, fmt.Errorf("%w: materialize historical evidence deletion is in progress", ErrPolicy)
+	}
+	layout, err := BuildLayout(options.Meta, options.Limits)
+	if err != nil {
+		report.Outcome = OutcomeBlocked
+		report.addBlocker("manifest.unsupported_layout", "the metafile layout is outside materialize v1")
+		return report, err
+	}
 	handle, err := openJournal(ctx, session, options.OperationID, options.Limits)
 	if err != nil {
 		if retained, observed, retentionErr := controlReportFromRetention(ctx, session, rootInfo, options.OperationID, options.Limits); observed {

@@ -566,7 +566,7 @@ modeled safely.
 ## Journaled copy-only materialization
 
 `seed materialize` is the first content-write slice. It is deliberately
-narrower than downloader coordination and has five explicit controls:
+narrower than downloader coordination and has six explicit controls:
 
 ```text
 run     selector + live search roots + target + reviewed plan ID + write ack
@@ -574,6 +574,7 @@ resume  selector + target + reviewed plan ID + write ack + explicit operation ID
 status  target + optional explicit operation ID
 abandon target + abandon ack + explicit operation ID
 prune   target + reviewed plan ID + deletion ack + explicit operation ID
+forget  target + reviewed plan ID + historical-evidence-deletion ack + explicit operation ID
 ```
 
 Both plan surfaces remain `layout_only`, `effect:none`, and
@@ -647,6 +648,18 @@ after the operation root is exactly reduced to its lock plus retention marker
 directory. The retained tombstone makes retries idempotent and never becomes
 authority over source or final bytes.
 
+`forget` is a third, irreversible authority boundary after prune. It accepts
+only the explicit complete tombstone, copies its exact canonical intent and
+completion evidence into a target-root-level no-path recovery marker, then
+removes the retention markers and bound operation subtree. The recovery marker
+is re-read after operation removal and deleted last. While it exists, every
+ordinary materialize mutation/current-final path fails closed and status/list
+reports `forgetting` without advancing it. Successful completion deliberately
+leaves no on-target attribution; subsequent absence is
+`absent_unattributed`, never `already_forgotten`. Its JSON kind is
+`content.materialization.forget`. Source bytes, published final content,
+downloader state, and unrelated operations are outside this authority.
+
 All usage, selector, acknowledgement, timeout, and budget checks precede
 metafile, source-root, target-root, and journal I/O. Non-usage failures remain
 report-first: exit `0` is a successful transition/read, `1` is operational
@@ -655,6 +668,8 @@ content or journal integrity failure, and `4` is a policy/source/plan/selector
 blocker, explicit operation not found, or incomplete operation listing. A
 failure can have nonzero or uncertain writes; its explicit operation ID is the
 only resume handoff.
+The final forget transition returns `0` only for a newly confirmed deletion;
+once its last marker is absent, unattributed absence is operational exit `1`.
 
 ## Exact stopped-job adoption
 

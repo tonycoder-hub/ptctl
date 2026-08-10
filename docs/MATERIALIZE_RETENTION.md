@@ -1,8 +1,9 @@
 # Materialize operation retention
 
-This document defines the first deletion-capable `ptctl` workflow. It is a
-follow-on to copy-only journaled materialization, not a general filesystem
-cleaner and not downloader coordination.
+This document defines materialize operation-state retention and the narrower
+irreversible boundary for deleting its last tombstone. It is a follow-on to
+copy-only journaled materialization, not a general filesystem cleaner and not
+downloader coordination.
 
 ## Goal
 
@@ -11,7 +12,7 @@ committed operation also retains its private intent and journal after the final
 layout has been verified. Retaining everything is the safest initial recovery
 policy, but it is not a sustainable steady state.
 
-The retention slice adds one explicit command:
+The retention lifecycle has two separately acknowledged commands:
 
 ```text
 ptctl seed materialize prune \
@@ -19,6 +20,12 @@ ptctl seed materialize prune \
   --expect-plan-id 24_HEX \
   --acknowledge-operation-state-deletion \
   [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] \
+  OPERATION_ID
+
+ptctl seed materialize forget \
+  --target PATH \
+  --expect-plan-id 24_HEX \
+  --acknowledge-historical-evidence-deletion \
   OPERATION_ID
 ```
 
@@ -29,6 +36,13 @@ distinguish an already-pruned operation from an operation that never existed.
 The command must therefore say `pruned`, not `cleaned up`, `rolled back`, or
 `deleted completely`.
 
+`forget` is not an alias for prune and is never automatic. It accepts only an
+exact complete retained tombstone, first publishes a root-level recovery
+intent, then deletes that tombstone and removes the recovery intent last. It
+irreversibly destroys ptctl's final on-target attribution for the selected
+operation. A later call can observe only `absent_unattributed`; it must never
+invent `already_forgotten` or historical idempotence from an empty namespace.
+
 ## Authority and preconditions
 
 Every invocation requires all of the following before the first mutation:
@@ -37,8 +51,9 @@ Every invocation requires all of the following before the first mutation:
 2. the exact target-root locator and a fresh `fsbind` root identity;
 3. the reviewed 24-hex plan ID from the operation report;
 4. the dedicated deletion acknowledgement;
-5. a complete, canonical operation journal or an already sealed retention
-   marker;
+5. a complete canonical operation journal, an already sealed retention marker,
+   or the exact durable forget recovery intent that copied that marker before
+   deletion;
 6. an operation phase of exactly `committed` or `abandoned`.
 
 For `committed`, the caller must also supply the exact metafile selector. The
@@ -53,6 +68,12 @@ blocker and does not make a healthy journal corrupt. A serialized report,
 tombstone, journal hash, filename, object identity, size, mtime, or downloader
 claim can never replace the required current final proof for a newly started
 committed prune.
+
+Forget performs no current content proof and gains no authority from a public
+report. It requires the same full operation ID, reviewed plan ID, freshly bound
+target-root identity, exact canonical retention intent/completion pair, and a
+third dedicated acknowledgement. The retained marker bytes and operation-root
+identity are copied into the canonical root intent before the first deletion.
 
 ## State machine
 
@@ -80,6 +101,17 @@ publish retention/complete.json no-replace
         |
         v
 retained tombstone
+        |
+        | full selectors + historical-evidence-deletion acknowledgement
+        v
+publish root-level forget intent no-replace
+        |
+        | exact identity-bound tombstone/subtree deletion
+        v
+remove root-level forget intent last
+        |
+        v
+absent_unattributed
 ```
 
 The durable intent marker happens before any deletion, so a crash cannot leave
@@ -93,6 +125,14 @@ no-replace rename, file and directory sync, named-entry identity rechecks, and
 the existing operation lock. Publication ambiguity, binding loss, or
 unconfirmed durability is preserved in the receipt. Recovery never infers
 success merely because an original file or directory is absent.
+
+The forget intent lives directly under the bound target root as
+`.ptctl-materialize-forget-<operation-digest>.json`. It embeds the complete
+no-path retention evidence and is the only recovery authority after the
+operation subtree is gone. A lockless empty residue can be removed only when
+its identity matches the intent. Ordinary run, resume, abandon, prune, and
+current-final proof fail closed while that marker is visible; status/listing
+label the operation as forgetting without selecting or advancing it.
 
 ## Retention marker
 
@@ -162,8 +202,11 @@ facts for:
 - fixed limits and actual usage;
 - blockers, issues, and warnings as non-null arrays.
 
-Stable outcomes are `pruned`, `already_pruned`, `blocked`, `interrupted`, and
-`integrity_failed`. Default reports never contain the target, final, operation,
+Prune outcomes are `pruned`, `already_pruned`, `blocked`, `interrupted`, and
+`integrity_failed`. Forget uses JSON kind
+`content.materialization.forget` and outcomes `forgotten`,
+`absent_unattributed`, `blocked`, `interrupted`, `integrity_failed`, and
+`durability_unconfirmed`. Default reports never contain the target, final, operation,
 journal, scratch, stage, or source path. Operation, plan, variant, marker, and
 filesystem IDs are stable correlators and are not anonymity.
 
@@ -171,6 +214,10 @@ Exit codes follow the existing report-first contract: `0` for `pruned` or
 `already_pruned`, `1` for operational interruption or an output failure, `2`
 for usage, `3` for proven journal/marker/content integrity failure, and `4` for
 policy/selector blockers or an explicit operation not found.
+For forget, only a newly confirmed `forgotten` result returns `0`; unattributed
+absence, interruption, ambiguous removal, or unconfirmed durability returns
+`1`, usage returns `2`, proven marker/namespace integrity failure returns `3`,
+and policy/selector blocking returns `4`.
 
 ## Fixed budgets
 
@@ -197,18 +244,18 @@ under the original operation ID.
 
 This slice does not:
 
-- remove the retained tombstone itself;
 - delete or retire a source layout;
 - delete or modify the published final layout;
 - infer that a downloader is using the final layout;
 - pause, add, relocate, recheck, or resume a downloader;
 - merge operations, choose the newest operation, or prune by age;
 - scan all target roots automatically;
-- implement quotas, background garbage collection, or cross-filesystem trash;
+- implement quotas, age/latest selection, background garbage collection, or
+  cross-filesystem trash;
 - weaken the no-delete semantics of `abandon`.
 
-Deleting retained tombstones and broader downloader coordination still need
-separate explicit authorities and recovery stories. `seed retire run|resume`
-now implements its own target-root-local, per-name source-retirement journal;
-that independent acknowledgement and operation do not broaden this retention
-operation's scope or authorize it to touch source content.
+Broader downloader coordination still needs separate explicit authorities and
+recovery stories. `seed retire run|resume` implements its own
+target-root-local, per-name source-retirement journal; its prune/forget
+lifecycle is independent and does not broaden materialize retention authority
+or authorize either workflow to touch unrelated content.

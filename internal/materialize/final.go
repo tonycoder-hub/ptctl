@@ -265,6 +265,21 @@ func VerifyCurrentFinal(ctx context.Context, options FinalProofOptions) (*Verifi
 		return nil, FinalObservation{}, err
 	}
 	defer session.Close()
+	forgetName, _ := ForgetRootName(options.OperationID)
+	forgetMarker, _, _, _, forgetErr := readForgetRootIntent(ctx, session, forgetName, maxForgetMarkerBytes)
+	if forgetErr == nil {
+		if forgetMarker.OperationID != options.OperationID || forgetMarker.TargetRootIdentity != rootInfo.Identity.String() ||
+			forgetMarker.RetentionIntent.MetafileVariantID != options.Meta.MetafileVariantID {
+			return nil, FinalObservation{}, fmt.Errorf("%w: materialize forget marker disagrees with the current final selector", ErrIntegrity)
+		}
+		if forgetMarker.PlanID != options.ExpectedPlanID {
+			return nil, FinalObservation{}, fmt.Errorf("%w: materialize forget marker differs from the reviewed plan", ErrPolicy)
+		}
+		return nil, FinalObservation{}, fmt.Errorf("%w: materialize historical authority is being forgotten", ErrPolicy)
+	}
+	if !errors.Is(forgetErr, fsbind.ErrNotFound) {
+		return nil, FinalObservation{}, forgetErr
+	}
 
 	meta := options.Meta.Clone()
 	var expectedFinal fsbind.Identity

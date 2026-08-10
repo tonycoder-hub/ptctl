@@ -8,13 +8,15 @@ domains and reconciles them around verifiable torrent metadata.
 > content proof, discovery, planning, and reconciliation are intentionally
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
-> acknowledged target-root-local `seed materialize run|resume|abandon|prune`
+> acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
 > workflow, exact `client adopt run|resume` stopped-add operations, and
 > explicit `client activate run|resume` recheck/start operations. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
-> heavy state and retains its tombstone. Client adoption never mutates an
+> heavy state and retains its tombstone; `seed materialize forget` has a third
+> acknowledgement and irreversibly removes only that exact tombstone plus its
+> last recovery marker. Client adoption never mutates an
 > existing job; activation is limited to the reviewed exact job's recheck and
 > optional start transitions. Outside the separately acknowledged source-name
 > retirement workflow, no listed operation overwrites, moves, rewrites, or
@@ -87,7 +89,9 @@ capabilities at the edge, not assumptions in the core domain model.
   no-clobber publication, fixed hard limits, explicit operation-ID recovery,
   bounded status/listing, terminal no-delete abandon, and separately
   acknowledged exact pruning of one terminal operation's private state while
-  retaining a durable tombstone;
+  retaining a durable tombstone, followed only on explicit request by
+  recoverable, identity-bound deletion of that tombstone and its last
+  attribution marker;
 - tracker output reduced to origins so announce passkeys are not printed;
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
@@ -449,6 +453,12 @@ ptctl seed materialize prune \
   --expect-plan-id 0123456789abcdef01234567 \
   --acknowledge-operation-state-deletion \
   sha256:OPERATION_DIGEST
+
+ptctl seed materialize forget \
+  --target "D:\PT" \
+  --expect-plan-id 0123456789abcdef01234567 \
+  --acknowledge-historical-evidence-deletion \
+  sha256:OPERATION_DIGEST
 ```
 
 `status` without an ID performs a bounded name-only listing whose entries are
@@ -460,8 +470,8 @@ recovery authority. `abandon` is allowed only before publication intent. It
 appends one terminal journal event and deliberately retains staging and scratch
 bytes: it is not cleanup, rollback, or deletion.
 
-`prune` is the only deletion-capable materialize command. It selects exactly
-one full operation ID and reviewed plan ID. A newly started committed prune
+`prune` is the operation-state deletion boundary. It selects exactly one full
+operation ID and reviewed plan ID. A newly started committed prune
 also requires the exact metafile and reverifies the current final namespace and
 bytes; an abandoned operation instead proves the final name absent. It then
 publishes a durable private retention intent before deleting only the original
@@ -469,9 +479,19 @@ intent, journal, scratch, and stage objects. A small exact tombstone remains,
 so retries are explicit and idempotent. Prune never removes source bytes, the
 published final layout, another operation, or a downloader job.
 
+`forget` is a distinct, narrower, irreversible boundary. It accepts only the
+explicit complete tombstone left by prune and requires a third acknowledgement.
+Before deleting a retained marker it publishes a canonical root-level recovery
+intent bound to the same target root, operation, plan, and exact tombstone; it
+removes that intent last. It never touches source bytes, the published final,
+downloader state, or another operation. After confirmed completion no ptctl
+attribution remains, so a repeated call reports `absent_unattributed` and
+returns `1` instead of inventing `already_forgotten`.
+
 Materialize JSON has kind `content.materialization`; the ID listing uses
 `content.materialization.operation_list`; prune uses
-`content.materialization.retention`. Reports always keep effect, actual
+`content.materialization.retention`; forget uses
+`content.materialization.forget`. Reports always keep effect, actual
 and uncertain writes, phase, plan/source/target assurance, fixed limits/usage,
 and non-null blocker/issue/warning arrays separate. They never expose absolute
 source, target, journal, staging, or scratch paths, and have no path-disclosure
@@ -935,8 +955,9 @@ is still printed first.
 
 Materialize validates every selector, acknowledgement, timeout, and limit
 before opening a metafile, source root, target root, or journal. Successful
-`run`/`resume`, a completed status/list read, a successful abandon, and
-`pruned`/`already_pruned` return `0`. Operational interruption, cancellation,
+`run`/`resume`, a completed status/list read, a successful abandon,
+`pruned`/`already_pruned`, and a newly confirmed `forgotten` return `0`.
+Unattributed absence after forget, operational interruption, cancellation,
 publication/removal ambiguity, or
 unconfirmed post-publication durability returns `1`; invalid usage or a
 missing acknowledgement returns `2`; content/journal integrity failure returns
@@ -945,6 +966,9 @@ authority, explicit operation not found, or incomplete bounded operation
 listing returns `4`. Non-usage outcomes are written before the exit. A failure
 may have nonzero or uncertain writes, and a reported operation ID is the only
 recovery handoff; retries never choose an operation automatically.
+Forget is intentionally different after its last marker is gone: an explicit
+selector then yields report-first `absent_unattributed` and exit `1`, because
+the tool can no longer prove either prior completion or a never-existing ID.
 
 Source-retirement pruning uses the same report-first exit lattice:
 `pruned`/`already_pruned` return `0`, operational interruption or uncertain
@@ -995,15 +1019,16 @@ site reads, bounds network and filesystem work, hides private store/object and
 discovery/reconciliation absolute paths by default, never exposes materialize
 paths, defaults conflicts to failure, and confines private operation-state
 deletion to separately acknowledged materialize/source-retirement prune
-commands; exact source-retirement tombstone erasure and source-name unlink each
-have their own narrower acknowledgement. Commands such
+commands; exact materialize/source-retirement tombstone erasure and source-name
+unlink each have their own narrower acknowledgement. Commands such
 as `storage probe` and `seed plan` keep their documented path-display
 contracts. The private store uses owner-only permissions and atomic no-clobber
 publication for both metafiles and allowlisted sealed state records; this is
 access control, not encryption. Store init/import, storage profile
 creation/index refresh, the artifact plus sealed-binding phases of an
 acknowledged site metafile fetch, and acknowledged target-root-local
-materialize operations (including explicit retention pruning), acknowledged
+materialize operations (including explicit retention pruning and exact
+tombstone forgetting), acknowledged
 exact stopped-job adoption, reviewed client recheck/start, and acknowledged
 source-name retirement (including its separate journal pruning and explicit
 last-evidence forget transition), are

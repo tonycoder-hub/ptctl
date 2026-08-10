@@ -8,14 +8,16 @@ import (
 )
 
 func hasOperationDirectoryPrefix(name string) bool {
-	if runtime.GOOS == "windows" {
-		return len(name) >= len(operationDirectoryPrefix) && strings.EqualFold(name[:len(operationDirectoryPrefix)], operationDirectoryPrefix)
-	}
-	return strings.HasPrefix(name, operationDirectoryPrefix)
+	return !hasForgetMarkerPrefix(name) && hasPlatformPrefix(name, operationDirectoryPrefix)
 }
 
 const (
 	operationDirectoryPrefix = ".ptctl-materialize-"
+	// MaterializeForgetMarkerPrefix reserves the root-level, owner-private
+	// recovery marker used while one exact retained materialize tombstone is
+	// being irreversibly forgotten.
+	MaterializeForgetMarkerPrefix = ".ptctl-materialize-forget-"
+	materializeForgetMarkerPrefix = MaterializeForgetMarkerPrefix
 	// ClientAdoptOperationDirectoryPrefix is reserved at the materialized
 	// target root so a torrent payload can never collide with adoption control
 	// state. clientadopt consumes this exact constant to prevent drift.
@@ -46,7 +48,7 @@ const (
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
+	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
@@ -75,6 +77,10 @@ func HasSourceRetireOperationPrefix(name string) bool {
 
 func HasSourceRetireForgetMarkerPrefix(name string) bool {
 	return hasPlatformPrefix(name, sourceRetireForgetMarkerPrefix)
+}
+
+func hasForgetMarkerPrefix(name string) bool {
+	return hasPlatformPrefix(name, materializeForgetMarkerPrefix)
 }
 
 func hasPlatformPrefix(name, prefix string) bool {

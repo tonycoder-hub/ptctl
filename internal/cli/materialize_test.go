@@ -48,6 +48,12 @@ type materializeRetentionJSONEnvelope struct {
 	Data   materialize.RetentionReport `json:"data"`
 }
 
+type materializeForgetJSONEnvelope struct {
+	Schema string                   `json:"schema"`
+	Kind   string                   `json:"kind"`
+	Data   materialize.ForgetReport `json:"data"`
+}
+
 func TestSeedMaterializePruneIsExplicitRecoverableAndPrivate(t *testing.T) {
 	fixture := newMaterializeCLIFixture(t)
 	storeRoot, variantID := storeMaterializeMetafile(t, fixture.torrentPath)
@@ -118,6 +124,81 @@ func TestSeedMaterializePruneIsExplicitRecoverableAndPrivate(t *testing.T) {
 	if repeated.Data.Outcome != materialize.RetentionOutcomeAlreadyPruned || repeated.Data.WritesPerformed != 0 || !repeated.Data.Markers.ExactTombstone {
 		t.Fatalf("idempotent prune changed state: %s", out.String())
 	}
+	forgetRootName, forgetRaw := publishMaterializeForgetMarkerForCLI(t, fixture.targetRoot, operationID)
+
+	out.Reset()
+	errOut.Reset()
+	missingMetafile := filepath.Join(fixture.targetRoot, "PTCTL-FORGET-RESUME-MUST-NOT-READ.torrent")
+	reader := &trackingReader{}
+	resumeArgs := []string{
+		"seed", "materialize", "resume", "--torrent", missingMetafile,
+		"--target", fixture.targetRoot, "--expect-plan-id", fixture.planID,
+		"--acknowledge-filesystem-write", "--output", "json", operationID,
+	}
+	if code := Run(resumeArgs, reader, &out, &errOut); code != 4 || reader.read {
+		t.Fatalf("forget-boundary resume code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	forgetting := decodeMaterializeReport(t, out.Bytes())
+	if forgetting.Data.Outcome != materialize.OutcomeForgetting || forgetting.Data.Operation.Status != "forgetting" ||
+		forgetting.Data.WritesPerformed != 0 || forgetting.Data.Operation.Resumable || !forgetting.Data.Plan.Matches ||
+		forgetting.Data.Plan.ExpectedID != fixture.planID || forgetting.Data.Plan.ObservedID != fixture.planID {
+		t.Fatalf("resume crossed forget boundary: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), missingMetafile, fixture.targetRoot)
+
+	if err := os.WriteFile(filepath.Join(fixture.targetRoot, forgetRootName), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"seed", "materialize", "status", "--target", fixture.targetRoot, "--output", "json", operationID},
+		strings.NewReader(""), &out, &errOut); code != 3 {
+		t.Fatalf("corrupt forget status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	corrupt := decodeMaterializeReport(t, out.Bytes())
+	if corrupt.Data.Outcome != materialize.OutcomeIntegrityFailed || corrupt.Data.Operation.Resumable ||
+		len(corrupt.Data.Issues) != 1 || corrupt.Data.Issues[0].Code != "operation.forget_marker_invalid" {
+		t.Fatalf("corrupt forget marker was misclassified: %s", out.String())
+	}
+	if err := os.WriteFile(filepath.Join(fixture.targetRoot, forgetRootName), forgetRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	forgetArgs := []string{
+		"seed", "materialize", "forget", "--target", fixture.targetRoot,
+		"--expect-plan-id", fixture.planID, "--acknowledge-historical-evidence-deletion", "--output", "json", operationID,
+	}
+	reader = &trackingReader{}
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 {
+		t.Fatalf("forget code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	forgotten := decodeMaterializeForgetReport(t, out.Bytes())
+	if forgotten.Schema != "ptctl.dev/v1" || forgotten.Kind != "content.materialization.forget" ||
+		forgotten.Data.Outcome != materialize.ForgetOutcomeForgotten || forgotten.Data.WritesPerformed == 0 ||
+		forgotten.Data.WritesUncertain || !forgotten.Data.Authority.TargetHistoricalEvidenceErased ||
+		forgotten.Data.Authority.MarkerDurable || forgotten.Data.Authority.ExactTombstoneEvidenceAvailable || forgotten.Data.Operation.Resumable ||
+		forgotten.Data.Blockers == nil || forgotten.Data.Issues == nil || forgotten.Data.Warnings == nil {
+		t.Fatalf("unexpected forget report: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.targetRoot, fixture.sourceRoot, fixture.sourcePath, fixture.finalPath, fixture.torrentPath, storeRoot)
+	final, err = os.ReadFile(fixture.finalPath)
+	if err != nil || !bytes.Equal(final, fixture.content) {
+		t.Fatalf("forget changed final bytes: %q %v", final, err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 1 || reader.read {
+		t.Fatalf("repeated forget code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	absent := decodeMaterializeForgetReport(t, out.Bytes())
+	if absent.Data.Outcome != materialize.ForgetOutcomeAbsentUnattributed || absent.Data.WritesPerformed != 0 ||
+		absent.Data.Authority.TargetHistoricalEvidenceErased {
+		t.Fatalf("repeated forget claimed attributable completion: %s", out.String())
+	}
 }
 
 func TestSeedMaterializePruneUsagePrecedesTargetIO(t *testing.T) {
@@ -136,6 +217,23 @@ func TestSeedMaterializePruneUsagePrecedesTargetIO(t *testing.T) {
 	}
 }
 
+func TestSeedMaterializeForgetUsagePrecedesTargetIO(t *testing.T) {
+	target := filepath.Join(physicalCLITempDir(t), "PTCTL-FORGET-TARGET-MUST-NOT-BE-READ")
+	operationID := "sha256:" + strings.Repeat("1", 64)
+	reader := &trackingReader{}
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"seed", "materialize", "forget", "--target", target,
+		"--expect-plan-id", strings.Repeat("2", 24), "--output", "json", operationID,
+	}, reader, &out, &errOut)
+	if code != 2 || reader.read || out.Len() != 0 || !strings.Contains(errOut.String(), "acknowledge-historical-evidence-deletion") {
+		t.Fatalf("bad forget usage crossed report boundary: code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatal("bad forget usage touched the target locator")
+	}
+}
+
 func decodeMaterializeRetentionReport(t *testing.T, raw []byte) materializeRetentionJSONEnvelope {
 	t.Helper()
 	var envelope materializeRetentionJSONEnvelope
@@ -143,6 +241,94 @@ func decodeMaterializeRetentionReport(t *testing.T, raw []byte) materializeReten
 		t.Fatalf("decode retention report: %v\n%s", err, raw)
 	}
 	return envelope
+}
+
+func decodeMaterializeForgetReport(t *testing.T, raw []byte) materializeForgetJSONEnvelope {
+	t.Helper()
+	var envelope materializeForgetJSONEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode materialize forget report: %v\n%s", err, raw)
+	}
+	return envelope
+}
+
+func publishMaterializeForgetMarkerForCLI(t *testing.T, targetRoot, operationValue string) (string, []byte) {
+	t.Helper()
+	ctx := context.Background()
+	operation, err := materialize.ParseOperationID(operationValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationName, err := materialize.OperationDirectoryName(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retentionRoot := filepath.Join(targetRoot, operationName, "retention")
+	intentRaw, err := os.ReadFile(filepath.Join(retentionRoot, "intent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, intentID, err := materialize.DecodeRetentionIntent(bytes.NewReader(intentRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeRaw, err := os.ReadFile(filepath.Join(retentionRoot, "complete.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete, completeID, err := materialize.DecodeRetentionComplete(bytes.NewReader(completeRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, rootInfo, err := fsbind.BindExisting(targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	subtree, err := session.OpenPrivateSubtreeObserved(operationName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subtree.Close()
+	marker := materialize.ForgetIntent{
+		Schema: materialize.ForgetIntentSchemaV1, OperationID: operation,
+		OperationRootIdentity: subtree.Identity().String(), TargetRootIdentity: rootInfo.Identity.String(),
+		PlanID: intent.PlanID, RetentionIntentMarkerID: intentID, RetentionCompleteMarkerID: completeID,
+		RetentionIntent: intent, RetentionComplete: complete, Basis: materialize.ForgetBasisExact,
+	}
+	raw, markerID, err := materialize.EncodeForgetIntent(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingName := "forget-" + strings.TrimPrefix(markerID.String(), "sha256:") + ".pending"
+	pendingPath, err := fsbind.PathFromComponents([]string{"retention", pendingName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := subtree.CreateRegular(ctx, pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rootName, err := materialize.ForgetRootName(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := session.PublishNoReplace(ctx, subtree, pendingPath, rootName)
+	if err != nil || !publication.Published || publication.Durability != fsbind.DurabilityConfirmed {
+		t.Fatalf("publish forget marker=%#v err=%v", publication, err)
+	}
+	return rootName, append([]byte(nil), raw...)
 }
 
 func TestSeedMaterializeRunStatusResumeAndPrivacy(t *testing.T) {
@@ -385,6 +571,7 @@ func TestSeedMaterializeUsagePrecedesFilesystemAndSecretInput(t *testing.T) {
 		{"seed", "materialize", "resume", "--torrent", missing, "--target", missing, "--expect-plan-id", validPlanID, "--acknowledge-filesystem-write", "--max-depth", "1", validOperationID},
 		{"seed", "materialize", "status", "--target", missing, "--max-operations", "1", validOperationID},
 		{"seed", "materialize", "abandon", "--target", missing, validOperationID},
+		{"seed", "materialize", "forget", "--target", missing, "--expect-plan-id", validPlanID, validOperationID},
 	}
 	for _, args := range tests {
 		reader := &trackingReader{}
@@ -406,11 +593,13 @@ func TestSeedMaterializeHelpIsCompleteAndFixedBudget(t *testing.T) {
 		args     []string
 		required []string
 	}{
-		{[]string{"seed", "materialize", "--help"}, []string{"run", "resume", "status", "abandon", "standalone seed plan ID is not an", "never selects a latest operation"}},
+		{[]string{"seed", "materialize", "--help"}, []string{"run", "resume", "status", "abandon", "prune", "forget", "standalone seed plan ID is not an", "never selects a latest operation"}},
 		{[]string{"seed", "materialize", "run", "--help"}, []string{"acknowledge-filesystem-write", "metafile-store", "search-root", "max-proof-bytes", "standalone seed plan ID is not accepted"}},
 		{[]string{"seed", "materialize", "resume", "--help"}, []string{"OPERATION_ID", "partially staged", "search-root"}},
 		{[]string{"seed", "materialize", "status", "--help"}, []string{"max-root-entries", "max-operations", "not_inspected"}},
 		{[]string{"seed", "materialize", "abandon", "--help"}, []string{"acknowledge-abandon", "retains staged and scratch bytes", "no deletion"}},
+		{[]string{"seed", "materialize", "prune", "--help"}, []string{"acknowledge-operation-state-deletion", "retention intent", "tombstone is retained"}},
+		{[]string{"seed", "materialize", "forget", "--help"}, []string{"acknowledge-historical-evidence-deletion", "recovery marker", "published final layout"}},
 	}
 	for _, command := range commands {
 		var out, errOut bytes.Buffer

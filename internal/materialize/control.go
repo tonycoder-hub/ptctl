@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 )
@@ -80,6 +81,9 @@ func Status(ctx context.Context, options ControlOptions) (Report, error) {
 		return report, fmt.Errorf("%w: bind target root: %v", ErrPolicy, err)
 	}
 	defer session.Close()
+	if forgetting, forgetErr := applyForgetControl(ctx, session, options.OperationID, "", &report); forgetting {
+		return report, forgetErr
+	}
 	handle, err := openJournal(ctx, session, options.OperationID, options.Limits)
 	if err != nil {
 		if retained, observed, retentionErr := controlReportFromRetention(ctx, session, rootInfo, options.OperationID, options.Limits); observed {
@@ -146,6 +150,12 @@ func Abandon(ctx context.Context, options ControlOptions) (Report, error) {
 		return report, fmt.Errorf("%w: bind target root: %v", ErrPolicy, err)
 	}
 	defer session.Close()
+	if forgetting, forgetErr := applyForgetControl(ctx, session, options.OperationID, "", &report); forgetting {
+		if forgetErr != nil {
+			return report, forgetErr
+		}
+		return report, fmt.Errorf("%w: materialize historical evidence deletion is in progress", ErrPolicy)
+	}
 	handle, err := openJournal(ctx, session, options.OperationID, options.Limits)
 	if err != nil {
 		if retained, observed, retentionErr := controlReportFromRetention(ctx, session, rootInfo, options.OperationID, options.Limits); observed {
@@ -213,7 +223,7 @@ func ListOperations(ctx context.Context, targetRoot string, limits OperationList
 	result := OperationListResult{
 		Effect: "read_target_operation_names", Limits: limits,
 		Operations: []OperationSummary{}, Warnings: []string{
-			"listing never selects a latest operation; resume, status, and abandon require an explicit full operation ID",
+			"listing never selects a latest operation; resume, status, abandon, prune, and forget require an explicit full operation ID",
 		},
 	}
 	if err := limits.Validate(); err != nil {
@@ -244,23 +254,55 @@ func ListOperations(ctx context.Context, targetRoot string, limits OperationList
 		result.StopReason = listing.StopReason
 		return result, nil
 	}
+	operations := make(map[OperationID]string)
 	for _, entry := range listing.Entries {
-		if !hasOperationDirectoryPrefix(entry.Name) {
+		var operationID OperationID
+		var status string
+		switch {
+		case hasForgetMarkerPrefix(entry.Name):
+			parsed, parseErr := ParseForgetRootName(entry.Name)
+			if parseErr != nil || entry.Kind != string(fsbind.ObjectKindRegular) {
+				result.StopReason = "invalid_operation_entry"
+				return result, nil
+			}
+			operationID, status = parsed, "forget_in_progress_not_inspected"
+		case hasOperationDirectoryPrefix(entry.Name):
+			parsed, valid := operationIDFromDirectoryEntry(entry.Name)
+			if !valid || entry.Kind != string(fsbind.ObjectKindDirectory) {
+				result.StopReason = "invalid_operation_entry"
+				return result, nil
+			}
+			operationID, status = parsed, "not_inspected"
+		default:
 			continue
 		}
-		operationID, valid := operationIDFromDirectoryEntry(entry.Name)
-		if !valid || entry.Kind != "directory" {
-			result.StopReason = "invalid_operation_entry"
-			return result, nil
+		if prior, exists := operations[operationID]; exists {
+			if prior == "not_inspected" && status == "forget_in_progress_not_inspected" {
+				operations[operationID] = status
+			}
+			continue
 		}
-		if len(result.Operations) >= limits.MaxOperations {
+		if len(operations) >= limits.MaxOperations {
 			result.StopReason = "max_operations"
+			appendOperationSummaries(&result, operations)
 			return result, nil
 		}
-		result.Operations = append(result.Operations, OperationSummary{ID: operationID, Status: "not_inspected"})
+		operations[operationID] = status
 	}
+	appendOperationSummaries(&result, operations)
 	result.Complete = true
 	return result, nil
+}
+
+func appendOperationSummaries(result *OperationListResult, operations map[OperationID]string) {
+	ids := make([]OperationID, 0, len(operations))
+	for id := range operations {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(left, right int) bool { return ids[left].String() < ids[right].String() })
+	for _, id := range ids {
+		result.Operations = append(result.Operations, OperationSummary{ID: id, Status: operations[id]})
+	}
 }
 
 func reportFromJournal(handle *journal, limits Limits) Report {
