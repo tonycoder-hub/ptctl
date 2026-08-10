@@ -56,16 +56,26 @@ loopback, link-local, multicast, and unspecified addresses are rejected. Each
 redirect is checked for the same scheme, host, and effective port. Proxies are
 disabled for site reads to avoid silently forwarding cookies.
 
+The effectful metafile fetch is stricter: it rejects every redirect so that one
+acknowledgement cannot expand into another tracker-visible request. The report
+accounts for whether the sole transport attempt started even when DNS, TLS, or
+response processing later fails; it never derives a zero request count merely
+from an error.
+
 Downloader endpoints are a separate, explicit trust decision because seedboxes
 often live on private networks. They require HTTPS; plain HTTP is accepted only
 for an explicit numeric loopback address.
 
 ### Retry storms and account bans
 
-The TJUPT adapter performs one bounded GET per command and never retries. HTTP
-429 is terminal. There is no cross-process limiter in the alpha, so callers
-must not loop or parallelize site commands. There is no Cloudflare or CAPTCHA
-bypass.
+The TJUPT adapter sends at most one bounded GET per command and never retries.
+HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
+callers must not loop or parallelize site commands. There is no Cloudflare or
+CAPTCHA bypass.
+
+`site metafile fetch` is scoped to one validated remote ID and one GET. It does
+not perform a preceding detail lookup, follow a redirect, retry, or fan out to
+related IDs.
 
 A live reconciliation uses one qBittorrent login and two bounded torrent-list
 reads, sequentially and without retry. When `auto` observes one uniquely
@@ -87,6 +97,14 @@ qBittorrent responses have explicit limits. Torrent piece length is capped.
 Metafile-store import and inspection use the same bounded parser and cap raw
 artifact bytes before hashing or retaining them. An on-disk object name or
 side record is never trusted as its digest or parsed identity.
+
+The site metafile response is bounded while entering the private store import
+pipeline and must be a complete, strictly valid metafile before publication.
+An observed exact-variant relation additionally requires that store import
+explicitly return a valid exact artifact reference whose whole-response digest
+and consumed-byte receipt agree. Login, challenge, maintenance, unknown HTML,
+oversized, and partial responses fail closed and never become an empty or
+weaker artifact.
 
 The qBittorrent ledger is capped at 8 MiB and 25,000 jobs. Each magnet claim
 is capped at 64 KiB, 256 query pairs, eight `xt` values, and 256 bytes per
@@ -237,30 +255,43 @@ verification.
 
 ### Read side effects and remote storage
 
-For inspect, verify, discovery, planning, reconciliation, and current site or
-downloader reads, "read-only" means zero intentional filesystem mutation, not
-zero observable side effect. Metadata and content reads may update atime, wake
-disks, hydrate a cloud placeholder, traverse a FUSE/SMB backend, or incur
+For inspect, verify, discovery, planning, reconciliation, ordinary site reads,
+and downloader reads, "read-only" means zero intentional filesystem mutation,
+not zero observable side effect. Metadata and content reads may update atime,
+wake disks, hydrate a cloud placeholder, traverse a FUSE/SMB backend, or incur
 network cost. Network paths that can be recognized syntactically are opt-in,
 and scans use one goroutine with no retry. Context cancellation is checked
 between operations, but a blocked filesystem syscall may not be interruptible.
 Users should narrow roots and budgets before scanning mounted remote storage.
 
-`metafile store init` and `metafile store import` are the explicit exception:
-their reported effect includes private-store writes. `writes_performed` counts
-the logical publication of an accepted store marker or immutable object, not
-private temporary or uninitialized staging entries. It is nonzero when that
-accepted state became visible, including a possible count of `1` for
+`metafile store init`, `metafile store import`, and the store phase of
+`site metafile fetch` are the explicit write exceptions. Their reported write
+count covers logical publication of an accepted store marker or immutable
+object, not private temporary or uninitialized staging entries. It is nonzero
+when that accepted state became visible, including a possible count of `1` for
 `published_durability_unconfirmed`. Store inspect and every existing artifact
 consumer remain zero-write.
 
-The future B1 site metafile fetch crosses both boundaries. It may be recorded by
-the tracker and returns a passkey-bearing artifact, so it must require an
-explicit site-effect acknowledgement and an initialized private store. Store,
-usage, limits, and destination assurances must be validated before the cookie
-is read; the bounded same-origin response must be strictly parsed and imported
-through the same no-clobber primitive. No raw response may be written to stdout
-or to an arbitrary destination, and no retry is allowed.
+The B1 site metafile fetch crosses two independent boundaries. The tracker may
+record its passkey-bearing GET, so the command requires an explicit
+site-effect acknowledgement scoped to one site reference. All usage, limits,
+the one remote ID, capability, authentication method, and initialized store's
+privacy/no-clobber assurances are validated before the cookie is read from
+stdin. It then sends at most one bounded GET, with no detail lookup, redirect,
+or retry, and passes the bounded exact response directly to the existing
+no-clobber store primitive, which requires strict validation before publication.
+
+The report-only `observed_exact_variant` relation records the exact store
+reference established for that site reference during this invocation; no
+persistent binding or sidecar is created. A pre-publication or import failure
+retains only the bounded request/response receipt. The CLI must not independently
+hash received bytes and promote that failure into a relation. Once store import
+has returned the valid exact reference, a later durability or post-publication
+failure does not erase the observation, but the observation still does not
+prove durability. Request accounting, logical store writes, and durability
+assurance remain separate even on failure. No raw response, request URL,
+cookie, announce material, object or temporary path may be written to stdout,
+reports, errors, or an arbitrary destination.
 
 ### Supply chain
 

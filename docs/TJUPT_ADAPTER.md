@@ -2,20 +2,25 @@
 
 TJUPT is the first experimental site implementation, not a special case
 embedded in the content core. It has not had a credentialed live smoke test in
-this repository. The adapter currently declares three read capabilities:
+this repository. The adapter declares three ordinary read capabilities plus
+one explicitly effectful metafile capability:
 
 - session check;
 - torrent search;
-- bonus catalog inspection.
+- bonus catalog inspection;
+- acknowledged metafile fetch into the private store.
 
-Each command performs one bounded GET, uses the configured TJUPT HTTPS origin,
-does not retry, refuses cross-origin redirects, and never submits a form. Page
-recognition is fail-closed: a login page is unauthenticated, a positively
+Each command sends at most one bounded GET, uses the configured TJUPT HTTPS
+origin, does not retry, and never submits a form. Ordinary reads refuse
+cross-origin redirects. The effectful metafile fetch refuses every redirect so
+its explicit acknowledgement authorizes at most one tracker-visible request.
+Page recognition is fail-closed: a login page is unauthenticated, a positively
 recognized bonus/search page is accepted, and maintenance, challenge, or
 unknown HTML is indeterminate/an error rather than a successful empty result.
-These current site reads perform no intentional filesystem write. Local
-`metafile store init` and `metafile store import` are a separate, explicitly
-writing boundary and do not contact TJUPT.
+Ordinary site reads perform no intentional filesystem write. Local store
+mutations are `metafile store init`, `metafile store import`, and the store
+phase of `site metafile fetch`; these form the explicit private-store write
+boundary.
 
 ## Why the bonus catalog remains site-defined
 
@@ -83,15 +88,15 @@ file/`--torrent` source with the paired `--metafile-store DIR
 --metafile-variant ID` flags. The alternatives are mutually exclusive, and all
 stored consumers remain zero-write.
 
-## B1: effectful metafile fetch gate
+## B1: effectful metafile fetch
 
-The natural next adapter methods remain torrent details and a clearly labeled
-metafile fetch, but TJUPT does not yet declare or expose
-`torrent.metafile.read_effectful`. A metafile GET may be recorded by the
-tracker, and its response contains a passkey. B1 is gated on the private store
-above and must not add a raw stdout or arbitrary-destination download path.
+TJUPT declares `torrent.metafile.read_effectful` independently of
+`torrent.detail`; no detail capability or detail request is implied. A
+metafile GET may be recorded by the tracker, and its response contains a
+passkey. B1 is gated on the private store above and has no raw stdout,
+arbitrary-destination, or sidecar path.
 
-The planned command shape is:
+The command shape is:
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch \
@@ -101,14 +106,30 @@ printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch \
   tjupt REMOTE_ID
 ```
 
-Before reading the cookie or sending a request, B1 must validate all usage,
-limits, the remote ID, and the initialized store's privacy/no-clobber
-assurance. It then performs one bounded, same-origin GET with no retry, rejects
-login/challenge/maintenance/HTML responses, strictly validates the exact raw
-metafile, and hands those bytes to the same store import primitive. The report
-may bind `(tjupt, remote_id)` to the resulting whole-raw variant for that
-observation, but must not expose the request URL, response body, announce path,
-passkey, cookie, temporary path, or absolute store path by default.
+The acknowledgement must be explicit and is scoped to the single validated
+remote ID in this invocation. Before reading the cookie or sending a request,
+B1 validates all usage, limits, the capability and authentication method, the
+remote ID, and the initialized store's privacy/no-clobber assurance. It then
+performs one bounded, same-origin GET with no redirect or retry, rejects
+login/challenge/maintenance/HTML responses, and passes the bounded exact bytes
+directly to the same store import primitive. That pipeline requires a complete,
+strictly valid metafile before no-clobber publication.
+
+The report-only `observed_exact_variant` relation may bind
+`(tjupt, remote_id)` to the whole-raw variant only when store import explicitly
+returns a valid exact artifact reference and its whole-response digest and
+consumed-byte receipt agree. A pre-publication or import failure retains only
+the bounded request/response receipt; the CLI never re-hashes the received body
+to upgrade that failure into a relation. Once the exact reference has been
+established, a later durability or post-publication failure does not erase the
+observation. It remains neither a durability claim nor a persistent site
+ledger, store alias, or sidecar.
+
+The report accounts for the site request and logical store publication
+separately. The request URL, redirect location, response body, announce path,
+passkey, cookie, server filename, object path, and temporary path never enter
+output or errors. The store root remains hidden unless the ordinary
+absolute-path disclosure is explicitly requested.
 
 If no-clobber publication succeeds but its durability confirmation fails, B1
 must propagate `published_durability_unconfirmed`: a complete artifact may be
@@ -124,8 +145,9 @@ that history. Its publication assurance remains unobservable; a completed
 publication followed by cleanup or validation failure is reported as
 `published_post_commit_failure`.
 
-Store commands use exit `0` for successful and idempotent outcomes, `1` for
-operational/store failures, `2` for invalid or conflicting selectors, and `3`
-for invalid or corrupt metafile bytes. Exit `4` remains reserved for the
-existing report-first verification/reconciliation requirement flags; B1 must
-not silently redefine it.
+The fetch reports before returning any non-usage operational or integrity
+failure. It uses exit `0` for newly stored and already-present exact variants,
+`1` for site, credential, store, or publication failures, `2` for invalid usage
+or missing acknowledgement, and `3` for invalid exact metafile bytes or a
+corrupt existing artifact. Exit `4` remains reserved for the existing
+report-first verification/reconciliation requirement flags.

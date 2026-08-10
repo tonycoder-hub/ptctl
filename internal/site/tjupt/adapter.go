@@ -17,28 +17,46 @@ const DefaultBaseURL = "https://www.tjupt.org/"
 // Adapter implements the conservative, read-only subset of TJUPT. It never
 // submits a form and does not retry requests automatically.
 type Adapter struct {
-	baseURL string
+	baseURL   string
+	newClient guardedClientFactory
+}
+
+type guardedClient interface {
+	Get(context.Context, string, url.Values) ([]byte, *url.URL, error)
+	GetOnce(context.Context, string, url.Values, string, int64, int64) (httpguard.StrictResponse, error)
+	RequestsMade() int
+	Close() error
+}
+
+type guardedClientFactory func(string, string, time.Duration) (guardedClient, error)
+
+func newGuardedClient(baseURL, cookie string, minInterval time.Duration) (guardedClient, error) {
+	return httpguard.New(baseURL, cookie, minInterval)
 }
 
 func New(baseURL string) *Adapter {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
-	return &Adapter{baseURL: baseURL}
+	return &Adapter{baseURL: baseURL, newClient: newGuardedClient}
 }
 
 func (a *Adapter) Descriptor() domain.SiteDescriptor {
+	capabilities := []domain.Capability{
+		domain.CapabilityAuthCheck,
+		domain.CapabilitySearch,
+		domain.CapabilityBonusRead,
+	}
+	if a.baseURL == DefaultBaseURL {
+		capabilities = append(capabilities, domain.CapabilityMetafile)
+	}
 	return domain.SiteDescriptor{
-		ID:          "tjupt",
-		Name:        "TJUPT / 北洋园PT",
-		BaseURL:     a.baseURL,
-		Stability:   "experimental",
-		AuthMethods: []domain.AuthMethod{domain.AuthMethodCookieHeader},
-		Capabilities: []domain.Capability{
-			domain.CapabilityAuthCheck,
-			domain.CapabilitySearch,
-			domain.CapabilityBonusRead,
-		},
+		ID:           "tjupt",
+		Name:         "TJUPT / 北洋园PT",
+		BaseURL:      a.baseURL,
+		Stability:    "experimental",
+		AuthMethods:  []domain.AuthMethod{domain.AuthMethodCookieHeader},
+		Capabilities: capabilities,
 	}
 }
 
@@ -97,9 +115,17 @@ func (a *Adapter) get(ctx context.Context, credential site.Credential, path stri
 	if credential.Method() != domain.AuthMethodCookieHeader {
 		return nil, nil, fmt.Errorf("TJUPT requires cookie_header authentication")
 	}
-	client, err := httpguard.New(a.baseURL, credential.SecretValue(), 2*time.Second)
+	client, err := a.clientFactory()(a.baseURL, credential.SecretValue(), 2*time.Second)
 	if err != nil {
 		return nil, nil, err
 	}
+	defer client.Close()
 	return client.Get(ctx, path, query)
+}
+
+func (a *Adapter) clientFactory() guardedClientFactory {
+	if a.newClient != nil {
+		return a.newClient
+	}
+	return newGuardedClient
 }

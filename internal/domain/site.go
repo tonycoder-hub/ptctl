@@ -79,6 +79,21 @@ type TorrentRef struct {
 	RemoteID string `json:"remote_id"`
 }
 
+// SiteMetafileObservation is the public, content-free proof produced when a
+// site adapter's one effectful fetch is imported as an exact metafile variant.
+// Origin and RouteID identify the adapter-controlled route that was actually
+// observed; neither value is inferred from TorrentRef or an info hash.
+type SiteMetafileObservation struct {
+	Ref               TorrentRef `json:"ref"`
+	Origin            string     `json:"origin"`
+	RouteID           string     `json:"route_id"`
+	MetafileVariantID string     `json:"metafile_variant_id"`
+	Basis             string     `json:"basis"`
+	ObservedAtStart   time.Time  `json:"observed_at_start"`
+	ObservedAtEnd     time.Time  `json:"observed_at_end"`
+	ResponseBytes     int64      `json:"response_bytes"`
+}
+
 type TorrentSummary struct {
 	Ref         TorrentRef `json:"ref"`
 	Name        string     `json:"name"`
