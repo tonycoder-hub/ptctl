@@ -68,11 +68,16 @@ type ClientReport struct {
 }
 
 type JournalReport struct {
-	Status                string `json:"status"`
-	IntentDurable         bool   `json:"intent_durable"`
-	AttemptsRecorded      int    `json:"attempts_recorded"`
-	CompletionDurable     bool   `json:"completion_durable"`
-	PendingRecoveryMarker bool   `json:"pending_recovery_marker"`
+	Status                     string `json:"status"`
+	IntentDurable              bool   `json:"intent_durable"`
+	AttemptsRecorded           int    `json:"attempts_recorded"`
+	CompletionDurable          bool   `json:"completion_durable"`
+	PendingRecoveryMarker      bool   `json:"pending_recovery_marker"`
+	RetentionState             string `json:"retention_state"`
+	RetentionIntentPresent     bool   `json:"retention_intent_present"`
+	RetentionCompletionPresent bool   `json:"retention_completion_present"`
+	RetentionIntentDurable     bool   `json:"retention_intent_durable"`
+	RetentionCompletionDurable bool   `json:"retention_completion_durable"`
 }
 
 type WriteReport struct {
@@ -128,7 +133,7 @@ func newReport(prepared *PreparedPlan, expectedID string) Report {
 		Final: FinalReport{Status: finalStatus, Observation: observation},
 		Client: ClientReport{Status: "not_observed", BeforeIdentity: "not_observed", AfterIdentity: "not_observed",
 			VariantRelation: "unobservable", Assurance: "not_observed"},
-		Journal:  JournalReport{Status: "not_created"},
+		Journal:  JournalReport{Status: "not_created", RetentionState: "not_requested"},
 		Blockers: []Finding{}, Issues: []Finding{},
 		Warnings: []string{
 			"qBittorrent cannot prove that its stored private metafile bytes equal the submitted exact variant",

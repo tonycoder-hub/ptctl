@@ -726,6 +726,27 @@ It also remains filesystem-read-only: canonical marker presence is reported,
 but directory durability is refreshed only by effectful resume before client
 I/O.
 
+Terminal adoption state has a distinct retention transition:
+
+```text
+exact terminal intent + bounded attempt chain + completion
+  -> durable owner-private retention intent containing the exact canonical chain
+  -> remove only original intent/attempt/completion markers and empty scratch
+  -> exact remaining namespace audit
+  -> durable retention completion
+```
+
+`client adopt prune` is selected only by one full operation ID plus its reviewed
+adoption plan ID and requires a separate operation-state-deletion
+acknowledgement. It never opens a downloader session, reads a credential,
+touches the materialized final, or selects latest/by-age state. An intent-only
+crash state is advanced only by prune; ordinary run/resume/status never crosses
+the deletion boundary. The complete tombstone is still read through the same
+bound target and operation identities. Only that same-invocation read creates
+`clientadopt.VerifiedCompletion`, so activation can consume the historical
+completion without treating public JSON as authority. The tombstone does not
+claim that the client job or final is current.
+
 The adoption slice itself never mutates an existing job, changes its location,
 starts a recheck, resumes or pauses transfer, removes a job, deletes a source,
 or claims source retirement. Existing-job recheck/start and source retirement

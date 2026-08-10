@@ -41,6 +41,7 @@ type verifiedCompletionAuthority struct {
 	operationID  OperationID
 	completion   Completion
 	completionID MarkerID
+	retained     bool
 }
 
 func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*VerifiedCompletion, CompletionObservation, error) {
@@ -57,13 +58,14 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 	defer handle.Close()
 	state := handle.state
 	if state.Pending != "" || state.Completion == nil || state.CompletionID == "" ||
+		state.Retained && !state.RetentionComplete ||
 		state.Intent.PlanID != options.ExpectedPlanID || state.Intent.OperationID != options.OperationID ||
 		state.Completion.PlanID != options.ExpectedPlanID || state.Completion.OperationID != options.OperationID {
 		return nil, CompletionObservation{}, fmt.Errorf("%w: adoption completion is unavailable or disagrees with the selector", ErrPolicy)
 	}
 	authority := &verifiedCompletionAuthority{
 		plan: state.Intent.Plan, planID: state.Intent.PlanID, operationID: state.Intent.OperationID,
-		completion: *state.Completion, completionID: state.CompletionID,
+		completion: *state.Completion, completionID: state.CompletionID, retained: state.Retained,
 	}
 	verified := &VerifiedCompletion{authority: authority}
 	return verified, verified.Observation(), nil
@@ -86,8 +88,15 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
 		ExpectedContentPathRef: plan.ExpectedContentPathRef, JobID: completion.JobID, JobState: completion.JobState,
 		FinalObjectIdentity: completion.FinalObjectIdentity,
-		Assurance:           "same_invocation_bound_canonical_adoption_completion_read_without_durability_refresh",
+		Assurance:           completionAssurance(authority),
 	}
+}
+
+func completionAssurance(authority *verifiedCompletionAuthority) string {
+	if authority != nil && authority.retained {
+		return "same_invocation_bound_canonical_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation"
+	}
+	return "same_invocation_bound_canonical_adoption_completion_read_without_durability_refresh"
 }
 
 func (verified *VerifiedCompletion) Matches(operation OperationID, planID, variantID, clientConfigID, pathMappingID string) bool {

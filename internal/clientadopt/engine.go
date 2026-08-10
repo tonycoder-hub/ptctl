@@ -238,6 +238,14 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 		return report, err
 	}
 	defer handle.Close()
+	if handle.state.Retained {
+		applyRetainedJournalReport(&report, handle.state)
+		err := fmt.Errorf("%w: retained client adoption state cannot be resumed", ErrPolicy)
+		report.addBlocker("operation.prune_boundary", "the adoption journal was pruned; only its historical completion tombstone remains")
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
 	if handle.state.Intent.Plan != options.Prepared.plan || handle.state.Intent.PlanID != options.Prepared.planID {
 		err := fmt.Errorf("%w: journal intent differs from the reviewed adoption plan", ErrPolicy)
 		report.addBlocker("plan.journal_mismatch", "the selected operation belongs to a different reviewed plan")
@@ -350,6 +358,11 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 		return report, err
 	}
 	defer handle.Close()
+	if handle.state.Retained {
+		applyRetainedJournalReport(&report, handle.state)
+		report.finalize()
+		return report, nil
+	}
 	plan := handle.state.Intent.Plan
 	report.Plan = PlanReport{
 		ID: handle.state.Intent.PlanID, Matches: true, Action: plan.Action, ClientConfigID: plan.ClientConfigID,
@@ -722,11 +735,23 @@ func journalReport(state journalState) JournalReport {
 	return JournalReport{
 		Status: status, IntentDurable: state.IntentID != "" && state.Durable, AttemptsRecorded: len(state.Attempts),
 		CompletionDurable: state.Completion != nil && state.CompletionID != "" && state.Durable, PendingRecoveryMarker: state.Pending != "",
+		RetentionState: retentionStateLabel(state), RetentionIntentPresent: state.Retained && state.RetentionIntentDurable,
+		RetentionCompletionPresent: state.Retained && state.RetentionComplete && state.RetentionCompleteID != "",
+		// A read-only tombstone observation cannot reconstruct a historical
+		// directory-fsync result. Only the effectful prune receipt reports
+		// retention-marker durability.
+		RetentionIntentDurable: false, RetentionCompletionDurable: false,
 	}
 }
 
 func phaseForState(state journalState) string {
 	switch {
+	case state.Retained && state.RetentionComplete:
+		return "retained_adoption_completion"
+	case state.Retained && state.RetentionIntentDurable:
+		return "retention_intent_recorded"
+	case state.Retained:
+		return "retention_initializing"
 	case state.Pending != "":
 		return "marker_recovery_required"
 	case state.Completion != nil:
@@ -737,6 +762,57 @@ func phaseForState(state journalState) string {
 		return "intent_recorded"
 	default:
 		return "initialization_incomplete"
+	}
+}
+
+func retentionStateLabel(state journalState) string {
+	switch {
+	case state.Retained && state.RetentionComplete:
+		return "complete"
+	case state.Retained && state.RetentionIntentDurable:
+		return "intent_recorded"
+	case state.Retained:
+		return "initializing"
+	default:
+		return "not_requested"
+	}
+}
+
+func applyRetainedJournalReport(report *Report, state journalState) {
+	if report == nil {
+		return
+	}
+	report.Operation.Resumable = false
+	report.Operation.PhaseBefore = phaseForState(state)
+	report.Operation.PhaseAfter = report.Operation.PhaseBefore
+	report.Journal = journalReport(state)
+	report.Effect = append(report.Effect, "read_private_client_adoption_retention_state")
+	if state.RetentionIntentID != "" {
+		plan := state.Intent.Plan
+		expected := report.Plan.ExpectedID
+		report.Plan = PlanReport{ID: state.Intent.PlanID, ExpectedID: expected, Matches: expected == "" || expected == state.Intent.PlanID,
+			Action: plan.Action, ClientConfigID: plan.ClientConfigID,
+			PathMappingID: plan.PathMappingID, ClientPathSemantics: plan.ClientPathSemantics,
+			ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef}
+		report.Final.Observation = historicalFinalObservation(plan)
+	}
+	switch {
+	case state.RetentionComplete:
+		report.Outcome = OutcomeHistoricalAdopted
+		report.Operation.Status = "retained"
+		report.Client.Status = "historical_adoption_tombstone_current_client_not_observed"
+		report.Warnings = append(report.Warnings, "the retained tombstone can authorize downstream proof but cannot establish current downloader state")
+		report.Warnings = append(report.Warnings, "read-only retained status observes canonical markers but does not refresh their directory durability")
+	case state.RetentionIntentDurable:
+		report.Outcome = OutcomeIncomplete
+		report.Operation.Status = "pruning"
+		report.Client.Status = "historical_adoption_retention_incomplete"
+		report.addBlocker("operation.prune_required", "a durable retention intent exists; only explicit client adopt prune may complete deletion")
+	default:
+		report.Outcome = OutcomeIncomplete
+		report.Operation.Status = "retention_initializing"
+		report.Client.Status = "historical_adoption_retention_unsealed"
+		report.addBlocker("operation.prune_required", "a reserved retention boundary exists; only explicit client adopt prune may recover it")
 	}
 }
 

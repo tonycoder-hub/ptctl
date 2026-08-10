@@ -25,14 +25,16 @@ import (
 )
 
 type activationFixture struct {
-	meta          *metafile.MetaInfo
-	targetRoot    string
-	verifiedFinal *materialize.VerifiedFinal
-	authority     *PreparedAuthority
-	clientConfig  string
-	savePath      string
-	contentPath   string
-	opaqueKey     string
+	meta              *metafile.MetaInfo
+	targetRoot        string
+	verifiedFinal     *materialize.VerifiedFinal
+	authority         *PreparedAuthority
+	clientConfig      string
+	savePath          string
+	contentPath       string
+	opaqueKey         string
+	adoptionOperation clientadopt.OperationID
+	adoptionPlanID    string
 }
 
 type memoryPayload struct {
@@ -176,7 +178,18 @@ func makeActivationFixture(t *testing.T) activationFixture {
 	return makeActivationFixtureFrom(t, raw, []activationSource{{name: "renamed-source", content: content}})
 }
 
+func makeActivationFixtureWithRetainedAdoption(t *testing.T) activationFixture {
+	t.Helper()
+	content := []byte("client activation retained adoption fixture")
+	raw := activationSingleV1Metafile("activate-retained.bin", content)
+	return makeActivationFixtureFromMode(t, raw, []activationSource{{name: "renamed-retained-source", content: content}}, true)
+}
+
 func makeActivationFixtureFrom(t *testing.T, raw []byte, sources []activationSource) activationFixture {
+	return makeActivationFixtureFromMode(t, raw, sources, false)
+}
+
+func makeActivationFixtureFromMode(t *testing.T, raw []byte, sources []activationSource, retainAdoption bool) activationFixture {
 	t.Helper()
 	ctx := context.Background()
 	meta, err := metafile.Parse(raw)
@@ -252,6 +265,14 @@ func makeActivationFixtureFrom(t *testing.T, raw []byte, sources []activationSou
 	if err != nil {
 		t.Fatalf("adoption report=%#v err=%v", adoptionReport, err)
 	}
+	if retainAdoption {
+		retention, pruneErr := clientadopt.Prune(ctx, clientadopt.PruneOptions{TargetRoot: targetRoot,
+			OperationID: adoptionPlan.OperationID(), ExpectedPlanID: adoptionPlan.PlanID(), Acknowledge: true,
+			Limits: clientadopt.DefaultRetentionLimits()})
+		if pruneErr != nil || retention.Outcome != clientadopt.RetentionOutcomePruned || !retention.Markers.ExactTombstone {
+			t.Fatalf("adoption retention=%#v err=%v", retention, pruneErr)
+		}
+	}
 	verifiedAdoption, _, err := clientadopt.VerifyCompletion(ctx, clientadopt.CompletionProofOptions{TargetRoot: targetRoot,
 		OperationID: adoptionPlan.OperationID(), ExpectedPlanID: adoptionPlan.PlanID()})
 	if err != nil {
@@ -263,7 +284,21 @@ func makeActivationFixtureFrom(t *testing.T, raw []byte, sources []activationSou
 		t.Fatal(err)
 	}
 	return activationFixture{meta: meta, targetRoot: targetRoot, verifiedFinal: verifiedFinal, authority: authority,
-		clientConfig: clientConfig, savePath: savePath, contentPath: contentPath, opaqueKey: opaque}
+		clientConfig: clientConfig, savePath: savePath, contentPath: contentPath, opaqueKey: opaque,
+		adoptionOperation: adoptionPlan.OperationID(), adoptionPlanID: adoptionPlan.PlanID()}
+}
+
+func TestPrepareAuthorityAcceptsBoundRetainedAdoptionCompletion(t *testing.T) {
+	fixture := makeActivationFixtureWithRetainedAdoption(t)
+	if fixture.authority == nil || fixture.authority.verifiedAdoption == nil || !fixture.authority.verifiedAdoption.Verified() {
+		t.Fatalf("retained adoption authority unavailable: %#v", fixture.authority)
+	}
+	status, err := clientadopt.Status(context.Background(), clientadopt.StatusOptions{TargetRoot: fixture.targetRoot,
+		OperationID: fixture.adoptionOperation})
+	if err != nil || status.Operation.Status != "retained" || status.Journal.RetentionState != "complete" || !status.Journal.RetentionCompletionPresent ||
+		status.Plan.ID != fixture.adoptionPlanID {
+		t.Fatalf("retained adoption status=%#v err=%v", status, err)
+	}
 }
 
 func (fixture activationFixture) job(state string, progress float64) downloader.Torrent {

@@ -307,6 +307,21 @@ Read-only status validates the canonical marker namespace but does not infer a
 historical directory-fsync result. Effectful resume refreshes that durability
 boundary before it reads the client ledger or relies on a marker.
 
+Adoption pruning is a separate local deletion authority. It requires one full
+operation ID, its reviewed plan ID, and
+`--acknowledge-operation-state-deletion`; all syntax and hard limits are
+checked without reading password stdin. It first seals the exact canonical
+intent, bounded attempt chain, completion, and marker IDs into a private
+retention intent. Only after that marker is durable may it remove the selected
+operation's original marker files and empty scratch directory, followed by an
+exact namespace audit and a retention completion marker. A crash after the
+intent blocks ordinary resume and can be recovered only by the same explicit
+prune selector. No latest/by-age selection, downloader request, final-content
+write, or cross-operation deletion is authorized. A complete tombstone can
+create downstream completion authority only through a fresh bound read; its
+public DTO and JSON round trip remain powerless and it does not establish
+current downloader state.
+
 After the POST, a terminal marker requires one unique exact typed job, stopped
 state, reviewed size and exact lexical save/content paths, plus a second exact
 final verification. These are bracketed, non-atomic observations. They neither
@@ -677,10 +692,11 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- smaller client-journal retirement and broader quota/age policy (materialize
-  and source-retirement heavy state have exact pruning, and each retained
-  tombstone has a separately acknowledged explicit forget transition; no
-  operation is selected automatically by policy);
+- activation-journal retirement, adoption-tombstone forgetting, and broader
+  quota/age policy (materialize, adoption, and source-retirement heavy state
+  have exact explicit pruning; materialize and source-retirement tombstones
+  also have separately acknowledged forget transitions; no operation is
+  selected automatically by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal

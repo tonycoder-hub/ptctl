@@ -28,6 +28,12 @@ type clientAdoptJSONEnvelope struct {
 	Data   clientadopt.Report `json:"data"`
 }
 
+type clientAdoptRetentionJSONEnvelope struct {
+	Schema string                      `json:"schema"`
+	Kind   string                      `json:"kind"`
+	Data   clientadopt.RetentionReport `json:"data"`
+}
+
 type clientAdoptCLIFixture struct {
 	materialize materializeCLIFixture
 	storeRoot   string
@@ -176,6 +182,87 @@ func TestClientAdoptUnknownRequestIsNotRepeatedWithoutAcknowledgement(t *testing
 	assertClientAdoptErrorPrivate(t, errOut.String(), fixture, server.server.URL)
 }
 
+func TestClientAdoptPruneIsLocalAndRetainedResumeStopsBeforeCredentials(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newClientAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+	base := clientAdoptBaseArgs(fixture, server.server.URL)
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	planned := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	runArgs := append([]string{"client", "adopt", "run"}, base...)
+	runArgs = append(runArgs, "--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	requestsBefore := server.login.Load() + server.ledger.Load() + server.add.Load()
+	reader := &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	pruneArgs := []string{"client", "adopt", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", planned.Data.Operation.ID}
+	if code := Run(pruneArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retained := decodeClientAdoptRetentionReport(t, out.Bytes())
+	if retained.Data.Outcome != clientadopt.RetentionOutcomePruned || !retained.Data.Markers.ExactTombstone ||
+		retained.Data.Operation.Status != "retained" || retained.Data.WritesPerformed == 0 || reader.read {
+		t.Fatalf("retention report=%#v stdin_read=%t", retained.Data, reader.read)
+	}
+	if requestsAfter := server.login.Load() + server.ledger.Load() + server.add.Load(); requestsAfter != requestsBefore {
+		t.Fatalf("prune contacted downloader: before=%d after=%d", requestsBefore, requestsAfter)
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	resumeArgs := append([]string{"client", "adopt", "resume"}, base...)
+	resumeArgs = append(resumeArgs, "--expect-adoption-plan-id", planned.Data.Plan.ID, planned.Data.Operation.ID)
+	if code := Run(resumeArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retained resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	resume := decodeClientAdoptReport(t, out.Bytes())
+	if resume.Data.Outcome != clientadopt.OutcomeHistoricalAdopted || resume.Data.Operation.Status != "retained" ||
+		resume.Data.Journal.RetentionState != "complete" || resume.Data.Plan.ExpectedID != planned.Data.Plan.ID ||
+		!resume.Data.Plan.Matches || reader.read {
+		t.Fatalf("retained resume=%#v stdin_read=%t", resume.Data, reader.read)
+	}
+	if requestsAfter := server.login.Load() + server.ledger.Load() + server.add.Load(); requestsAfter != requestsBefore {
+		t.Fatalf("retained resume contacted downloader: before=%d after=%d", requestsBefore, requestsAfter)
+	}
+
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	wrongID := strings.Repeat("f", 24)
+	if wrongID == planned.Data.Plan.ID {
+		wrongID = strings.Repeat("e", 24)
+	}
+	wrongResume := append([]string{"client", "adopt", "resume"}, base...)
+	wrongResume = append(wrongResume, "--expect-adoption-plan-id", wrongID, planned.Data.Operation.ID)
+	if code := Run(wrongResume, reader, &out, &errOut); code != 4 {
+		t.Fatalf("wrong retained resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if reader.read || server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("wrong retained resume crossed credential/network boundary: read=%t", reader.read)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(pruneArgs, strings.NewReader("CANARY-MUST-NOT-BE-READ"), &out, &errOut); code != 0 {
+		t.Fatalf("repeated prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	repeated := decodeClientAdoptRetentionReport(t, out.Bytes())
+	if repeated.Data.Outcome != clientadopt.RetentionOutcomeAlreadyPruned || repeated.Data.WritesPerformed != 0 {
+		t.Fatalf("repeated retention=%#v", repeated.Data)
+	}
+}
+
 func newClientAdoptCLIFixture(t *testing.T) clientAdoptCLIFixture {
 	t.Helper()
 	fixture := newMaterializeCLIFixture(t)
@@ -300,6 +387,18 @@ func decodeClientAdoptReport(t *testing.T, raw []byte) clientAdoptJSONEnvelope {
 	}
 	if result.Schema != "ptctl.dev/v1" || result.Kind != "client.adoption" {
 		t.Fatalf("unexpected client adoption envelope: %s", raw)
+	}
+	return result
+}
+
+func decodeClientAdoptRetentionReport(t *testing.T, raw []byte) clientAdoptRetentionJSONEnvelope {
+	t.Helper()
+	var result clientAdoptRetentionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode client adoption retention report: %v\n%s", err, raw)
+	}
+	if result.Schema != "ptctl.dev/v1" || result.Kind != "client.adoption.retention" {
+		t.Fatalf("unexpected client adoption retention envelope: %s", raw)
 	}
 	return result
 }

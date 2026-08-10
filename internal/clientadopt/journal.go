@@ -44,20 +44,26 @@ type journalRecoveryReceipt struct {
 }
 
 type journalState struct {
-	Intent       Intent
-	IntentID     MarkerID
-	Attempts     []Attempt
-	AttemptIDs   []MarkerID
-	Completion   *Completion
-	CompletionID MarkerID
-	Pending      string
-	Durable      bool
+	Intent                 Intent
+	IntentID               MarkerID
+	Attempts               []Attempt
+	AttemptIDs             []MarkerID
+	Completion             *Completion
+	CompletionID           MarkerID
+	Pending                string
+	Durable                bool
+	Retained               bool
+	RetentionIntentDurable bool
+	RetentionComplete      bool
+	RetentionIntentID      RetentionMarkerID
+	RetentionCompleteID    RetentionMarkerID
 }
 
 type journalHandle struct {
-	session *fsbind.Session
-	subtree *fsbind.Subtree
-	state   journalState
+	session   *fsbind.Session
+	subtree   *fsbind.Subtree
+	state     journalState
+	retention retentionState
 }
 
 type namedMarkerObservation struct {
@@ -183,6 +189,38 @@ func openJournal(ctx context.Context, targetRoot string, operationID OperationID
 		return nil, recovery, classifyJournalError(err)
 	}
 	handle := &journalHandle{session: session, subtree: subtree}
+	retention, retentionErr := loadRetentionState(ctx, handle, operationID, rootInfo.Identity)
+	if retentionErr != nil {
+		_ = handle.Close()
+		return nil, recovery, retentionErr
+	}
+	if retention.DirectoryPresent {
+		limits := DefaultRetentionLimits()
+		switch {
+		case retention.IntentID != "":
+			// A retained completion is authority only while the operation root
+			// still has the exact namespace promised by the retained intent.
+			// Before the intent is durable the complete legacy journal must
+			// remain; after it is durable deletion may be partially complete.
+			if _, auditErr := auditRetentionNamespace(ctx, handle, retention.Intent, limits, true,
+				retention.IntentPresent, retention.CompletePresent); auditErr != nil {
+				_ = handle.Close()
+				return nil, recovery, auditErr
+			}
+		case !retention.IntentPresent:
+			// Creating the reserved directory is the first prune write. Until a
+			// canonical intent exists, bind the boundary to an independently
+			// valid live journal rather than treating an empty directory as
+			// retained authority.
+			if _, liveErr := handle.readStateForRetention(ctx); liveErr != nil {
+				_ = handle.Close()
+				return nil, recovery, liveErr
+			}
+		}
+		handle.retention = retention
+		handle.state = retention.journalState()
+		return handle, recovery, nil
+	}
 	state, err := handle.readState(ctx)
 	if errors.Is(err, ErrInitializationIncomplete) && recoverPending && recoveryPlan != nil {
 		recovery, err = handle.recoverInitialization(ctx, operationID, rootInfo, *recoveryPlan)
@@ -328,6 +366,14 @@ func mergeMarkerWriteReceipts(left, right markerWriteReceipt) markerWriteReceipt
 }
 
 func (handle *journalHandle) readState(ctx context.Context) (journalState, error) {
+	return handle.readStateWithRetention(ctx, false)
+}
+
+func (handle *journalHandle) readStateForRetention(ctx context.Context) (journalState, error) {
+	return handle.readStateWithRetention(ctx, true)
+}
+
+func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRetention bool) (journalState, error) {
 	state := journalState{Attempts: []Attempt{}, AttemptIDs: []MarkerID{}}
 	observed := make([]namedMarkerObservation, 0, maximumAttempts+2)
 	root, _ := fsbind.PathFromComponents(nil)
@@ -345,6 +391,7 @@ func (handle *journalHandle) readState(ctx context.Context) (journalState, error
 		case entry.Name == ".fsbind-operation.lock" && entry.Kind == string(fsbind.ObjectKindRegular):
 		case entry.Name == scratchDirectory && entry.Kind == string(fsbind.ObjectKindDirectory):
 			scratchPresent = true
+		case allowRetention && entry.Name == retentionDirectoryName && entry.Kind == string(fsbind.ObjectKindDirectory):
 		case entry.Kind == string(fsbind.ObjectKindRegular) && (entry.Name == intentFileName || entry.Name == completionFileName || isAttemptFileName(entry.Name)):
 			regular[entry.Name] = true
 		default:

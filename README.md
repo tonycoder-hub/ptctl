@@ -9,7 +9,7 @@ domains and reconciles them around verifiable torrent metadata.
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
-> workflow, exact `client adopt run|resume` stopped-add operations, and
+> workflow, exact `client adopt run|resume|prune` stopped-add operations, and
 > explicit `client activate run|resume` recheck/start operations. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
@@ -18,7 +18,9 @@ domains and reconciles them around verifiable torrent metadata.
 > acknowledgement and irreversibly removes only that exact tombstone plus its
 > last recovery marker. Client adoption never mutates an
 > existing job; activation is limited to the reviewed exact job's recheck and
-> optional start transitions. Outside the separately acknowledged source-name
+> optional start transitions. `client adopt prune` separately seals one
+> terminal completion tombstone before deleting only that operation's private
+> request journal. Outside the separately acknowledged source-name
 > retirement workflow, no listed operation overwrites, moves, rewrites, or
 > deletes a source or published final layout. Retirement can unlink only the
 > reviewed exact source names; `seed retire prune` separately deletes only one
@@ -632,6 +634,15 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt resume \
 ptctl client adopt status \
   --target "D:\PT" \
   sha256:ADOPTION_OPERATION_DIGEST
+
+# Once adoption has an exact terminal completion, retain that authority while
+# deleting only the selected operation's heavy request-attempt journal.
+ptctl client adopt prune \
+  --target "D:\PT" \
+  --expect-adoption-plan-id ADOPTION_PLAN_ID \
+  --acknowledge-operation-state-deletion \
+  --output json \
+  sha256:ADOPTION_OPERATION_DIGEST
 ```
 
 `status` is local and read-only: it never reads a password or contacts the
@@ -644,6 +655,20 @@ effects, actual/uncertain journal writes, request counts, before/after typed
 identity states, current-final proof basis, and non-null findings separate.
 Raw host/client paths, endpoint, username, password, opaque qB job key, magnet
 URI, tracker URL, passkey, and raw metafile bytes never enter the report.
+
+`prune` is a separate local-only deletion boundary. It requires the full
+operation ID, the reviewed adoption plan ID, and
+`--acknowledge-operation-state-deletion`; it accepts no client credential and
+makes no network request. Before deletion it copies the canonical intent,
+bounded attempt chain, completion, and their domain-separated IDs into a
+durable owner-private retention intent. It then removes only the selected
+operation's original markers and empty scratch directory and publishes a
+retention completion. The resulting two-marker tombstone remains usable by
+`client activate` only after a same-invocation bound read recreates opaque
+`VerifiedCompletion` authority. JSON or a copied public observation cannot do
+so. An intent-only crash state blocks ordinary resume and is recoverable only
+by repeating the same explicit prune selector. JSON kind is
+`client.adoption.retention`; `pruned` and `already_pruned` return `0`.
 
 Recheck that adopted job, then optionally start it only after a durable
 completion observation:

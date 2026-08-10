@@ -66,6 +66,8 @@ func (a *app) clientAdopt(args []string) error {
 		return a.clientAdoptResume(args[1:])
 	case "status":
 		return a.clientAdoptStatus(args[1:])
+	case "prune":
+		return a.clientAdoptPrune(args[1:])
 	default:
 		return usageError("unknown client adopt subcommand %q", args[0])
 	}
@@ -77,6 +79,7 @@ func (a *app) clientAdoptHelp() {
   ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
   ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add] [--acknowledge-repeat-add] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
+  ptctl client adopt prune --target PATH --expect-adoption-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
 
 Version 1 only adds an absent exact typed-infohash job in stopped mode. It never
 changes an existing job, moves content, rechecks, resumes, deletes, or retires
@@ -86,6 +89,11 @@ Run records a durable target-root-local request intent before its one add POST.
 If the response is lost, resume first observes the queue and never repeats the
 POST unless --acknowledge-repeat-add is explicit. A successful outcome remains
 pending client recheck; qBittorrent cannot expose the stored private variant.
+
+Prune is a separate local-only deletion boundary. It copies one terminal
+canonical journal into an owner-private tombstone before deleting only that
+operation's intent, request-attempt markers, completion, and empty scratch.
+The tombstone remains usable as historical authority by client activation.
 `)
 }
 
@@ -297,12 +305,23 @@ func (a *app) clientAdoptResume(args []string) error {
 	// any downloader request. Status is strictly read-only.
 	status, statusErr := clientadopt.Status(ctx, clientadopt.StatusOptions{TargetRoot: *values.targetRoot, OperationID: operationID})
 	initializationIncomplete := errors.Is(statusErr, clientadopt.ErrInitializationIncomplete)
-	if statusErr != nil && !initializationIncomplete || !initializationIncomplete && status.Plan.ID != prepared.prepared.PlanID() || operationID != prepared.prepared.OperationID() {
+	if statusErr != nil && !initializationIncomplete ||
+		!initializationIncomplete && status.Plan.ID != prepared.prepared.PlanID() ||
+		*values.expectedAdoptionPlan != prepared.prepared.PlanID() || operationID != prepared.prepared.OperationID() {
 		if statusErr == nil {
 			statusErr = fmt.Errorf("%w: operation belongs to a different adoption plan", clientadopt.ErrPolicy)
 		}
 		report := clientadopt.FailureReport(prepared.prepared, *values.expectedAdoptionPlan, "resume", 0, statusErr)
 		return a.finishClientAdopt(prepared.output, report, statusErr)
+	}
+	status.Plan.ExpectedID = *values.expectedAdoptionPlan
+	status.Plan.Matches = status.Plan.ID == *values.expectedAdoptionPlan
+	if status.Operation.Status == "retained" {
+		return a.finishClientAdopt(prepared.output, status, nil)
+	}
+	if status.Operation.Status == "pruning" || status.Operation.Status == "retention_initializing" {
+		statusErr = fmt.Errorf("%w: explicit client adopt prune must complete the retention boundary", clientadopt.ErrPolicy)
+		return a.finishClientAdopt(prepared.output, status, statusErr)
 	}
 	if (initializationIncomplete || status.Journal.AttemptsRecorded == 0 && !status.Journal.CompletionDurable) && !*values.acknowledgeAdd {
 		statusErr = fmt.Errorf("%w: this operation has no add request intent; resume requires explicit downloader-add acknowledgement", clientadopt.ErrPolicy)
@@ -351,6 +370,36 @@ func (a *app) clientAdoptStatus(args []string) error {
 	return a.finishClientAdopt(*output, report, operationErr)
 }
 
+func (a *app) clientAdoptPrune(args []string) error {
+	fs := newFlagSet("client adopt prune")
+	output := fs.String("output", "table", "table or json")
+	targetRoot := fs.String("target", "", "materialized target root")
+	expectedPlanID := fs.String("expect-adoption-plan-id", "", "reviewed 24-hex client adoption plan ID")
+	acknowledge := fs.Bool("acknowledge-operation-state-deletion", false, "acknowledge deletion of one terminal adoption journal")
+	timeout := fs.Duration("timeout", time.Hour, "bounded private retention transition timeout")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *targetRoot == "" {
+		return usageError("client adopt prune requires --target, --expect-adoption-plan-id, acknowledgement, and one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validMaterializePlanID(*expectedPlanID) || !*acknowledge {
+		return usageError("client adopt prune requires canonical --expect-adoption-plan-id and --acknowledge-operation-state-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("client adopt prune --timeout must be in (0,1h]")
+	}
+	operationID, err := clientadopt.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("client adopt prune requires a canonical OPERATION_ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := clientadopt.Prune(ctx, clientadopt.PruneOptions{TargetRoot: *targetRoot, OperationID: operationID,
+		ExpectedPlanID: *expectedPlanID, Acknowledge: true, Limits: clientadopt.DefaultRetentionLimits()})
+	return a.finishClientAdoptRetention(*output, report, operationErr)
+}
+
 func (a *app) finishClientAdopt(output string, report clientadopt.Report, operationErr error) error {
 	if err := a.writeClientAdoptReport(output, report); err != nil {
 		return err
@@ -366,6 +415,26 @@ func (a *app) finishClientAdopt(output string, report clientadopt.Report, operat
 		return &inconclusiveErr{message: "client adoption is not complete; see report"}
 	}
 	return fmt.Errorf("client adoption was interrupted; see report")
+}
+
+func (a *app) finishClientAdoptRetention(output string, report clientadopt.RetentionReport, operationErr error) error {
+	if output == "json" {
+		if err := writeJSON(a.stdout, report, nil); err != nil {
+			return err
+		}
+	} else if err := writeClientAdoptRetentionHuman(a.stdout, report); err != nil {
+		return err
+	}
+	if operationErr == nil {
+		return nil
+	}
+	if errors.Is(operationErr, clientadopt.ErrIntegrity) {
+		return &integrityErr{message: "client adoption retention failed integrity validation; see report"}
+	}
+	if errors.Is(operationErr, clientadopt.ErrPolicy) || errors.Is(operationErr, clientadopt.ErrOperationNotFound) {
+		return &inconclusiveErr{message: "client adoption retention is blocked; see report"}
+	}
+	return fmt.Errorf("client adoption retention was interrupted; see report")
 }
 
 func (a *app) writeClientAdoptReport(output string, report clientadopt.Report) error {
@@ -395,10 +464,43 @@ func writeClientAdoptHuman(out io.Writer, report clientadopt.Report) error {
 		report.Client.AddAttempted, report.Client.AddReceipt.Complete, report.Client.AddReceipt.AutomaticRetries, report.Client.AddReceipt.RedirectsFollowed,
 		terminalSafe(materializeValueOr(report.Client.JobID, "not_observed")), terminalSafe(materializeValueOr(report.Client.JobState, "not_observed")),
 		terminalSafe(materializeValueOr(report.Client.ContentPathRef, "not_observed")), terminalSafe(report.Client.VariantRelation), terminalSafe(report.Client.Assurance))
-	fmt.Fprintf(w, "\nJOURNAL / WRITES\nSTATUS\t%s\nINTENT DURABLE\t%t\nATTEMPTS RECORDED\t%d\nCOMPLETION DURABLE\t%t\nPENDING RECOVERY MARKER\t%t\nOPERATION DIRECTORIES\t%d\nCONTROL DIRECTORIES\t%d\nTEMPORARY FILES\t%d\nTEMPORARY BYTES\t%d\nMARKER PUBLICATIONS\t%d\nTEMPORARY REMOVALS\t%d\nAMBIGUOUS PUBLICATIONS\t%d\n",
+	fmt.Fprintf(w, "\nJOURNAL / WRITES\nSTATUS\t%s\nINTENT DURABLE\t%t\nATTEMPTS RECORDED\t%d\nCOMPLETION DURABLE\t%t\nPENDING RECOVERY MARKER\t%t\nRETENTION STATE\t%s\nRETENTION INTENT PRESENT\t%t\nRETENTION COMPLETE PRESENT\t%t\nRETENTION INTENT DURABLE\t%t\nRETENTION COMPLETE DURABLE\t%t\nOPERATION DIRECTORIES\t%d\nCONTROL DIRECTORIES\t%d\nTEMPORARY FILES\t%d\nTEMPORARY BYTES\t%d\nMARKER PUBLICATIONS\t%d\nTEMPORARY REMOVALS\t%d\nAMBIGUOUS PUBLICATIONS\t%d\n",
 		terminalSafe(report.Journal.Status), report.Journal.IntentDurable, report.Journal.AttemptsRecorded, report.Journal.CompletionDurable, report.Journal.PendingRecoveryMarker,
+		terminalSafe(report.Journal.RetentionState), report.Journal.RetentionIntentPresent, report.Journal.RetentionCompletionPresent,
+		report.Journal.RetentionIntentDurable, report.Journal.RetentionCompletionDurable,
 		report.Writes.OperationDirectories, report.Writes.ControlDirectories, report.Writes.TemporaryFiles, report.Writes.TemporaryBytes,
 		report.Writes.MarkerPublications, report.Writes.TemporaryRemovals, report.Writes.AmbiguousPublications)
+	fmt.Fprintln(w, "\nISSUES")
+	writeClientAdoptFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	if len(report.Warnings) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
+}
+
+func writeClientAdoptRetentionHuman(out io.Writer, report clientadopt.RetentionReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nPHASE BEFORE\t%s\nPHASE AFTER\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseBefore), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeClientAdoptFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / TARGET\nPLAN ID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nEXPECTED ROOT IDENTITY\t%s\nOBSERVED ROOT IDENTITY\t%s\nROOT BOUND\t%t\nSTABILITY\t%s\n",
+		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(valueOrUnknown(report.Plan.ExpectedID)), report.Plan.Matches,
+		terminalSafe(valueOrUnknown(report.Target.ExpectedRootIdentity)), terminalSafe(valueOrUnknown(report.Target.ObservedRootIdentity)),
+		report.Target.RootIdentityBound, terminalSafe(report.Target.StabilityAssurance))
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nINTENT ID\t%s\nCOMPLETION ID\t%s\nATTEMPTS\t%d\nAUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(valueOrUnknown(report.Proof.IntentID)), terminalSafe(valueOrUnknown(report.Proof.CompletionID)),
+		report.Proof.AttemptsRecorded, report.Proof.HistoricalAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nRETENTION / WRITES\nSTATE\t%s\nINTENT MARKER\t%s\nCOMPLETE MARKER\t%s\nINTENT DURABLE\t%t\nCOMPLETION DURABLE\t%t\nEXACT TOMBSTONE\t%t\nPRUNE RESUMABLE\t%t\nCONTROL DIRECTORIES\t%d\nTEMPORARY FILES\t%d\nTEMPORARY BYTES\t%d\nMARKER PUBLICATIONS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\n",
+		terminalSafe(report.Markers.State), terminalSafe(valueOrUnknown(report.Markers.IntentMarkerID)), terminalSafe(valueOrUnknown(report.Markers.CompleteMarkerID)),
+		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.PruneResumable,
+		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerTemporaryBytes,
+		report.Writes.MarkerPublications, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved)
 	fmt.Fprintln(w, "\nISSUES")
 	writeClientAdoptFindings(w, report.Issues)
 	fmt.Fprintln(w, "\nWARNINGS")
