@@ -67,8 +67,12 @@ type FinalClientProjection struct {
 	PathSemantics  string `json:"path_semantics"`
 	SavePathRef    string `json:"save_path_ref"`
 	ContentPathRef string `json:"content_path_ref"`
+	ManifestFiles  int    `json:"manifest_files"`
 	savePath       string
 	contentPath    string
+	filePaths      map[int]string
+	filePathRefs   map[int]string
+	fileSizes      map[int]int64
 }
 
 func (projection FinalClientProjection) SavePath() (string, bool) {
@@ -77,6 +81,23 @@ func (projection FinalClientProjection) SavePath() (string, bool) {
 
 func (projection FinalClientProjection) ContentPath() (string, bool) {
 	return projection.contentPath, projection.contentPath != ""
+}
+
+// FilePath returns one process-local projected final file path by manifest
+// index. Raw paths have no JSON representation and are copied on access.
+func (projection FinalClientProjection) FilePath(index int) (string, bool) {
+	value, ok := projection.filePaths[index]
+	return value, ok && value != ""
+}
+
+func (projection FinalClientProjection) FilePathRef(index int) (string, bool) {
+	value, ok := projection.filePathRefs[index]
+	return value, ok && value != ""
+}
+
+func (projection FinalClientProjection) FileSize(index int) (int64, bool) {
+	value, ok := projection.fileSizes[index]
+	return value, ok && value >= 0
 }
 
 func (verified *VerifiedFinal) Verified() bool {
@@ -157,10 +178,30 @@ func (verified *VerifiedFinal) ProjectClientPaths(hostRoot, clientRoot string, c
 		digest := sha256.Sum256([]byte("ptctl-client-path-v1\x00" + value))
 		return "sha256:" + hex.EncodeToString(digest[:])
 	}
+	filePaths := make(map[int]string, len(authority.layout.Files))
+	filePathRefs := make(map[int]string, len(authority.layout.Files))
+	fileSizes := make(map[int]int64, len(authority.layout.Files))
+	for _, file := range authority.layout.Files {
+		hostPath := filepath.Join(append([]string{authority.targetRoot}, file.Components...)...)
+		mapped, mapErr := storage.MapHostToClient(hostRoot, hostPath, clientRoot, clientWindows)
+		if mapErr != nil {
+			return FinalClientProjection{}, fmt.Errorf("project materialized file %d: %w", file.ManifestIndex, mapErr)
+		}
+		if mapped.ClientPath == "" {
+			return FinalClientProjection{}, fmt.Errorf("project materialized file %d: client path is empty", file.ManifestIndex)
+		}
+		if _, duplicate := filePaths[file.ManifestIndex]; duplicate {
+			return FinalClientProjection{}, fmt.Errorf("materialized client projection has a duplicate manifest index")
+		}
+		filePaths[file.ManifestIndex] = mapped.ClientPath
+		filePathRefs[file.ManifestIndex] = pathRef(mapped.ClientPath)
+		fileSizes[file.ManifestIndex] = file.Length
+	}
 	return FinalClientProjection{
 		PathMappingID: "sha256:" + hex.EncodeToString(mappingDigest[:]), PathSemantics: semantics,
 		SavePathRef: pathRef(save.ClientPath), ContentPathRef: pathRef(content.ClientPath),
-		savePath: save.ClientPath, contentPath: content.ClientPath,
+		ManifestFiles: len(filePaths), savePath: save.ClientPath, contentPath: content.ClientPath,
+		filePaths: filePaths, filePathRefs: filePathRefs, fileSizes: fileSizes,
 	}, nil
 }
 

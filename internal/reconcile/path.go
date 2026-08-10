@@ -51,6 +51,39 @@ func ClientPathReference(value string, windows bool) (string, error) {
 	return parsed.public(false), nil
 }
 
+// JoinClientPath joins a downloader-returned relative path to an already
+// absolute client path using only the declared remote lexical semantics. It
+// never resolves or opens the result in the host namespace.
+func JoinClientPath(base string, relative []string, windows bool) (string, error) {
+	parsed, err := parseClientPath(base, windows)
+	if err != nil {
+		return "", err
+	}
+	components, err := parseClientRelativeComponents(relative, windows)
+	if err != nil {
+		return "", err
+	}
+	joined := parsed.joinRelative(components)
+	if len(joined.canonical()) > maxClientPathBytes {
+		return "", fmt.Errorf("joined client path exceeds 32 KiB")
+	}
+	return joined.canonical(), nil
+}
+
+// ValidateClientPathSet rejects duplicate and file/directory-prefix aliases in
+// a complete set of client-visible file claims.
+func ValidateClientPathSet(values map[int]string, windows bool) error {
+	parsed := make(map[int]clientPath, len(values))
+	for index, value := range values {
+		path, err := parseClientPath(value, windows)
+		if err != nil {
+			return err
+		}
+		parsed[index] = path
+	}
+	return validateClientPathSet(parsed)
+}
+
 // PathMappingOptions is the invocation-scoped host/client namespace mapping
 // used to project a process-local verified source. It is configuration, not
 // evidence that the downloader can actually access the projected path.

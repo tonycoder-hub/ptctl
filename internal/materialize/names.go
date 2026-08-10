@@ -21,19 +21,23 @@ const (
 	// state. clientadopt consumes this exact constant to prevent drift.
 	ClientAdoptOperationDirectoryPrefix = ".ptctl-client-adopt-"
 	clientAdoptDirectoryPrefix          = ClientAdoptOperationDirectoryPrefix
-	intentFileName                      = "intent.json"
-	journalDirectoryName                = "journal"
-	stageDirectoryName                  = "stage"
-	scratchDirectoryName                = "scratch"
-	retentionDirectoryName              = "retention"
-	retentionIntentFileName             = "intent.json"
-	retentionCompleteName               = "complete.json"
-	eventFilePrefix                     = "event-"
-	eventFileSuffix                     = ".json"
+	// ClientActivateOperationDirectoryPrefix is reserved for explicit
+	// recheck/start coordination state downstream of stopped-job adoption.
+	ClientActivateOperationDirectoryPrefix = ".ptctl-client-activate-"
+	clientActivateDirectoryPrefix          = ClientActivateOperationDirectoryPrefix
+	intentFileName                         = "intent.json"
+	journalDirectoryName                   = "journal"
+	stageDirectoryName                     = "stage"
+	scratchDirectoryName                   = "scratch"
+	retentionDirectoryName                 = "retention"
+	retentionIntentFileName                = "intent.json"
+	retentionCompleteName                  = "complete.json"
+	eventFilePrefix                        = "event-"
+	eventFileSuffix                        = ".json"
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix}
+	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {

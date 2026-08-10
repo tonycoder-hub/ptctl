@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
@@ -134,6 +135,10 @@ Usage:
   ptctl client adopt run [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
   ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add --acknowledge-repeat-add] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
+  ptctl client activate plan [adoption selectors] --adoption-operation ID --adoption-plan-id ID [--start-after-recheck] [--output table|json]
+  ptctl client activate run [same selectors] --expect-activation-plan-id ID --acknowledge-client-recheck [--output table|json]
+  ptctl client activate resume [same selectors] --expect-activation-plan-id ID [explicit acknowledgement flags] [--output table|json] OPERATION_ID
+  ptctl client activate status --target PATH [--output table|json] OPERATION_ID
 
   ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
@@ -208,8 +213,11 @@ func (a *app) client(args []string) error {
 	if len(args) > 0 && args[0] == "adopt" {
 		return a.clientAdopt(args[1:])
 	}
+	if len(args) > 0 && args[0] == "activate" {
+		return a.clientActivate(args[1:])
+	}
 	if len(args) == 0 || (args[0] != "status" && args[0] != "list") {
-		return usageError("client requires status, list, or adopt")
+		return usageError("client requires status, list, adopt, or activate")
 	}
 	command := args[0]
 	fs := newFlagSet("client " + command)
@@ -1442,6 +1450,8 @@ func jsonKind(data any) string {
 		return "content.materialization.retention"
 	case clientadopt.Report:
 		return "client.adoption"
+	case clientactivate.Report:
+		return "client.activation"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

@@ -244,3 +244,140 @@ func TestAddStoppedNeverFollowsRedirectOrRetries(t *testing.T) {
 		t.Fatalf("receipt=%#v login=%d add=%d redirected=%d requests=%d err=%v", receipt, login.Load(), add.Load(), redirected.Load(), session.RequestsMade(), err)
 	}
 }
+
+func TestExistingJobControlUsesVersionBoundRoutesAndExactForm(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		version       string
+		wantProtocol  string
+		wantStartPath string
+	}{
+		{name: "v4 resume", version: "v4.6.7", wantProtocol: downloader.ControlProtocolQBittorrentV4, wantStartPath: "/api/v2/torrents/resume"},
+		{name: "v5 start", version: "v5.0.4", wantProtocol: downloader.ControlProtocolQBittorrentV5, wantStartPath: "/api/v2/torrents/start"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const opaque = "opaque&a=b?#%"
+			var requests atomic.Int32
+			var gotPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				switch request.URL.Path {
+				case "/api/v2/auth/login":
+					http.SetCookie(writer, &http.Cookie{Name: "SID", Value: "synthetic", Path: "/"})
+					_, _ = writer.Write([]byte("Ok."))
+				case "/api/v2/app/version":
+					_, _ = writer.Write([]byte(test.version))
+				case "/api/v2/torrents/recheck", test.wantStartPath:
+					if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
+						t.Errorf("unexpected request: %s %s", request.Method, request.Header.Get("Content-Type"))
+					}
+					if err := request.ParseForm(); err != nil || len(request.PostForm) != 1 || len(request.PostForm["hashes"]) != 1 || request.PostForm.Get("hashes") != opaque {
+						t.Errorf("unexpected form: %#v err=%v", request.PostForm, err)
+					}
+					gotPaths = append(gotPaths, request.URL.Path)
+					_, _ = writer.Write([]byte("Ok."))
+				default:
+					http.NotFound(writer, request)
+				}
+			}))
+			defer server.Close()
+
+			adapter, err := New(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			credential, _ := downloader.NewCredential("alice", "secret")
+			session, err := adapter.OpenExistingJobMutationSession(context.Background(), credential)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			descriptor, err := session.ReadExistingJobControlDescriptor(context.Background())
+			if err != nil || descriptor.Protocol != test.wantProtocol {
+				t.Fatalf("descriptor=%#v err=%v", descriptor, err)
+			}
+			recheck, err := session.Recheck(context.Background(), downloader.ExistingJobMutationRequest{JobKey: opaque})
+			if err != nil || !recheck.Complete || recheck.RequestsAttempted != 1 || !recheck.RequestBytesKnown {
+				t.Fatalf("recheck=%#v err=%v", recheck, err)
+			}
+			start, err := session.Start(context.Background(), downloader.ExistingJobMutationRequest{JobKey: opaque})
+			if err != nil || !start.Complete || start.RequestsAttempted != 1 || !start.RequestBytesKnown {
+				t.Fatalf("start=%#v err=%v", start, err)
+			}
+			if requests.Load() != 4 || session.RequestsMade() != 4 || len(gotPaths) != 2 || gotPaths[0] != "/api/v2/torrents/recheck" || gotPaths[1] != test.wantStartPath {
+				t.Fatalf("requests=%d/%d paths=%v", requests.Load(), session.RequestsMade(), gotPaths)
+			}
+		})
+	}
+}
+
+func TestExistingJobControlRejectsUnsupportedVersionAndPreCanceledMutation(t *testing.T) {
+	var mutations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v2/auth/login":
+			http.SetCookie(writer, &http.Cookie{Name: "SID", Value: "synthetic", Path: "/"})
+			_, _ = writer.Write([]byte("Ok."))
+		case "/api/v2/app/version":
+			_, _ = writer.Write([]byte("v6.0.0"))
+		default:
+			mutations.Add(1)
+		}
+	}))
+	defer server.Close()
+	adapter, _ := New(server.URL)
+	credential, _ := downloader.NewCredential("alice", "secret")
+	session, err := adapter.OpenExistingJobMutationSession(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if _, err := session.ReadExistingJobControlDescriptor(context.Background()); err == nil {
+		t.Fatal("unsupported qBittorrent major was accepted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	receipt, err := session.Recheck(ctx, downloader.ExistingJobMutationRequest{JobKey: "opaque"})
+	if !errors.Is(err, context.Canceled) || receipt.RequestsAttempted != 0 || receipt.StopReason != "context_cancelled" || mutations.Load() != 0 || session.RequestsMade() != 2 {
+		t.Fatalf("receipt=%#v mutations=%d requests=%d err=%v", receipt, mutations.Load(), session.RequestsMade(), err)
+	}
+}
+
+func TestExistingJobControlDoesNotRedirectRetryOrLeakOpaqueKey(t *testing.T) {
+	const opaque = "CANARY-OPAQUE-JOB&a=b"
+	const responseCanary = "CANARY-LOCATION"
+	var mutation, redirected atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v2/auth/login":
+			http.SetCookie(writer, &http.Cookie{Name: "SID", Value: "synthetic", Path: "/"})
+			_, _ = writer.Write([]byte("Ok."))
+		case "/api/v2/app/version":
+			_, _ = writer.Write([]byte("v5.0.0"))
+		case "/api/v2/torrents/recheck":
+			mutation.Add(1)
+			writer.Header().Set("Location", "/redirected?secret="+responseCanary)
+			writer.WriteHeader(http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirected.Add(1)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	adapter, _ := New(server.URL)
+	credential, _ := downloader.NewCredential("alice", "secret")
+	session, err := adapter.OpenExistingJobMutationSession(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if _, err := session.ReadExistingJobControlDescriptor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := session.Recheck(context.Background(), downloader.ExistingJobMutationRequest{JobKey: opaque})
+	if err == nil || receipt.Complete || receipt.RequestsAttempted != 1 || receipt.AutomaticRetries != 0 || receipt.RedirectsFollowed != 0 ||
+		mutation.Load() != 1 || redirected.Load() != 0 || session.RequestsMade() != 3 || strings.Contains(err.Error(), opaque) || strings.Contains(err.Error(), responseCanary) {
+		t.Fatalf("receipt=%#v mutation=%d redirected=%d requests=%d err=%v", receipt, mutation.Load(), redirected.Load(), session.RequestsMade(), err)
+	}
+}

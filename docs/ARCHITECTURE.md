@@ -682,9 +682,10 @@ It also remains filesystem-read-only: canonical marker presence is reported,
 but directory durability is refreshed only by effectful resume before client
 I/O.
 
-The current slice never mutates an existing job, changes its location, starts a
-recheck, resumes or pauses transfer, removes a job, deletes a source, or claims
-source retirement. Those later transitions need a separate plan and journal:
+The adoption slice never mutates an existing job, changes its location, starts
+a recheck, resumes or pauses transfer, removes a job, deletes a source, or
+claims source retirement. Existing-job recheck/start is a separate downstream
+plan and journal; the other transitions remain future work:
 
 ```text
 explicit client recheck -> bracket result -> optional controlled start
@@ -697,6 +698,71 @@ never infer source retirement from materialization or stopped-job adoption.
 Reflink may eventually be safer than hardlink because a client repair through
 a shared inode can corrupt a media library, but the implemented filesystem
 strategy remains copy only.
+
+## Explicit client recheck and controlled start
+
+`client activate` consumes three live authorities in one process: a current
+`materialize.VerifiedFinal`, a canonical `clientadopt.VerifiedCompletion`, and
+one fresh authenticated downloader mutation session. Public JSON from any of
+those workflows is not authority. The activation plan binds the materialize
+and adoption operation/plan IDs, exact metafile variant and typed infohashes,
+target/final identities, invocation-scoped mapping references, one opaque job
+reference, exact file-layout digest, qB protocol generation, and whether start
+is reviewed:
+
+```text
+current exact final + canonical stopped adoption + exact stopped client job
+  -> reviewed activation plan
+  -> durable recheck-attempt marker
+  -> one non-retried recheck POST
+  -> durable checking observation OR same-invocation incomplete->complete edge
+  -> complete stopped job + exact indexed layout + current final reverify
+  -> durable recheck-completion marker
+  -> optional durable start-attempt marker + one non-retried start POST
+  -> complete started client claim + current final reverify
+  -> durable activation-completion marker
+```
+
+`downloader.ExistingJobMutationSession` extends the same bounded ledger/file
+session with a one-shot control descriptor and `Recheck`/`Start` ports. The qB
+adapter reads the application version once: supported 4.x sessions bind start
+to `/api/v2/torrents/resume`, while supported 5.x sessions bind it to
+`/api/v2/torrents/start`; both bind recheck to
+`/api/v2/torrents/recheck`. Callers never provide a route. Login, descriptor,
+ledger, optional file ledger, and each POST are serial and exactly counted;
+HTTP/2, connection reuse, proxying, redirect, retry, and queue fan-out remain
+disabled. The opaque qB key is URL-form encoded only at the adapter boundary
+and never enters plans, journals, reports, or errors.
+
+A `200` response proves only that one application-layer request returned. It
+does not prove that qB entered or completed checking. The strongest completion
+path first seals an observed `checkingUP|checkingDL` state, then on a later
+invocation observes a complete stopped job. A second accepted path begins from
+an incomplete stopped job and observes complete stopped state immediately
+after the same invocation's request. If a complete job checks too quickly to
+expose either edge, the request remains unknown. Resume observes first and
+never repeats an unknown recheck or start unless its separate base and repeat
+acknowledgements are both present. A reviewed start is a later resume after
+the recheck-completion marker is durable, so one invocation sends at most one
+effectful client POST.
+
+For ordinary multi-file jobs, every observation includes one bounded qB file
+ledger. Manifest indices must be contiguous and exact; effective paths, sizes,
+selection, progress, and completion are checked for every file against the
+same process-local final projection. Single-file jobs use the exact content
+path, total size, stopped/started state, and progress claim. In both cases the
+filesystem final is reverified before a request and before a completion marker.
+These are bracketed, non-atomic client and filesystem observations; they do not
+prove the client's current inode, the private metafile variant, or continuous
+stability after the last observation.
+
+The deterministic `.ptctl-client-activate-<digest>` directory uses the same
+bound owner-private fs journal primitives as adoption, but has independent
+canonical intent, bounded recheck/start attempt, recheck-started,
+recheck-completion, and activation-completion markers. Read-only `status`
+chooses only an explicit operation ID, performs no network request or sync, and
+does not upgrade historical marker presence into current client or durability
+evidence.
 
 ## Plugin direction
 

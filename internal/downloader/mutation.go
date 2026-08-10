@@ -45,6 +45,73 @@ type MutationSession interface {
 	AddStopped(context.Context, AddStoppedRequest) (MutationReceipt, error)
 }
 
+const (
+	ControlProtocolQBittorrentV4 = "qbittorrent_webapi_v4"
+	ControlProtocolQBittorrentV5 = "qbittorrent_webapi_v5"
+
+	ControlEffectRecheck = "request_existing_job_recheck"
+	ControlEffectStart   = "request_existing_job_start"
+)
+
+// ExistingJobControlDescriptor is a bounded, normalized capability result for
+// mutations of an already identified downloader job. Protocol is deliberately
+// explicit because qBittorrent 4.x and 5.x use different start routes.
+type ExistingJobControlDescriptor struct {
+	Driver         string `json:"driver"`
+	Protocol       string `json:"protocol"`
+	RecheckRouteID string `json:"recheck_route_id"`
+	StartRouteID   string `json:"start_route_id"`
+}
+
+func (descriptor ExistingJobControlDescriptor) Validate() error {
+	if descriptor.Driver != "qbittorrent" || descriptor.RecheckRouteID != "qbittorrent.torrents.recheck.v1" {
+		return fmt.Errorf("downloader existing-job control descriptor is invalid")
+	}
+	switch descriptor.Protocol {
+	case ControlProtocolQBittorrentV4:
+		if descriptor.StartRouteID != "qbittorrent.torrents.resume.v1" {
+			return fmt.Errorf("downloader existing-job control descriptor is invalid")
+		}
+	case ControlProtocolQBittorrentV5:
+		if descriptor.StartRouteID != "qbittorrent.torrents.start.v1" {
+			return fmt.Errorf("downloader existing-job control descriptor is invalid")
+		}
+	default:
+		return fmt.Errorf("downloader existing-job control protocol is unsupported")
+	}
+	return nil
+}
+
+type ExistingJobMutationRequest struct {
+	// JobKey is a process-local opaque locator obtained from a complete ledger
+	// in the same authenticated session. It is never serialized as identity.
+	JobKey string `json:"-"`
+}
+
+type ExistingJobMutationReceipt struct {
+	Effect            string    `json:"effect"`
+	ObservedAtStart   time.Time `json:"observed_at_start"`
+	ObservedAtEnd     time.Time `json:"observed_at_end"`
+	Complete          bool      `json:"complete"`
+	RequestsAttempted int       `json:"requests_attempted"`
+	AutomaticRetries  int       `json:"automatic_retries"`
+	RedirectsFollowed int       `json:"redirects_followed"`
+	RequestBytes      int64     `json:"request_bytes"`
+	RequestBytesKnown bool      `json:"request_bytes_known"`
+	StopReason        string    `json:"stop_reason,omitempty"`
+}
+
+// ExistingJobMutationSession performs only the two transitions used by the
+// explicit activation workflow. A caller must first obtain the descriptor, then
+// select one unique typed job from this same session. Implementations must not
+// retry, redirect, fan out, or accept a caller-selected route.
+type ExistingJobMutationSession interface {
+	LedgerSession
+	ReadExistingJobControlDescriptor(context.Context) (ExistingJobControlDescriptor, error)
+	Recheck(context.Context, ExistingJobMutationRequest) (ExistingJobMutationReceipt, error)
+	Start(context.Context, ExistingJobMutationRequest) (ExistingJobMutationReceipt, error)
+}
+
 type TypedIdentity struct {
 	InfoHashV1 string `json:"info_hash_v1,omitempty"`
 	InfoHashV2 string `json:"info_hash_v2,omitempty"`

@@ -9,12 +9,14 @@ domains and reconciles them around verifiable torrent metadata.
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune`
-> workflow, and exact `client adopt run|resume` stopped-add operations. The
+> workflow, exact `client adopt run|resume` stopped-add operations, and
+> explicit `client activate run|resume` recheck/start operations. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
 > heavy state and retains its tombstone. Client adoption never mutates an
-> existing job. No listed operation overwrites, moves, rewrites, or deletes a
+> existing job; activation is limited to the reviewed exact job's recheck and
+> optional start transitions. No listed operation overwrites, moves, rewrites, or deletes a
 > source or published final layout; reads
 > may still update atime or hydrate an offline placeholder.
 
@@ -106,12 +108,16 @@ capabilities at the edge, not assumptions in the core domain model.
   durable request-intent journal, one non-retried add POST, after-ledger/path
   checks, exact final re-verification, and no automatic replay of an unknown
   request;
+- explicit qBittorrent recheck and optional controlled start downstream of a
+  canonical stopped-adoption completion, with version-bound v4/v5 routes,
+  durable per-request intent, exact typed job/per-file layout reobservation,
+  current-final re-verification, and no automatic replay of unknown requests;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
 index alone, background refresh/watchers, site torrent-detail reads,
-downloader recheck/start/pause/location/removal or existing-job mutation,
+downloader pause/location/removal or broader existing-job mutation,
 attributed/empty-file client-layout reconciliation,
 reflink/hardlink or cross-filesystem materialization, automatic execution of
 serialized plan reports, source/staging cleanup or rollback, source or
@@ -591,6 +597,74 @@ effects, actual/uncertain journal writes, request counts, before/after typed
 identity states, current-final proof basis, and non-null findings separate.
 Raw host/client paths, endpoint, username, password, opaque qB job key, magnet
 URI, tracker URL, passkey, and raw metafile bytes never enter the report.
+
+Recheck that adopted job, then optionally start it only after a durable
+completion observation:
+
+```bash
+# Review. Add --start-after-recheck to include the optional start transition
+# in the plan ID.
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client activate plan \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --adoption-operation sha256:ADOPTION_OPERATION_DIGEST \
+  --adoption-plan-id ADOPTION_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin --start-after-recheck --output json
+
+# Run authorizes only one recheck request. A reviewed start is always a
+# separate later resume so one invocation never sends two effectful POSTs.
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client activate run \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --adoption-operation sha256:ADOPTION_OPERATION_DIGEST \
+  --adoption-plan-id ADOPTION_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin --start-after-recheck \
+  --expect-activation-plan-id ACTIVATION_PLAN_ID \
+  --acknowledge-client-recheck --output json
+
+# After qBittorrent has been observed complete and stopped, start is still a
+# separate explicit acknowledgement because it may announce or transfer data.
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client activate resume \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --adoption-operation sha256:ADOPTION_OPERATION_DIGEST \
+  --adoption-plan-id ADOPTION_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin --start-after-recheck \
+  --expect-activation-plan-id ACTIVATION_PLAN_ID \
+  --acknowledge-client-start sha256:ACTIVATION_OPERATION_DIGEST
+
+ptctl client activate status --target "D:\PT" \
+  sha256:ACTIVATION_OPERATION_DIGEST
+```
+
+Activation never treats a successful POST as a completed recheck. It records
+the request intent first, then requires either a durable observation of a
+checking state followed by a complete stopped observation, or an incomplete to
+complete transition bracketed by the same invocation's request. A fast recheck
+that starts and finishes between observations can therefore remain
+`recheck_request_result_unknown`; repeating it requires both
+`--acknowledge-client-recheck` and `--acknowledge-repeat-recheck`. Start has the
+same non-replay rule and its own repeat acknowledgement. qBittorrent 4.x uses
+the reviewed `resume` route while 5.x uses `start`; an unknown major is
+unsupported rather than guessed. Completion remains a bracketed client claim
+plus a same-invocation exact final proof, not proof of a raw private variant or
+an atomic client/filesystem snapshot. Each invocation sends at most one
+effectful client POST. JSON kind is `client.activation`.
 
 Reconcile one exact metafile with verified bytes and qBittorrent's read-only
 ledger. The password is used for one login; two bounded torrent-list reads

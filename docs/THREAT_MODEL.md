@@ -289,6 +289,53 @@ one-way client/path/job references and never includes host/client paths,
 endpoint, username, password, generic job key, magnet URI, tracker material,
 or raw metafile bytes.
 
+Client activation is a second, narrower existing-job mutation boundary. It is
+unavailable without a same-invocation exact final authority and a canonical
+stopped-adoption completion from the same client configuration and path
+mapping. `run` requires `--acknowledge-client-recheck`; optional start requires
+`--start-after-recheck` in the reviewed plan, then a later `resume` with
+`--acknowledge-client-start`. Repeating an inconclusive request additionally
+requires the matching repeat acknowledgement. No acknowledgement grants pause,
+move, removal, deletion, source retirement, or a different job selector.
+
+The CLI validates artifact/materialize/adoption/mapping/endpoint selectors and
+inspects an explicit resume journal before password stdin. The activation plan
+also includes a fresh qB version descriptor and current exact job-layout
+digest, so a new run must read the credential and bounded client state before
+it can compare the reviewed activation plan ID. Any mismatch is still rejected
+before journal creation or mutation. The core requires a fresh session with
+exactly one login request, then counts exactly one descriptor GET, one ledger
+GET, an optional one-file-ledger GET for the unique job, and at most one
+explicitly selected POST per transition.
+
+The qB control adapter accepts only known 4.x/5.x application generations and
+binds their different resume/start route internally. Effectful requests are
+HTTP/1.1-only, proxy-free, no-keepalive, redirect-free, bounded, serial, and
+non-retried. The opaque job locator is used only as a URL-encoded `hashes` form
+value. Transport, HTTP, response, report, and journal errors never include that
+locator, response bodies/headers, endpoint, username, credential, magnet URI,
+or tracker material.
+
+A successful request receipt is not a recheck or start completion receipt.
+Recheck completion requires a durable checking observation followed by a
+complete stopped observation, or a same-invocation incomplete-to-complete edge
+after a durable request intent. A fast check with neither observable edge stays
+unknown. Start completion requires a durable recheck completion and start
+attempt, complete started state, exact file-layout claims, and another current
+final proof. Cancellation or an unreadable after-ledger leaves an attempted
+request unknown. Resume observes first and never automatically replays it.
+Start is authorized only by a later resume after durable recheck completion;
+one invocation sends at most one effectful client POST.
+
+Every marker is canonical, size-bounded, no-clobber, identity-bound, and reread
+by name across a namespace bracket. The journal permits at most three explicit
+attempts per action and at most one pending scratch marker. Read-only status
+does not refresh directory durability and calls current client/final state
+unobserved. Even a successful terminal report means same-invocation bracketed,
+non-atomic exact filesystem proof plus bounded client claims; it does not prove
+that qB holds the private metafile variant, has the same inode open, or cannot
+change immediately after observation.
+
 The target root must support the fsbind root-identity, no-link/reparse,
 same-filesystem, and no-replace primitives. The plan-review root identity is
 rechecked before journal creation. Journal, scratch, and stage objects live
@@ -430,7 +477,7 @@ remote storage.
 `metafile store init`, `metafile store import`, `storage profile create`,
 `storage index refresh`, the artifact/binding phases of `site metafile fetch`,
 acknowledged materialize operations, and acknowledged exact stopped-job
-adoption are the explicit write exceptions.
+adoption/activation are the explicit write exceptions.
 Store/index/fetch reported write
 count covers logical publication of an accepted store marker or immutable
 object, not private temporary or uninitialized staging entries. It is nonzero
@@ -438,10 +485,13 @@ when that accepted state became visible, including a possible count of `1` for
 `published_durability_unconfirmed`. Materialize instead separately counts
 operation subtrees/directories, journal objects/events, scratch/staged objects,
 publication attempts, logical publications, ambiguous writes, and bytes. Store
-inspect and every non-materialize/non-adoption artifact consumer remain
-zero-write. Adoption separately counts its operation/control directories,
+inspect and every non-materialize/non-adoption/non-activation artifact consumer
+remain zero-write. Adoption separately counts its operation/control directories,
 temporary marker bytes, no-clobber marker publications/removals, uncertain
 writes, login/ledger/add requests, and add receipt.
+Activation uses the same private-write accounting shape but separately reports
+descriptor/ledger/file-ledger reads, recheck/start attempt markers, exactly
+attempted client actions, completion markers, and unknown request results.
 
 The B1 site metafile fetch crosses two independent boundaries. The tracker may
 record its passkey-bearing GET, so the command requires an explicit
@@ -489,9 +539,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
   terminal operation state now has only exact single-operation pruning);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
-- downloader recheck/start/pause/location/removal transitions, re-adoption
-  after a terminal job disappears, and client-side private-variant
-  observability;
+- downloader pause/location/removal transitions, re-adoption after a terminal
+  job disappears, and client-side private-variant observability;
 - current-filesystem completeness tokens or journal-backed incremental index
   invalidation; the existing sealed snapshot is candidate-only;
 - encryption-at-rest or an audited external-key design for private metafile
@@ -499,7 +548,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - per-account cross-process site rate-limit coordination;
 - signed releases, SBOM, and build provenance.
 
-No broader deletion, downloader mutation beyond the exact stopped-add slice,
+No broader deletion or downloader mutation beyond exact stopped-add and
+reviewed recheck/start slices,
 tracker write, or broader content strategy should be added until the relevant
 gap has a testable control and a failure-recovery story. The private metafile
 store grants no authority over seeded content, a materialize acknowledgement
