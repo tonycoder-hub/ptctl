@@ -35,6 +35,9 @@ func observeClient(ctx context.Context, authority *PreparedAuthority, session do
 	if err != nil {
 		return result, err
 	}
+	if ledger.Driver != DriverQBittorrent || !ledger.Capabilities.ContentPath {
+		return result, fmt.Errorf("%w: downloader ledger lacks the reviewed qBittorrent path capability", ErrIntegrity)
+	}
 	assessment, err := downloader.AssessLedgerIdentity(ledger, downloader.TypedIdentity{
 		InfoHashV1: authority.final.InfoHashV1, InfoHashV2: authority.final.InfoHashV2,
 	})
@@ -82,7 +85,7 @@ func observeClient(ctx context.Context, authority *PreparedAuthority, session do
 }
 
 func (observed clientObservation) validateForPlan(authority *PreparedAuthority) error {
-	if authority == nil || observed.job.Hash == "" || observed.jobID != authority.adoption.JobID ||
+	if authority == nil || observed.job.Hash == "" || observed.jobID != authority.expectedJobID ||
 		!canonicalSHA256ID(observed.fileLayoutID) || !stoppedState(observed.job.State) ||
 		observed.fileLayoutID == "" || !observed.allSelected {
 		return fmt.Errorf("%w: exact adopted job is not ready for a reviewed recheck plan", ErrPolicy)
@@ -91,7 +94,7 @@ func (observed clientObservation) validateForPlan(authority *PreparedAuthority) 
 }
 
 func validateJobEnvelope(authority *PreparedAuthority, job downloader.Torrent, currentJobID string) error {
-	if authority == nil || currentJobID == "" || currentJobID != authority.adoption.JobID || job.SizeBytes != authority.final.ContentBytes ||
+	if authority == nil || currentJobID == "" || currentJobID != authority.expectedJobID || job.SizeBytes != authority.final.ContentBytes ||
 		math.IsNaN(job.Progress) || math.IsInf(job.Progress, 0) || job.Progress < 0 || job.Progress > 1 {
 		return fmt.Errorf("%w: exact downloader job differs from the adopted identity or size", ErrIntegrity)
 	}

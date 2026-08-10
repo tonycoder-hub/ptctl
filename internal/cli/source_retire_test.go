@@ -71,10 +71,11 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 		t.Fatalf("activation did not complete recheck: %s", out.String())
 	}
 
-	args := sourceRetireBaseArgs(fixture, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	args := sourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
 	out.Reset()
 	errOut.Reset()
-	if code := Run(args, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+	requestsBeforeRetire := server.totalRequests()
+	if code := Run(args, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
 		t.Fatalf("retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	report := decodeSourceRetireReport(t, out.Bytes())
@@ -83,10 +84,12 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 		report.Data.DeletionPerformed || report.Data.Plan.DeletionAuthority != "none" || report.Data.Plan.ID == "" ||
 		len(report.Data.Plan.SourceFiles) != 1 || report.Data.Plan.SourceFiles[0].SourcePath != "" ||
 		!report.Data.Scan.Complete || !report.Data.Scan.VerificationComplete || report.Data.Scan.StopReasons == nil ||
-		report.Data.Blockers == nil || report.Data.Issues == nil || report.Data.Warnings == nil {
+		report.Data.Blockers == nil || report.Data.Issues == nil || report.Data.Warnings == nil ||
+		!report.Data.ClientUse.Stable || report.Data.ClientUse.RequestsMade != 3 ||
+		server.totalRequests()-requestsBeforeRetire != 3 {
 		t.Fatalf("unexpected retirement report: %s", out.String())
 	}
-	assertSourceRetirePrivate(t, out.Bytes(), fixture)
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
 	tableArgs := append([]string(nil), args...)
 	for index := 0; index < len(tableArgs)-1; index++ {
 		if tableArgs[index] == "--output" {
@@ -96,18 +99,19 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 	}
 	out.Reset()
 	errOut.Reset()
-	if code := Run(tableArgs, strings.NewReader(""), &out, &errOut); code != 0 ||
-		!strings.Contains(out.String(), "DELETION AUTHORITY") || !strings.Contains(out.String(), "none") {
+	if code := Run(tableArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 ||
+		!strings.Contains(out.String(), "DELETION AUTHORITY") || !strings.Contains(out.String(), "none") ||
+		!strings.Contains(out.String(), "CURRENT CLIENT USE") {
 		t.Fatalf("retire table code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
-	assertSourceRetirePrivate(t, out.Bytes(), fixture)
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
 
 	// Explicit path disclosure changes presentation only, not the reviewed plan
 	// identity or any write/deletion count.
 	shownArgs := append(append([]string(nil), args...), "--show-absolute-paths")
 	out.Reset()
 	errOut.Reset()
-	if code := Run(shownArgs, strings.NewReader(""), &out, &errOut); code != 0 {
+	if code := Run(shownArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
 		t.Fatalf("shown retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	shown := decodeSourceRetireReport(t, out.Bytes())
@@ -117,7 +121,7 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 
 	// Selecting the published final itself is a complete positive conflict. The
 	// report is still emitted first; --require-eligible converts it to exit 4.
-	blockedArgs := sourceRetireBaseArgs(fixture, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	blockedArgs := sourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
 	for index := 0; index < len(blockedArgs)-1; index++ {
 		if blockedArgs[index] == "--search-root" {
 			blockedArgs[index+1] = fixture.materialize.targetRoot
@@ -127,27 +131,69 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 	blockedArgs = append(blockedArgs, "--require-eligible")
 	out.Reset()
 	errOut.Reset()
-	if code := Run(blockedArgs, strings.NewReader(""), &out, &errOut); code != 4 {
+	blockedReader := &trackingReader{}
+	requestsBeforeBlocked := server.totalRequests()
+	if code := Run(blockedArgs, blockedReader, &out, &errOut); code != 4 {
 		t.Fatalf("blocked retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	blocked := decodeSourceRetireReport(t, out.Bytes())
 	if blocked.Data.Outcome != sourceretire.OutcomeBlocked || blocked.Data.WritesPerformed != 0 ||
-		!sourceRetireFinding(blocked.Data.Blockers, "source.overlaps_final") {
+		!sourceRetireFinding(blocked.Data.Blockers, "source.overlaps_final") || blockedReader.read ||
+		server.totalRequests() != requestsBeforeBlocked {
 		t.Fatalf("published final was not blocked: %s", out.String())
 	}
 
 	limitedArgs := append(append([]string(nil), args...), "--max-proof-bytes", "1", "--require-eligible")
 	out.Reset()
 	errOut.Reset()
-	if code := Run(limitedArgs, strings.NewReader(""), &out, &errOut); code != 4 {
+	limitedReader := &trackingReader{}
+	requestsBeforeLimited := server.totalRequests()
+	if code := Run(limitedArgs, limitedReader, &out, &errOut); code != 4 {
 		t.Fatalf("limited retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	limited := decodeSourceRetireReport(t, out.Bytes())
 	if limited.Data.Outcome != sourceretire.OutcomeIncomplete || limited.Data.Scan.StopReasons == nil ||
 		len(limited.Data.Scan.StopReasons) == 0 || limited.Data.WritesPerformed != 0 ||
-		limited.Data.Activation.ObservedAtStart == "" || limited.Data.Final.OperationID == "" {
+		limited.Data.Activation.ObservedAtStart == "" || limited.Data.Final.OperationID == "" || limitedReader.read ||
+		server.totalRequests() != requestsBeforeLimited {
 		t.Fatalf("proof budget was not reported as incomplete: %s", out.String())
 	}
+
+	// A syntactically valid mapping that differs from the reviewed activation is
+	// rejected before stdin or another client request.
+	mismatchedMapping := append([]string(nil), args...)
+	for index := 0; index < len(mismatchedMapping)-1; index++ {
+		if mismatchedMapping[index] == "--client-root" {
+			mismatchedMapping[index+1] = "/different-client-root"
+			break
+		}
+	}
+	mismatchReader := &trackingReader{}
+	requestsBeforeMismatch := server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(mismatchedMapping, mismatchReader, &out, &errOut); code != 4 || mismatchReader.read ||
+		server.totalRequests() != requestsBeforeMismatch {
+		t.Fatalf("mapping mismatch code=%d read=%t stdout=%q stderr=%q", code, mismatchReader.read, out.String(), errOut.String())
+	}
+
+	// A transport failure is a complete, privacy-safe report with the adapter's
+	// exact attempted-request count. It does not retry or become a fatal default
+	// exit merely because --require-eligible was not requested.
+	server.server.Close()
+	out.Reset()
+	errOut.Reset()
+	const passwordCanary = "SOURCE-RETIRE-PASSWORD-CANARY"
+	if code := Run(args, strings.NewReader(passwordCanary+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("transport failure code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	failed := decodeSourceRetireReport(t, out.Bytes())
+	if failed.Data.Outcome != sourceretire.OutcomeIncomplete || failed.Data.ClientUse.Status != "incomplete" ||
+		failed.Data.ClientUse.RequestsMade != 1 || !sourceRetireFinding(failed.Data.Issues, "client.current_use_incomplete") ||
+		bytes.Contains(out.Bytes(), []byte(passwordCanary)) {
+		t.Fatalf("unsafe transport failure report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
 }
 
 func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
@@ -162,16 +208,19 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	out.Reset()
 	errOut.Reset()
 	if code := Run([]string{"seed", "retire", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
-		!strings.Contains(out.String(), "deletion_authority") || !strings.Contains(out.String(), "zero writes") {
+		!strings.Contains(out.String(), "deletion_authority") || !strings.Contains(out.String(), "zero writes") ||
+		!strings.Contains(out.String(), "two bounded job-ledger reads") {
 		t.Fatalf("help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 }
 
-func sourceRetireBaseArgs(fixture clientAdoptCLIFixture, activationOperation, activationPlanID string) []string {
+func sourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOperation, activationPlanID string) []string {
 	return []string{"seed", "retire", "plan", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
 		"--search-root", fixture.materialize.sourceRoot, "--target", fixture.materialize.targetRoot,
 		"--materialize-operation", fixture.operation, "--materialize-plan-id", fixture.materialize.planID,
 		"--activation-operation", activationOperation, "--activation-plan-id", activationPlanID,
+		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--driver", "qbittorrent", "--url", endpoint, "--username", clientAdoptUser, "--password-stdin",
 		"--timeout", "1m", "--output", "json"}
 }
 
@@ -184,10 +233,11 @@ func decodeSourceRetireReport(t *testing.T, raw []byte) sourceRetireJSONEnvelope
 	return result
 }
 
-func assertSourceRetirePrivate(t *testing.T, raw []byte, fixture clientAdoptCLIFixture) {
+func assertSourceRetirePrivate(t *testing.T, raw []byte, fixture clientAdoptCLIFixture, endpoint string) {
 	t.Helper()
 	for _, secret := range []string{fixture.materialize.sourceRoot, fixture.materialize.sourcePath,
-		fixture.materialize.targetRoot, fixture.materialize.finalPath, materializeSourceName} {
+		fixture.materialize.targetRoot, fixture.materialize.finalPath, materializeSourceName,
+		endpoint, clientAdoptRoot, clientAdoptUser, clientAdoptPassword, clientAdoptJobKey} {
 		if secret != "" && bytes.Contains(raw, []byte(secret)) {
 			t.Fatalf("source retirement report leaked %q: %s", secret, raw)
 		}

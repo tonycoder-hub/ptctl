@@ -768,27 +768,34 @@ evidence.
 ## Read-only source-retirement eligibility
 
 `seed retire plan` closes only the evidence-planning half of source retirement.
-It consumes four same-process inputs: the exact metafile, one complete live
+It consumes the exact metafile, one complete live
 `seed.Discover` result with its opaque `VerifiedSource`, a current
 `materialize.VerifiedFinal`, and a `clientactivate.VerifiedCompletion` read from
-one explicit terminal activation journal. Recheck-only plans become terminal at
+one explicit terminal activation journal. That completion and final establish
+a process-local `CurrentUseAuthority`; one authenticated read-only downloader
+session then supplies two bounded observations of the exact typed-infohash job
+and, for ordinary multi-file layouts, its indexed effective paths. Recheck-only plans become terminal at
 their recheck-completion marker; a plan that reviewed start is not terminal
 until its activation-completion marker exists. Public status/JSON cannot
-recreate either capability.
+recreate any process-local capability.
 
 ```text
 explicit live source roots -> complete unique exact source map
 explicit materialize operation + exact current final reverify
 explicit activation operation + reviewed terminal marker chain
+same activation client configuration + invocation path mapping
+  -> bounded live typed-job/effective-path observation
   -> per-index named-source identity checks
   -> reject source beneath or physically aliasing the final
   -> exact post-selection source reverify
   -> second exact current-final reverify
+  -> second bounded live typed-job/effective-path observation
+  -> require stable same-session job, state, layout, and paths
   -> review-only source-retirement plan (deletion authority: none)
 ```
 
 The plan ID binds the metafile variant and typed hashes, materialize and
-activation selectors, terminal marker, source-selection ID, target/final
+activation selectors, terminal marker, current-use authority ID, source-selection ID, target/final
 identities, and for every content-bearing physical source its manifest index,
 size, modification observation, and domain-separated path reference. Displaying
 absolute source paths is presentation-only and does not change the ID. Empty
@@ -797,11 +804,11 @@ listed. Search roots that include the final normally make discovery ambiguous;
 if the final itself is uniquely selected, the overlap check blocks it.
 
 This is intentionally not an executable serialized plan. Source proof remains
-same-invocation and bracketed, client completion is a historical client claim,
-and the final can change after the last check. No live client ledger is read, so
-the plan cannot claim that the exact job still uses the materialized final. A
-deletion slice will require a new live source/final proof, a fresh unique typed
-job and effective-file-path observation, an exact expected plan ID, a separate
+same-invocation and bracketed, client completion is historical, and current
+client state/path evidence is a bounded, bracketed, non-atomic lexical claim.
+It does not prove a remote open inode, raw private variant, or state after the
+last read. A deletion slice will require a new live source/final proof, repeat
+the unique typed-job and effective-file-path observations, an exact expected plan ID, a separate
 deletion acknowledgement, bound no-follow unlink primitives, per-name journal
 receipts, crash recovery, and explicit treatment of partial success. None of
 those authorities are granted here.

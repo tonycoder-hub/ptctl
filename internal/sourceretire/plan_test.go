@@ -31,6 +31,8 @@ type retireFixture struct {
 	discovery        seed.DiscoveryResult
 	final            *materialize.VerifiedFinal
 	activation       *clientactivate.VerifiedCompletion
+	currentUse       *clientactivate.CurrentUseAuthority
+	currentJob       downloader.Torrent
 	sourceRoot       string
 	sourcePath       string
 	targetRoot       string
@@ -112,12 +114,12 @@ func (*retireActivationSession) Close() error              { return nil }
 
 func TestBuildProducesZeroWriteEligibilityWithoutPathDisclosure(t *testing.T) {
 	fixture := makeRetireFixture(t)
-	report, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
-		Final: fixture.final, Activation: fixture.activation})
+	report, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
 	if err != nil || report.Outcome != OutcomeEligible || report.WritesPerformed != 0 || report.DeletionPerformed ||
 		report.Plan.DeletionAuthority != "none" || report.Plan.ID == "" || report.Plan.Validate() != nil ||
 		len(report.Plan.SourceFiles) != 1 || report.Plan.SourceFiles[0].SourcePath != "" || !report.Plan.SourceFiles[0].DistinctObject ||
-		!report.Scan.Complete || !report.Scan.VerificationComplete || report.Scan.StopReasons == nil {
+		!report.Scan.Complete || !report.Scan.VerificationComplete || report.Scan.StopReasons == nil ||
+		!report.ClientUse.Stable || report.ClientUse.RequestsMade != 3 || report.Plan.CurrentClientUseID == "" {
 		t.Fatalf("report=%#v err=%v", report, err)
 	}
 	if _, err := os.Stat(fixture.sourcePath); err != nil {
@@ -130,8 +132,7 @@ func TestBuildProducesZeroWriteEligibilityWithoutPathDisclosure(t *testing.T) {
 	if bytes.Contains(raw, []byte(fixture.sourcePath)) || bytes.Contains(raw, []byte(filepath.Base(fixture.sourcePath))) {
 		t.Fatalf("default report leaked source path: %s", raw)
 	}
-	shown, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
-		Final: fixture.final, Activation: fixture.activation, ShowAbsolutePaths: true})
+	shown, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, true))
 	if err != nil || shown.Plan.ID != report.Plan.ID || shown.Plan.SourceFiles[0].SourcePath != fixture.sourcePath {
 		t.Fatalf("path opt-in changed authority or failed: %#v err=%v", shown, err)
 	}
@@ -160,30 +161,26 @@ func TestBuildRejectsDetachedDiscoveryAndFinalOverlap(t *testing.T) {
 	fixture := makeRetireFixture(t)
 	mutatedMeta := fixture.meta.Clone()
 	mutatedMeta.InfoHashV1 = strings.Repeat("f", 40)
-	report, err := Build(context.Background(), BuildOptions{Meta: mutatedMeta, Discovery: &fixture.discovery,
-		Final: fixture.final, Activation: fixture.activation})
+	report, err := Build(context.Background(), retireBuildOptions(fixture, mutatedMeta, &fixture.discovery, false))
 	if err != nil || report.Outcome != OutcomeBlocked || !hasFinding(report.Blockers, "metafile.authority_mismatch") {
 		t.Fatalf("mutated metafile passed: report=%#v err=%v", report, err)
 	}
 
 	incomplete := fixture.discovery
 	incomplete.Scan.Complete = false
-	report, err = Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &incomplete,
-		Final: fixture.final, Activation: fixture.activation})
+	report, err = Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &incomplete, false))
 	if err != nil || report.Outcome != OutcomeIncomplete || !hasFinding(report.Blockers, "source.discovery_incomplete") {
 		t.Fatalf("mutated incomplete scan passed: report=%#v err=%v", report, err)
 	}
 	invalidSelection := fixture.discovery
 	invalidSelection.Selection.Status = "blocked"
-	report, err = Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &invalidSelection,
-		Final: fixture.final, Activation: fixture.activation})
+	report, err = Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &invalidSelection, false))
 	if err != nil || report.Outcome != OutcomeBlocked || !hasFinding(report.Blockers, "source.selection_invalid") {
 		t.Fatalf("mutated selection passed: report=%#v err=%v", report, err)
 	}
 
 	public := fixture.discovery.PublicReportCopy()
-	detached, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &public,
-		Final: fixture.final, Activation: fixture.activation})
+	detached, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &public, false))
 	if err != nil || detached.Outcome != OutcomeBlocked || !hasFinding(detached.Blockers, "source.process_authority_unavailable") {
 		t.Fatalf("detached=%#v err=%v", detached, err)
 	}
@@ -195,8 +192,7 @@ func TestBuildRejectsDetachedDiscoveryAndFinalOverlap(t *testing.T) {
 	if err != nil || finalDiscovery.SourceOutcome != "verified_unique" {
 		t.Fatalf("final discovery=%#v err=%v", finalDiscovery, err)
 	}
-	overlap, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &finalDiscovery,
-		Final: fixture.final, Activation: fixture.activation})
+	overlap, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &finalDiscovery, false))
 	if err != nil || overlap.Outcome != OutcomeBlocked || !hasFinding(overlap.Blockers, "source.overlaps_final") {
 		t.Fatalf("overlap=%#v err=%v", overlap, err)
 	}
@@ -207,8 +203,7 @@ func TestBuildFailsClosedWhenSourceChangesAfterDiscovery(t *testing.T) {
 	if err := os.WriteFile(fixture.sourcePath, bytes.Repeat([]byte("x"), int(fixture.meta.TotalLength)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
-		Final: fixture.final, Activation: fixture.activation})
+	report, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
 	if !errors.Is(err, ErrIntegrity) || report.Outcome != OutcomeIntegrityFailed || report.WritesPerformed != 0 {
 		t.Fatalf("report=%#v err=%v", report, err)
 	}
@@ -233,11 +228,43 @@ func TestBuildRehashesSourceWhenSizeAndTimestampAreRestored(t *testing.T) {
 	if restored.Size() != before.Size() || !restored.ModTime().Equal(before.ModTime()) {
 		t.Skip("test filesystem cannot restore the source timestamp exactly")
 	}
-	report, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
-		Final: fixture.final, Activation: fixture.activation})
+	report, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
 	if !errors.Is(err, ErrIntegrity) || report.Outcome != OutcomeIntegrityFailed ||
 		!hasFinding(report.Blockers, "integrity.proof_changed") {
 		t.Fatalf("metadata-preserving byte change passed: report=%#v err=%v", report, err)
+	}
+}
+
+func TestBuildRequiresStableBeforeAfterLiveClientUse(t *testing.T) {
+	fixture := makeRetireFixture(t)
+	now := time.Now().UTC()
+	beforeJob := fixture.currentJob
+	afterJob := fixture.currentJob
+	afterJob.State = "uploading"
+	session := &retireActivationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{
+		retireLedger(&beforeJob, now), retireLedger(&afterJob, now.Add(time.Second)),
+	}}
+	report, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
+		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session})
+	if err != nil || report.Outcome != OutcomeIncomplete || report.ClientUse.Status != "unstable" ||
+		report.ClientUse.Stable || report.ClientUse.RequestsMade != 3 ||
+		!hasFinding(report.Blockers, "client.current_use_unstable") {
+		t.Fatalf("state-changing client bracket passed: report=%#v err=%v", report, err)
+	}
+}
+
+func TestBuildTreatsCurrentClientPathChangeAsBlockedEvidence(t *testing.T) {
+	fixture := makeRetireFixture(t)
+	moved := fixture.currentJob
+	moved.ContentPath += "-moved"
+	session := &retireActivationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{
+		retireLedger(&moved, time.Now().UTC()),
+	}}
+	report, err := Build(context.Background(), BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
+		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session})
+	if err != nil || report.Outcome != OutcomeBlocked || report.ClientUse.Status != "blocked" ||
+		report.ClientUse.RequestsMade != 2 || !hasFinding(report.Blockers, "client.current_use_blocked") {
+		t.Fatalf("client path conflict was misclassified: report=%#v err=%v", report, err)
 	}
 }
 
@@ -362,6 +389,13 @@ func makeRetireFixture(t *testing.T) retireFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	currentUse, err := clientactivate.PrepareCurrentUse(final, completion, clientactivate.CurrentUseOptions{
+		ClientConfigID: clientConfig, HostRoot: hostRoot, ClientRoot: "/downloads", ClientWindows: false,
+		FileLimits: downloader.DefaultJobFileLedgerLimits(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Re-run live source discovery after all downstream steps. The retirement
 	// planner must consume this invocation's current proof, not the historical
 	// source capability used by materialization.
@@ -372,7 +406,18 @@ func makeRetireFixture(t *testing.T) retireFixture {
 		t.Fatalf("fresh discovery=%#v err=%v", freshDiscovery, err)
 	}
 	return retireFixture{meta: meta, discovery: freshDiscovery, final: final, activation: completion,
+		currentUse: currentUse, currentJob: completeJob,
 		sourceRoot: sourceRoot, sourcePath: sourcePath, targetRoot: targetRoot, activationPlanID: preview.Plan.ID}
+}
+
+func retireBuildOptions(fixture retireFixture, meta *metafile.MetaInfo, discovery *seed.DiscoveryResult, showPaths bool) BuildOptions {
+	now := time.Now().UTC()
+	job := fixture.currentJob
+	session := &retireActivationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{
+		retireLedger(&job, now), retireLedger(&job, now.Add(time.Second)),
+	}}
+	return BuildOptions{Meta: meta, Discovery: discovery, Final: fixture.final, Activation: fixture.activation,
+		ClientUse: fixture.currentUse, ClientSession: session, ShowAbsolutePaths: showPaths}
 }
 
 func retireLedger(job *downloader.Torrent, started time.Time) downloader.LedgerSnapshot {

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
+	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
@@ -19,6 +20,8 @@ type BuildOptions struct {
 	Discovery         *seed.DiscoveryResult
 	Final             *materialize.VerifiedFinal
 	Activation        *clientactivate.VerifiedCompletion
+	ClientUse         *clientactivate.CurrentUseAuthority
+	ClientSession     downloader.LedgerSession
 	ShowAbsolutePaths bool
 }
 
@@ -28,9 +31,19 @@ type BuildOptions struct {
 // cannot prove current uniqueness.
 func Build(ctx context.Context, options BuildOptions) (Report, error) {
 	report := newReport()
+	if options.ClientSession != nil {
+		requests := options.ClientSession.RequestsMade()
+		if requests < 0 {
+			return failIntegrity(&report, "downloader read-session request count is contradictory")
+		}
+		report.ClientUse.RequestsMade = requests
+		if requests > 0 {
+			report.Effect = append(report.Effect, "authenticate_downloader_read_session")
+		}
+	}
 	if options.Meta == nil || options.Discovery == nil || options.Final == nil || options.Activation == nil {
 		report.Outcome = OutcomeBlocked
-		report.addBlocker("authority.unavailable", "metafile, live source, final, and client-completion authorities are all required")
+		report.addBlocker("authority.unavailable", "metafile, live source, final, and terminal completion authorities are all required")
 		report.finalize()
 		return report, nil
 	}
@@ -212,6 +225,20 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		}
 		files = append(files, file)
 	}
+	if options.ClientUse == nil || options.ClientSession == nil {
+		report.Outcome = OutcomeBlocked
+		report.addBlocker("client.current_use_authority_unavailable", "same-invocation live-client authority and one read session are required")
+		report.finalize()
+		return report, nil
+	}
+	report.Effect = append(report.Effect, "read_live_downloader_ledger")
+	clientBefore, beforeObservation, clientErr := clientactivate.VerifyCurrentUse(ctx, options.ClientUse, options.ClientSession)
+	report.ClientUse.Before = beforeObservation
+	report.ClientUse.RequestsMade = options.ClientSession.RequestsMade()
+	if clientErr != nil {
+		return failClientProof(&report, clientErr, "the live downloader could not prove current use of the exact final before source planning")
+	}
+	report.ClientUse.Status = "before_observed"
 	// Discovery proved uniqueness earlier in this invocation. Re-read and
 	// cryptographically verify that selected named mapping after its identity
 	// and alias checks so metadata-only stability is not mistaken for current
@@ -245,6 +272,28 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		return failIntegrity(&report, "materialized final identity changed during source retirement planning")
 	}
 	report.Final = finalAfter
+	clientAfter, afterObservation, clientErr := clientactivate.VerifyCurrentUse(ctx, options.ClientUse, options.ClientSession)
+	report.ClientUse.After = afterObservation
+	report.ClientUse.RequestsMade = options.ClientSession.RequestsMade()
+	if clientErr != nil {
+		return failClientProof(&report, clientErr, "the live downloader could not prove current use of the exact final after source planning")
+	}
+	activationObservation := report.Activation
+	if !clientBefore.StableWith(clientAfter) ||
+		!clientBefore.Matches(beforeObservation.UseID, finalAfter.MetafileVariantID, finalAfter.OperationID,
+			finalAfter.MaterializePlanID, finalAfter.FinalObjectIdentity, activationObservation.OperationID,
+			activationObservation.PlanID, activationObservation.TerminalMarkerID) ||
+		!clientAfter.Matches(beforeObservation.UseID, finalAfter.MetafileVariantID, finalAfter.OperationID,
+			finalAfter.MaterializePlanID, finalAfter.FinalObjectIdentity, activationObservation.OperationID,
+			activationObservation.PlanID, activationObservation.TerminalMarkerID) {
+		report.Outcome = OutcomeIncomplete
+		report.ClientUse.Status = "unstable"
+		report.addBlocker("client.current_use_unstable", "live downloader identity, state, layout, or effective paths changed across source planning")
+		report.finalize()
+		return report, nil
+	}
+	report.ClientUse.Status, report.ClientUse.Stable = "observed_stable", true
+	report.ClientUse.Assurance = "same_session_before_after_typed_job_and_effective_path_claims_bracketed_with_exact_final_reverification_non_atomic"
 	report.Source = SourceReport{Status: "verified_unique_distinct_from_final", SelectionID: options.Discovery.Selection.SelectedID,
 		PhysicalFiles: len(files), ContentBytes: expectedBytes,
 		Assurance: "same_invocation_unique_source_with_post_selection_exact_reverification_bracketed_by_exact_final_reverification"}
@@ -253,7 +302,8 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		MetafileVariantID: meta.MetafileVariantID, InfoHashV1: meta.InfoHashV1, InfoHashV2: meta.InfoHashV2,
 		MaterializeOperationID: firstFinal.OperationID, MaterializePlanID: firstFinal.MaterializePlanID,
 		ActivationOperationID: report.Activation.OperationID, ActivationPlanID: report.Activation.PlanID,
-		ClientCompletionID: report.Activation.TerminalMarkerID, SourceSelectionID: options.Discovery.Selection.SelectedID,
+		ClientCompletionID: report.Activation.TerminalMarkerID, CurrentClientUseID: beforeObservation.UseID,
+		SourceSelectionID:  options.Discovery.Selection.SelectedID,
 		TargetRootIdentity: firstFinal.TargetRootIdentity, FinalObjectIdentity: firstFinal.FinalObjectIdentity,
 		ManifestFiles: len(meta.Files), PhysicalSourceFiles: len(files), ContentBytes: expectedBytes,
 		AbsolutePathsShown: options.ShowAbsolutePaths, SourceFiles: files,
@@ -262,6 +312,7 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 			"same_invocation_post_selection_exact_source_reverification",
 			"same_invocation_pre_and_post_exact_final_verification",
 			"canonical_terminal_client_activation_journal_read",
+			"same_session_before_after_live_typed_job_and_effective_path_observation",
 			"named_source_identity_reobservation",
 			"source_final_object_non_alias_observation",
 			"bracketed_non_atomic",
@@ -292,6 +343,25 @@ func failProof(report *Report, err error, message string) (Report, error) {
 	report.addIssue("proof.incomplete", message)
 	report.finalize()
 	return *report, err
+}
+
+func failClientProof(report *Report, err error, message string) (Report, error) {
+	switch {
+	case errors.Is(err, clientactivate.ErrIntegrity), errors.Is(err, materialize.ErrIntegrity):
+		return failIntegrity(report, message)
+	case errors.Is(err, clientactivate.ErrPolicy):
+		report.Outcome = OutcomeBlocked
+		report.ClientUse.Status = "blocked"
+		report.addBlocker("client.current_use_blocked", message)
+		report.finalize()
+		return *report, nil
+	default:
+		report.Outcome = OutcomeIncomplete
+		report.ClientUse.Status = "incomplete"
+		report.addIssue("client.current_use_incomplete", message)
+		report.finalize()
+		return *report, err
+	}
 }
 
 func failIntegrity(report *Report, message string) (Report, error) {

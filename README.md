@@ -114,8 +114,9 @@ capabilities at the edge, not assumptions in the core domain model.
   current-final re-verification, and no automatic replay of unknown requests;
 - zero-write source-retirement eligibility planning from a new complete live
   source proof, current exact materialized-final proof, and canonical terminal
-  client activation journal, with explicit final-overlap/alias rejection and
-  no deletion authority;
+  client activation journal, plus stable before/after reads of the exact live
+  typed-infohash job and its effective paths from one qBittorrent session, with
+  explicit final-overlap/alias rejection and no deletion authority;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -674,7 +675,7 @@ Review which current source file names could be considered for a future,
 separately authorized retirement operation:
 
 ```bash
-ptctl seed retire plan \
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl seed retire plan \
   --metafile-store PRIVATE_STORE \
   --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
   --search-root "D:\Media\Original" \
@@ -683,6 +684,9 @@ ptctl seed retire plan \
   --materialize-plan-id MATERIALIZE_PLAN_ID \
   --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
   --activation-plan-id ACTIVATION_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin \
   --require-eligible \
   --output json
 ```
@@ -690,18 +694,23 @@ ptctl seed retire plan \
 This command performs zero writes and always reports
 `deletion_authority: none`. It repeats complete live discovery in the explicit
 search roots, reads the canonical terminal activation marker selected by its
-reviewed action, re-verifies the exact published final before and after source
-identity checks, re-verifies the selected source bytes after those checks, and
-rejects a selected source that is inside or aliases that final. Default output
+reviewed action, and uses one authenticated read-only qBittorrent session to
+observe the exact typed-infohash job before and after local proof. Single-file
+planning makes one login plus two bounded job-ledger reads; ordinary multi-file
+planning adds two bounded file-ledger reads. It never retries or mutates the
+client. The exact published final and selected source bytes are reverified
+inside that live-client bracket, and a selected source inside or aliasing the
+final is rejected. Default output
 contains one-way source-path references; raw source paths
 require `--show-absolute-paths`. Only content-bearing regular-file names are
 represented. Empty files, padding, directories, cleanup, and deletion remain
 out of scope. Unselected hardlink or alias names may remain, so the plan never
-claims that storage would be reclaimed. The terminal activation marker is
-historical: this command does not contact qBittorrent or claim that its current
-job location still names the final. A future deletion command must rebuild the
-same live plan, freshly prove the unique exact job and its effective file paths
-still use the current final, require a separate acknowledgement, and journal
+claims that storage would be reclaimed. The terminal activation marker remains
+historical; current job identity, state, and effective paths are established
+separately by the bounded live reads. Those values are still non-atomic client
+claims and do not prove a remote open inode. A future deletion command must
+rebuild the same live plan and repeat every client/source/final proof, require a
+separate acknowledgement, and journal
 every unlink result; serialized plan JSON will not be authority. JSON kind is
 `content.source_retirement_plan`.
 

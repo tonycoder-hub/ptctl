@@ -6,11 +6,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
+	"github.com/tonycoder-hub/ptctl/internal/downloader"
+	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
@@ -35,6 +39,13 @@ type sourceRetireFlags struct {
 	materializePlanID    *string
 	activationOperation  *string
 	activationPlanID     *string
+	hostRoot             *string
+	clientRoot           *string
+	clientStyle          *string
+	driver               *string
+	endpoint             *string
+	username             *string
+	passwordStdin        *bool
 	showAbsolute         *bool
 	allowNetwork         *bool
 	requireEligible      *bool
@@ -69,13 +80,19 @@ func (a *app) seedRetire(args []string) error {
 
 func (a *app) seedRetireHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID [flags]
+  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [flags]
 
 The plan command is read-only. It requires one complete live source discovery,
-a current exact materialized-final proof, and one canonical terminal client
-activation journal. It emits only an eligibility plan: deletion_authority is
-always none, it performs zero writes, no file or directory is removed, and serialized JSON is never
-accepted later as proof.
+a current exact materialized-final proof, one canonical terminal client
+activation journal, and stable before/after observations of the exact live
+qBittorrent job in one authenticated read session. It emits only an eligibility
+plan: deletion_authority is always none, it performs zero writes, no file or
+directory is removed, and serialized JSON is never accepted later as proof.
+
+The live-client bracket performs one login plus two bounded job-ledger reads;
+multi-file torrents add at most two bounded file-ledger reads. There are no
+retries or client mutations. Client paths and state remain non-atomic lexical
+claims and do not prove a remote open inode.
 
 Search roots must deliberately identify the source names under review. If they
 also discover the published final, ambiguity or final-overlap blocks the plan.
@@ -96,6 +113,13 @@ func addSourceRetireFlags(fs *flag.FlagSet) *sourceRetireFlags {
 	values.materializePlanID = fs.String("materialize-plan-id", "", "reviewed materialize plan ID")
 	values.activationOperation = fs.String("activation-operation", "", "explicit terminal client activation operation ID")
 	values.activationPlanID = fs.String("activation-plan-id", "", "reviewed client activation plan ID")
+	values.hostRoot = fs.String("host-root", "", "host namespace root containing the materialized target")
+	values.clientRoot = fs.String("client-root", "", "downloader-visible namespace root")
+	values.clientStyle = fs.String("client-style", "posix", "downloader path style: posix or windows")
+	values.driver = fs.String("driver", "qbittorrent", "downloader driver")
+	values.endpoint = fs.String("url", "", "qBittorrent Web API origin")
+	values.username = fs.String("username", "", "qBittorrent username")
+	values.passwordStdin = fs.Bool("password-stdin", false, "read downloader password from stdin")
 	values.showAbsolute = fs.Bool("show-absolute-paths", false, "include selected absolute source paths in output")
 	values.allowNetwork = fs.Bool("allow-network", false, "allow explicit network/UNC source roots; never applies to target")
 	values.requireEligible = fs.Bool("require-eligible", false, "exit 4 after the report unless outcome is eligible_for_separate_review")
@@ -126,6 +150,12 @@ type preparedSourceRetire struct {
 	materializePlanID    string
 	activationOperation  clientactivate.OperationID
 	activationPlanID     string
+	hostRoot             string
+	clientRoot           string
+	clientWindows        bool
+	clientConfigID       string
+	adapter              *qbittorrent.Adapter
+	username             string
 	showAbsolute         bool
 	requireEligible      bool
 	timeout              time.Duration
@@ -135,8 +165,18 @@ type preparedSourceRetire struct {
 func (values *sourceRetireFlags) validate(fs *flag.FlagSet) (preparedSourceRetire, error) {
 	var result preparedSourceRetire
 	if len(values.searchRoots) == 0 || *values.targetRoot == "" || *values.materializeOperation == "" ||
-		*values.materializePlanID == "" || *values.activationOperation == "" || *values.activationPlanID == "" {
-		return result, usageError("seed retire plan requires search roots and every materialize/activation selector")
+		*values.materializePlanID == "" || *values.activationOperation == "" || *values.activationPlanID == "" ||
+		*values.hostRoot == "" || *values.clientRoot == "" || *values.endpoint == "" || *values.username == "" {
+		return result, usageError("seed retire plan requires every source, materialize, activation, mapping, and downloader selector")
+	}
+	if !*values.passwordStdin {
+		return result, usageError("seed retire plan requires --password-stdin")
+	}
+	if *values.driver != "qbittorrent" {
+		return result, usageError("--driver currently supports only qbittorrent")
+	}
+	if *values.clientStyle != "posix" && *values.clientStyle != "windows" {
+		return result, usageError("--client-style must be posix or windows")
 	}
 	for _, root := range values.searchRoots {
 		if root == "" {
@@ -162,6 +202,18 @@ func (values *sourceRetireFlags) validate(fs *flag.FlagSet) (preparedSourceRetir
 	if err != nil {
 		return result, err
 	}
+	clientWindows := *values.clientStyle == "windows"
+	if err := storage.ValidatePathMappingConfig(*values.hostRoot, *values.clientRoot, clientWindows); err != nil {
+		return result, usageError("seed retire plan path mapping is invalid: %v", err)
+	}
+	adapter, err := qbittorrent.New(*values.endpoint)
+	if err != nil {
+		return result, usageError("seed retire plan downloader endpoint is invalid")
+	}
+	clientConfigID, err := adapter.ClientConfigID(*values.username)
+	if err != nil {
+		return result, usageError("seed retire plan downloader configuration is invalid")
+	}
 	inventory := storage.DefaultInventoryLimits()
 	inventory.MaxDepth, inventory.MaxDirectories = *values.maxDepth, *values.maxDirectories
 	inventory.MaxEntries, inventory.MaxEntriesPerDirectory = *values.maxEntries, *values.maxDirectoryEntries
@@ -182,6 +234,8 @@ func (values *sourceRetireFlags) validate(fs *flag.FlagSet) (preparedSourceRetir
 	return preparedSourceRetire{input: input, output: *values.output, targetRoot: *values.targetRoot,
 		materializeOperation: materializeOperation, materializePlanID: *values.materializePlanID,
 		activationOperation: activationOperation, activationPlanID: *values.activationPlanID,
+		hostRoot: *values.hostRoot, clientRoot: *values.clientRoot, clientWindows: clientWindows,
+		clientConfigID: clientConfigID, adapter: adapter, username: *values.username,
 		showAbsolute: *values.showAbsolute, requireEligible: *values.requireEligible, timeout: *values.timeout,
 		discovery: seed.DiscoverOptions{SearchRoots: append([]string(nil), values.searchRoots...), InventoryLimits: inventory,
 			MatchLimits: match, AllowNetwork: *values.allowNetwork, ShowAbsolutePaths: false,
@@ -194,7 +248,7 @@ func (a *app) seedRetirePlan(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [flags]")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Zero writes and zero deletion. The result is review evidence only; no serialized plan is executable authority.")
 		fmt.Fprintln(fs.Output(), "")
@@ -249,12 +303,117 @@ func (a *app) seedRetirePlan(args []string) error {
 	if err != nil {
 		return fmt.Errorf("source retirement terminal client completion could not be verified")
 	}
+	currentUse, err := clientactivate.PrepareCurrentUse(final, activation, clientactivate.CurrentUseOptions{
+		ClientConfigID: prepared.clientConfigID, HostRoot: prepared.hostRoot, ClientRoot: prepared.clientRoot,
+		ClientWindows: prepared.clientWindows, FileLimits: downloader.DefaultJobFileLedgerLimits(),
+	})
+	if errors.Is(err, clientactivate.ErrIntegrity) {
+		return &integrityErr{message: "source retirement live-client selectors disagree with the terminal activation"}
+	}
+	if errors.Is(err, clientactivate.ErrPolicy) {
+		return &inconclusiveErr{message: "source retirement live-client selectors disagree with the reviewed activation"}
+	}
+	if err != nil {
+		return fmt.Errorf("source retirement live-client authority could not be prepared")
+	}
 	discovery, err := seed.Discover(ctx, meta, prepared.discovery)
 	if err != nil {
 		return fmt.Errorf("source retirement live source discovery failed")
 	}
-	report, operationErr := sourceretire.Build(ctx, sourceretire.BuildOptions{Meta: meta, Discovery: &discovery,
-		Final: final, Activation: activation, ShowAbsolutePaths: prepared.showAbsolute})
+	baseOptions := sourceretire.BuildOptions{Meta: meta, Discovery: &discovery, Final: final, Activation: activation,
+		ShowAbsolutePaths: prepared.showAbsolute}
+	if !sourceRetireNeedsClientSession(meta, discovery, final) {
+		// This conservative read-only preview only decides whether credential I/O
+		// can be avoided. The core repeats every check before issuing a plan.
+		report, operationErr := sourceretire.Build(ctx, baseOptions)
+		return a.finishSourceRetire(prepared, report, operationErr)
+	}
+	credential, err := readDownloaderCredential(a.stdin, prepared.username)
+	if err != nil {
+		return err
+	}
+	session, openErr := prepared.adapter.OpenReadSession(ctx, credential)
+	if openErr != nil {
+		requests, _ := downloader.RequestsMadeFromError(openErr)
+		session = &failedSourceRetireSession{requests: requests}
+	}
+	defer session.Close()
+	baseOptions.ClientUse, baseOptions.ClientSession = currentUse, session
+	report, operationErr := sourceretire.Build(ctx, baseOptions)
+	return a.finishSourceRetire(prepared, report, operationErr)
+}
+
+func sourceRetireNeedsClientSession(meta *metafile.MetaInfo, discovery seed.DiscoveryResult, final *materialize.VerifiedFinal) bool {
+	if meta == nil || final == nil || !final.Verified() || !discovery.Scan.Complete || !discovery.Scan.VerificationComplete ||
+		len(discovery.Scan.StopReasons) != 0 || discovery.SourceOutcome != "verified_unique" ||
+		discovery.Selection.Status != "ready" || discovery.Selection.SelectedID == "" {
+		return false
+	}
+	source, ok := discovery.VerifiedSource(meta)
+	finalRoot, finalOK := final.ProcessFinalPath()
+	if !ok || source == nil || !source.Result().Verified || !finalOK || finalRoot == "" {
+		return false
+	}
+	bindings := source.Bindings()
+	expectedPhysical := 0
+	for _, file := range meta.Files {
+		if file.Length > 0 && !strings.Contains(file.Attribute, "p") {
+			expectedPhysical++
+		}
+	}
+	if expectedPhysical == 0 || len(bindings) != expectedPhysical {
+		return false
+	}
+	seenPaths := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
+		if binding.FileIndex < 0 || binding.FileIndex >= len(meta.Files) || binding.Path == "" || !filepath.IsAbs(binding.Path) {
+			return false
+		}
+		manifestFile := meta.Files[binding.FileIndex]
+		if manifestFile.Length <= 0 || strings.Contains(manifestFile.Attribute, "p") {
+			return false
+		}
+		precondition, preconditionErr := source.SourcePrecondition(binding.FileIndex)
+		cleanSource := filepath.Clean(binding.Path)
+		if preconditionErr != nil || precondition.SizeBytes != manifestFile.Length {
+			return false
+		}
+		if _, duplicate := seenPaths[cleanSource]; duplicate {
+			return false
+		}
+		seenPaths[cleanSource] = struct{}{}
+		finalPath, finalLength, found := final.ProcessFilePath(binding.FileIndex)
+		if !found || finalLength != manifestFile.Length || sourceRetirePathWithin(finalRoot, binding.Path) {
+			return false
+		}
+		sourceInfo, sourceErr := os.Lstat(binding.Path)
+		finalInfo, finalErr := os.Lstat(finalPath)
+		if sourceErr != nil || finalErr != nil || !sourceInfo.Mode().IsRegular() || !finalInfo.Mode().IsRegular() ||
+			os.SameFile(sourceInfo, finalInfo) {
+			return false
+		}
+	}
+	return true
+}
+
+func sourceRetirePathWithin(base, path string) bool {
+	relative, err := filepath.Rel(filepath.Clean(base), filepath.Clean(path))
+	return err == nil && relative != "" && !filepath.IsAbs(relative) &&
+		(relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
+type failedSourceRetireSession struct{ requests int }
+
+func (*failedSourceRetireSession) ReadLedger(context.Context) (downloader.LedgerSnapshot, error) {
+	return downloader.LedgerSnapshot{}, errors.New("downloader read session unavailable")
+}
+func (*failedSourceRetireSession) ReadJobFiles(context.Context, string, downloader.JobFileLedgerLimits) (downloader.JobFileLedgerSnapshot, error) {
+	return downloader.JobFileLedgerSnapshot{}, errors.New("downloader read session unavailable")
+}
+func (session *failedSourceRetireSession) RequestsMade() int { return session.requests }
+func (*failedSourceRetireSession) Close() error              { return nil }
+
+func (a *app) finishSourceRetire(prepared preparedSourceRetire, report sourceretire.Report, operationErr error) error {
 	if err := a.writeSourceRetireReport(prepared.output, report); err != nil {
 		return err
 	}
@@ -302,6 +461,20 @@ func writeSourceRetireHuman(out io.Writer, report sourceretire.Report) error {
 		terminalSafe(report.Activation.OperationID), terminalSafe(report.Activation.PlanID), terminalSafe(report.Activation.TerminalPhase),
 		terminalSafe(report.Activation.TerminalMarkerID), terminalSafe(report.Activation.ObservedAtStart),
 		terminalSafe(report.Activation.ObservedAtEnd), terminalSafe(report.Activation.Assurance))
+	currentUseID := report.Plan.CurrentClientUseID
+	if currentUseID == "" {
+		currentUseID = report.ClientUse.Before.UseID
+	}
+	fmt.Fprintf(w, "\nCURRENT CLIENT USE\nSTATUS\t%s\nREQUESTS MADE\t%d\nSTABLE\t%t\nUSE ID\t%s\nBEFORE JOB\t%s\nBEFORE STATE\t%s\nBEFORE PROGRESS\t%.6f\nBEFORE SNAPSHOT\t%s\nBEFORE INTERVAL\t%s .. %s\nAFTER JOB\t%s\nAFTER STATE\t%s\nAFTER PROGRESS\t%.6f\nAFTER SNAPSHOT\t%s\nAFTER INTERVAL\t%s .. %s\nASSURANCE\t%s\n",
+		terminalSafe(report.ClientUse.Status), report.ClientUse.RequestsMade, report.ClientUse.Stable,
+		terminalSafe(currentUseID), terminalSafe(report.ClientUse.Before.JobID),
+		terminalSafe(report.ClientUse.Before.JobState), report.ClientUse.Before.JobProgress,
+		terminalSafe(report.ClientUse.Before.CompleteFileSnapshotID),
+		terminalSafe(report.ClientUse.Before.ObservedAtStart), terminalSafe(report.ClientUse.Before.ObservedAtEnd),
+		terminalSafe(report.ClientUse.After.JobID), terminalSafe(report.ClientUse.After.JobState), report.ClientUse.After.JobProgress,
+		terminalSafe(report.ClientUse.After.CompleteFileSnapshotID),
+		terminalSafe(report.ClientUse.After.ObservedAtStart), terminalSafe(report.ClientUse.After.ObservedAtEnd),
+		terminalSafe(report.ClientUse.Assurance))
 	if len(report.Plan.SourceFiles) > 0 {
 		fmt.Fprintln(w, "\nSOURCE FILES")
 		fmt.Fprintln(w, "INDEX\tBYTES\tPATH")

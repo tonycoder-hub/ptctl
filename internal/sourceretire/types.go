@@ -64,6 +64,7 @@ type Plan struct {
 	ActivationOperationID  string       `json:"activation_operation_id"`
 	ActivationPlanID       string       `json:"activation_plan_id"`
 	ClientCompletionID     string       `json:"client_completion_id"`
+	CurrentClientUseID     string       `json:"current_client_use_id"`
 	SourceSelectionID      string       `json:"source_selection_id"`
 	TargetRootIdentity     string       `json:"target_root_identity"`
 	FinalObjectIdentity    string       `json:"final_object_identity"`
@@ -80,7 +81,8 @@ func (plan Plan) Validate() error {
 		!canonicalSHA256ID(plan.ID) || !canonicalSHA256ID(plan.MetafileVariantID) ||
 		!canonicalSHA256ID(plan.MaterializeOperationID) || !canonicalPlanID(plan.MaterializePlanID) ||
 		!canonicalSHA256ID(plan.ActivationOperationID) || !canonicalPlanID(plan.ActivationPlanID) ||
-		!canonicalSHA256ID(plan.ClientCompletionID) || !canonicalSHA256ID(plan.SourceSelectionID) ||
+		!canonicalSHA256ID(plan.ClientCompletionID) || !canonicalSHA256ID(plan.CurrentClientUseID) ||
+		!canonicalSHA256ID(plan.SourceSelectionID) ||
 		plan.TargetRootIdentity == "" || plan.FinalObjectIdentity == "" || plan.ManifestFiles <= 0 ||
 		plan.PhysicalSourceFiles <= 0 || plan.PhysicalSourceFiles > plan.ManifestFiles || plan.ContentBytes <= 0 ||
 		len(plan.SourceFiles) != plan.PhysicalSourceFiles {
@@ -152,6 +154,15 @@ type SourceScanReport struct {
 	MatchIssueCount      int                        `json:"match_issue_count"`
 }
 
+type ClientUseReport struct {
+	Status       string                               `json:"status"`
+	RequestsMade int                                  `json:"requests_made"`
+	Stable       bool                                 `json:"stable"`
+	Before       clientactivate.CurrentUseObservation `json:"before"`
+	After        clientactivate.CurrentUseObservation `json:"after"`
+	Assurance    string                               `json:"assurance"`
+}
+
 type Report struct {
 	Outcome           string                               `json:"outcome"`
 	Effect            []string                             `json:"effect"`
@@ -162,6 +173,7 @@ type Report struct {
 	Scan              SourceScanReport                     `json:"source_scan"`
 	Final             materialize.FinalObservation         `json:"materialized_final"`
 	Activation        clientactivate.CompletionObservation `json:"client_completion"`
+	ClientUse         ClientUseReport                      `json:"current_client_use"`
 	Blockers          []Finding                            `json:"blockers"`
 	Issues            []Finding                            `json:"issues"`
 	Warnings          []string                             `json:"warnings"`
@@ -169,22 +181,25 @@ type Report struct {
 
 func newReport() Report {
 	return Report{
-		Outcome:         OutcomeIncomplete,
-		Effect:          []string{"read_source_metadata", "read_source_content", "read_exact_materialized_final", "read_private_client_activation_journal"},
+		Outcome: OutcomeIncomplete,
+		Effect: []string{"read_source_metadata", "read_source_content", "read_exact_materialized_final",
+			"read_private_client_activation_journal"},
 		WritesPerformed: 0, DeletionPerformed: false,
 		Plan: Plan{Schema: PlanSchemaV1, Mode: PlanModeV1, DeletionAuthority: "none",
 			SourceFiles: []SourceFile{}, EvidenceBasis: []string{}},
-		Source:   SourceReport{Status: "not_observed", Assurance: "not_observed"},
-		Scan:     SourceScanReport{StopReasons: []string{}},
-		Blockers: []Finding{}, Issues: []Finding{},
+		Source:    SourceReport{Status: "not_observed", Assurance: "not_observed"},
+		Scan:      SourceScanReport{StopReasons: []string{}},
+		ClientUse: ClientUseReport{Status: "not_observed", Assurance: "not_observed"},
+		Blockers:  []Finding{}, Issues: []Finding{},
 		Warnings: []string{
 			"this report performs zero writes and grants no deletion authority",
 			"only explicit content-bearing regular-file names are candidates; directories, empty files, and padding are not retired",
 			"unselected hardlink or alias names remain untouched; the plan does not claim that underlying storage would be reclaimed",
-			"no live downloader state or location is observed; a future deletion command must freshly prove that the unique exact job still uses the current materialized final",
+			"live downloader state and effective paths are bounded self-reported lexical claims; they do not prove remote filesystem reachability or an open inode",
+			"typed downloader identity does not make the downloader's raw private metafile variant observable",
 			"source, final, and client observations are same-invocation or historical brackets, not one atomic snapshot",
 			"a future deletion command must rebuild the same plan from live proof and require a separate acknowledgement and journal",
-			"path references are stable pseudonyms and may be dictionary-guessable; they are not anonymization",
+			"client, job, layout, mapping, and path references are stable pseudonyms and may be dictionary-guessable; they are not anonymization",
 		},
 	}
 }

@@ -27,6 +27,7 @@ type PreparedAuthority struct {
 	adoption         clientadopt.CompletionObservation
 	projection       materialize.FinalClientProjection
 	clientConfigID   string
+	expectedJobID    string
 	windows          bool
 	fileLimits       downloader.JobFileLedgerLimits
 }
@@ -64,7 +65,8 @@ func PrepareAuthority(final *materialize.VerifiedFinal, adoption *clientadopt.Ve
 	}
 	return &PreparedAuthority{
 		verifiedFinal: final, verifiedAdoption: adoption, final: finalObservation, adoption: adoptionObservation,
-		projection: projection, clientConfigID: options.ClientConfigID, windows: options.ClientWindows, fileLimits: options.FileLimits,
+		projection: projection, clientConfigID: options.ClientConfigID, expectedJobID: adoptionObservation.JobID,
+		windows: options.ClientWindows, fileLimits: options.FileLimits,
 	}, nil
 }
 
