@@ -223,6 +223,34 @@ func (f *FetchedMetafile) MatchesReceipt(receipt MetafileFetchReceipt) bool {
 		int64(len(f.raw)) <= receipt.Limits.MaxResponseBytes
 }
 
+// ValidateMetafileObservation validates the complete public form which may be
+// sealed as a historical site-to-variant observation. It does not grant any
+// authority: persistence writers must still require an ObservedMetafileBinding
+// produced by the same process-local fetched response.
+func ValidateMetafileObservation(observation domain.SiteMetafileObservation) error {
+	if err := validatePublicRef(observation.Ref); err != nil {
+		return err
+	}
+	if err := (MetafileFetchConfig{Origin: observation.Origin, RouteID: observation.RouteID}).Validate(); err != nil {
+		return err
+	}
+	if _, err := parseVariantID(observation.MetafileVariantID); err != nil {
+		return err
+	}
+	if observation.Basis != MetafileObservationExactFetchBasis {
+		return fmt.Errorf("metafile observation basis is invalid")
+	}
+	if observation.ObservedAtStart.IsZero() || observation.ObservedAtEnd.IsZero() ||
+		observation.ObservedAtStart.Location() != time.UTC || observation.ObservedAtEnd.Location() != time.UTC ||
+		observation.ObservedAtEnd.Before(observation.ObservedAtStart) {
+		return fmt.Errorf("metafile observation interval is invalid")
+	}
+	if observation.ResponseBytes <= 0 || observation.ResponseBytes > hardMetafileResponseBytes {
+		return fmt.Errorf("metafile observation byte count is invalid")
+	}
+	return nil
+}
+
 // BindImported proves only an exact whole-response import. An info hash, a
 // declared site reference, or a partial read can never create this binding.
 func (f *FetchedMetafile) BindImported(variantID string, bytesConsumed int64) (*ObservedMetafileBinding, error) {
@@ -236,18 +264,22 @@ func (f *FetchedMetafile) BindImported(variantID string, bytesConsumed int64) (*
 	if err != nil || subtle.ConstantTimeCompare(digest, f.digest[:]) != 1 {
 		return nil, fmt.Errorf("imported metafile variant does not match the fetched response")
 	}
+	observation := domain.SiteMetafileObservation{
+		Ref:               f.ref,
+		Origin:            f.origin,
+		RouteID:           f.routeID,
+		MetafileVariantID: variantID,
+		Basis:             MetafileObservationExactFetchBasis,
+		ObservedAtStart:   f.start,
+		ObservedAtEnd:     f.end,
+		ResponseBytes:     int64(len(f.raw)),
+	}
+	if err := ValidateMetafileObservation(observation); err != nil {
+		return nil, err
+	}
 	return &ObservedMetafileBinding{
-		observation: domain.SiteMetafileObservation{
-			Ref:               f.ref,
-			Origin:            f.origin,
-			RouteID:           f.routeID,
-			MetafileVariantID: variantID,
-			Basis:             MetafileObservationExactFetchBasis,
-			ObservedAtStart:   f.start,
-			ObservedAtEnd:     f.end,
-			ResponseBytes:     int64(len(f.raw)),
-		},
-		authority: f.authority,
+		observation: observation,
+		authority:   f.authority,
 	}, nil
 }
 
@@ -275,6 +307,27 @@ func (binding *ObservedMetafileBinding) Matches(ref domain.TorrentRef, origin, r
 	return binding != nil && binding.authority != nil &&
 		binding.observation.Ref == ref && binding.observation.Origin == origin &&
 		binding.observation.RouteID == routeID && binding.observation.MetafileVariantID == variantID
+}
+
+// MatchesReceipt ties the process-local exact-response authority back to the
+// complete, bounded fetch account which produced it. Persistent binding
+// writers must use this check rather than accepting a serializable
+// SiteMetafileObservation on its own.
+func (binding *ObservedMetafileBinding) MatchesReceipt(receipt MetafileFetchReceipt) bool {
+	if binding == nil || binding.authority == nil ||
+		ValidateMetafileObservation(binding.observation) != nil || receipt.Limits.Validate() != nil {
+		return false
+	}
+	observation := binding.observation
+	return receipt.Effect == MetafileFetchEffect && receipt.Ref == observation.Ref &&
+		receipt.Origin == observation.Origin && receipt.RouteID == observation.RouteID &&
+		receipt.ObservedAtStart.Equal(observation.ObservedAtStart) &&
+		receipt.ObservedAtEnd.Equal(observation.ObservedAtEnd) &&
+		receipt.Complete && receipt.StopReason == "" &&
+		receipt.Used.RequestsAttempted == 1 && receipt.Used.AutomaticRetries == 0 &&
+		receipt.Used.RedirectsFollowed == 0 && receipt.Used.ResponseBytesKnown &&
+		receipt.Used.ResponseBytesRead == observation.ResponseBytes &&
+		observation.ResponseBytes <= receipt.Limits.MaxResponseBytes
 }
 
 func (binding ObservedMetafileBinding) String() string { return "[REDACTED_METAFILE_BINDING]" }

@@ -15,6 +15,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/site"
+	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 )
 
 const (
@@ -24,17 +25,18 @@ const (
 
 type siteMetafileFetchReport struct {
 	kind            string
-	Outcome         string                      `json:"outcome"`
-	Effect          []string                    `json:"effect"`
-	WritesPerformed int                         `json:"writes_performed"`
-	Acknowledgement siteMetafileAcknowledgement `json:"acknowledgement"`
-	Site            siteMetafileSiteSummary     `json:"site"`
-	Binding         siteMetafileBindingSummary  `json:"binding"`
-	Request         siteMetafileRequestSummary  `json:"request"`
-	StoreOperation  metafileStoreReport         `json:"store_operation"`
-	Blockers        []string                    `json:"blockers"`
-	Issues          []string                    `json:"issues"`
-	Warnings        []string                    `json:"warnings"`
+	Outcome         string                        `json:"outcome"`
+	Effect          []string                      `json:"effect"`
+	WritesPerformed int                           `json:"writes_performed"`
+	Acknowledgement siteMetafileAcknowledgement   `json:"acknowledgement"`
+	Site            siteMetafileSiteSummary       `json:"site"`
+	Binding         siteMetafileBindingSummary    `json:"binding"`
+	Persistent      siteMetafilePersistentBinding `json:"persistent_binding"`
+	Request         siteMetafileRequestSummary    `json:"request"`
+	StoreOperation  metafileStoreReport           `json:"store_operation"`
+	Blockers        []string                      `json:"blockers"`
+	Issues          []string                      `json:"issues"`
+	Warnings        []string                      `json:"warnings"`
 }
 
 type siteMetafileAcknowledgement struct {
@@ -54,6 +56,24 @@ type siteMetafileBindingSummary struct {
 	EvidenceBasis []string                        `json:"evidence_basis"`
 	Observation   *domain.SiteMetafileObservation `json:"observation,omitempty"`
 	BlockerCodes  []string                        `json:"blocker_codes"`
+}
+
+type siteMetafilePersistentBinding struct {
+	Outcome         string                                 `json:"outcome"`
+	Effect          string                                 `json:"effect"`
+	Publication     string                                 `json:"publication"`
+	WritesPerformed int                                    `json:"writes_performed"`
+	Record          *metastore.RecordRef                   `json:"record,omitempty"`
+	Assurance       siteMetafilePersistentBindingAssurance `json:"assurance"`
+	BlockerCodes    []string                               `json:"blocker_codes"`
+}
+
+type siteMetafilePersistentBindingAssurance struct {
+	RecordDigestVerified       bool `json:"record_digest_verified"`
+	ReferencedArtifactVerified bool `json:"referenced_artifact_verified"`
+	SameStoreOperationBound    bool `json:"same_store_operation_bound"`
+	AtomicNoClobber            bool `json:"atomic_no_clobber"`
+	DurabilityConfirmed        bool `json:"durability_confirmed"`
 }
 
 type siteMetafileRequestSummary struct {
@@ -231,9 +251,10 @@ func (a *app) siteMetafileFetch(args []string) error {
 		report.Issues = append(report.Issues, blocker)
 	}
 
+	var observed *site.ObservedMetafileBinding
 	if artifactRef.ID != "" && importReceipt.BytesConsumed == int64(len(raw)) {
 		binding, bindErr := fetched.BindImported(artifactRef.MetafileVariantID, importReceipt.BytesConsumed)
-		if bindErr == nil && binding != nil && binding.Matches(ref, config.Origin, config.RouteID, artifactRef.MetafileVariantID) {
+		if bindErr == nil && binding != nil && binding.Matches(ref, config.Origin, config.RouteID, artifactRef.MetafileVariantID) && binding.MatchesReceipt(receipt) {
 			observation := binding.PublicCopy()
 			if observation.Origin != config.Origin || observation.RouteID != config.RouteID || observation.ResponseBytes != receipt.Used.ResponseBytesRead || !observation.ObservedAtStart.Equal(receipt.ObservedAtStart) || !observation.ObservedAtEnd.Equal(receipt.ObservedAtEnd) {
 				report.Outcome = "published_post_commit_failure"
@@ -245,6 +266,7 @@ func (a *app) siteMetafileFetch(args []string) error {
 					EvidenceBasis: []string{"effectful_same_origin_get_for_remote_id", "complete_bounded_response", "whole_response_sha256_equals_metafile_variant_id"},
 					Observation:   &observation, BlockerCodes: []string{},
 				}
+				observed = binding
 			}
 		} else if importErr == nil {
 			report.Outcome = "published_post_commit_failure"
@@ -256,6 +278,40 @@ func (a *app) siteMetafileFetch(args []string) error {
 		report.Outcome = "published_post_commit_failure"
 		report.Blockers = append(report.Blockers, "binding.import_identity_disagrees")
 		mappedErr = fmt.Errorf("site metafile import identity disagrees with the fetched response")
+	}
+	if importErr == nil && mappedErr == nil && observed != nil {
+		repository, repositoryErr := sitebinding.NewRepository(store, sitebinding.DefaultLimits())
+		if repositoryErr != nil {
+			report.Persistent.BlockerCodes = []string{"binding.repository_unavailable"}
+			report.Blockers = append(report.Blockers, "binding.repository_unavailable")
+			mappedErr = fmt.Errorf("site metafile binding repository is unavailable")
+		} else {
+			recordRef, sealReceipt, sealErr := repository.Seal(ctx, observed, receipt, artifactRef)
+			report.Persistent, blocker = siteFetchPersistentBinding(recordRef, sealReceipt, sealErr)
+			report.WritesPerformed += sealReceipt.WritesPerformed
+			if blocker != "" {
+				report.Blockers = append(report.Blockers, blocker)
+				report.Issues = append(report.Issues, blocker)
+			}
+			if sealErr != nil {
+				report.Outcome = report.Persistent.Outcome
+				if errors.Is(sealErr, sitebinding.ErrCorruptBinding) || errors.Is(sealErr, metastore.ErrCorruptArtifact) || errors.Is(sealErr, metastore.ErrCorruptRecord) {
+					mappedErr = &integrityErr{message: "site metafile binding failed record or linked-artifact integrity verification"}
+				} else {
+					mappedErr = fmt.Errorf("site metafile binding publication failed")
+				}
+			} else if report.WritesPerformed > 0 {
+				report.Outcome = "stored"
+			} else {
+				report.Outcome = "already_present"
+			}
+		}
+	} else if importErr == nil && mappedErr == nil {
+		report.Persistent = siteFetchPersistenceNotAttempted(importErr)
+		report.Blockers = append(report.Blockers, "binding.exact_variant_not_established")
+		mappedErr = fmt.Errorf("site metafile binding authority is unavailable")
+	} else {
+		report.Persistent = siteFetchPersistenceNotAttempted(importErr)
 	}
 	if mappedErr != nil {
 		return a.finishSiteMetafileFetch(*output, report, mappedErr)
@@ -269,8 +325,10 @@ func (a *app) siteMetafileFetchHelp() {
 
 This command performs one explicitly acknowledged, effectful torrent-metafile GET
 and imports the exact bounded response into an initialized private metafile store.
-It never follows redirects, retries, prints raw bytes, or writes a site binding
-sidecar. A direct site observation and store durability are reported separately.
+It never follows redirects, retries, or prints raw bytes. After a complete
+private-artifact import, it publishes a sealed historical site-to-variant binding
+record in the same store. The response, artifact, and binding durability remain
+separate evidence axes; the binding is not proof of current site state.
 
 Flags:
   --acknowledge-site-effect  acknowledge that the GET may count as a download
@@ -287,14 +345,18 @@ func newSiteMetafileFetchReport(ref domain.TorrentRef, config site.MetafileFetch
 	storeOperation := failedMetafileStoreReport("metafile.store.import", "write_private_metafile_store", storeLimits, "store.not_attempted", showAbsolute, storeRoot, "")
 	return siteMetafileFetchReport{
 		kind: "site.metafile.fetch", Outcome: "blocked",
-		Effect:          []string{site.MetafileFetchEffect, "write_private_metafile_store"},
+		Effect:          []string{site.MetafileFetchEffect, "write_private_metafile_store", "write_private_site_metafile_binding"},
 		Acknowledgement: siteMetafileAcknowledgement{Provided: true, Scope: "one_remote_metafile_get"},
 		Site:            siteMetafileSiteSummary{Ref: ref, ExpectedOrigin: config.Origin, ExpectedRoute: config.RouteID},
 		Binding:         siteMetafileBindingSummary{Status: "declared_unbound", EvidenceLevel: "declared", EvidenceBasis: []string{"user_supplied_site_reference"}, BlockerCodes: []string{"binding.exact_variant_not_established"}},
-		Request:         siteMetafileRequestSummary{Status: "not_started", Receipt: site.MetafileFetchReceipt{Effect: site.MetafileFetchEffect, Ref: ref, Origin: config.Origin, RouteID: config.RouteID, Limits: fetchLimits}},
-		StoreOperation:  storeOperation,
-		Blockers:        []string{}, Issues: []string{},
-		Warnings: []string{"the site observation is a direct non-atomic HTTPS observation, not a site signature", "no persistent site-to-variant binding is written", "the private metafile store is permission-isolated, not encrypted"},
+		Persistent: siteMetafilePersistentBinding{
+			Outcome: "blocked", Effect: "write_private_site_metafile_binding", Publication: "not_attempted",
+			BlockerCodes: []string{"binding.persistence_not_attempted"},
+		},
+		Request:        siteMetafileRequestSummary{Status: "not_started", Receipt: site.MetafileFetchReceipt{Effect: site.MetafileFetchEffect, Ref: ref, Origin: config.Origin, RouteID: config.RouteID, Limits: fetchLimits}},
+		StoreOperation: storeOperation,
+		Blockers:       []string{}, Issues: []string{},
+		Warnings: []string{"the site observation is a direct non-atomic HTTPS observation, not a site signature or proof of current site state", "the private metafile store is permission-isolated, not encrypted"},
 	}
 }
 
@@ -348,6 +410,61 @@ func siteFetchStoreOperation(store *metastore.Store, meta *metafile.MetaInfo, re
 		return report, outcome, code, &integrityErr{message: "metafile fetch import failed strict validation or found a corrupt stored artifact"}
 	}
 	return report, outcome, code, importErr
+}
+
+func siteFetchPersistentBinding(record metastore.RecordRef, receipt sitebinding.SealReceipt, sealErr error) (siteMetafilePersistentBinding, string) {
+	result := siteMetafilePersistentBinding{
+		Outcome: "blocked", Effect: "write_private_site_metafile_binding", Publication: "not_published",
+		WritesPerformed: receipt.WritesPerformed, BlockerCodes: []string{},
+	}
+	if record.ID != "" {
+		copyOfRecord := record
+		result.Record = &copyOfRecord
+	}
+	if sealErr == nil {
+		result.Outcome = "stored"
+		result.Publication = "published"
+		if receipt.AlreadyPresent {
+			result.Outcome = "already_present"
+			result.Publication = "already_present"
+		}
+		result.Assurance.RecordDigestVerified = true
+		result.Assurance.ReferencedArtifactVerified = true
+		result.Assurance.SameStoreOperationBound = true
+		result.Assurance.AtomicNoClobber = receipt.WritesPerformed == 1
+		result.Assurance.DurabilityConfirmed = receipt.WritesPerformed == 1
+		return result, ""
+	}
+	code := "binding.persistence_failed"
+	switch {
+	case errors.Is(sealErr, metastore.ErrDurabilityUnconfirmed):
+		result.Outcome = "published_durability_unconfirmed"
+		result.Publication = "published_durability_unconfirmed"
+		code = "binding.durability_unconfirmed"
+	case errors.Is(sealErr, sitebinding.ErrCorruptBinding), errors.Is(sealErr, metastore.ErrCorruptArtifact), errors.Is(sealErr, metastore.ErrCorruptRecord):
+		result.Outcome = "integrity_failed"
+		if receipt.WritesPerformed > 0 {
+			result.Publication = "published_post_commit_failure"
+		}
+		code = "binding.integrity_failed"
+	case receipt.WritesPerformed > 0:
+		result.Outcome = "published_post_commit_failure"
+		result.Publication = "published_post_commit_failure"
+		code = "binding.post_commit_failure"
+	}
+	result.BlockerCodes = append(result.BlockerCodes, code)
+	return result, code
+}
+
+func siteFetchPersistenceNotAttempted(importErr error) siteMetafilePersistentBinding {
+	code := "binding.persistence_not_attempted"
+	if importErr != nil {
+		code = "binding.artifact_not_durably_imported"
+	}
+	return siteMetafilePersistentBinding{
+		Outcome: "blocked", Effect: "write_private_site_metafile_binding", Publication: "not_attempted",
+		BlockerCodes: []string{code},
+	}
 }
 
 func readFetchedMetafile(fetched *site.FetchedMetafile, maxBytes int64) ([]byte, error) {
@@ -511,6 +628,19 @@ func writeSiteMetafileFetchHuman(out io.Writer, report siteMetafileFetchReport) 
 	}
 	if report.Binding.Observation != nil {
 		fmt.Fprintf(w, "OBSERVED VARIANT\t%s\nOBSERVED ORIGIN\t%s\nADAPTER ROUTE\t%s\n", terminalSafe(report.Binding.Observation.MetafileVariantID), terminalSafe(report.Binding.Observation.Origin), terminalSafe(report.Binding.Observation.RouteID))
+	}
+	persistent := report.Persistent
+	recordID := "-"
+	if persistent.Record != nil {
+		recordID = persistent.Record.ID.String()
+	}
+	fmt.Fprintf(w, "\nPERSISTENT BINDING\nOUTCOME\t%s\nPUBLICATION\t%s\nWRITES\t%d\nRECORD ID\t%s\nRECORD DIGEST VERIFIED\t%t\nREFERENCED ARTIFACT VERIFIED\t%t\nSAME STORE OPERATION BOUND\t%t\nATOMIC NO-CLOBBER\t%t\nDURABILITY CONFIRMED\t%t\n",
+		terminalSafe(persistent.Outcome), terminalSafe(persistent.Publication), persistent.WritesPerformed, terminalSafe(recordID),
+		persistent.Assurance.RecordDigestVerified, persistent.Assurance.ReferencedArtifactVerified,
+		persistent.Assurance.SameStoreOperationBound, persistent.Assurance.AtomicNoClobber,
+		persistent.Assurance.DurabilityConfirmed)
+	if len(persistent.BlockerCodes) > 0 {
+		fmt.Fprintf(w, "BINDING BLOCKERS\t%s\n", terminalSafe(strings.Join(persistent.BlockerCodes, ",")))
 	}
 	store := report.StoreOperation
 	fmt.Fprintf(w, "\nSTORE OUTCOME\t%s\nSTORE EFFECT\t%s\nSTORE WRITES\t%d\nPUBLICATION ASSURANCE\t%s\nDIGEST VERIFIED\t%t\nSTRICTLY PARSED\t%t\nATOMIC NO-CLOBBER\t%t\nDURABILITY CONFIRMED\t%t\nPRIVACY ENFORCED\t%t\nENCRYPTION\t%s\n", terminalSafe(store.Outcome), terminalSafe(store.Effect), store.WritesPerformed, terminalSafe(store.Assurance.Publication), store.Assurance.DigestVerified, store.Assurance.StrictlyParsed, store.Assurance.AtomicNoClobber, store.Assurance.DurabilityConfirmed, store.Assurance.PrivacyEnforced, terminalSafe(store.Assurance.Encryption))

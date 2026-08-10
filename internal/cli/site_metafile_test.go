@@ -16,6 +16,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/site"
+	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 )
 
 type fakeMetafileFetchAdapter struct {
@@ -141,6 +142,18 @@ func TestSiteMetafileFetchStoresExactVariantAndHidesSecrets(t *testing.T) {
 					MetafileVariantID string `json:"metafile_variant_id"`
 				} `json:"observation"`
 			} `json:"binding"`
+			Persistent struct {
+				Outcome         string `json:"outcome"`
+				WritesPerformed int    `json:"writes_performed"`
+				Record          struct {
+					ID string `json:"record_id"`
+				} `json:"record"`
+				Assurance struct {
+					RecordVerified   bool `json:"record_digest_verified"`
+					ArtifactVerified bool `json:"referenced_artifact_verified"`
+					SameStore        bool `json:"same_store_operation_bound"`
+				} `json:"assurance"`
+			} `json:"persistent_binding"`
 			Request struct {
 				RequestsMade int `json:"requests_made"`
 				Retries      int `json:"retries"`
@@ -154,7 +167,7 @@ func TestSiteMetafileFetchStoresExactVariantAndHidesSecrets(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Kind != "site.metafile.fetch" || envelope.Data.Outcome != "stored" || envelope.Data.WritesPerformed != 1 || envelope.Data.Binding.Status != "observed_exact_variant" || envelope.Data.Binding.Observation.Origin != "https://fake.invalid" || envelope.Data.Binding.Observation.RouteID != "fake.download_by_id.v1" || !strings.HasPrefix(envelope.Data.Binding.Observation.MetafileVariantID, "sha256:") || envelope.Data.Request.RequestsMade != 1 || envelope.Data.Request.Retries != 0 || envelope.Data.Request.Redirects != 0 {
+	if envelope.Kind != "site.metafile.fetch" || envelope.Data.Outcome != "stored" || envelope.Data.WritesPerformed != 2 || envelope.Data.Binding.Status != "observed_exact_variant" || envelope.Data.Binding.Observation.Origin != "https://fake.invalid" || envelope.Data.Binding.Observation.RouteID != "fake.download_by_id.v1" || !strings.HasPrefix(envelope.Data.Binding.Observation.MetafileVariantID, "sha256:") || envelope.Data.Request.RequestsMade != 1 || envelope.Data.Request.Retries != 0 || envelope.Data.Request.Redirects != 0 || envelope.Data.Persistent.Outcome != "stored" || envelope.Data.Persistent.WritesPerformed != 1 || !strings.HasPrefix(envelope.Data.Persistent.Record.ID, "sha256:") || !envelope.Data.Persistent.Assurance.RecordVerified || !envelope.Data.Persistent.Assurance.ArtifactVerified || !envelope.Data.Persistent.Assurance.SameStore {
 		t.Fatalf("unexpected report: %s", out.String())
 	}
 	assertJSONArray(t, "fetch blockers", envelope.Data.Blockers)
@@ -174,13 +187,18 @@ func TestSiteMetafileFetchStoresExactVariantAndHidesSecrets(t *testing.T) {
 			Binding         struct {
 				Status string `json:"status"`
 			} `json:"binding"`
+			Persistent struct {
+				Record struct {
+					ID string `json:"record_id"`
+				} `json:"record"`
+			} `json:"persistent_binding"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &repeated); err != nil {
 		t.Fatal(err)
 	}
-	if repeated.Data.Outcome != "already_present" || repeated.Data.WritesPerformed != 0 || repeated.Data.Binding.Status != "observed_exact_variant" {
-		t.Fatalf("unexpected idempotent report: %s", out.String())
+	if repeated.Data.Outcome != "stored" || repeated.Data.WritesPerformed != 1 || repeated.Data.Binding.Status != "observed_exact_variant" || repeated.Data.Persistent.Record.ID == envelope.Data.Persistent.Record.ID {
+		t.Fatalf("a new historical observation was not sealed separately: %s", out.String())
 	}
 }
 
@@ -199,6 +217,75 @@ func TestSiteMetafileFetchRejectsNonPrivateResponseBeforeStoreWrite(t *testing.T
 	}
 	if !strings.Contains(out.String(), `"outcome": "integrity_failed"`) || !strings.Contains(out.String(), "artifact.not_private") || !strings.Contains(out.String(), `"writes_performed": 0`) || strings.Contains(out.String(), "observed_exact_variant") {
 		t.Fatalf("unsafe non-private report: %s", out.String())
+	}
+	store, err := metastore.Open(storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.ListRecords(context.Background(), metastore.RecordKindSiteMetafileBindingV1, metastore.DefaultRecordLimits())
+	if err != nil || len(listed.Records) != 0 {
+		t.Fatalf("invalid response left a persistent site binding: records=%v err=%v", listed.Records, err)
+	}
+}
+
+func TestPersistentSiteBindingAssuranceIsOperationScoped(t *testing.T) {
+	record := metastore.RecordRef{Kind: metastore.RecordKindSiteMetafileBindingV1, ID: metastore.RecordID("sha256:" + strings.Repeat("1", 64)), SizeBytes: 10}
+	already, blocker := siteFetchPersistentBinding(record, sitebinding.SealReceipt{AlreadyPresent: true, Record: record}, nil)
+	if blocker != "" || already.Outcome != "already_present" || !already.Assurance.RecordDigestVerified || !already.Assurance.ReferencedArtifactVerified || !already.Assurance.SameStoreOperationBound || already.Assurance.AtomicNoClobber || already.Assurance.DurabilityConfirmed {
+		t.Fatalf("historical publication was overstated: %#v blocker=%q", already, blocker)
+	}
+	unconfirmed, blocker := siteFetchPersistentBinding(record, sitebinding.SealReceipt{WritesPerformed: 1, Record: record}, metastore.ErrDurabilityUnconfirmed)
+	if blocker != "binding.durability_unconfirmed" || unconfirmed.Outcome != "published_durability_unconfirmed" || unconfirmed.Assurance.RecordDigestVerified || unconfirmed.Assurance.ReferencedArtifactVerified || unconfirmed.Assurance.DurabilityConfirmed {
+		t.Fatalf("unconfirmed publication was overstated: %#v blocker=%q", unconfirmed, blocker)
+	}
+}
+
+func TestSiteMetafileFetchPostImportIdentityFailuresDoNotContradictPersistenceJSON(t *testing.T) {
+	config, err := site.NewMetafileFetchConfig("https://fake.invalid", "fake.download_by_id.v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cause := range []string{"binding.exact_variant_not_established", "binding.import_identity_disagrees"} {
+		t.Run(cause, func(t *testing.T) {
+			report := newSiteMetafileFetchReport(
+				domain.TorrentRef{SiteID: "fakept", RemoteID: "42"}, config,
+				site.DefaultMetafileFetchLimits(), metastore.DefaultLimits(), false, "PRIVATE-STORE-PATH-CANARY",
+			)
+			report.Outcome = "published_post_commit_failure"
+			report.WritesPerformed = 1
+			report.Blockers = []string{cause}
+			report.StoreOperation.Outcome = "stored"
+			report.StoreOperation.WritesPerformed = 1
+			report.StoreOperation.Assurance.DurabilityConfirmed = true
+			report.Persistent = siteFetchPersistenceNotAttempted(nil)
+
+			var out bytes.Buffer
+			a := &app{stdout: &out}
+			if err := a.writeSiteMetafileFetchReport("json", report); err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Data struct {
+					Blockers   []string `json:"blockers"`
+					Persistent struct {
+						Outcome      string   `json:"outcome"`
+						Publication  string   `json:"publication"`
+						BlockerCodes []string `json:"blocker_codes"`
+					} `json:"persistent_binding"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if len(envelope.Data.Blockers) != 1 || envelope.Data.Blockers[0] != cause ||
+				envelope.Data.Persistent.Outcome != "blocked" || envelope.Data.Persistent.Publication != "not_attempted" ||
+				len(envelope.Data.Persistent.BlockerCodes) != 1 || envelope.Data.Persistent.BlockerCodes[0] != "binding.persistence_not_attempted" {
+				t.Fatalf("post-import failure was reported inconsistently: %s", out.String())
+			}
+			if strings.Contains(out.String(), "binding.artifact_not_durably_imported") {
+				t.Fatalf("successful artifact import was contradicted: %s", out.String())
+			}
+		})
 	}
 }
 
@@ -263,7 +350,7 @@ func TestSiteMetafileFetchHumanReportOrdersBlockersBeforeEvidence(t *testing.T) 
 	blockers := strings.Index(text, "BLOCKERS")
 	siteSection := strings.Index(text, "REMOTE ID")
 	storeSection := strings.Index(text, "STORE OUTCOME")
-	if blockers < 0 || siteSection < blockers || storeSection < siteSection || !strings.Contains(text, "OBSERVED VARIANT") || !strings.Contains(text, "AUTOMATIC RETRIES") {
+	if blockers < 0 || siteSection < blockers || storeSection < siteSection || !strings.Contains(text, "OBSERVED VARIANT") || !strings.Contains(text, "AUTOMATIC RETRIES") || !strings.Contains(text, "PERSISTENT BINDING") || !strings.Contains(text, "RECORD ID") {
 		t.Fatalf("unclear human report: %s", text)
 	}
 	for _, secret := range []string{storeRoot, name, passkey, cookie} {

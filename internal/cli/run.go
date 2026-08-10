@@ -23,6 +23,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/site"
 	"github.com/tonycoder-hub/ptctl/internal/site/tjupt"
+	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
@@ -286,6 +287,7 @@ func (a *app) reconcileReport(args []string) error {
 	clientRoot := fs.String("client-root", "", "optional downloader namespace root paired with --host-root")
 	clientStyle := fs.String("client-style", "posix", "downloader path style: posix or windows; requires host/client roots")
 	siteRefValue := fs.String("site-ref", "", "optional user-declared SITE/REMOTE_ID reference")
+	siteBindingRecordValue := fs.String("site-binding-record", "", "explicit sealed site-binding record ID; requires the stored metafile selector")
 	showAbsolute := fs.Bool("show-absolute-paths", false, "include absolute host and downloader paths in output")
 	allowNetwork := fs.Bool("allow-network", false, "allow explicit network/UNC search roots")
 	timeout := fs.Duration("timeout", time.Hour, "shared downloader, scan, and verification wall-clock budget")
@@ -350,6 +352,17 @@ func (a *app) reconcileReport(args []string) error {
 	input, err := flaggedMetafileInput("reconcile report", *torrentPath, *storeRoot, *variantID, explicit["torrent"], explicit["metafile-store"], explicit["metafile-variant"])
 	if err != nil {
 		return err
+	}
+	var siteBindingRecordID metastore.RecordID
+	if explicit["site-binding-record"] {
+		if input.storeRoot == "" {
+			return usageError("--site-binding-record requires --metafile-store and --metafile-variant")
+		}
+		parsedRecordID, parseErr := metastore.ParseRecordID(*siteBindingRecordValue)
+		if parseErr != nil {
+			return usageError("--site-binding-record requires a canonical sealed record ID")
+		}
+		siteBindingRecordID = parsedRecordID
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
@@ -482,8 +495,41 @@ func (a *app) reconcileReport(args []string) error {
 		indexedProfile = profileSelection.Profile
 		indexedDescriptorID = snapshotSelection.DescriptorRecordID
 	}
+	siteSelection := reconcile.SiteBindingSelection{Requested: explicit["site-binding-record"], RecordID: siteBindingRecordID}
+	siteBindingGateFailed := false
+	siteBindingIntegrityFailed := false
+	if siteSelection.Requested {
+		bindingStore, openErr := metastore.Open(input.storeRoot)
+		if openErr != nil {
+			siteSelection.StopReason = "site_binding_load_failed"
+			siteBindingGateFailed = true
+		} else {
+			bindingRepository, repositoryErr := sitebinding.NewRepository(bindingStore, sitebinding.DefaultLimits())
+			if repositoryErr != nil {
+				siteSelection.StopReason = "site_binding_load_failed"
+				siteBindingGateFailed = true
+			} else {
+				verifiedBinding, _, loadErr := bindingRepository.Load(ctx, siteBindingRecordID)
+				if loadErr != nil {
+					siteSelection.StopReason = siteBindingLoadStopReason(loadErr)
+					siteBindingGateFailed = true
+					siteBindingIntegrityFailed = siteSelection.StopReason == "site_binding_integrity_failed"
+				} else if adapterErr := validateSiteBindingAdapter(a.registry, verifiedBinding); adapterErr != nil {
+					siteSelection.StopReason = "site_binding_adapter_mismatch"
+					siteBindingGateFailed = true
+				} else {
+					siteSelection.Verified = verifiedBinding
+					public := verifiedBinding.PublicCopy()
+					boundRef := domain.TorrentRef{SiteID: public.Record.SiteID, RemoteID: public.Record.RemoteID}
+					if public.Record.MetafileVariantID != meta.MetafileVariantID || siteRef != nil && *siteRef != boundRef {
+						siteBindingGateFailed = true
+					}
+				}
+			}
+		}
+	}
 	var clientCredential downloader.Credential
-	if clientRequested {
+	if clientRequested && !siteBindingGateFailed {
 		clientCredential, err = readDownloaderCredential(a.stdin, *username)
 		if err != nil {
 			return err
@@ -495,10 +541,13 @@ func (a *app) reconcileReport(args []string) error {
 		FileLayoutMode: *clientFileLayout,
 		FileLimits:     clientFileLimits,
 	}
+	if clientRequested && siteBindingGateFailed {
+		bracket.StopReason = "client_snapshot_incomplete"
+	}
 	var session downloader.LedgerSession
 	var fileJobKey string
 	fileBeforeComplete := false
-	if clientRequested {
+	if clientRequested && !siteBindingGateFailed {
 		session, err = clientAdapter.OpenReadSession(ctx, clientCredential)
 		if err != nil {
 			session = nil
@@ -608,6 +657,7 @@ func (a *app) reconcileReport(args []string) error {
 		VerifiedSource:    verifiedSource,
 		Client:            bracket,
 		SiteRef:           siteRef,
+		SiteBinding:       siteSelection,
 		PathMapping:       reportMapping,
 		ShowAbsolutePaths: *showAbsolute,
 	})
@@ -621,6 +671,9 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if siteBindingIntegrityFailed {
+		return &integrityErr{message: "the explicit site binding record or linked metafile artifact failed integrity verification"}
 	}
 	if *requireReconciled && report.Outcome != "consistent" {
 		return &inconclusiveErr{message: "reconciliation outcome is not consistent"}
@@ -648,6 +701,52 @@ func parseSiteRef(value string) (*domain.TorrentRef, error) {
 		}
 	}
 	return &domain.TorrentRef{SiteID: siteID, RemoteID: remoteID}, nil
+}
+
+func siteBindingLoadStopReason(err error) string {
+	switch {
+	case errors.Is(err, sitebinding.ErrCorruptBinding), errors.Is(err, sitebinding.ErrInvalidBinding),
+		errors.Is(err, metastore.ErrCorruptArtifact), errors.Is(err, metastore.ErrCorruptRecord),
+		errors.Is(err, metastore.ErrRecordConsumerIncomplete):
+		return "site_binding_integrity_failed"
+	default:
+		return "site_binding_load_failed"
+	}
+}
+
+func validateSiteBindingAdapter(registry *site.Registry, binding *sitebinding.VerifiedSiteBinding) error {
+	if registry == nil || binding == nil || !binding.Verified() {
+		return fmt.Errorf("site binding adapter proof is unavailable")
+	}
+	public := binding.PublicCopy()
+	if err := public.Record.Validate(); err != nil {
+		return fmt.Errorf("site binding record is invalid")
+	}
+	ref := domain.TorrentRef{SiteID: public.Record.SiteID, RemoteID: public.Record.RemoteID}
+	adapter, ok := registry.Get(ref.SiteID)
+	if !ok {
+		return fmt.Errorf("site binding adapter is unavailable")
+	}
+	descriptor := adapter.Descriptor()
+	if descriptor.ID != ref.SiteID || !descriptor.Supports(domain.CapabilityMetafile) {
+		return fmt.Errorf("site binding adapter capability is unavailable")
+	}
+	fetcher, ok := adapter.(site.MetafileFetcher)
+	if !ok {
+		return fmt.Errorf("site binding adapter port is unavailable")
+	}
+	config, err := fetcher.MetafileFetchConfig()
+	if err != nil || config.Validate() != nil || config.Origin != public.Record.Origin || config.RouteID != public.Record.RouteID {
+		return fmt.Errorf("site binding adapter provenance does not match")
+	}
+	descriptorOrigin, err := canonicalSiteDescriptorOrigin(descriptor.BaseURL)
+	if err != nil || descriptorOrigin != config.Origin {
+		return fmt.Errorf("site binding adapter origin is unsafe")
+	}
+	if err := fetcher.ValidateMetafileRef(ref); err != nil {
+		return fmt.Errorf("site binding remote reference is not canonical")
+	}
+	return nil
 }
 
 func reconciliationClientStopReason(ctx context.Context, err error, fallback string) string {
@@ -1495,6 +1594,31 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 	fmt.Fprintln(w, "METAFILE VARIANT NOTE\tdownloader APIs do not expose the private raw metafile variant; infohash linkage cannot prove variant equality")
 	fmt.Fprintln(w, "PATH NOTE\thost/client namespace projection and content-path comparison are lexical only")
 
+	siteLedger := report.Ledgers.Site
+	bindingRecordID := siteLedger.BindingRecordID
+	if bindingRecordID == "" {
+		bindingRecordID = "-"
+	}
+	boundRef := "-"
+	if siteLedger.Ref != nil {
+		boundRef = siteLedger.Ref.SiteID + "/" + siteLedger.Ref.RemoteID
+	}
+	observedStart, observedEnd := "-", "-"
+	if siteLedger.ObservedAtStart != nil {
+		observedStart = siteLedger.ObservedAtStart.Format(time.RFC3339Nano)
+	}
+	if siteLedger.ObservedAtEnd != nil {
+		observedEnd = siteLedger.ObservedAtEnd.Format(time.RFC3339Nano)
+	}
+	fmt.Fprintf(w, "\nSITE BINDING\nREQUESTED\t%t\nSELECTOR\t%s\nSTATUS\t%s\nRECORD ID\t%s\nSITE REF\t%s\nPROCESS-LOCAL PROOF\t%t\nHISTORICAL\t%t\nORIGIN\t%s\nROUTE\t%s\nOBSERVED START\t%s\nOBSERVED END\t%s\n",
+		report.Scope.SiteBindingRequested, terminalSafe(report.Scope.SiteBindingSelector), terminalSafe(siteLedger.Status),
+		terminalSafe(bindingRecordID), terminalSafe(boundRef), siteLedger.ProcessLocalProof, siteLedger.Historical,
+		terminalSafe(valueOrUnknown(siteLedger.Origin)), terminalSafe(valueOrUnknown(siteLedger.RouteID)),
+		terminalSafe(observedStart), terminalSafe(observedEnd))
+	if siteLedger.StopReason != "" {
+		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(siteLedger.StopReason))
+	}
+
 	siteID := "-"
 	if report.Ledgers.Site.Ref != nil {
 		siteID = report.Ledgers.Site.Ref.SiteID + "/" + report.Ledgers.Site.Ref.RemoteID
@@ -1508,7 +1632,15 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		downloaderID = "-"
 	}
 	fmt.Fprintln(w, "\nLEDGERS\nLEDGER\tSTATUS\tID\tSUMMARY")
-	fmt.Fprintf(w, "site\t%s\t%s\tuser declaration is not a live site binding\n", terminalSafe(report.Ledgers.Site.Status), terminalSafe(siteID))
+	siteSummary := "not requested"
+	if report.Ledgers.Site.Status == "declared_unbound" {
+		siteSummary = "user declaration only"
+	} else if report.Ledgers.Site.ProcessLocalProof {
+		siteSummary = "sealed historical exact-response observation; current site mapping unobservable"
+	} else if report.Scope.SiteBindingRequested {
+		siteSummary = "explicit binding could not be verified"
+	}
+	fmt.Fprintf(w, "site\t%s\t%s\t%s\n", terminalSafe(report.Ledgers.Site.Status), terminalSafe(siteID), terminalSafe(siteSummary))
 	fmt.Fprintf(w, "metafile\t%s\t%s\t%s; %s\n", terminalSafe(report.Ledgers.Metafile.Status), terminalSafe(shortID(report.Ledgers.Metafile.VariantID)), terminalSafe(report.Ledgers.Metafile.Version), humanBytes(report.Ledgers.Metafile.PhysicalBytes))
 	fmt.Fprintf(w, "storage\t%s\t%s\tprocess-local proof=%t\n", terminalSafe(report.Ledgers.Storage.Status), terminalSafe(shortID(storageID)), report.Ledgers.Storage.ProcessLocalProof)
 	fmt.Fprintf(w, "downloader\t%s\t%s\trequests=%d; jobs=%d/%d\n", terminalSafe(report.Ledgers.Downloader.Status), terminalSafe(downloaderID), report.Ledgers.Downloader.RequestsMade, report.Ledgers.Downloader.JobsExaminedBefore, report.Ledgers.Downloader.JobsExaminedAfter)

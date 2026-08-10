@@ -16,7 +16,10 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
+	"github.com/tonycoder-hub/ptctl/internal/site"
+	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
@@ -79,6 +82,106 @@ func TestSerializedDiscoveryCannotBecomeProcessLocalProof(t *testing.T) {
 	}
 	if report.Outcome != "incomplete" || relationStatus(report, "storage_content_proof") != "incomplete" || report.Ledgers.Storage.ProcessLocalProof {
 		t.Fatalf("replayed report was accepted as proof: %#v", report)
+	}
+}
+
+func TestExplicitSealedSiteBindingAddsHistoricalAxisWithoutUpgradingLocalProof(t *testing.T) {
+	meta, discovery, source, root := reconciledSingleFile(t)
+	recordID, ref, verified := sealedSiteBindingForMeta(t, meta)
+	job := matchingJob(meta, "/downloads/renamed.bin")
+	before, after := ledgerPair(job)
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		Client:      ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3},
+		SiteRef:     &ref,
+		SiteBinding: SiteBindingSelection{Requested: true, RecordID: recordID, Verified: verified},
+		PathMapping: testPathMapping(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "consistent" || relationStatus(report, "site_metafile") != "historical_observed_exact_variant" ||
+		!report.Ledgers.Site.ProcessLocalProof || !report.Ledgers.Site.Historical ||
+		report.Ledgers.Site.BindingRecordID != recordID.String() || !report.Scope.SiteBindingRequested ||
+		report.Scope.SiteBindingSelector != "explicit_record" || !strings.Contains(report.Assurance, "sealed_historical_site_observation") {
+		t.Fatalf("historical site proof was not represented safely: %#v", report)
+	}
+
+	encoded, err := json.Marshal(verified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replay sitebinding.VerifiedSiteBinding
+	if err := json.Unmarshal(encoded, &replay); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		SiteBinding: SiteBindingSelection{Requested: true, RecordID: recordID, Verified: &replay},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Outcome != "incomplete" || relationStatus(replayed, "site_metafile") != "incomplete" || replayed.Ledgers.Site.ProcessLocalProof {
+		t.Fatalf("serialized site binding regained authority: %#v", replayed)
+	}
+
+	localOnly, err := Build(BuildInput{
+		Meta: meta, Discovery: seed.DiscoveryResult{SourceOutcome: "incomplete"},
+		SiteBinding: SiteBindingSelection{Requested: true, RecordID: recordID, Verified: verified},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localOnly.Outcome != "incomplete" || relationStatus(localOnly, "site_metafile") != "historical_observed_exact_variant" {
+		t.Fatalf("site proof improperly upgraded missing storage proof: %#v", localOnly)
+	}
+}
+
+func TestExplicitSiteBindingMismatchAndIntegrityGateOverallOutcome(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	recordID, ref, verified := sealedSiteBindingForMeta(t, meta)
+	other := ref
+	other.RemoteID = "124"
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source, SiteRef: &other,
+		SiteBinding: SiteBindingSelection{Requested: true, RecordID: recordID, Verified: verified},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "conflict" || relationStatus(report, "site_metafile") != "selected_binding_mismatch" {
+		t.Fatalf("explicit ref mismatch was not a conflict: %#v", report)
+	}
+	report, err = Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		SiteBinding: SiteBindingSelection{Requested: true, RecordID: recordID, StopReason: "site_binding_integrity_failed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "integrity_failed" || relationStatus(report, "site_metafile") != "integrity_failed" {
+		t.Fatalf("binding corruption did not gate the report: %#v", report)
+	}
+}
+
+func TestOverallConflictOutranksAmbiguityAcrossAxes(t *testing.T) {
+	tests := []struct {
+		name          string
+		storageStatus string
+		clientStatus  string
+		pathStatus    string
+	}{
+		{name: "client identity conflict with ambiguous storage", storageStatus: "verified_ambiguous", clientStatus: "conflict", pathStatus: "not_comparable"},
+		{name: "client size conflict with ambiguous client identity", storageStatus: "verified_unique", clientStatus: "ambiguous", pathStatus: "client_size_conflict"},
+		{name: "client file layout conflict with ambiguous storage", storageStatus: "verified_ambiguous", clientStatus: "exact_unique", pathStatus: "client_file_layout_conflict"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := overallOutcome("not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true); got != "conflict" {
+				t.Fatalf("positive contradiction was hidden by ambiguity: got %q", got)
+			}
+		})
 	}
 }
 
@@ -502,6 +605,63 @@ func reconciledSingleFile(t *testing.T) (*metafile.MetaInfo, seed.DiscoveryResul
 		t.Fatalf("discovery did not retain process-local proof: %#v", discovery)
 	}
 	return meta, discovery, source, root
+}
+
+func sealedSiteBindingForMeta(t *testing.T, meta *metafile.MetaInfo) (metastore.RecordID, domain.TorrentRef, *sitebinding.VerifiedSiteBinding) {
+	t.Helper()
+	content := []byte("payload")
+	piece := sha1.Sum(content)
+	raw := testBencode(map[string]any{
+		"announce": "https://tracker.invalid/announce?passkey=CANARY-TRACKER-PASSKEY",
+		"info":     map[string]any{"length": int64(len(content)), "name": "source.bin", "piece length": int64(len(content)), "pieces": piece[:], "private": int64(1)},
+	})
+	parsed, err := metafile.Parse(raw)
+	if err != nil || parsed.MetafileVariantID != meta.MetafileVariantID {
+		t.Fatalf("site binding fixture does not match metafile: parsed=%v err=%v", parsed, err)
+	}
+	physical, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeRoot := filepath.Join(physical, "binding-store")
+	store, _, err := metastore.Init(storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, artifact, imported, err := store.Import(context.Background(), bytes.NewReader(raw), metastore.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := domain.TorrentRef{SiteID: "tjupt", RemoteID: "123"}
+	start := time.Date(2026, 8, 10, 5, 6, 7, 0, time.UTC)
+	end := start.Add(time.Second)
+	fetched, err := site.NewFetchedMetafile(ref, "https://www.tjupt.org", "tjupt.download_by_id.v1", start, end, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := site.DefaultMetafileFetchLimits()
+	fetch := site.MetafileFetchReceipt{
+		Effect: site.MetafileFetchEffect, Ref: ref, Origin: "https://www.tjupt.org", RouteID: "tjupt.download_by_id.v1",
+		ObservedAtStart: start, ObservedAtEnd: end, Complete: true, Limits: limits,
+		Used: site.MetafileFetchUsage{RequestsAttempted: 1, ResponseBytesRead: int64(len(raw)), ResponseBytesKnown: true},
+	}
+	observed, err := fetched.BindImported(artifact.MetafileVariantID, imported.BytesConsumed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := sitebinding.NewRepository(store, sitebinding.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := repository.Seal(context.Background(), observed, fetch, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, _, err := repository.Load(context.Background(), record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record.ID, ref, verified
 }
 
 func testPathMapping(root string) *PathMappingOptions {

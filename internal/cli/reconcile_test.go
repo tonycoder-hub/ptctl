@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,7 +14,9 @@ import (
 	"testing"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/reconcile"
+	"github.com/tonycoder-hub/ptctl/internal/site"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
@@ -113,6 +116,94 @@ func TestReconcileReportBracketsOneClientSessionAndProducesConsistentJSON(t *tes
 		t.Fatalf("single-file reconciliation unexpectedly read a file ledger: %#v", response.Data.Ledgers.Downloader.FileLayout)
 	}
 	assertJSONStringsExclude(t, out.Bytes(), torrentPath, searchRoot, filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), clientPath, server.URL, clientUser, password, magnet, magnetCanary)
+}
+
+func TestReconcileConsumesOnlyAnExplicitSealedSiteBindingRecord(t *testing.T) {
+	storeRoot, variantID, recordID, searchRoot, adapter := prepareStoredSiteBinding(t)
+	var out bytes.Buffer
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+	if err := a.reconcileReport([]string{
+		"--metafile-store", storeRoot, "--metafile-variant", variantID,
+		"--site-binding-record", recordID, "--site-ref", "fakept/42",
+		"--search-root", searchRoot, "--output", "json",
+	}); err != nil {
+		t.Fatalf("reconcile stored binding: %v stdout=%s", err, out.String())
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "partial" || !response.Data.Scope.SiteBindingRequested ||
+		response.Data.Scope.SiteBindingSelector != "explicit_record" ||
+		relationStatusCLI(response.Data, "site_metafile") != "historical_observed_exact_variant" ||
+		!response.Data.Ledgers.Site.ProcessLocalProof || response.Data.Ledgers.Site.BindingRecordID != recordID {
+		t.Fatalf("explicit binding was not represented exactly: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), storeRoot, filepath.Join(storeRoot, "objects"), "SITE-BINDING-PASSKEY-CANARY")
+
+	out.Reset()
+	if err := a.reconcileReport([]string{
+		"--metafile-store", storeRoot, "--metafile-variant", variantID,
+		"--site-binding-record", recordID, "--site-ref", "fakept/43",
+		"--search-root", searchRoot, "--output", "json",
+	}); err != nil {
+		t.Fatalf("mismatch should still produce a report: %v stdout=%s", err, out.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "conflict" || relationStatusCLI(response.Data, "site_metafile") != "selected_binding_mismatch" {
+		t.Fatalf("explicit expected ref mismatch did not fail closed: %s", out.String())
+	}
+}
+
+func TestInvalidSiteBindingStopsBeforeDownloaderCredentialOrRequest(t *testing.T) {
+	storeRoot, variantID, _, searchRoot, adapter := prepareStoredSiteBinding(t)
+	missingID := "sha256:" + strings.Repeat("1", 64)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	reader := &trackingReader{}
+	var out bytes.Buffer
+	a := &app{stdin: reader, stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+	if err := a.reconcileReport([]string{
+		"--metafile-store", storeRoot, "--metafile-variant", variantID,
+		"--site-binding-record", missingID, "--search-root", searchRoot,
+		"--driver", "qbittorrent", "--url", server.URL, "--username", "user", "--password-stdin",
+		"--output", "json",
+	}); err != nil {
+		t.Fatalf("missing explicit binding should produce an incomplete report: %v stdout=%s", err, out.String())
+	}
+	if reader.read || requests.Load() != 0 || !strings.Contains(out.String(), `"outcome": "incomplete"`) || !strings.Contains(out.String(), "site.binding_proof_unavailable") {
+		t.Fatalf("binding preflight crossed credential/network boundary: read=%t requests=%d stdout=%s", reader.read, requests.Load(), out.String())
+	}
+}
+
+func TestCorruptExplicitSiteBindingReportsIntegrityBeforeCredential(t *testing.T) {
+	storeRoot, variantID, recordID, searchRoot, adapter := prepareStoredSiteBinding(t)
+	digest := strings.TrimPrefix(recordID, "sha256:")
+	recordPath := filepath.Join(storeRoot, "objects", "record-site.metafile.binding.v1-"+digest+".sealed")
+	if err := os.WriteFile(recordPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := &trackingReader{}
+	var out bytes.Buffer
+	a := &app{stdin: reader, stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+	err := a.reconcileReport([]string{
+		"--metafile-store", storeRoot, "--metafile-variant", variantID,
+		"--site-binding-record", recordID, "--search-root", searchRoot,
+		"--driver", "qbittorrent", "--url", "http://127.0.0.1:1", "--username", "user", "--password-stdin",
+		"--output", "json",
+	})
+	var integrity *integrityErr
+	if !errors.As(err, &integrity) || reader.read || !strings.Contains(out.String(), `"outcome": "integrity_failed"`) || strings.Contains(out.String(), recordPath) {
+		t.Fatalf("corrupt binding boundary failed: err=%v read=%t stdout=%s", err, reader.read, out.String())
+	}
 }
 
 func TestReconcileReportMultiFileLayoutUsesFiveRequestsAndReconciles(t *testing.T) {
@@ -270,6 +361,9 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--site-ref="}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--site-ref", "tjupt/<script>"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--site-ref", "tjupt/" + strings.Repeat("x", 257)}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--site-binding-record", "sha256:" + strings.Repeat("0", 64)}, clientGroup...),
+		append([]string{"reconcile", "report", "--metafile-store", "unused", "--metafile-variant", "sha256:" + strings.Repeat("0", 64), "--site-binding-record", "not-an-id", "--search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--metafile-store", "unused", "--metafile-variant", "sha256:" + strings.Repeat("0", 64), "--site-binding-record=", "--search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", missingTorrent, "--search-root", searchRoot}, clientGroup...),
 		tooManyRoots,
 	}
@@ -326,7 +420,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client flags are one optional group") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") || !strings.Contains(helpOut.String(), "lexical only") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client flags are one optional group") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") || !strings.Contains(helpOut.String(), "lexical only") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -338,6 +432,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	text := out.String()
 	blockers := strings.Index(text, "BLOCKERS")
 	relations := strings.Index(text, "RELATIONS")
+	siteBinding := strings.Index(text, "SITE BINDING")
 	ledgers := strings.Index(text, "LEDGERS")
 	fileLayout := strings.Index(text, "CLIENT FILE LAYOUT (BOUNDED)")
 	fileFindings := strings.Index(text, "CLIENT FILE FINDINGS (BOUNDED)")
@@ -345,7 +440,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	scan := strings.Index(text, "STORAGE SCAN")
 	matches := strings.Index(text, "VERIFIED STORAGE MATCHES")
 	bindings := strings.Index(text, "VERIFIED STORAGE BINDINGS (BOUNDED)")
-	if blockers < 0 || relations <= blockers || ledgers <= relations || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
+	if blockers < 0 || relations <= blockers || siteBinding <= relations || ledgers <= siteBinding || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
 		t.Fatalf("unclear reconciliation human order: %q", text)
 	}
 }
@@ -377,6 +472,60 @@ func TestReconcileHumanShowAbsolutePathsRendersHostAndClientBindings(t *testing.
 			t.Fatalf("--show-absolute-paths did not render %q: %q", expected, text)
 		}
 	}
+}
+
+func prepareStoredSiteBinding(t *testing.T) (storeRoot, variantID, recordID, searchRoot string, adapter *fakeMetafileFetchAdapter) {
+	t.Helper()
+	storeRoot = filepath.Join(physicalCLITempDir(t), "SITE-BINDING-STORE-PATH-CANARY")
+	if _, _, err := metastore.Init(storeRoot); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("payload")
+	adapter = &fakeMetafileFetchAdapter{raw: sitePrivateTrackerMetafile("source.bin", content, "SITE-BINDING-PASSKEY-CANARY")}
+	var fetchOut bytes.Buffer
+	fetchApp := &app{stdin: strings.NewReader("SID=site-binding-test\n"), stdout: &fetchOut, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+	if err := fetchApp.siteMetafileFetch([]string{
+		"--cookie-stdin", "--acknowledge-site-effect", "--metafile-store", storeRoot,
+		"--output", "json", "fakept", "42",
+	}); err != nil {
+		t.Fatalf("prepare site binding: %v stdout=%s", err, fetchOut.String())
+	}
+	var fetchResponse struct {
+		Data struct {
+			StoreOperation struct {
+				Artifact struct {
+					VariantID string `json:"metafile_variant_id"`
+				} `json:"artifact"`
+			} `json:"store_operation"`
+			Persistent struct {
+				Record struct {
+					ID string `json:"record_id"`
+				} `json:"record"`
+			} `json:"persistent_binding"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(fetchOut.Bytes(), &fetchResponse); err != nil {
+		t.Fatal(err)
+	}
+	variantID = fetchResponse.Data.StoreOperation.Artifact.VariantID
+	recordID = fetchResponse.Data.Persistent.Record.ID
+	if variantID == "" || recordID == "" {
+		t.Fatalf("fetch did not return durable handoff IDs: %s", fetchOut.String())
+	}
+	searchRoot = t.TempDir()
+	if err := os.WriteFile(filepath.Join(searchRoot, "renamed.bin"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return storeRoot, variantID, recordID, searchRoot, adapter
+}
+
+func relationStatusCLI(report reconcile.Report, kind string) string {
+	for _, relation := range report.Relations {
+		if relation.Kind == kind {
+			return relation.Status
+		}
+	}
+	return ""
 }
 
 func writeReconciliationFixture(t *testing.T) (string, string, *metafile.MetaInfo) {
