@@ -15,7 +15,7 @@ import (
 func TestRepositoryCreatesIdempotentImmutableProfileAndSelectsAlias(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	root := t.TempDir()
+	root := physicalIndexTempDir(t)
 	first, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC))
 	if err != nil || first.WritesPerformed != 1 || first.AlreadyPresent || first.RecordID == "" {
 		t.Fatalf("first profile import failed: receipt=%#v err=%v", first, err)
@@ -37,10 +37,10 @@ func TestRepositoryCreatesIdempotentImmutableProfileAndSelectsAlias(t *testing.T
 func TestRepositoryRejectsSameNameWithDifferentDeclaration(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	if _, err := repository.CreateProfile(ctx, "media", []string{t.TempDir()}, false, DefaultScanLimits(), time.Now()); err != nil {
+	if _, err := repository.CreateProfile(ctx, "media", []string{physicalIndexTempDir(t)}, false, DefaultScanLimits(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.CreateProfile(ctx, "media", []string{t.TempDir()}, false, DefaultScanLimits(), time.Now()); !errors.Is(err, ErrProfileConflict) {
+	if _, err := repository.CreateProfile(ctx, "media", []string{physicalIndexTempDir(t)}, false, DefaultScanLimits(), time.Now()); !errors.Is(err, ErrProfileConflict) {
 		t.Fatalf("immutable profile name conflict was not rejected: %v", err)
 	}
 }
@@ -48,7 +48,7 @@ func TestRepositoryRejectsSameNameWithDifferentDeclaration(t *testing.T) {
 func TestRepositorySelectsLatestGenerationAndRejectsTie(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{t.TempDir()}, false, DefaultScanLimits(), time.Now())
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{physicalIndexTempDir(t)}, false, DefaultScanLimits(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestProfileValidationRecomputesDeclarationIdentity(t *testing.T) {
 
 func testRepository(t *testing.T) *Repository {
 	t.Helper()
-	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "state"))
+	store, _, err := metastore.Init(filepath.Join(physicalIndexTempDir(t), "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +89,16 @@ func testRepository(t *testing.T) *Repository {
 		t.Fatal(err)
 	}
 	return repository
+}
+
+func physicalIndexTempDir(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("resolve temporary directory: %v", err)
+	}
+	return resolved
 }
 
 func importTestDescriptor(t *testing.T, repository *Repository, profile Profile, generation uint64, salt string) metastore.RecordID {

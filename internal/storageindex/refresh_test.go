@@ -20,7 +20,7 @@ import (
 func TestRefreshPublishesDataThenDescriptorAndAdvancesGeneration(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	root := t.TempDir()
+	root := physicalIndexTempDir(t)
 	writeTestFile(t, filepath.Join(root, "b.bin"), []byte("b"))
 	writeTestFile(t, filepath.Join(root, "a", "x.bin"), []byte("alpha"))
 	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now())
@@ -67,7 +67,7 @@ func TestRefreshPublishesDataThenDescriptorAndAdvancesGeneration(t *testing.T) {
 func TestRefreshIncompleteInventoryPublishesNoDiscoverableSnapshot(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	root := t.TempDir()
+	root := physicalIndexTempDir(t)
 	writeTestFile(t, filepath.Join(root, "a"), []byte("a"))
 	writeTestFile(t, filepath.Join(root, "b"), []byte("b"))
 	scanLimits := DefaultScanLimits()
@@ -92,7 +92,7 @@ func TestRefreshIncompleteInventoryPublishesNoDiscoverableSnapshot(t *testing.T)
 
 func TestLiveOperationsRejectForeignPlatformProfileBeforeStateOrFilesystemRead(t *testing.T) {
 	repository := testRepository(t)
-	profile, err := NewProfile("foreign", []string{filepath.Join(t.TempDir(), "must-not-be-read")}, false, DefaultScanLimits(), time.Now())
+	profile, err := NewProfile("foreign", []string{filepath.Join(physicalIndexTempDir(t), "must-not-be-read")}, false, DefaultScanLimits(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestLiveOperationsRejectForeignPlatformProfileBeforeStateOrFilesystemRead(t
 		t.Fatalf("foreign query crossed the live-platform gate: result=%#v err=%v", query, err)
 	}
 
-	local, err := NewProfile("relative", []string{t.TempDir()}, false, DefaultScanLimits(), time.Now())
+	local, err := NewProfile("relative", []string{physicalIndexTempDir(t)}, false, DefaultScanLimits(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestLiveOperationsRejectForeignPlatformProfileBeforeStateOrFilesystemRead(t
 }
 
 func TestRefreshRevalidatesDataAndDescriptorAfterPublication(t *testing.T) {
-	stateParent := t.TempDir()
+	stateParent := physicalIndexTempDir(t)
 	stateRoot := filepath.Join(stateParent, "state")
 	store, _, err := metastore.Init(stateRoot)
 	if err != nil {
@@ -135,7 +135,7 @@ func TestRefreshRevalidatesDataAndDescriptorAfterPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contentRoot := t.TempDir()
+	contentRoot := physicalIndexTempDir(t)
 	writeTestFile(t, filepath.Join(contentRoot, "file.bin"), []byte("payload"))
 	profileReceipt, err := repository.CreateProfile(context.Background(), "media", []string{contentRoot}, false, DefaultScanLimits(), time.Now())
 	if err != nil {

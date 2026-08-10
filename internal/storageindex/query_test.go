@@ -12,7 +12,7 @@ import (
 func TestLoadCandidatesReobservesLiveIdentityBoundFile(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	root := t.TempDir()
+	root := physicalIndexTempDir(t)
 	path := filepath.Join(root, "renamed.bin")
 	writeTestFile(t, path, []byte("payload"))
 	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now())
@@ -33,7 +33,9 @@ func TestLoadCandidatesReobservesLiveIdentityBoundFile(t *testing.T) {
 	}
 	value, readErr := io.ReadAll(file)
 	closeErr := file.Close()
-	if readErr != nil || closeErr != nil || string(value) != "payload" || query.Candidates[0].ResolvedPath != path {
+	expectedInfo, expectedErr := os.Stat(path)
+	resolvedInfo, resolvedErr := os.Stat(query.Candidates[0].ResolvedPath)
+	if readErr != nil || closeErr != nil || string(value) != "payload" || expectedErr != nil || resolvedErr != nil || !os.SameFile(expectedInfo, resolvedInfo) {
 		t.Fatalf("live candidate opener disagreed: value=%q read=%v close=%v path=%q", value, readErr, closeErr, query.Candidates[0].ResolvedPath)
 	}
 }
@@ -41,7 +43,7 @@ func TestLoadCandidatesReobservesLiveIdentityBoundFile(t *testing.T) {
 func TestLoadCandidatesRejectsReplacedProfileRoot(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	parent := t.TempDir()
+	parent := physicalIndexTempDir(t)
 	root := filepath.Join(parent, "root")
 	writeTestFile(t, filepath.Join(root, "file.bin"), []byte("same"))
 	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now())
@@ -66,7 +68,7 @@ func TestLoadCandidatesRejectsReplacedProfileRoot(t *testing.T) {
 func TestLoadCandidatesCandidateBudgetIsNPlusOneAndStillVerifiesSnapshot(t *testing.T) {
 	repository := testRepository(t)
 	ctx := context.Background()
-	root := t.TempDir()
+	root := physicalIndexTempDir(t)
 	writeTestFile(t, filepath.Join(root, "a"), []byte("x"))
 	writeTestFile(t, filepath.Join(root, "b"), []byte("y"))
 	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now())
