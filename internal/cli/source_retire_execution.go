@@ -72,7 +72,7 @@ func (a *app) seedRetireRun(args []string) error {
 		OperationID: operation, Limits: sourceretire.DefaultExecutionLimits()})
 	if status.Operation.Status != "not_found" {
 		switch status.Operation.Status {
-		case "retained", "pruning", "retention_initializing", "historical_complete":
+		case "retained", "pruning", "retention_initializing", "historical_complete", "forgetting":
 			return a.finishSourceRetireExecution(prepared.output, status, statusErr)
 		}
 		if statusErr != nil || status.Outcome == sourceretire.ExecutionOutcomeIntegrity || status.Outcome == sourceretire.ExecutionOutcomeBlocked {
@@ -146,7 +146,7 @@ func (a *app) seedRetireResume(args []string) error {
 	if statusErr != nil || status.Outcome == sourceretire.ExecutionOutcomeIntegrity || status.Outcome == sourceretire.ExecutionOutcomeBlocked {
 		return a.finishSourceRetireExecution(prepared.output, status, statusErr)
 	}
-	if status.Operation.Status == "retained" || status.Operation.Status == "pruning" || status.Operation.Status == "retention_initializing" {
+	if status.Operation.Status == "retained" || status.Operation.Status == "pruning" || status.Operation.Status == "retention_initializing" || status.Operation.Status == "forgetting" {
 		return a.finishSourceRetireExecution(prepared.output, status, nil)
 	}
 	if status.Operation.PlanID != *expected {
@@ -305,6 +305,59 @@ func (a *app) seedRetirePrune(args []string) error {
 	return nil
 }
 
+func (a *app) seedRetireForget(args []string) error {
+	fs := newFlagSet("seed retire forget")
+	output := fs.String("output", "table", "table or json")
+	target := fs.String("target", "", "existing local materialized target root")
+	expected := fs.String("expect-plan-id", "", "reviewed sha256 source-retirement plan ID")
+	acknowledge := fs.Bool("acknowledge-historical-evidence-deletion", false, "acknowledge irreversible deletion of the retained tombstone and final historical attribution")
+	timeout := fs.Duration("timeout", time.Minute, "historical-evidence deletion wall-clock budget")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *target == "" {
+		return usageError("seed retire forget requires --target and exactly one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validSourceRetireExecutionPlanID(*expected) {
+		return usageError("seed retire forget requires a canonical --expect-plan-id")
+	}
+	if !*acknowledge {
+		return usageError("seed retire forget requires --acknowledge-historical-evidence-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("seed retire forget --timeout must be greater than zero and no more than 1h")
+	}
+	operation, err := sourceretire.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("seed retire forget requires a canonical sha256 OPERATION_ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := sourceretire.ForgetExecutionTombstone(ctx, sourceretire.ExecutionForgetOptions{
+		TargetRoot: *target, OperationID: operation, ExpectedPlanID: *expected, Acknowledge: true,
+		Limits: sourceretire.DefaultExecutionForgetLimits(),
+	})
+	if err := a.writeSourceRetireForgetReport(*output, report); err != nil {
+		return err
+	}
+	if errors.Is(operationErr, sourceretire.ErrExecutionIntegrity) || report.Outcome == sourceretire.ExecutionForgetOutcomeIntegrityFailed {
+		return &integrityErr{message: "source retirement historical evidence failed integrity validation; see report"}
+	}
+	if report.Outcome == sourceretire.ExecutionForgetOutcomeBlocked {
+		return &inconclusiveErr{message: "source retirement historical-evidence deletion was blocked; see report"}
+	}
+	if report.Outcome == sourceretire.ExecutionForgetOutcomeAbsentUnattributed {
+		return fmt.Errorf("source retirement historical evidence is absent without a remaining attribution marker; see report")
+	}
+	if operationErr != nil || report.Outcome != sourceretire.ExecutionForgetOutcomeForgotten {
+		return fmt.Errorf("source retirement historical-evidence deletion was interrupted or its durability is unconfirmed; see report")
+	}
+	return nil
+}
+
 func (a *app) prepareSourceRetireLocal(ctx context.Context, prepared preparedSourceRetire, discover bool) (preparedSourceRetireLocal, error) {
 	var result preparedSourceRetireLocal
 	meta, err := loadMetafileInput(ctx, prepared.input)
@@ -421,6 +474,45 @@ func (a *app) writeSourceRetireRetentionReport(output string, report sourceretir
 		return usageError("--output must be table or json")
 	}
 	return writeSourceRetireRetentionHuman(a.stdout, report)
+}
+
+func (a *app) writeSourceRetireForgetReport(output string, report sourceretire.ExecutionForgetReport) error {
+	if output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	if output != "table" {
+		return usageError("--output must be table or json")
+	}
+	return writeSourceRetireForgetHuman(a.stdout, report)
+}
+
+func writeSourceRetireForgetHuman(out io.Writer, report sourceretire.ExecutionForgetReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\n",
+		terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain)
+	writeSourceRetireFindings(w, "BLOCKERS", report.Blockers)
+	writeSourceRetireFindings(w, "ISSUES", report.Issues)
+	fmt.Fprintf(w, "\nOPERATION\nID\t%s\nPLAN\t%s\nSTATUS\t%s\nPHASE\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.PlanID), terminalSafe(report.Operation.Status),
+		terminalSafe(report.Operation.Phase), report.Operation.Resumable)
+	fmt.Fprintf(w, "\nAUTHORITY\nSTATE\t%s\nFORGET MARKER\t%s\nMARKER DURABLE\t%t\nRETENTION INTENT\t%s\nRETENTION COMPLETE\t%s\nEXACT TOMBSTONE EVIDENCE AVAILABLE\t%t\nTARGET HISTORICAL EVIDENCE ERASED\t%t\n",
+		terminalSafe(report.Authority.State), terminalSafe(report.Authority.MarkerID), report.Authority.MarkerDurable,
+		terminalSafe(report.Authority.RetentionIntentMarkerID), terminalSafe(report.Authority.RetentionCompleteMarkerID),
+		report.Authority.ExactTombstoneEvidenceAvailable, report.Authority.TargetHistoricalEvidenceErased)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nINTENT\t%s\nTERMINAL COMPLETION\t%s\nFILES RETIRED\t%d\nBYTES RETIRED\t%d\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(report.Proof.IntentID), terminalSafe(report.Proof.TerminalCompletionID),
+		report.Proof.FilesRetired, report.Proof.BytesRetired, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nMARKER TEMPORARIES\t%d\nMARKER PUBLICATIONS\t%d\nAMBIGUOUS MARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\n",
+		report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications, report.Writes.AmbiguousMarkerPublications, report.Writes.RemovalAttempts,
+		report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals)
+	fmt.Fprintf(w, "\nLIMITS\nMAX MARKER BYTES\t%d\n", report.Limits.MaxMarkerBytes)
+	if len(report.Warnings) > 0 {
+		fmt.Fprintln(w, "\nWARNINGS")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+		}
+	}
+	return w.Flush()
 }
 
 func writeSourceRetireRetentionHuman(out io.Writer, report sourceretire.ExecutionRetentionReport) error {

@@ -376,6 +376,75 @@ func platformReleaseOperationLock(file *os.File, _ *boundDirectory) error {
 	return file.Close()
 }
 
+func platformRetirePrivateSubtree(session *Session, name string, directory *boundDirectory, lockFile *os.File, expectedDirectory, expectedLock rawIdentity) (attempted, lockRemoved, directoryAttempted, removed, durable bool, resultErr error) {
+	if directory == nil || directory.file == nil || lockFile == nil || directory.raw != expectedDirectory ||
+		verifyWindowsParent(session, directory) != nil || platformCheckOperationLock(session, directory, lockFile, expectedLock) != nil {
+		return false, false, false, false, false, ErrBindingChanged
+	}
+	named, namedErr := platformOpenPrivateDirectory(session, session.root, name)
+	if namedErr != nil {
+		return false, false, false, false, false, namedErr
+	}
+	namedMatches := named.raw == expectedDirectory
+	namedCloseErr := named.file.Close()
+	if !namedMatches || namedCloseErr != nil {
+		return false, false, false, false, false, ErrUnsafeObject
+	}
+
+	lockClosed, directoryClosed := false, false
+	defer func() {
+		if !lockClosed {
+			_ = lockFile.Close()
+		}
+		if !directoryClosed {
+			_ = directory.file.Close()
+		}
+	}()
+
+	attempted = true
+	lockDeleteErr := markWindowsCreatedForDeletion(windows.Handle(lockFile.Fd()))
+	lockCloseErr := lockFile.Close()
+	lockClosed = true
+	remainingLock, remainingLockRaw, remainingLockErr := platformOpenPrivateRegularReadOnly(session, directory, operationLockName)
+	if remainingLock != nil {
+		_ = remainingLock.Close()
+	}
+	lockRemoved = errors.Is(remainingLockErr, ErrNotFound)
+	if !lockRemoved {
+		if remainingLockErr == nil && remainingLockRaw == expectedLock {
+			return attempted, false, false, false, false, ErrUnsafeObject
+		}
+		return attempted, false, false, false, false, ErrRemovalAmbiguous
+	}
+	if lockDeleteErr != nil || lockCloseErr != nil {
+		resultErr = ErrRemovalAmbiguous
+	}
+
+	directoryAttempted = true
+	directoryDeleteErr := markWindowsCreatedForDeletion(windows.Handle(directory.file.Fd()))
+	directoryCloseErr := directory.file.Close()
+	directoryClosed = true
+	remainingDirectory, remainingDirectoryErr := platformOpenPrivateDirectory(session, session.root, name)
+	if remainingDirectory != nil {
+		_ = remainingDirectory.file.Close()
+	}
+	removed = errors.Is(remainingDirectoryErr, ErrNotFound)
+	if !removed {
+		if directoryDeleteErr != nil || directoryCloseErr != nil || remainingDirectoryErr == nil {
+			return attempted, lockRemoved, directoryAttempted, false, false, errors.Join(resultErr, ErrUnsafeObject)
+		}
+		return attempted, lockRemoved, directoryAttempted, false, false, errors.Join(resultErr, ErrRemovalAmbiguous)
+	}
+	if directoryDeleteErr != nil || directoryCloseErr != nil {
+		resultErr = errors.Join(resultErr, ErrRemovalAmbiguous)
+	}
+	if platformSyncDirectory(session.root) != nil {
+		return attempted, lockRemoved, directoryAttempted, removed, false, errors.Join(resultErr, ErrDurabilityUnconfirmed)
+	}
+	durable = true
+	return attempted, lockRemoved, directoryAttempted, removed, durable, resultErr
+}
+
 func platformSyncFile(file *os.File) error {
 	if file == nil || file.Sync() != nil {
 		return fmt.Errorf("sync bound regular file failed")

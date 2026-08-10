@@ -401,6 +401,79 @@ func platformReleaseOperationLock(file *os.File, directory *boundDirectory) erro
 	return first
 }
 
+func platformRetirePrivateSubtree(session *Session, name string, directory *boundDirectory, lockFile *os.File, expectedDirectory, expectedLock rawIdentity) (attempted, lockRemoved, directoryAttempted, removed, durable bool, resultErr error) {
+	if directory == nil || directory.file == nil || lockFile == nil || directory.raw != expectedDirectory ||
+		verifyLinuxDirectory(session, directory) != nil || platformCheckOperationLock(session, directory, lockFile, expectedLock) != nil {
+		return false, false, false, false, false, ErrBindingChanged
+	}
+	named, namedErr := platformOpenPrivateDirectory(session, session.root, name)
+	if namedErr != nil {
+		return false, false, false, false, false, namedErr
+	}
+	namedMatches := named.raw == expectedDirectory
+	namedCloseErr := named.file.Close()
+	if !namedMatches || namedCloseErr != nil {
+		return false, false, false, false, false, ErrUnsafeObject
+	}
+
+	lockClosed, directoryClosed := false, false
+	defer func() {
+		if !lockClosed {
+			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+			_ = lockFile.Close()
+		}
+		if !directoryClosed {
+			_ = unix.Flock(int(directory.file.Fd()), unix.LOCK_UN)
+			_ = directory.file.Close()
+		}
+	}()
+
+	attempted = true
+	lockRemoveErr := unix.Unlinkat(int(directory.file.Fd()), operationLockName, 0)
+	remainingLock, remainingLockRaw, remainingLockErr := platformOpenPrivateRegularReadOnly(session, directory, operationLockName)
+	if remainingLock != nil {
+		_ = remainingLock.Close()
+	}
+	lockRemoved = errors.Is(remainingLockErr, ErrNotFound)
+	_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+	lockCloseErr := lockFile.Close()
+	lockClosed = true
+	if !lockRemoved {
+		if remainingLockErr == nil && remainingLockRaw == expectedLock {
+			return attempted, false, false, false, false, ErrUnsafeObject
+		}
+		return attempted, false, false, false, false, ErrRemovalAmbiguous
+	}
+	if lockRemoveErr != nil || lockCloseErr != nil {
+		resultErr = ErrRemovalAmbiguous
+	}
+
+	directoryAttempted = true
+	directoryRemoveErr := unix.Unlinkat(int(session.root.file.Fd()), name, unix.AT_REMOVEDIR)
+	remainingDirectory, remainingDirectoryErr := platformOpenPrivateDirectory(session, session.root, name)
+	if remainingDirectory != nil {
+		_ = remainingDirectory.file.Close()
+	}
+	removed = errors.Is(remainingDirectoryErr, ErrNotFound)
+	_ = unix.Flock(int(directory.file.Fd()), unix.LOCK_UN)
+	directoryCloseErr := directory.file.Close()
+	directoryClosed = true
+	if !removed {
+		if remainingDirectoryErr == nil {
+			return attempted, lockRemoved, directoryAttempted, false, false, errors.Join(resultErr, ErrUnsafeObject)
+		}
+		return attempted, lockRemoved, directoryAttempted, false, false, errors.Join(resultErr, ErrRemovalAmbiguous)
+	}
+	if directoryRemoveErr != nil || directoryCloseErr != nil {
+		resultErr = errors.Join(resultErr, ErrRemovalAmbiguous)
+	}
+	if unix.Fsync(int(session.root.file.Fd())) != nil {
+		return attempted, lockRemoved, directoryAttempted, removed, false, errors.Join(resultErr, ErrDurabilityUnconfirmed)
+	}
+	durable = true
+	return attempted, lockRemoved, directoryAttempted, removed, durable, resultErr
+}
+
 func platformSyncFile(file *os.File) error {
 	if file == nil || unix.Fsync(int(file.Fd())) != nil {
 		return fmt.Errorf("sync bound regular file failed")

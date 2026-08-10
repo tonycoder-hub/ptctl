@@ -81,6 +81,8 @@ func (a *app) seedRetire(args []string) error {
 		return a.seedRetireStatus(args[1:])
 	case "prune":
 		return a.seedRetirePrune(args[1:])
+	case "forget":
+		return a.seedRetireForget(args[1:])
 	default:
 		return usageError("unknown seed retire subcommand %q", args[0])
 	}
@@ -93,6 +95,7 @@ func (a *app) seedRetireHelp() {
   ptctl seed retire resume (same local/live selectors) --expect-plan-id ID --acknowledge-source-deletion [flags] OPERATION_ID
   ptctl seed retire status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed retire prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl seed retire forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
 The plan command is read-only. It requires one complete live source discovery,
 a current exact materialized-final proof, one canonical terminal client
@@ -107,10 +110,14 @@ gets a durable attempt marker before identity-bound removal and a completion
 marker afterward. Resume accepts only an explicit operation and repeats local
 and live proof. Status with an explicit ID reads only that private journal or
 retained tombstone and makes no current presence claim. Without an ID it makes
-one bounded name-only listing; rows remain not_inspected and no latest
-operation is selected.
+one bounded name-only listing; operation rows remain not_inspected, visible
+forget markers are labeled in progress, and no latest operation is selected.
 Prune is a separate acknowledged boundary for one terminal operation: it
 deletes only that operation's private journal and retains an exact tombstone.
+Forget is a final, separately acknowledged boundary for one exact retained
+tombstone. It publishes a root-level recovery intent, removes the operation
+subtree, then removes that last intent. Afterward, a repeated call can report
+only unattributed absence; it cannot claim idempotent historical success.
 
 The live-client bracket performs one login plus two bounded job-ledger reads;
 multi-file torrents add at most two bounded file-ledger reads. There are no

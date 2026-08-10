@@ -468,8 +468,9 @@ files are only read: materialize does not move, rewrite, link, or delete them,
 although their reads can still update atime or hydrate placeholders.
 
 A source-retirement `status` call without an ID is only a bounded root-name
-inventory. It returns canonical operation IDs as `not_inspected`, never opens
-their journals, never chooses a latest operation, and emits no unrelated root
+inventory. It returns canonical operation directories as `not_inspected` and
+canonical root forget markers as `forget_in_progress_not_inspected`, never opens
+their contents, never chooses a latest operation, and emits no unrelated root
 name. N+1 entry, name-byte, or retained-operation limits make the result
 incomplete; malformed objects under the reserved operation prefix fail closed.
 
@@ -489,6 +490,20 @@ Only the flat private journal and empty scratch directory are eligible for
 removal. Source names, parents, the materialized final, downloader state, other
 operations, and the retained tombstone remain out of scope. The source-retire
 tombstone is historical and never asserts current source absence.
+
+Forgetting that tombstone is a distinct irreversible authority. It is allowed
+only for one explicit complete tombstone after a dedicated acknowledgement.
+The implementation publishes a private root-level intent containing the exact
+no-path tombstone evidence before removing any retained marker. It removes the
+operation subtree by bound identity while holding its cooperative lock, uses
+the root intent to recover an exact empty lockless residue after a crash, and
+removes the root intent last. The intent does not authorize source, final,
+client, or unrelated-operation deletion. Root-marker replacement, hardlinks,
+unexpected namespace entries, operation/root identity drift, and ambiguous or
+unconfirmed durability all fail closed with actual/uncertain write receipts.
+After confirmed last-marker removal, the target root has no remaining
+historical attribution and absence is therefore `absent_unattributed`, not
+idempotent success.
 
 Allowlisted sealed state records share the private store's root binding,
 owner-only staging, no-replace, durability, and corruption controls, but use a
@@ -657,10 +672,10 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- explicit retained-tombstone retirement and broader quota/age policy
-  (materialize and source-retirement heavy terminal state now have exact
-  single-operation pruning; tombstones and smaller client journals are not yet
-  retired or selected by policy);
+- materialize-tombstone retirement, smaller client-journal retirement, and
+  broader quota/age policy (source-retirement heavy state has exact pruning and
+  its retained tombstone now has a separately acknowledged explicit forget
+  transition; no operation is selected automatically by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal

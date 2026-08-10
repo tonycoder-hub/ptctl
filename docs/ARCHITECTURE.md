@@ -886,10 +886,12 @@ does not read a password or contact the client.
 
 Source-retirement operation discovery is a separate bounded, read-only name
 inventory. Without an explicit ID, `status` examines the target root once,
-retains only canonical operation IDs up to fixed entry/name/result limits, and
-labels every row `not_inspected`. It neither opens a journal nor selects a
-latest operation, and malformed objects in the reserved source-retirement
-namespace make the listing incomplete rather than being ignored.
+retains only canonical operation IDs up to fixed entry/name/result limits.
+Operation directories are `not_inspected`; a canonical visible root forget
+marker is `forget_in_progress_not_inspected`. It neither opens a journal nor
+selects a latest operation, and malformed objects in the reserved
+source-retirement namespace make the listing incomplete rather than being
+ignored.
 
 Terminal source-retirement journals may be retired only through the separate
 `seed retire prune` transition. The selector is one full operation ID plus its
@@ -906,11 +908,40 @@ lock plus retention directory. An intent-only crash state is interpreted only
 by explicit prune; run/resume/status never cross it. The completed tombstone is
 historical audit evidence, not current source-absence proof.
 
-The remover deliberately does not delete directories, final content, empty or
-padding entries, other hardlink/alias names, or downloader jobs. A successful
-unlink therefore does not prove reclaimed blocks. Source deletion, final
-verification, and client observation are bracketed non-atomic facts rather
-than one frozen cross-system transaction.
+An exact retained source-retirement tombstone can cross one further explicit
+boundary through `seed retire forget`. The command requires the full operation
+ID, reviewed plan ID, and a dedicated historical-evidence-deletion
+acknowledgement; it has no list/latest or age selector. Before any retained
+marker is removed, a canonical owner-private intent is published directly
+beneath the same bound target root. That intent embeds the complete no-path
+retention intent and completion plus their domain-separated IDs, operation and
+root identities, plan ID, and retired counts. It is therefore sufficient to
+finish one interrupted removal without reopening a deleted operation subtree.
+
+```text
+exact complete retained tombstone + explicit selectors + acknowledgement
+  -> exact tombstone audit
+  -> durable root-level forget intent
+  -> remove complete marker, intent marker, and empty retention directory
+  -> remove exact lock-only operation subtree while holding its authority
+  -> re-read the unchanged root intent
+  -> remove the root intent last and confirm target-root durability
+```
+
+Only the root intent may authorize recovery after the operation subtree is
+gone. A lockless empty residue can be removed only by the exact directory
+identity embedded in that intent. Unexpected objects, changed bytes, hardlinks,
+identity drift, ambiguous removal, or lost root binding fail closed. Successful
+completion deliberately destroys the final on-target attribution record.
+Subsequent absence is reported as `absent_unattributed`, never as historical
+idempotence; there is no `already_forgotten` state to infer from an empty
+namespace.
+
+The source-name remover deliberately does not delete content directories,
+final content, empty or padding entries, other hardlink/alias names, or
+downloader jobs. A successful unlink therefore does not prove reclaimed
+blocks. Source deletion, final verification, and client observation are
+bracketed non-atomic facts rather than one frozen cross-system transaction.
 
 ## Plugin direction
 

@@ -32,6 +32,12 @@ type sourceRetireRetentionJSONEnvelope struct {
 	Data   sourceretire.ExecutionRetentionReport `json:"data"`
 }
 
+type sourceRetireForgetJSONEnvelope struct {
+	Schema string                             `json:"schema"`
+	Kind   string                             `json:"kind"`
+	Data   sourceretire.ExecutionForgetReport `json:"data"`
+}
+
 func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 	fixture := newClientAdoptCLIFixture(t)
 	server := newClientActivateServer(t, fixture.meta, fixture.raw)
@@ -247,7 +253,7 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	if code := Run([]string{"seed", "retire", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
 		!strings.Contains(out.String(), "deletion_authority") || !strings.Contains(out.String(), "zero writes") ||
 		!strings.Contains(out.String(), "two bounded job-ledger reads") || !strings.Contains(out.String(), "retains an exact tombstone") ||
-		!strings.Contains(out.String(), "not_inspected") {
+		!strings.Contains(out.String(), "not_inspected") || !strings.Contains(out.String(), "unattributed absence") {
 		t.Fatalf("help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()
@@ -260,8 +266,26 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	out.Reset()
 	errOut.Reset()
 	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "forget", "--target", "missing", "--expect-plan-id", plan, operation}, reader, &out, &errOut); code != 2 || reader.read {
+		t.Fatalf("missing forget acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
 	if code := Run([]string{"seed", "retire", "status", "--target", "missing", "--max-operations", "1", operation}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
 		t.Fatalf("operation-list flag with explicit selector code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	derived, err := sourceretire.OperationIDForPlanID(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{"seed", "retire", "forget", "--target", t.TempDir(), "--expect-plan-id", plan,
+		"--acknowledge-historical-evidence-deletion", derived.String()}, reader, &out, &errOut); code != 1 || reader.read ||
+		!strings.Contains(out.String(), "absent_unattributed") || !strings.Contains(out.String(), "TARGET HISTORICAL EVIDENCE ERASED") {
+		t.Fatalf("absent forget table code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
 	}
 }
 
@@ -475,6 +499,37 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 	if repeated.Data.Outcome != sourceretire.ExecutionRetentionOutcomeAlreadyPruned || repeated.Data.WritesPerformed != 0 {
 		t.Fatalf("idempotent prune changed state: %s", out.String())
 	}
+
+	forgetArgs := []string{"seed", "retire", "forget", "--target", fixture.materialize.targetRoot,
+		"--expect-plan-id", plan.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json", execution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	forgotten := decodeSourceRetireForgetReport(t, out.Bytes())
+	if forgotten.Schema != "ptctl.dev/v1" || forgotten.Kind != "content.source_retirement.forget" ||
+		forgotten.Data.Outcome != sourceretire.ExecutionForgetOutcomeForgotten || !forgotten.Data.Authority.TargetHistoricalEvidenceErased ||
+		forgotten.Data.Authority.MarkerDurable || forgotten.Data.Operation.Resumable || forgotten.Data.WritesPerformed == 0 ||
+		forgotten.Data.Blockers == nil || forgotten.Data.Issues == nil || forgotten.Data.Warnings == nil {
+		t.Fatalf("unexpected forget report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 1 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("repeated forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	absent := decodeSourceRetireForgetReport(t, out.Bytes())
+	if absent.Data.Outcome != sourceretire.ExecutionForgetOutcomeAbsentUnattributed || absent.Data.WritesPerformed != 0 || absent.Data.Authority.TargetHistoricalEvidenceErased {
+		t.Fatalf("repeated forget claimed historical idempotence: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
 }
 
 func sourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOperation, activationPlanID string) []string {
@@ -510,6 +565,15 @@ func decodeSourceRetireRetentionReport(t *testing.T, raw []byte) sourceRetireRet
 	var result sourceRetireRetentionJSONEnvelope
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatalf("decode source retirement retention report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireForgetReport(t *testing.T, raw []byte) sourceRetireForgetJSONEnvelope {
+	t.Helper()
+	var result sourceRetireForgetJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement forget report: %v\n%s", err, raw)
 	}
 	return result
 }

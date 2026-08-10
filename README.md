@@ -20,8 +20,10 @@ domains and reconciles them around verifiable torrent metadata.
 > retirement workflow, no listed operation overwrites, moves, rewrites, or
 > deletes a source or published final layout. Retirement can unlink only the
 > reviewed exact source names; `seed retire prune` separately deletes only one
-> terminal retirement operation's private journal and retains its tombstone; reads
-> may still update atime or hydrate an offline placeholder.
+> terminal retirement operation's private journal and retains its tombstone;
+> `seed retire forget` has a third acknowledgement and irreversibly removes
+> that exact tombstone plus its last recovery marker. Reads may still update
+> atime or hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
@@ -128,6 +130,10 @@ capabilities at the edge, not assumptions in the core domain model.
   durable per-name attempts/completions, supports explicit crash recovery, and
   reverifies the final and live client use without deleting directories,
   aliases, empty/padding entries, or downloader jobs;
+- separately acknowledged pruning of one terminal source-retirement journal
+  into an exact historical tombstone, followed only on explicit request by
+  recoverable, identity-bound deletion of that tombstone and its final
+  attribution marker;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -757,15 +763,23 @@ ptctl seed retire prune --target "D:\PT" \
   --acknowledge-operation-state-deletion \
   --output json \
   sha256:SOURCE_RETIREMENT_OPERATION_DIGEST
+
+ptctl seed retire forget --target "D:\PT" \
+  --expect-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
+  --acknowledge-historical-evidence-deletion \
+  --output json \
+  sha256:SOURCE_RETIREMENT_OPERATION_DIGEST
 ```
 
 `resume` takes the same local/live selectors, expected plan ID, deletion
 acknowledgement, and one explicit operation ID. Neither run nor resume accepts
 plan JSON as proof or selects a latest operation. `status` with no operation ID
 performs one bounded target-root name listing and returns only canonical source
-retirement IDs as `not_inspected`; it does not open their journals, select a
-latest operation, expose unrelated names, or claim terminal/source-absence
-state. Passing an ID retains the exact historical journal/tombstone read.
+retirement IDs. Ordinary operation directories are `not_inspected`; a matching
+root forget marker is `forget_in_progress_not_inspected`. It does not open
+their journals, select a latest operation, expose unrelated names, or claim
+terminal/source-absence state. Passing an ID retains the exact historical
+journal, tombstone, or visible forget-marker read.
 
 `prune` is a second, narrower deletion boundary. It accepts only one explicit
 terminal operation ID, the exact reviewed plan ID, and
@@ -780,6 +794,20 @@ all content names are outside this authority. The retained tombstone preserves
 the plan, intent/completion digests, final/client lineage, and retired counts as
 historical evidence; it does not prove that a retired source name remains
 absent now. JSON kind is `content.source_retirement.retention`.
+
+`forget` is a third and final deletion boundary. It accepts only the same full
+operation and plan IDs plus `--acknowledge-historical-evidence-deletion`, and
+only a complete exact retained tombstone is eligible. Before touching that
+tombstone, ptctl copies its complete no-path historical evidence into an
+owner-private root-level intent. It then removes the two retained markers, the
+empty retention directory, and the exact lock-only operation subtree; the root
+intent is removed last. A crash before that last step resumes only from the
+same explicit IDs. The materialized final, source parents and names, downloader
+job, and every other operation remain outside this authority. Once the last
+marker is durably absent, no on-target authority remains from which a later
+invocation can distinguish a previous successful forget from an unknown
+selector, so a repeated call reports `absent_unattributed` rather than
+`already_forgotten`. JSON kind is `content.source_retirement.forget`.
 
 `run` rebuilds the complete live plan in the same invocation and compares its
 ID before any journal write. It then creates one owner-private operation under
@@ -966,8 +994,9 @@ emits no request bodies, blocks cross-origin/downgrade redirects, never retries
 site reads, bounds network and filesystem work, hides private store/object and
 discovery/reconciliation absolute paths by default, never exposes materialize
 paths, defaults conflicts to failure, and confines private operation-state
-deletion to the separately acknowledged materialize/source-retirement prune
-commands while source-name unlink has its own narrower acknowledgement. Commands such
+deletion to separately acknowledged materialize/source-retirement prune
+commands; exact source-retirement tombstone erasure and source-name unlink each
+have their own narrower acknowledgement. Commands such
 as `storage probe` and `seed plan` keep their documented path-display
 contracts. The private store uses owner-only permissions and atomic no-clobber
 publication for both metafiles and allowlisted sealed state records; this is
@@ -976,7 +1005,8 @@ creation/index refresh, the artifact plus sealed-binding phases of an
 acknowledged site metafile fetch, and acknowledged target-root-local
 materialize operations (including explicit retention pruning), acknowledged
 exact stopped-job adoption, reviewed client recheck/start, and acknowledged
-source-name retirement (including its separate journal pruning), are
+source-name retirement (including its separate journal pruning and explicit
+last-evidence forget transition), are
 the explicit write exceptions to the otherwise
 zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).

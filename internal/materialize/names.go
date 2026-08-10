@@ -29,19 +29,24 @@ const (
 	// acknowledged, journaled removal of source names after client activation.
 	SourceRetireOperationDirectoryPrefix = ".ptctl-source-retire-"
 	sourceRetireDirectoryPrefix          = SourceRetireOperationDirectoryPrefix
-	intentFileName                       = "intent.json"
-	journalDirectoryName                 = "journal"
-	stageDirectoryName                   = "stage"
-	scratchDirectoryName                 = "scratch"
-	retentionDirectoryName               = "retention"
-	retentionIntentFileName              = "intent.json"
-	retentionCompleteName                = "complete.json"
-	eventFilePrefix                      = "event-"
-	eventFileSuffix                      = ".json"
+	// SourceRetireForgetMarkerPrefix reserves the root-level, owner-private
+	// recovery marker used while an explicitly selected retained source-
+	// retirement tombstone is being irreversibly forgotten.
+	SourceRetireForgetMarkerPrefix = ".ptctl-source-retire-forget-"
+	sourceRetireForgetMarkerPrefix = SourceRetireForgetMarkerPrefix
+	intentFileName                 = "intent.json"
+	journalDirectoryName           = "journal"
+	stageDirectoryName             = "stage"
+	scratchDirectoryName           = "scratch"
+	retentionDirectoryName         = "retention"
+	retentionIntentFileName        = "intent.json"
+	retentionCompleteName          = "complete.json"
+	eventFilePrefix                = "event-"
+	eventFileSuffix                = ".json"
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix}
+	prefixes := []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
@@ -59,6 +64,25 @@ func hasReservedControlPrefix(name string) bool {
 // use this to ensure a source path can never be reinterpreted as private
 // materialize, adoption, activation, or retirement control state.
 func IsReservedControlName(name string) bool { return hasReservedControlPrefix(name) }
+
+// HasSourceRetireOperationPrefix and HasSourceRetireForgetMarkerPrefix apply
+// the target platform's exact namespace collision semantics. Parsers still
+// require canonical lowercase names after these helpers identify the reserved
+// family.
+func HasSourceRetireOperationPrefix(name string) bool {
+	return !HasSourceRetireForgetMarkerPrefix(name) && hasPlatformPrefix(name, sourceRetireDirectoryPrefix)
+}
+
+func HasSourceRetireForgetMarkerPrefix(name string) bool {
+	return hasPlatformPrefix(name, sourceRetireForgetMarkerPrefix)
+}
+
+func hasPlatformPrefix(name, prefix string) bool {
+	if runtime.GOOS == "windows" {
+		return len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix)
+	}
+	return strings.HasPrefix(name, prefix)
+}
 
 func OperationDirectoryName(id OperationID) (string, error) {
 	parsed, err := ParseOperationID(id.String())

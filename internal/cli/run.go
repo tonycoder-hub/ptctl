@@ -156,6 +156,7 @@ Usage:
   ptctl seed retire resume [same selectors] --expect-plan-id ID --acknowledge-source-deletion [--output table|json] OPERATION_ID
   ptctl seed retire status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed retire prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl seed retire forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -166,7 +167,7 @@ Safety defaults:
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
   * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone.
-  * Seed retire plan performs fresh proof reads only and grants no deletion authority. Run/resume require a separate exact plan ID and deletion acknowledgement, journal every explicit name, and never remove directories, aliases, padding, empty files, or final content. Prune has its own acknowledgement and deletes only one terminal operation's private journal while retaining a tombstone.
+  * Seed retire plan performs fresh proof reads only and grants no deletion authority. Run/resume require a separate exact plan ID and deletion acknowledgement, journal every explicit name, and never remove directories, aliases, padding, empty files, or final content. Prune has its own acknowledgement and deletes only one terminal operation's private journal while retaining a tombstone; forget has a third acknowledgement and deletes only that exact tombstone plus its last recovery marker.
   * Client adoption only adds an absent exact-infohash qBittorrent job in stopped mode. It journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
@@ -1537,6 +1538,8 @@ func jsonKind(data any) string {
 		return "content.source_retirement.operation_list"
 	case sourceretire.ExecutionRetentionReport:
 		return "content.source_retirement.retention"
+	case sourceretire.ExecutionForgetReport:
+		return "content.source_retirement.forget"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

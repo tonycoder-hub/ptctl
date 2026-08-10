@@ -131,7 +131,7 @@ func TestBuildLayoutRejectsUnicodeSimpleFoldCollisionOnWindows(t *testing.T) {
 }
 
 func TestBuildLayoutReservesEveryControlPrefix(t *testing.T) {
-	for _, prefix := range []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix} {
+	for _, prefix := range []string{operationDirectoryPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix} {
 		name := prefix + "content"
 		if runtime.GOOS == "windows" {
 			name = strings.ToUpper(name)
@@ -144,5 +144,17 @@ func TestBuildLayoutReservesEveryControlPrefix(t *testing.T) {
 		if _, err := BuildLayout(meta, DefaultLimits()); !errors.Is(err, ErrPolicy) {
 			t.Fatalf("reserved control prefix %q was accepted: %v", prefix, err)
 		}
+	}
+}
+
+func TestSourceRetireReservedFamiliesDistinguishForgetMarkers(t *testing.T) {
+	operation := SourceRetireOperationDirectoryPrefix + strings.Repeat("a", 64)
+	forget := SourceRetireForgetMarkerPrefix + strings.Repeat("b", 64) + ".json"
+	if runtime.GOOS == "windows" {
+		operation, forget = strings.ToUpper(operation), strings.ToUpper(forget)
+	}
+	if !HasSourceRetireOperationPrefix(operation) || HasSourceRetireForgetMarkerPrefix(operation) ||
+		HasSourceRetireOperationPrefix(forget) || !HasSourceRetireForgetMarkerPrefix(forget) {
+		t.Fatalf("reserved source-retire families overlap: operation=%q forget=%q", operation, forget)
 	}
 }

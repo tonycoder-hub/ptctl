@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strings"
+	"sort"
 
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
@@ -53,7 +53,7 @@ func ListExecutionOperations(ctx context.Context, targetRoot string, limits Exec
 		Limits:     limits,
 		Operations: []ExecutionOperationSummary{},
 		Warnings: []string{
-			"listing never selects a latest operation; resume, status, and prune require an explicit full operation ID",
+			"listing never selects a latest operation; resume, status, prune, and forget require an explicit full operation ID",
 			"not_inspected rows do not claim journal integrity, terminal state, or current source-name absence",
 		},
 	}
@@ -91,21 +91,53 @@ func ListExecutionOperations(ctx context.Context, targetRoot string, limits Exec
 		result.StopReason = listing.StopReason
 		return result, nil
 	}
+	operations := make(map[OperationID]string)
 	for _, entry := range listing.Entries {
-		if !strings.HasPrefix(entry.Name, materialize.SourceRetireOperationDirectoryPrefix) {
+		var operationID OperationID
+		var status string
+		switch {
+		case materialize.HasSourceRetireForgetMarkerPrefix(entry.Name):
+			parsed, parseErr := ParseExecutionForgetRootName(entry.Name)
+			if parseErr != nil || entry.Kind != string(fsbind.ObjectKindRegular) {
+				result.StopReason = "invalid_operation_entry"
+				return result, nil
+			}
+			operationID, status = parsed, "forget_in_progress_not_inspected"
+		case materialize.HasSourceRetireOperationPrefix(entry.Name):
+			parsed, parseErr := ParseOperationDirectoryName(entry.Name)
+			if parseErr != nil || entry.Kind != string(fsbind.ObjectKindDirectory) {
+				result.StopReason = "invalid_operation_entry"
+				return result, nil
+			}
+			operationID, status = parsed, "not_inspected"
+		default:
 			continue
 		}
-		operationID, parseErr := ParseOperationDirectoryName(entry.Name)
-		if parseErr != nil || entry.Kind != string(fsbind.ObjectKindDirectory) {
-			result.StopReason = "invalid_operation_entry"
-			return result, nil
+		if prior, exists := operations[operationID]; exists {
+			if prior == "not_inspected" && status == "forget_in_progress_not_inspected" {
+				operations[operationID] = status
+			}
+			continue
 		}
-		if len(result.Operations) >= limits.MaxOperations {
+		if len(operations) >= limits.MaxOperations {
 			result.StopReason = "max_operations"
+			appendExecutionOperationSummaries(&result, operations)
 			return result, nil
 		}
-		result.Operations = append(result.Operations, ExecutionOperationSummary{ID: operationID, Status: "not_inspected"})
+		operations[operationID] = status
 	}
+	appendExecutionOperationSummaries(&result, operations)
 	result.Complete = true
 	return result, nil
+}
+
+func appendExecutionOperationSummaries(result *ExecutionOperationListResult, operations map[OperationID]string) {
+	ids := make([]OperationID, 0, len(operations))
+	for id := range operations {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(left, right int) bool { return ids[left].String() < ids[right].String() })
+	for _, id := range ids {
+		result.Operations = append(result.Operations, ExecutionOperationSummary{ID: id, Status: operations[id]})
+	}
 }

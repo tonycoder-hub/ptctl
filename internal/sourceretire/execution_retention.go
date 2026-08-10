@@ -43,6 +43,20 @@ func PruneExecution(ctx context.Context, options ExecutionPruneOptions) (Executi
 	report.Target.ObservedRootIdentity = rootInfo.Identity.String()
 	report.Target.RootIdentityBound = true
 	report.Target.StabilityAssurance = "non_atomic_bound_filesystem"
+	forgetName, _ := ExecutionForgetRootName(options.OperationID)
+	forgetMarker, _, _, _, forgetErr := readExecutionForgetRootIntent(ctx, target, forgetName, maximumExecutionForgetBytes)
+	if forgetErr == nil {
+		if forgetMarker.OperationID != options.OperationID || forgetMarker.PlanID != options.ExpectedPlanID ||
+			forgetMarker.TargetRootIdentity != rootInfo.Identity.String() {
+			return mapExecutionRetentionError(&report, ErrExecutionIntegrity, "the durable forget intent disagrees with the explicit prune selector")
+		}
+		report.Operation.Status, report.Operation.Phase, report.Operation.Resumable = "forgetting", "forget_intent_recorded", false
+		report.Markers.State = "forget_intent_published"
+		return executionRetentionBlocked(&report, "operation.forget_required", "a private forget intent is visible; prune may no longer advance this operation")
+	}
+	if !errors.Is(forgetErr, fsbind.ErrNotFound) {
+		return mapExecutionRetentionError(&report, forgetErr, "source retirement forget state could not be inspected")
+	}
 
 	handle, journalErr := openExecutionJournalForRetention(ctx, target, options.OperationID, options.JournalLimits)
 	var subtree *fsbind.Subtree

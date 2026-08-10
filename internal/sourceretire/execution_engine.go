@@ -76,6 +76,12 @@ func Run(ctx context.Context, options RunOptions) (ExecutionReport, error) {
 		return executionIntegrity(&report, "the source retirement operation ID could not be derived")
 	}
 	report.Operation = ExecutionOperationReport{ID: operation.String(), PlanID: review.Plan.ID, Status: "initializing", Phase: "planned"}
+	if forgetting, forgetErr := applyExecutionForgetControl(ctx, target, operation, &report); forgetting {
+		if forgetErr != nil {
+			return mapExecutionError(&report, forgetErr, "source retirement forget state could not be inspected")
+		}
+		return report, nil
+	}
 	if retained, retentionErr := applyExecutionRetentionControl(ctx, target, operation, &report); retained {
 		if retentionErr != nil {
 			return mapExecutionError(&report, retentionErr, "source retirement retention state could not be inspected")
@@ -121,13 +127,19 @@ func Resume(ctx context.Context, options ResumeOptions) (ExecutionReport, error)
 		return mapExecutionError(&report, err, "source retirement target root could not be bound")
 	}
 	defer target.Close()
-	report.addEffect("read_private_source_retirement_journal")
+	if forgetting, forgetErr := applyExecutionForgetControl(ctx, target, options.OperationID, &report); forgetting {
+		if forgetErr != nil {
+			return mapExecutionError(&report, forgetErr, "source retirement forget state could not be inspected")
+		}
+		return report, nil
+	}
 	if retained, retentionErr := applyExecutionRetentionControl(ctx, target, options.OperationID, &report); retained {
 		if retentionErr != nil {
 			return mapExecutionError(&report, retentionErr, "source retirement retention state could not be inspected")
 		}
 		return report, nil
 	}
+	report.addEffect("read_private_source_retirement_journal")
 	journal, err := openExecutionJournal(ctx, target, options.OperationID, options.Limits)
 	if err != nil {
 		return mapExecutionError(&report, err, "source retirement journal could not be opened")
@@ -204,13 +216,19 @@ func Status(ctx context.Context, options StatusOptions) (ExecutionReport, error)
 		return mapExecutionError(&report, err, "source retirement target root could not be bound")
 	}
 	defer target.Close()
-	report.addEffect("read_private_source_retirement_journal")
+	if forgetting, forgetErr := applyExecutionForgetControl(ctx, target, options.OperationID, &report); forgetting {
+		if forgetErr != nil {
+			return mapExecutionError(&report, forgetErr, "source retirement forget state could not be inspected")
+		}
+		return report, nil
+	}
 	if retained, retentionErr := applyExecutionRetentionControl(ctx, target, options.OperationID, &report); retained {
 		if retentionErr != nil {
 			return mapExecutionError(&report, retentionErr, "source retirement retention state could not be inspected")
 		}
 		return report, nil
 	}
+	report.addEffect("read_private_source_retirement_journal")
 	journal, err := openExecutionJournal(ctx, target, options.OperationID, options.Limits)
 	if err != nil {
 		return mapExecutionError(&report, err, "source retirement journal could not be opened")

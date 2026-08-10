@@ -57,8 +57,11 @@ func platformCheckOperationLock(*Session, *boundDirectory, *os.File, rawIdentity
 	return ErrUnsupported
 }
 func platformReleaseOperationLock(*os.File, *boundDirectory) error { return nil }
-func platformSyncFile(*os.File) error                              { return ErrUnsupported }
-func platformSyncDirectory(*boundDirectory) error                  { return ErrUnsupported }
+func platformRetirePrivateSubtree(*Session, string, *boundDirectory, *os.File, rawIdentity, rawIdentity) (bool, bool, bool, bool, bool, error) {
+	return false, false, false, false, false, ErrUnsupported
+}
+func platformSyncFile(*os.File) error             { return ErrUnsupported }
+func platformSyncDirectory(*boundDirectory) error { return ErrUnsupported }
 func platformReadDirectory(*boundDirectory, int) ([]os.DirEntry, error) {
 	return nil, ErrUnsupported
 }
