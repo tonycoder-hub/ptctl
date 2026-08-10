@@ -150,8 +150,8 @@ Usage:
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
-  ptctl seed materialize run (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH --target PATH --expect-plan-id ID --acknowledge-filesystem-write [--output table|json]
-  ptctl seed materialize resume (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [--search-root PATH...] [--output table|json] OPERATION_ID
+  ptctl seed materialize run (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE --snapshot-record RECORD --select-source-match MATCH) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [--output table|json]
+  ptctl seed materialize resume (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [source selector] [--output table|json] OPERATION_ID
   ptctl seed materialize status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed materialize abandon --target PATH --acknowledge-abandon [--output table|json] OPERATION_ID
   ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [--output table|json] OPERATION_ID
@@ -1206,7 +1206,7 @@ func (a *app) seedDiscover(args []string) error {
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "Live-root discovery can establish current uniqueness. Stored-profile discovery reobserves and exactly verifies historical locators, but remains incomplete and never emits a plan because a snapshot cannot prove current uniqueness. Both modes perform zero writes.")
+		fmt.Fprintln(fs.Output(), "Live-root discovery can establish current uniqueness. Stored-profile discovery reobserves and exactly verifies historical locators but never infers current uniqueness. With an explicit --snapshot-record and --select-source-match, one reviewed exact source assignment may emit a target plan; this is explicit selection, not a negative or uniqueness proof. Both modes perform zero writes.")
 		fmt.Fprintln(fs.Output(), "Host/client mapping applies to discovered sources, or to planned targets when --target is set.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Flags:")
@@ -1221,11 +1221,12 @@ func (a *app) seedDiscover(args []string) error {
 	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
 	storageProfile := fs.String("storage-profile", "", "stored profile name or immutable ID; pair with --state-store")
 	snapshotRecord := fs.String("snapshot-record", "", "explicit descriptor record ID for stored-profile mode")
+	selectedSourceMatch := fs.String("select-source-match", "", "explicit sha256 source-match ID from the selected stored snapshot")
 	target := fs.String("target", "", "optional target storage root for a layout-only plan")
 	strategy := fs.String("strategy", "copy", "layout plan strategy; only copy is supported")
 	showAbsolute := fs.Bool("show-absolute-paths", false, "include absolute host paths in output")
 	allowNetwork := fs.Bool("allow-network", false, "allow explicit network/UNC search roots")
-	requireVerified := fs.Bool("require-verified", false, "exit 4 unless source_outcome is verified_unique; target handoff does not affect this")
+	requireVerified := fs.Bool("require-verified", false, "exit 4 unless source_outcome is verified_unique or verified_selected")
 	timeout := fs.Duration("timeout", time.Hour, "shared scan and verification wall-clock budget")
 	hostRoot := fs.String("host-root", "", "optional host namespace root for source paths, or target paths with --target")
 	clientRoot := fs.String("client-root", "", "optional downloader namespace root paired with --host-root")
@@ -1261,7 +1262,7 @@ func (a *app) seedDiscover(args []string) error {
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
-	indexedRequested := explicit["state-store"] || explicit["storage-profile"] || explicit["snapshot-record"]
+	indexedRequested := explicit["state-store"] || explicit["storage-profile"] || explicit["snapshot-record"] || explicit["select-source-match"]
 	if len(searchRoots) == 0 && !indexedRequested {
 		return usageError("seed discover requires --search-root or the --state-store/--storage-profile pair")
 	}
@@ -1273,6 +1274,14 @@ func (a *app) seedDiscover(args []string) error {
 	}
 	if explicit["snapshot-record"] && !indexedRequested {
 		return usageError("--snapshot-record requires stored-profile mode")
+	}
+	if explicit["select-source-match"] {
+		if !explicit["snapshot-record"] {
+			return usageError("--select-source-match requires an explicit --snapshot-record")
+		}
+		if !validSHA256Selector(*selectedSourceMatch) {
+			return usageError("--select-source-match requires a canonical sha256 source-match ID")
+		}
 	}
 	if indexedRequested && explicit["allow-network"] {
 		return usageError("--allow-network is fixed by the immutable storage profile in stored-profile mode")
@@ -1344,14 +1353,15 @@ func (a *app) seedDiscover(args []string) error {
 		return err
 	}
 	options := seed.DiscoverOptions{
-		SearchRoots:       append([]string(nil), searchRoots...),
-		InventoryLimits:   inventoryLimits,
-		MatchLimits:       matchLimits,
-		AllowNetwork:      *allowNetwork,
-		ShowAbsolutePaths: *showAbsolute,
-		TimeBudget:        *timeout,
-		TargetRoot:        *target,
-		Strategy:          *strategy,
+		SearchRoots:           append([]string(nil), searchRoots...),
+		InventoryLimits:       inventoryLimits,
+		MatchLimits:           matchLimits,
+		AllowNetwork:          *allowNetwork,
+		ShowAbsolutePaths:     *showAbsolute,
+		TimeBudget:            *timeout,
+		TargetRoot:            *target,
+		Strategy:              *strategy,
+		ExplicitSourceMatchID: *selectedSourceMatch,
 	}
 	if *hostRoot != "" {
 		options.ClientMapping = &seed.ClientMappingOptions{HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows"}
@@ -1402,8 +1412,8 @@ func (a *app) seedDiscover(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *requireVerified && result.SourceOutcome != "verified_unique" {
-		return &inconclusiveErr{message: "seed discovery source outcome is not verified_unique"}
+	if *requireVerified && result.SourceOutcome != "verified_unique" && result.SourceOutcome != "verified_selected" {
+		return &inconclusiveErr{message: "seed discovery source outcome is not verified_unique or verified_selected"}
 	}
 	return nil
 }
@@ -1475,6 +1485,11 @@ func wantedMetafileSizes(meta *metafile.MetaInfo) []int64 {
 		result = append(result, size)
 	}
 	return result
+}
+
+func validSHA256Selector(value string) bool {
+	_, err := metastore.ParseRecordID(value)
+	return err == nil
 }
 
 func writeJSON(out io.Writer, data any, warnings []string) error {
@@ -1961,8 +1976,16 @@ func writeDiscoveryHuman(out io.Writer, result seed.DiscoveryResult) error {
 	if selected == "" {
 		selected = "none"
 	}
-	fmt.Fprintf(w, "SEED DISCOVERY\nSOURCE OUTCOME\t%s\nSELECTION\t%s\nHANDOFF\t%s\nPLAN PRODUCED\t%t\nBEST EVIDENCE\t%s\nEFFECT\t%s\nWRITES\t%d\nTORRENT\t%s\nVERSION\t%s\nTIME BUDGET\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\nVERIFIED FOUND\t%d\nVERIFIED RETAINED\t%d\nSELECTED\t%s\n",
-		terminalSafe(result.SourceOutcome), terminalSafe(result.Selection.Status), terminalSafe(result.Handoff.Status), result.Handoff.PlanProduced,
+	selectionBasis := result.Selection.Basis
+	if selectionBasis == "" {
+		selectionBasis = "none"
+	}
+	selectionScope := result.Selection.ScopeID
+	if selectionScope == "" {
+		selectionScope = "none"
+	}
+	fmt.Fprintf(w, "SEED DISCOVERY\nSOURCE OUTCOME\t%s\nSELECTION\t%s\nSELECTION BASIS\t%s\nSELECTION SCOPE\t%s\nHANDOFF\t%s\nPLAN PRODUCED\t%t\nBEST EVIDENCE\t%s\nEFFECT\t%s\nWRITES\t%d\nTORRENT\t%s\nVERSION\t%s\nTIME BUDGET\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\nVERIFIED FOUND\t%d\nVERIFIED RETAINED\t%d\nSELECTED\t%s\n",
+		terminalSafe(result.SourceOutcome), terminalSafe(result.Selection.Status), terminalSafe(selectionBasis), terminalSafe(selectionScope), terminalSafe(result.Handoff.Status), result.Handoff.PlanProduced,
 		terminalSafe(result.BestEvidence), terminalSafe(result.Effect), result.WritesPerformed,
 		terminalSafe(result.Torrent.Name), terminalSafe(result.Torrent.Version), (time.Duration(result.Scan.TimeBudgetMillis) * time.Millisecond).String(), result.Scan.Complete, result.Scan.VerificationComplete,
 		result.Scan.InventoryUsed.EntriesExamined, result.Scan.InventoryLimits.MaxEntries,

@@ -38,6 +38,7 @@ type Plan struct {
 	ReadyToApply       bool                        `json:"ready_to_apply"`
 	Readiness          string                      `json:"readiness"`
 	SourceMode         string                      `json:"source_mode"`
+	SourceSelectionID  string                      `json:"source_selection_id,omitempty"`
 	SourceRoot         string                      `json:"source_root,omitempty"`
 	TargetRoot         string                      `json:"target_root"`
 	TargetRootIdentity string                      `json:"target_root_identity,omitempty"`
@@ -69,17 +70,28 @@ func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRo
 		return Plan{}, fmt.Errorf("resolve source root: %w", err)
 	}
 	sourceRoot = filepath.Clean(sourceRoot)
-	return buildMaterializePlan(ctx, meta, verified, "exact_root", sourceRoot, targetRoot, strategy)
+	return buildMaterializePlan(ctx, meta, verified, "exact_root", "", sourceRoot, targetRoot, strategy)
 }
 
 // BuildMaterializePlanFromVerified consumes an opaque mapped verification
 // observation. It supports sources scattered across multiple storage roots and
 // remains strictly read-only.
 func BuildMaterializePlanFromVerified(ctx context.Context, meta *metafile.MetaInfo, verified *metafile.VerifiedSource, targetRoot, strategy string) (Plan, error) {
-	return buildMaterializePlan(ctx, meta, verified, "discovered_map", "", targetRoot, strategy)
+	return buildMaterializePlan(ctx, meta, verified, "discovered_map", "", "", targetRoot, strategy)
 }
 
-func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified *metafile.VerifiedSource, sourceMode, sourceRoot, targetRoot, strategy string) (Plan, error) {
+// buildMaterializePlanFromIndexedSelection consumes one explicitly selected,
+// live-reverified source assignment whose immutable profile/snapshot/match
+// scope is bound by sourceSelectionID. It does not claim current-filesystem
+// uniqueness or absence.
+func buildMaterializePlanFromIndexedSelection(ctx context.Context, meta *metafile.MetaInfo, verified *metafile.VerifiedSource, targetRoot, strategy, sourceSelectionID string) (Plan, error) {
+	if !canonicalIndexedSourceSelectionID(sourceSelectionID) {
+		return Plan{}, fmt.Errorf("indexed source selection identity is invalid")
+	}
+	return buildMaterializePlan(ctx, meta, verified, "indexed_explicit_map", sourceSelectionID, "", targetRoot, strategy)
+}
+
+func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified *metafile.VerifiedSource, sourceMode, sourceSelectionID, sourceRoot, targetRoot, strategy string) (Plan, error) {
 	if err := ctx.Err(); err != nil {
 		return Plan{}, err
 	}
@@ -125,6 +137,7 @@ func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified
 		ReadyToApply:       false,
 		Readiness:          "layout_only",
 		SourceMode:         sourceMode,
+		SourceSelectionID:  sourceSelectionID,
 		SourceRoot:         sourceRoot,
 		TargetRoot:         targetProbe.ResolvedPath,
 		TargetRootIdentity: targetRootIdentity,
@@ -227,6 +240,9 @@ func rejectSymlinkPrefix(root, target string) error {
 
 func planID(plan Plan) string {
 	lines := []string{plan.InfoHashV1, plan.InfoHashV2, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceMode, plan.SourceRoot, plan.TargetRoot, plan.TargetRootIdentity, plan.Readiness, plan.ClientMapping}
+	if plan.SourceSelectionID != "" {
+		lines = append(lines, "source-selection\x00"+plan.SourceSelectionID)
+	}
 	operations := make([]string, 0, len(plan.Operations))
 	for _, operation := range plan.Operations {
 		operations = append(operations, fmt.Sprint(operation.ManifestIndex)+"\x00"+operation.Kind+"\x00"+operation.Source+"\x00"+operation.Target+"\x00"+operation.ClientTarget+"\x00"+fmt.Sprint(operation.Bytes))

@@ -2,9 +2,13 @@ package storageindex
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"sort"
 
@@ -80,6 +84,115 @@ type CandidateResult struct {
 	Warnings                   []string                    `json:"warnings"`
 	DataLoad                   metastore.RecordLoadReceipt `json:"data_load"`
 	Candidates                 []IndexedCandidate          `json:"-"`
+	authorityDigest            [sha256.Size]byte
+	authoritySet               bool
+}
+
+// HasLiveAuthority proves that this value is the unchanged process-local
+// result returned by LoadCandidates for the exact immutable profile. Public
+// JSON deliberately loses this authority, and changing any profile/snapshot,
+// accounting, diagnostic, locator, or observation field invalidates it.
+func (result CandidateResult) HasLiveAuthority(profile Profile) bool {
+	if !result.authoritySet || !result.HistoricalSnapshotVerified || result.CurrentSearchComplete ||
+		result.ProfileID != profile.ID || profile.ID == "" || profile.Revision == "" {
+		return false
+	}
+	digest := candidateAuthorityDigest(result, profile)
+	return subtle.ConstantTimeCompare(result.authorityDigest[:], digest[:]) == 1
+}
+
+func candidateAuthorityDigest(result CandidateResult, profile Profile) [sha256.Size]byte {
+	digest := sha256.New()
+	_, _ = io.WriteString(digest, "ptctl-storage-index-live-candidates-v1\x00")
+	writeCandidateAuthorityString(digest, result.Effect)
+	writeCandidateAuthorityBool(digest, result.Complete)
+	writeCandidateAuthorityBool(digest, result.HistoricalSnapshotVerified)
+	writeCandidateAuthorityBool(digest, result.CurrentSearchComplete)
+	writeCandidateAuthorityString(digest, result.ProfileID)
+	writeCandidateAuthorityString(digest, profile.Revision)
+	writeCandidateAuthorityString(digest, result.SnapshotID)
+	writeCandidateAuthorityString(digest, result.DescriptorRecordID.String())
+	writeCandidateAuthorityString(digest, result.DataRecordID.String())
+	writeCandidateAuthorityInts(digest,
+		int64(result.Limits.MaxCandidates), result.Limits.MaxPathBytes, int64(result.Limits.MaxIssues),
+		int64(result.Stats.SnapshotFilesConsidered), int64(result.Stats.SizeMatchesConsidered),
+		int64(result.Stats.CandidatesRetained), result.Stats.RetainedPathBytes,
+		int64(result.Stats.StaleLocators), int64(result.Stats.ChangedHints), int64(result.Stats.StaleRoots), int64(result.Stats.IssueOverflow),
+	)
+	writeCandidateAuthorityStrings(digest, result.StopReasons)
+	writeCandidateAuthorityInt(digest, int64(len(result.Issues)))
+	for _, issue := range result.Issues {
+		writeCandidateAuthorityString(digest, issue.Code)
+		writeCandidateAuthorityString(digest, issue.RootID)
+		writeCandidateAuthorityInt(digest, int64(issue.Count))
+	}
+	writeCandidateAuthorityStrings(digest, result.Warnings)
+	writeCandidateAuthorityString(digest, result.DataLoad.Effect)
+	writeCandidateAuthorityBool(digest, result.DataLoad.Complete)
+	writeCandidateAuthorityInts(digest, result.DataLoad.RecordBytesRead, result.DataLoad.ConsumerBytesRead)
+	writeCandidateAuthorityBool(digest, result.DataLoad.RecordBytesKnown)
+	writeCandidateAuthorityString(digest, result.DataLoad.Store.StoreID)
+	writeCandidateAuthorityString(digest, result.DataLoad.Store.Format)
+	writeCandidateAuthorityString(digest, result.DataLoad.Store.Privacy)
+	writeCandidateAuthorityString(digest, result.DataLoad.Store.CommitAssurance)
+	writeCandidateAuthorityInt(digest, int64(len(result.Candidates)))
+	for _, candidate := range result.Candidates {
+		entry := candidate.SnapshotEntry
+		writeCandidateAuthorityString(digest, entry.Type)
+		writeCandidateAuthorityString(digest, entry.RootID)
+		writeCandidateAuthorityStrings(digest, entry.RelativeComponentsRawBase64)
+		writeCandidateAuthorityInts(digest, entry.SizeBytes, entry.ModifiedUnixNanos)
+		writeCandidateAuthorityString(digest, entry.IdentityHint)
+		observation := candidate.Observation
+		writeCandidateAuthorityString(digest, observation.ObservationID)
+		writeCandidateAuthorityString(digest, observation.RootID)
+		writeCandidateAuthorityString(digest, observation.RelativePath)
+		writeCandidateAuthorityStrings(digest, observation.RelativeComponentsRawBase64)
+		writeCandidateAuthorityInts(digest, observation.SizeBytes, observation.ModifiedAt.UnixNano())
+		writeCandidateAuthorityInt(digest, int64(len(observation.Aliases)))
+		for _, alias := range observation.Aliases {
+			writeCandidateAuthorityString(digest, alias.RootID)
+			writeCandidateAuthorityString(digest, alias.RelativePath)
+			writeCandidateAuthorityStrings(digest, alias.RelativeComponentsRawBase64)
+		}
+		writeCandidateAuthorityString(digest, candidate.ResolvedPath)
+		writeCandidateAuthorityBool(digest, candidate.HintsChanged)
+	}
+	var resultDigest [sha256.Size]byte
+	copy(resultDigest[:], digest.Sum(nil))
+	return resultDigest
+}
+
+func writeCandidateAuthorityString(digest hash.Hash, value string) {
+	writeCandidateAuthorityInt(digest, int64(len(value)))
+	_, _ = io.WriteString(digest, value)
+}
+
+func writeCandidateAuthorityStrings(digest hash.Hash, values []string) {
+	writeCandidateAuthorityInt(digest, int64(len(values)))
+	for _, value := range values {
+		writeCandidateAuthorityString(digest, value)
+	}
+}
+
+func writeCandidateAuthorityBool(digest hash.Hash, value bool) {
+	if value {
+		_, _ = digest.Write([]byte{1})
+		return
+	}
+	_, _ = digest.Write([]byte{0})
+}
+
+func writeCandidateAuthorityInts(digest hash.Hash, values ...int64) {
+	for _, value := range values {
+		writeCandidateAuthorityInt(digest, value)
+	}
+}
+
+func writeCandidateAuthorityInt(digest hash.Hash, value int64) {
+	var raw [8]byte
+	binary.BigEndian.PutUint64(raw[:], uint64(value))
+	_, _ = digest.Write(raw[:])
 }
 
 // LoadCandidates verifies one sealed descriptor and its complete data stream,
@@ -244,6 +357,8 @@ func (repository *Repository) LoadCandidates(ctx context.Context, profile Profil
 		return result.Candidates[i].Observation.SortKey() < result.Candidates[j].Observation.SortKey()
 	})
 	result.Stats.CandidatesRetained = len(result.Candidates)
+	result.authorityDigest = candidateAuthorityDigest(result, profile)
+	result.authoritySet = true
 	return result, nil
 }
 

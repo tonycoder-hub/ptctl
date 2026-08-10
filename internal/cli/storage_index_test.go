@@ -18,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
+	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
@@ -102,6 +104,157 @@ func TestSeedDiscoverStoredProfileUsageIsValidatedBeforeStoreRead(t *testing.T) 
 	}, strings.NewReader(""), &out, &errOut)
 	if code != 2 || !strings.Contains(errOut.String(), "mutually exclusive") || strings.Contains(errOut.String(), missing) {
 		t.Fatalf("usage validation touched private state: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestIndexedExplicitSelectionPlansAndMaterializesWithoutClaimingUnique(t *testing.T) {
+	ctx := t.Context()
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentRoot := physicalCLITempDir(t)
+	content := []byte("indexed-explicit-materialize")
+	selectedPath := filepath.Join(contentRoot, "renamed-selected.bin")
+	if err := os.WriteFile(selectedPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{contentRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh, err := repository.Refresh(ctx, profileReceipt.Profile, storageindex.RefreshOptions{})
+	if err != nil || refresh.DescriptorRecord.ID == "" {
+		t.Fatalf("refresh failed: %#v %v", refresh, err)
+	}
+	descriptorID := refresh.DescriptorRecord.ID.String()
+	torrentPath := filepath.Join(physicalCLITempDir(t), "source.torrent")
+	if err := os.WriteFile(torrentPath, testV1Metafile("selected-final.bin", content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := physicalCLITempDir(t)
+
+	var out, errOut bytes.Buffer
+	base := []string{
+		"--torrent", torrentPath, "--state-store", stateRoot, "--storage-profile", "media",
+		"--snapshot-record", descriptorID, "--output", "json",
+	}
+	previewArgs := append([]string{"seed", "discover"}, base...)
+	if code := Run(previewArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("indexed preview code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var previewEnvelope struct {
+		Data seed.DiscoveryResult `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &previewEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if previewEnvelope.Data.SourceOutcome != "incomplete" || len(previewEnvelope.Data.Matches) != 1 || previewEnvelope.Data.Plan != nil {
+		t.Fatalf("unselected snapshot gained authority: %s", out.String())
+	}
+	matchID := previewEnvelope.Data.Matches[0].ID
+
+	out.Reset()
+	errOut.Reset()
+	selectedArgs := append([]string{"seed", "discover"}, base...)
+	selectedArgs = append(selectedArgs, "--select-source-match", matchID, "--target", targetRoot, "--require-verified")
+	if code := Run(selectedArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("selected preview code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var selectedEnvelope struct {
+		Data seed.DiscoveryResult `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &selectedEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	selected := selectedEnvelope.Data
+	if selected.SourceOutcome != "verified_selected" || selected.Selection.Status != "ready_explicit" ||
+		selected.Selection.ScopeID == "" || selected.Plan == nil || selected.Plan.SourceMode != "indexed_explicit_map" ||
+		selected.Plan.SourceSelectionID != selected.Selection.ScopeID {
+		t.Fatalf("selected preview did not bind plan: %s", out.String())
+	}
+	planID := selected.Plan.ID
+	assertJSONDoesNotContain(t, out.Bytes(), stateRoot, contentRoot, selectedPath, targetRoot, torrentPath)
+
+	wrongMatch := "sha256:" + strings.Repeat("0", 64)
+	if wrongMatch == matchID {
+		wrongMatch = "sha256:" + strings.Repeat("1", 64)
+	}
+	out.Reset()
+	errOut.Reset()
+	wrongArgs := []string{
+		"seed", "materialize", "run", "--torrent", torrentPath,
+		"--state-store", stateRoot, "--storage-profile", "media", "--snapshot-record", descriptorID,
+		"--select-source-match", wrongMatch, "--target", targetRoot, "--expect-plan-id", planID,
+		"--acknowledge-filesystem-write", "--output", "json",
+	}
+	if code := Run(wrongArgs, strings.NewReader(""), &out, &errOut); code != 4 {
+		t.Fatalf("unknown selected match code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	blocked := decodeMaterializeReport(t, out.Bytes())
+	if blocked.Data.Outcome != materialize.OutcomeBlocked || blocked.Data.WritesPerformed != 0 {
+		t.Fatalf("unknown selected match crossed write boundary: %s", out.String())
+	}
+	entries, err := os.ReadDir(targetRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("unknown selected match changed target: entries=%d err=%v", len(entries), err)
+	}
+
+	// A new exact alternative after snapshot capture proves why this mode must
+	// remain explicit selection rather than a current-filesystem uniqueness
+	// claim. It does not invalidate the reviewed exact selected source map.
+	if err := os.WriteFile(filepath.Join(contentRoot, "new-unindexed-alternative.bin"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	runArgs := []string{
+		"seed", "materialize", "run", "--torrent", torrentPath,
+		"--state-store", stateRoot, "--storage-profile", "media", "--snapshot-record", descriptorID,
+		"--select-source-match", matchID, "--target", targetRoot, "--expect-plan-id", planID,
+		"--acknowledge-filesystem-write", "--output", "json",
+	}
+	if code := Run(runArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("indexed materialize code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	report := decodeMaterializeReport(t, out.Bytes())
+	if report.Data.Outcome != materialize.OutcomeMaterializedVerified || report.Data.Source.Outcome != "verified_selected" ||
+		report.Data.Source.Mode != "indexed_explicit_live_reverification" || !report.Data.Source.ContentVerified ||
+		!report.Data.Plan.Matches || report.Data.Plan.ObservedID != planID {
+		t.Fatalf("indexed materialize overstated or lost authority: %s", out.String())
+	}
+	final, err := os.ReadFile(filepath.Join(targetRoot, "selected-final.bin"))
+	if err != nil || !bytes.Equal(final, content) {
+		t.Fatalf("indexed selected materialization bytes=%q err=%v", final, err)
+	}
+	assertJSONDoesNotContain(t, out.Bytes(), stateRoot, contentRoot, selectedPath, targetRoot, torrentPath)
+}
+
+func TestMaterializeIndexedSelectorUsagePrecedesStateAndTargetIO(t *testing.T) {
+	missingState := filepath.Join(physicalCLITempDir(t), "MUST-NOT-READ-STATE")
+	targetRoot := physicalCLITempDir(t)
+	before, err := os.ReadDir(targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"seed", "materialize", "run", "--torrent", "missing.torrent",
+		"--state-store", missingState, "--storage-profile", "media",
+		"--target", targetRoot, "--expect-plan-id", strings.Repeat("1", 24),
+		"--acknowledge-filesystem-write",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 2 || out.Len() != 0 || !strings.Contains(errOut.String(), "snapshot-record") || strings.Contains(errOut.String(), missingState) {
+		t.Fatalf("incomplete indexed selector crossed I/O boundary: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	after, err := os.ReadDir(targetRoot)
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("bad indexed usage changed target namespace: before=%d after=%d err=%v", len(before), len(after), err)
 	}
 }
 

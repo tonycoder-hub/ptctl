@@ -443,14 +443,34 @@ remain a candidate if the current regular file has the exact required size;
 the ordinary identity-bound torrent verifier still decides content truth.
 Hardlink aliases remain distinct paths and candidate edges.
 
+The live candidate value itself carries a private, non-serialized authority
+digest over the immutable profile revision, descriptor/data identities,
+bounded accounting, diagnostics, every historical row, and every fresh
+observation/locator. Seed discovery rejects a copied DTO if any of those public
+fields changed; a JSON round trip cannot recreate candidate authority.
+
 Historical inventory completeness and current search completeness are separate
-axes. In snapshot-only `seed discover`:
+axes. In unselected snapshot `seed discover`:
 
 - a live exact match may be reported with `best_evidence=verified`;
 - `source_outcome` always remains `incomplete`;
 - zero matches never becomes `not_found`;
 - multiple exact matches add positive ambiguity evidence but remain incomplete;
 - selection, client/target handoff, and materialization plan remain blocked.
+
+An explicit snapshot execution path is deliberately a choice rather than a
+search conclusion. The caller supplies one descriptor record ID and one exact
+source-match ID returned by a prior bounded preview. Every locator in that map
+is reopened beneath the immutable profile root and the ordinary identity-bound
+v1/v2/hybrid verifier runs again. If the selected map survives, the result is
+`verified_selected`; it never becomes `verified_unique`, `not_found`, or a
+current completeness token. A domain-separated selection-scope ID binds the
+profile ID, snapshot generation, descriptor record, and match ID into the
+materialize plan. Public JSON retains only this opaque review data and loses
+the process-local `VerifiedSource` capability.
+Budgets on unselected alternatives do not erase an already complete proof of
+the selected map, but they keep verification completeness false and cannot be
+used to infer how many other current layouts exist.
 
 `reconcile report` consumes the same result and therefore cannot become
 `consistent` from a historical snapshot. Only ordinary same-invocation full
@@ -549,13 +569,17 @@ Discovery source outcome and optional handoff are separate axes:
 - `verified_ambiguous`: at least two distinct layouts are verified, even if a
   later budget prevents retaining more alternatives;
 - `not_found`: a complete search found none;
+- `verified_selected`: one caller-selected historical locator map passed exact
+  live reobservation and content verification; no uniqueness is claimed;
 - `incomplete`: uniqueness or absence cannot be established because scanning
   or verification stopped early.
 
-Only `verified_unique` has a selected source. Target conflicts or client-path
-mapping errors can block the handoff without erasing the source outcome. A
-produced plan remains `layout_only`, `effect:none`, and `ready_to_apply:false`;
-its blockers explain which mutation and reconciliation controls are absent.
+`verified_unique` and `verified_selected` can retain a process-local selected
+source, but only the former is a current search result. Target conflicts or
+client-path mapping errors can block the handoff without erasing the source
+outcome. A produced plan remains `layout_only`, `effect:none`, and
+`ready_to_apply:false`; its blockers explain which mutation and reconciliation
+controls are absent.
 
 `bytes_verified` is physical content read. Per-algorithm
 `proof_stream_bytes` may differ because v1 includes virtual padding while v2
@@ -569,8 +593,8 @@ modeled safely.
 narrower than downloader coordination and has six explicit controls:
 
 ```text
-run     selector + live search roots + target + reviewed plan ID + write ack
-resume  selector + target + reviewed plan ID + write ack + explicit operation ID
+run     selector + live roots OR explicit stored match + target + reviewed plan ID + write ack
+resume  selector + target + reviewed plan ID + write ack + optional source selector + operation ID
 status  target + optional explicit operation ID
 abandon target + abandon ack + explicit operation ID
 prune   target + reviewed plan ID + deletion ack + explicit operation ID
@@ -579,16 +603,19 @@ forget  target + reviewed plan ID + historical-evidence-deletion ack + explicit 
 
 Both plan surfaces remain `layout_only`, `effect:none`, and
 `ready_to_apply:false`. `run` accepts only the 24-hex plan ID reviewed from
-`seed discover --target` with the same metafile selector, search roots, and
-target. The standalone `seed plan` uses `exact_root` source semantics and its ID
-is not a materialize execution selector. `run` does not deserialize either
-plan/discovery JSON or treat a historical report as proof. Under one timeout it
-loads the selected exact metafile, repeats the bounded live discovery, requires
-`verified_unique`, consumes the process-local opaque `VerifiedSource`, and
-rebuilds the copy-only discovered-map plan. A mismatch blocks before a journal
-is created. Each source copy is identity/precondition bracketed against that
-same-call authority; the complete staged layout is then exactly verified before
-publication.
+`seed discover --target` with the same metafile selector and target. Live mode
+also repeats the same search roots and requires `verified_unique`. Indexed mode
+requires one explicit profile, descriptor record, and source-match ID; it
+returns `verified_selected`, reopens every chosen locator, and reruns exact
+content proof without claiming current uniqueness. Its domain-separated
+selection scope is part of the plan ID. The standalone `seed plan` uses
+`exact_root` source semantics and its ID is not a materialize execution
+selector. `run` does not deserialize either plan/discovery JSON or treat a
+historical report as proof. Under one timeout it reproduces the chosen source
+mode, consumes only the same-invocation opaque `VerifiedSource`, and rebuilds
+the copy-only plan. A mismatch blocks before a journal is created. Each source
+copy is identity/precondition bracketed against that same-call authority; the
+complete staged layout is then exactly verified before publication.
 
 The target is an existing supported local filesystem root. A bound root
 identity from plan review must still match, the final top-level name must be
@@ -622,9 +649,10 @@ confirmations, staged/final publication attempts, bytes, and ambiguous writes
 are not collapsed into the outcome.
 
 `resume` first replays the explicit journal. Only `journaled`, `stage_created`,
-and `file_staged` phases may read supplied search roots and require a fresh
-unique source. Later phases ignore supplied roots and reverify staged or final
-bytes; a durable journal is recovery evidence, never source-content authority.
+and `file_staged` phases may read supplied live roots or the same explicit
+stored selection and require fresh same-mode source authority. Later phases
+ignore supplied source selectors and reverify staged or final bytes; a durable
+journal is recovery evidence, never source-content authority.
 Committed recovery rechecks the final namespace and content and returns
 `already_committed`. No command enumerates and silently selects an operation.
 

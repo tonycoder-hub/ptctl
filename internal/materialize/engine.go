@@ -110,9 +110,8 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		report.addBlocker("source.process_authority_missing", "same-invocation verified source authority is required")
 		return report, fmt.Errorf("%w: verified source authority is unavailable", ErrPolicy)
 	}
-	report.Source.Outcome = "verified_unique"
-	report.Source.ContentVerified = true
-	plan, err := seed.BuildMaterializePlanFromVerified(ctx, options.Meta, source, options.TargetRoot, StrategyCopy)
+	setVerifiedDiscoverySourceReport(&report, options.Discovery, options.Meta)
+	plan, err := options.Discovery.BuildMaterializePlan(ctx, options.Meta, options.TargetRoot, StrategyCopy)
 	if err != nil {
 		report.Outcome = OutcomeBlocked
 		report.addBlocker("plan.rebuild_failed", "the read-only layout plan could not be rebuilt")
@@ -379,10 +378,10 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 		}
 		if source == nil {
 			report.Outcome = OutcomeBlocked
-			report.addBlocker("source.process_authority_missing", "resume before stage verification requires fresh unique live discovery")
+			report.addBlocker("source.process_authority_missing", "resume before stage verification requires fresh verified source authority from the reviewed source mode")
 			return report, fmt.Errorf("%w: fresh verified source authority is unavailable", ErrPolicy)
 		}
-		plan, planErr := seed.BuildMaterializePlanFromVerified(ctx, options.Meta, source, targetRoot, StrategyCopy)
+		plan, planErr := options.Discovery.BuildMaterializePlan(ctx, options.Meta, targetRoot, StrategyCopy)
 		if planErr != nil {
 			report.Outcome = OutcomeBlocked
 			report.addBlocker("plan.rebuild_failed", "the live resume plan could not be rebuilt")
@@ -395,10 +394,7 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 			report.addBlocker("plan.id_mismatch", "the fresh source plan differs from the operation intent")
 			return report, fmt.Errorf("%w: fresh plan differs from operation intent", ErrPolicy)
 		}
-		report.Source = SourceReport{
-			Mode: "live_discovery", Outcome: "verified_unique",
-			PreconditionsRechecked: true, ContentVerified: true,
-		}
+		setVerifiedDiscoverySourceReport(&report, options.Discovery, options.Meta)
 	} else {
 		report.Source = SourceReport{Mode: "not_required_after_staging", Outcome: "not_requested"}
 	}
@@ -414,6 +410,30 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 	report.Operation.Status = "terminal"
 	report.Operation.Resumable = false
 	return report, nil
+}
+
+func setVerifiedDiscoverySourceReport(report *Report, discovery *seed.DiscoveryResult, meta *metafile.MetaInfo) {
+	if report == nil || discovery == nil {
+		return
+	}
+	mode, ok := discovery.VerifiedSourceMode(meta)
+	if !ok {
+		return
+	}
+	switch mode {
+	case "indexed_explicit":
+		report.Source = SourceReport{
+			Mode: "indexed_explicit_live_reverification", Outcome: "verified_selected",
+			PreconditionsRechecked: true, ContentVerified: true,
+		}
+	case "live_unique":
+		report.Source = SourceReport{
+			Mode: "live_discovery", Outcome: "verified_unique",
+			PreconditionsRechecked: true, ContentVerified: true,
+		}
+	default:
+		report.Source = SourceReport{Mode: "unknown", Outcome: "unavailable"}
+	}
 }
 
 func validateResumeIntent(meta *metafile.MetaInfo, layout Layout, intent Intent, expectedPlanID string) error {

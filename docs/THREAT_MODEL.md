@@ -186,6 +186,16 @@ Any limit hit sets the relevant `complete` flag false. Incomplete work cannot be
 reported as not-found or uniquely verified. If two layouts were already proven,
 ambiguity remains a positive fact even if later work stops.
 
+A sealed index may authorize only one explicitly named match that the current
+invocation successfully reopens and cryptographically verifies. This produces
+`verified_selected`, never a claim that candidate enumeration was complete.
+The immutable profile, descriptor, generation, and match are domain-separated
+into the reviewed plan ID; a different snapshot or locator identity cannot
+silently reproduce it. Public JSON drops the process-local source capability.
+The intermediate candidate query also has a private digest over its profile,
+records, accounting, diagnostics, and fresh observations, so relabeling a live
+candidate DTO or replaying JSON cannot synthesize this selection authority.
+
 ### Filesystem escape, races, and corruption
 
 Search roots must be explicit, non-overlapping directories. Inventory does not
@@ -738,8 +748,6 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 ## Known gaps before broader mutation support
 
-- snapshot-backed materialize authority; current writes require fresh complete
-  live discovery rather than historical index hints;
 - broader quota/age policy
   (materialize, adoption, activation, and source-retirement heavy state have
   exact explicit pruning and each tombstone family has a separately

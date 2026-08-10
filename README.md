@@ -68,6 +68,10 @@ capabilities at the edge, not assumptions in the core domain model.
 - descriptor-last snapshot publication, domain-separated record IDs, bounded
   latest-generation selection, root-identity invalidation, and live
   identity-bound reobservation of historical locators;
+- explicit sealed-snapshot source-map selection for materialization, with the
+  profile, descriptor, generation, and exact match bound into the reviewed
+  plan while every selected locator is reopened and cryptographically verified
+  again in the writing invocation;
 - one mutually exclusive metafile selector across inspect, verify, seed, and
   reconciliation commands: an ordinary file, or an initialized store plus its
   whole-metafile variant ID;
@@ -352,14 +356,38 @@ ptctl seed discover \
 
 Each retained historical locator is resolved beneath the current profile root,
 root/file identity is reobserved, and survivors still pass the ordinary exact
-v1/v2/hybrid verifier. Nevertheless `source_outcome` remains `incomplete`, even
-when one candidate is currently `verified`: a historical snapshot cannot prove
-that no new, removed, or renamed alternative exists now. Snapshot-only mode
-therefore never emits a materialization plan, never reports `not_found` or
-`verified_unique`, and never makes reconciliation `consistent`. Use ordinary
-same-call `--search-root` discovery when current uniqueness or absence is
-required. `--snapshot-record` can bypass bounded latest listing, but does not
-upgrade freshness or proof semantics.
+v1/v2/hybrid verifier. Without an explicit selection, `source_outcome` remains
+`incomplete`, even when one candidate is currently `verified`: a historical
+snapshot cannot prove that no new, removed, or renamed alternative exists now.
+Unselected snapshot mode therefore never emits a materialization plan, never
+reports `not_found` or `verified_unique`, and never makes reconciliation
+`consistent`.
+
+For copy-only materialization, a user may explicitly choose one currently
+verified source-map ID from one explicit immutable descriptor:
+
+```bash
+ptctl seed discover \
+  --torrent release.torrent \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --storage-profile media \
+  --snapshot-record sha256:DESCRIPTOR_DIGEST \
+  --select-source-match sha256:MATCH_DIGEST \
+  --target "D:\PT" \
+  --output json
+```
+
+That result is `verified_selected`, not `verified_unique`. The selection-scope
+ID binds the immutable profile, snapshot generation, descriptor record, and
+exact match into the plan ID. The selected locator set is reopened and exactly
+verified in that invocation; a serialized report has no authority. New or
+unindexed alternatives remain unobserved but do not make the explicitly chosen
+exact source unsafe to copy. Changing the descriptor, match, locator identity,
+or target requires a new review. Use ordinary same-call `--search-root`
+discovery whenever current uniqueness or absence itself is required.
+If a safety budget stops evaluation of other historical assignments after the
+selected map has been proved, only that selected map remains authorized; the
+report stays explicit about incomplete alternative enumeration.
 
 Verify an exact content root. v1 uses its cross-file piece stream, v2 uses
 per-file Merkle trees, and hybrid requires both proofs. For a multi-file
@@ -409,8 +437,8 @@ ptctl seed plan \
 The standalone `seed plan` result remains a zero-write review artifact:
 `effect` is `none`, readiness is `layout_only`, and `ready_to_apply` is false.
 Its `exact_root` plan ID is not an execution selector. To review a layout for
-materialize, use `seed discover --target` with the intended selector, search
-roots, and target (as in the preceding discovery example), retain that
+materialize, use `seed discover --target` with the intended metafile and source
+selector plus target (as in the preceding discovery examples), retain that
 discovery plan's 24-hex ID, then acknowledge the journal, staging, and target
 writes:
 
@@ -426,9 +454,14 @@ ptctl seed materialize run \
 ```
 
 `run` does not consume plan or discovery JSON as proof. In the same invocation
-it repeats bounded live discovery with that same selector/search-root/target
-shape, requires one uniquely verified source, rebuilds the copy-only plan from
-the process-local proof, and compares the fresh ID before creating a journal.
+it either repeats bounded live discovery with that same
+selector/search-root/target shape and requires one uniquely verified source,
+or repeats the exact stored-profile/descriptor/match selection and reopens and
+cryptographically verifies that chosen source map. It rebuilds the copy-only
+plan from process-local proof and compares the fresh ID before creating a
+journal. Stored selection never claims current uniqueness and requires all four
+flags `--state-store`, `--storage-profile`, `--snapshot-record`, and
+`--select-source-match` on both preview and early-phase run/resume.
 It then uses a private target-root-local
 journal and same-filesystem staging, exactly verifies staged and final bytes,
 and publishes the top-level layout without clobber. The materialize limits are
@@ -470,12 +503,27 @@ ptctl seed materialize forget \
   sha256:OPERATION_DIGEST
 ```
 
+An indexed execution uses the same reviewed plan ID:
+
+```bash
+ptctl seed materialize run \
+  --torrent release.torrent \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --storage-profile media \
+  --snapshot-record sha256:DESCRIPTOR_DIGEST \
+  --select-source-match sha256:MATCH_DIGEST \
+  --target "D:\PT" \
+  --expect-plan-id 0123456789abcdef01234567 \
+  --acknowledge-filesystem-write
+```
+
 `status` without an ID performs a bounded name-only listing whose entries are
-`not_inspected`; it never chooses a latest operation. `resume` reads fresh
-search roots only for `journaled`, `stage_created`, or `file_staged` phases.
-Omitting roots in one of those phases returns a blocked report; after stage
-verification, supplied roots are not read because staged/final bytes are the
-recovery authority. `abandon` is allowed only before publication intent. It
+`not_inspected`; it never chooses a latest operation. `resume` reads fresh live
+roots or repeats the explicit stored selection only for `journaled`,
+`stage_created`, or `file_staged` phases. Omitting source authority in one of
+those phases returns a blocked report; after stage verification, supplied
+source selectors are not read because staged/final bytes are the recovery
+authority. `abandon` is allowed only before publication intent. It
 appends one terminal journal event and deliberately retains staging and scratch
 bytes: it is not cleanup, rollback, or deletion.
 

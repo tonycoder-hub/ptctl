@@ -2,6 +2,7 @@ package storageindex
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,6 +28,9 @@ func TestLoadCandidatesReobservesLiveIdentityBoundFile(t *testing.T) {
 	if err != nil || !query.Complete || !query.HistoricalSnapshotVerified || query.CurrentSearchComplete || len(query.Candidates) != 1 {
 		t.Fatalf("candidate query failed: query=%#v err=%v", query, err)
 	}
+	if !query.HasLiveAuthority(profileReceipt.Profile) {
+		t.Fatal("fresh candidate query did not retain process-local authority")
+	}
 	file, err := query.Candidates[0].Observation.OpenObservedRegularContext(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +41,69 @@ func TestLoadCandidatesReobservesLiveIdentityBoundFile(t *testing.T) {
 	resolvedInfo, resolvedErr := os.Stat(query.Candidates[0].ResolvedPath)
 	if readErr != nil || closeErr != nil || string(value) != "payload" || expectedErr != nil || resolvedErr != nil || !os.SameFile(expectedInfo, resolvedInfo) {
 		t.Fatalf("live candidate opener disagreed: value=%q read=%v close=%v path=%q", value, readErr, closeErr, query.Candidates[0].ResolvedPath)
+	}
+}
+
+func TestCandidateResultAuthorityRejectsDTOReplayAndMutation(t *testing.T) {
+	repository := testRepository(t)
+	ctx := context.Background()
+	root := physicalIndexTempDir(t)
+	writeTestFile(t, filepath.Join(root, "selected.bin"), []byte("payload"))
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh, err := repository.Refresh(ctx, profileReceipt.Profile, RefreshOptions{Clock: deterministicClock(time.Now().UTC())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	query, err := repository.LoadCandidates(ctx, profileReceipt.Profile, refresh.DescriptorRecord.ID, []int64{7}, DefaultCandidateLimits())
+	if err != nil || !query.HasLiveAuthority(profileReceipt.Profile) {
+		t.Fatalf("candidate query authority failed: %#v %v", query, err)
+	}
+
+	mutations := map[string]func(*CandidateResult){
+		"profile":    func(value *CandidateResult) { value.ProfileID += "-changed" },
+		"snapshot":   func(value *CandidateResult) { value.SnapshotID += "-changed" },
+		"descriptor": func(value *CandidateResult) { value.DescriptorRecordID = value.DataRecordID },
+		"accounting": func(value *CandidateResult) { value.Stats.CandidatesRetained++ },
+		"warning": func(value *CandidateResult) {
+			value.Warnings = append(append([]string(nil), value.Warnings...), "injected")
+		},
+		"locator": func(value *CandidateResult) {
+			value.Candidates = append([]IndexedCandidate(nil), value.Candidates...)
+			value.Candidates[0].ResolvedPath += "-changed"
+		},
+		"observation": func(value *CandidateResult) {
+			value.Candidates = append([]IndexedCandidate(nil), value.Candidates...)
+			value.Candidates[0].Observation.ObservationID += "-changed"
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			tampered := query
+			mutate(&tampered)
+			if tampered.HasLiveAuthority(profileReceipt.Profile) {
+				t.Fatal("mutated candidate result retained authority")
+			}
+		})
+	}
+
+	raw, err := json.Marshal(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayed CandidateResult
+	if err := json.Unmarshal(raw, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.HasLiveAuthority(profileReceipt.Profile) {
+		t.Fatal("serialized candidate result recovered process-local authority")
+	}
+	changedProfile := profileReceipt.Profile
+	changedProfile.Revision += "-changed"
+	if query.HasLiveAuthority(changedProfile) {
+		t.Fatal("candidate result crossed immutable profile revision")
 	}
 }
 

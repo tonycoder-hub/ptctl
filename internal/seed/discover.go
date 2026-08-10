@@ -29,6 +29,12 @@ type DiscoverOptions struct {
 	TargetRoot        string
 	Strategy          string
 	ClientMapping     *ClientMappingOptions
+	// ExplicitSourceMatchID selects one exactly verified source assignment from
+	// a sealed-index discovery. It never means that the historical snapshot is
+	// complete for the current filesystem; the selected assignment is useful
+	// only because its locators are reopened and cryptographically verified in
+	// this invocation.
+	ExplicitSourceMatchID string
 }
 
 type DiscoveryTorrent struct {
@@ -44,6 +50,8 @@ type DiscoveryTorrent struct {
 type DiscoverySelection struct {
 	Status     string `json:"status"`
 	SelectedID string `json:"selected_id,omitempty"`
+	Basis      string `json:"basis,omitempty"`
+	ScopeID    string `json:"scope_id,omitempty"`
 }
 
 // DiscoveryHandoff describes only the optional read-only path projection or
@@ -151,17 +159,18 @@ type DiscoveryPlanOperation struct {
 }
 
 type DiscoveryPlan struct {
-	ID            string                   `json:"id"`
-	Effect        string                   `json:"effect"`
-	ReadyToApply  bool                     `json:"ready_to_apply"`
-	Readiness     string                   `json:"readiness"`
-	Evidence      string                   `json:"evidence"`
-	SourceMode    string                   `json:"source_mode"`
-	Strategy      string                   `json:"strategy"`
-	ClientMapping string                   `json:"client_mapping"`
-	Operations    []DiscoveryPlanOperation `json:"operations"`
-	Warnings      []string                 `json:"warnings"`
-	Blockers      []string                 `json:"blockers"`
+	ID                string                   `json:"id"`
+	Effect            string                   `json:"effect"`
+	ReadyToApply      bool                     `json:"ready_to_apply"`
+	Readiness         string                   `json:"readiness"`
+	Evidence          string                   `json:"evidence"`
+	SourceMode        string                   `json:"source_mode"`
+	SourceSelectionID string                   `json:"source_selection_id,omitempty"`
+	Strategy          string                   `json:"strategy"`
+	ClientMapping     string                   `json:"client_mapping"`
+	Operations        []DiscoveryPlanOperation `json:"operations"`
+	Warnings          []string                 `json:"warnings"`
+	Blockers          []string                 `json:"blockers"`
 }
 
 type DiscoveryResult struct {
@@ -181,17 +190,62 @@ type DiscoveryResult struct {
 	Warnings            []string           `json:"warnings"`
 	verifiedSource      *metafile.VerifiedSource
 	verifiedSelectionID string
+	verifiedSourceMode  string
+	verifiedScopeID     string
 }
 
 // VerifiedSource returns the process-local proof retained by this discovery
-// invocation. It is intentionally omitted from JSON, so a serialized report
-// cannot be replayed later as content authority.
+// invocation for either a unique complete live-search result or one explicitly
+// selected and live-reverified indexed assignment. It is intentionally omitted
+// from JSON, so a serialized report cannot be replayed later as content
+// authority.
 func (result *DiscoveryResult) VerifiedSource(meta *metafile.MetaInfo) (*metafile.VerifiedSource, bool) {
-	if result == nil || result.SourceOutcome != "verified_unique" || result.verifiedSource == nil ||
+	if result == nil || result.verifiedSource == nil ||
 		result.Selection.SelectedID == "" || result.Selection.SelectedID != result.verifiedSelectionID || !result.verifiedSource.Matches(meta) {
 		return nil, false
 	}
+	switch result.verifiedSourceMode {
+	case "live_unique":
+		if result.SourceOutcome != "verified_unique" || result.Selection.Status != "ready" || result.verifiedScopeID != "" {
+			return nil, false
+		}
+	case "indexed_explicit":
+		if result.SourceOutcome != "verified_selected" || result.Selection.Status != "ready_explicit" ||
+			result.verifiedScopeID == "" || result.Selection.ScopeID != result.verifiedScopeID {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
 	return result.verifiedSource, true
+}
+
+// BuildMaterializePlan consumes only the same-invocation private authority
+// retained by discovery. Indexed explicit selection is kept distinct from a
+// complete live-search uniqueness proof and binds its immutable selection
+// scope into the resulting plan ID.
+func (result *DiscoveryResult) BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, targetRoot, strategy string) (Plan, error) {
+	verified, ok := result.VerifiedSource(meta)
+	if !ok {
+		return Plan{}, fmt.Errorf("verified discovery source authority is unavailable")
+	}
+	switch result.verifiedSourceMode {
+	case "live_unique":
+		return BuildMaterializePlanFromVerified(ctx, meta, verified, targetRoot, strategy)
+	case "indexed_explicit":
+		return buildMaterializePlanFromIndexedSelection(ctx, meta, verified, targetRoot, strategy, result.verifiedScopeID)
+	default:
+		return Plan{}, fmt.Errorf("verified discovery source authority mode is invalid")
+	}
+}
+
+// VerifiedSourceMode reports a safe, fixed label for the private authority
+// retained by this process. Public DTO mutation cannot synthesize the label.
+func (result *DiscoveryResult) VerifiedSourceMode(meta *metafile.MetaInfo) (string, bool) {
+	if _, ok := result.VerifiedSource(meta); !ok {
+		return "", false
+	}
+	return result.verifiedSourceMode, true
 }
 
 // PublicReportCopy removes the process-local capability retained by Discover.
@@ -202,6 +256,8 @@ func (result *DiscoveryResult) VerifiedSource(meta *metafile.MetaInfo) (*metafil
 func (result DiscoveryResult) PublicReportCopy() DiscoveryResult {
 	result.verifiedSource = nil
 	result.verifiedSelectionID = ""
+	result.verifiedSourceMode = ""
+	result.verifiedScopeID = ""
 	if result.Matches != nil {
 		result.Matches = append([]DiscoveryMatch(nil), result.Matches...)
 		for i := range result.Matches {
@@ -226,6 +282,9 @@ func Discover(ctx context.Context, meta *metafile.MetaInfo, options DiscoverOpti
 	}
 	if len(options.SearchRoots) == 0 {
 		return result, fmt.Errorf("at least one search root is required")
+	}
+	if options.ExplicitSourceMatchID != "" {
+		return result, fmt.Errorf("explicit source match selection is available only with sealed-index discovery")
 	}
 	if options.Strategy == "" {
 		options.Strategy = "copy"
@@ -326,8 +385,10 @@ func Discover(ctx context.Context, meta *metafile.MetaInfo, options DiscoverOpti
 		result.SourceOutcome = "verified_unique"
 		result.Selection.Status = "ready"
 		result.Selection.SelectedID = result.Matches[0].ID
+		result.Selection.Basis = "complete_live_search_unique_exact_match"
 		result.verifiedSource = matchResult.Matches[0].Source
 		result.verifiedSelectionID = result.Selection.SelectedID
+		result.verifiedSourceMode = "live_unique"
 	default:
 		result.SourceOutcome = "not_found"
 		result.Blockers = append(result.Blockers, DiscoveryBlocker{Code: "source.no_verified_match", Message: "no retained source assignment passed exact torrent verification"})
@@ -748,17 +809,18 @@ func publicDiscoveryPlan(meta *metafile.MetaInfo, plan Plan, observations map[st
 		sourceLabels[filepath.Clean(candidate.path)] = label
 	}
 	result := &DiscoveryPlan{
-		ID:            plan.ID,
-		Effect:        plan.Effect,
-		ReadyToApply:  plan.ReadyToApply,
-		Readiness:     plan.Readiness,
-		Evidence:      plan.Evidence,
-		SourceMode:    plan.SourceMode,
-		Strategy:      plan.Strategy,
-		ClientMapping: plan.ClientMapping,
-		Operations:    []DiscoveryPlanOperation{},
-		Warnings:      append([]string{}, plan.Warnings...),
-		Blockers:      append([]string{}, plan.Blockers...),
+		ID:                plan.ID,
+		Effect:            plan.Effect,
+		ReadyToApply:      plan.ReadyToApply,
+		Readiness:         plan.Readiness,
+		Evidence:          plan.Evidence,
+		SourceMode:        plan.SourceMode,
+		SourceSelectionID: plan.SourceSelectionID,
+		Strategy:          plan.Strategy,
+		ClientMapping:     plan.ClientMapping,
+		Operations:        []DiscoveryPlanOperation{},
+		Warnings:          append([]string{}, plan.Warnings...),
+		Blockers:          append([]string{}, plan.Blockers...),
 	}
 	for _, operation := range plan.Operations {
 		source := sourceLabels[filepath.Clean(operation.Source)]

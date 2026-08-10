@@ -15,8 +15,10 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
+	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
 
 func TestRunMaterializesSingleFileWithDoubleExactVerification(t *testing.T) {
@@ -55,6 +57,93 @@ func TestRunMaterializesSingleFileWithDoubleExactVerification(t *testing.T) {
 	sourceRaw, err := os.ReadFile(sourcePath)
 	if err != nil || !bytes.Equal(sourceRaw, content) {
 		t.Fatal("source was changed by copy-only materialization")
+	}
+}
+
+func TestIndexedExplicitSourceAuthorityResumesEarlyMaterialize(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("indexed-resume-authority")
+	meta := materializeSingleV1Meta(t, "final.bin", content)
+	searchRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(searchRoot, "renamed.bin"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "materialize", []string{searchRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh, err := repository.Refresh(ctx, profileReceipt.Profile, storageindex.RefreshOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := func() storageindex.CandidateResult {
+		t.Helper()
+		result, err := repository.LoadCandidates(ctx, profileReceipt.Profile, refresh.DescriptorRecord.ID, []int64{int64(len(content))}, storageindex.DefaultCandidateLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	baseOptions := seed.DiscoverOptions{
+		InventoryLimits: storage.DefaultInventoryLimits(), MatchLimits: metafile.DefaultSourceMatchLimits(),
+		TimeBudget: time.Minute, Strategy: StrategyCopy,
+	}
+	preview, err := seed.DiscoverFromIndex(ctx, meta, profileReceipt.Profile, load(), baseOptions)
+	if err != nil || len(preview.Matches) != 1 {
+		t.Fatalf("indexed preview failed: %#v %v", preview, err)
+	}
+	targetRoot := t.TempDir()
+	preflightMaterializeFilesystem(t, targetRoot)
+	selectedOptions := baseOptions
+	selectedOptions.TargetRoot = targetRoot
+	selectedOptions.ExplicitSourceMatchID = preview.Matches[0].ID
+	selected, err := seed.DiscoverFromIndex(ctx, meta, profileReceipt.Profile, load(), selectedOptions)
+	if err != nil || selected.Plan == nil || selected.SourceOutcome != "verified_selected" {
+		t.Fatalf("indexed selection failed: %#v %v", selected, err)
+	}
+
+	t.Cleanup(func() { transitionHook = nil })
+	transitionHook = func(phase Phase) error {
+		if phase == PhaseStageCreated {
+			return errors.New("stop after stage creation")
+		}
+		return nil
+	}
+	interrupted, runErr := Run(ctx, RunOptions{
+		Meta: meta, Discovery: &selected, TargetRoot: targetRoot,
+		ExpectedPlanID: selected.Plan.ID, Limits: DefaultLimits(),
+	})
+	transitionHook = nil
+	if runErr == nil || interrupted.Operation.PhaseAfter != string(PhaseStageCreated) || interrupted.Source.Outcome != "verified_selected" {
+		t.Fatalf("indexed run did not stop at recoverable early phase: %#v %v", interrupted, runErr)
+	}
+	operationID, err := ParseOperationID(interrupted.Operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A new unindexed alternative does not create a uniqueness claim or change
+	// the exact explicitly selected map used for recovery.
+	if err := os.WriteFile(filepath.Join(searchRoot, "new-alternative.bin"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := seed.DiscoverFromIndex(ctx, meta, profileReceipt.Profile, load(), selectedOptions)
+	if err != nil || fresh.Plan == nil || fresh.Plan.ID != selected.Plan.ID {
+		t.Fatalf("fresh selected authority did not reproduce plan: %#v %v", fresh, err)
+	}
+	resumed, err := Resume(ctx, ResumeOptions{
+		Meta: meta, Discovery: &fresh, TargetRoot: targetRoot, OperationID: operationID,
+		ExpectedPlanID: selected.Plan.ID, Limits: DefaultLimits(),
+	})
+	if err != nil || resumed.Outcome != OutcomeMaterializedVerified || resumed.Source.Outcome != "verified_selected" || !resumed.Target.FinalContentVerified {
+		t.Fatalf("indexed early resume failed: %#v %v", resumed, err)
 	}
 }
 
