@@ -280,6 +280,14 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 	report.Target.StabilityAssurance = "non_atomic_bound_filesystem"
 	handle, err := openJournal(ctx, session, options.OperationID, options.Limits)
 	if err != nil {
+		if retained, observed, retentionErr := controlReportFromRetention(ctx, session, rootInfo, options.OperationID, options.Limits); observed {
+			if retentionErr != nil {
+				return retained, retentionErr
+			}
+			retained.Outcome = OutcomeBlocked
+			retained.addBlocker("operation.prune_in_progress", "resume cannot cross a durable retention boundary")
+			return retained, fmt.Errorf("%w: operation retention has started", ErrPolicy)
+		}
 		classifyJournalOpenReport(&report, err)
 		return report, err
 	}

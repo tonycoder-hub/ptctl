@@ -29,6 +29,7 @@ var (
 	ErrBindingChanged        = errors.New("bound filesystem root identity changed")
 	ErrDurabilityUnconfirmed = errors.New("bound filesystem publication durability is unconfirmed")
 	ErrPublicationAmbiguous  = errors.New("bound filesystem publication result is ambiguous")
+	ErrRemovalAmbiguous      = errors.New("bound filesystem removal result is ambiguous")
 	ErrBusy                  = errors.New("bound filesystem operation subtree is busy")
 )
 
@@ -240,6 +241,13 @@ func DefaultListLimits() ListLimits {
 	return ListLimits{MaxEntries: 10_000, MaxNameBytes: 16 << 20}
 }
 
+// MaximumListLimits exposes the installed hard directory-inventory ceiling so
+// higher-level fixed-budget protocols can reject an unrepresentable namespace
+// before they mutate it. Callers should normally prefer DefaultListLimits.
+func MaximumListLimits() ListLimits {
+	return ListLimits{MaxEntries: hardMaxListEntries, MaxNameBytes: hardMaxListNameBytes}
+}
+
 func (limits ListLimits) Validate() error {
 	if limits.MaxEntries <= 0 || limits.MaxEntries > hardMaxListEntries || limits.MaxNameBytes <= 0 || limits.MaxNameBytes > hardMaxListNameBytes {
 		return fmt.Errorf("bound directory list limits are invalid")
@@ -271,6 +279,19 @@ type Publication struct {
 	Durability     string   `json:"durability"`
 	SourceIdentity Identity `json:"source_identity,omitempty,omitzero"`
 	FinalIdentity  Identity `json:"final_identity,omitempty,omitzero"`
+}
+
+// Removal is an operation-scoped receipt for one identity-bound unlink or
+// empty-directory removal. Removed means the reviewed name was observed
+// absent after the attempt; Durability remains separate because an absent name
+// does not prove that its parent-directory update reached stable storage.
+type Removal struct {
+	Attempted  bool       `json:"attempted"`
+	Removed    bool       `json:"removed"`
+	Durability string     `json:"durability"`
+	Identity   Identity   `json:"identity,omitempty,omitzero"`
+	Kind       ObjectKind `json:"kind,omitempty"`
+	SizeBytes  int64      `json:"size_bytes,omitempty"`
 }
 
 // checkHook is a deterministic package test seam. It cannot replace the real
@@ -1148,6 +1169,99 @@ func (subtree *Subtree) CommitRegularNoReplace(ctx context.Context, source, dest
 	}
 	if publishErr != nil {
 		return receipt, publishErr
+	}
+	return receipt, bindingErr
+}
+
+// RemoveRegular removes one closed, owner-private, single-link regular file.
+// The caller must supply the identity obtained by a prior bounded namespace
+// audit. The method never follows links and never accepts an absent name as a
+// successful first attempt.
+func (subtree *Subtree) RemoveRegular(ctx context.Context, path Path, expected Identity) (Removal, error) {
+	return subtree.removeBoundObject(ctx, path, expected, ObjectKindRegular, -1)
+}
+
+// RemoveRegularExact additionally requires the regular-file size observed by
+// the caller's complete preflight. A size change fails before the unlink
+// attempt, so a stale byte-budget observation cannot silently authorize a
+// larger removal.
+func (subtree *Subtree) RemoveRegularExact(ctx context.Context, path Path, expected Identity, expectedSize int64) (Removal, error) {
+	if expectedSize < 0 {
+		return Removal{Durability: durabilityNotPublished, Kind: ObjectKindRegular}, ErrInvalidPath
+	}
+	return subtree.removeBoundObject(ctx, path, expected, ObjectKindRegular, expectedSize)
+}
+
+// RemoveEmptyDirectory removes one closed, owner-private empty directory. The
+// caller is responsible for a complete bounded child inventory and post-order
+// traversal before invoking this method.
+func (subtree *Subtree) RemoveEmptyDirectory(ctx context.Context, path Path, expected Identity) (Removal, error) {
+	return subtree.removeBoundObject(ctx, path, expected, ObjectKindDirectory, -1)
+}
+
+func (subtree *Subtree) removeBoundObject(ctx context.Context, path Path, expected Identity, wanted ObjectKind, expectedSize int64) (Removal, error) {
+	receipt := Removal{Durability: durabilityNotPublished, Kind: wanted}
+	if len(path.components) == 0 || expected.IsZero() || (wanted != ObjectKindRegular && wanted != ObjectKindDirectory) {
+		return receipt, ErrInvalidPath
+	}
+	if err := subtree.usable(ctx, "before_subtree_remove"); err != nil {
+		return receipt, err
+	}
+	parent, name, err := subtree.resolveTarget(path)
+	if err != nil {
+		return receipt, err
+	}
+	probe, actual, kind, inspectErr := platformInspectObject(subtree.session, parent, name)
+	if inspectErr != nil {
+		return receipt, inspectErr
+	}
+	info, statErr := probe.Stat()
+	closeErr := probe.Close()
+	if statErr != nil {
+		return receipt, fmt.Errorf("inspect bound removal object failed")
+	}
+	if closeErr != nil {
+		return receipt, fmt.Errorf("close bound removal object failed")
+	}
+	if kind != wanted || !identityFromRaw(actual).Equal(expected) {
+		return receipt, ErrUnsafeObject
+	}
+	receipt.Identity = expected
+	if wanted == ObjectKindRegular {
+		receipt.SizeBytes = info.Size()
+		if expectedSize >= 0 && receipt.SizeBytes != expectedSize {
+			return receipt, ErrUnsafeObject
+		}
+	}
+	if subtree.session.hasOpenIdentity(actual) || (wanted == ObjectKindDirectory && subtree.session.hasAnyOpenFiles()) {
+		return receipt, fmt.Errorf("remove bound object: handle remains open")
+	}
+	if wanted == ObjectKindDirectory {
+		if err := subtree.releaseDirectoryTree(path); err != nil {
+			return receipt, err
+		}
+	}
+	receipt.Attempted = true
+	removed, durable, removedRaw, removeErr := platformRemoveObject(subtree.session, parent, name, wanted == ObjectKindDirectory, actual, expectedSize)
+	if removed {
+		receipt.Removed = true
+		receipt.Durability = durabilityUnconfirmed
+		if durable {
+			receipt.Durability = durabilityConfirmed
+		}
+		if removedRaw != (rawIdentity{}) && removedRaw != actual {
+			removeErr = errors.Join(removeErr, ErrRemovalAmbiguous)
+		}
+	}
+	if removeErr == nil && !removed {
+		removeErr = ErrRemovalAmbiguous
+	}
+	bindingErr := subtree.checkBinding("after_subtree_remove_binding")
+	if removeErr != nil && bindingErr != nil {
+		return receipt, errors.Join(removeErr, bindingErr)
+	}
+	if removeErr != nil {
+		return receipt, removeErr
 	}
 	return receipt, bindingErr
 }

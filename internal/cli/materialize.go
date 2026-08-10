@@ -64,6 +64,8 @@ func (a *app) seedMaterialize(args []string) error {
 		return a.seedMaterializeStatus(args[1:])
 	case "abandon":
 		return a.seedMaterializeAbandon(args[1:])
+	case "prune":
+		return a.seedMaterializePrune(args[1:])
 	default:
 		return usageError("unknown seed materialize subcommand %q", args[0])
 	}
@@ -75,6 +77,7 @@ func (a *app) seedMaterializeHelp() {
   ptctl seed materialize resume (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [--search-root PATH...] [flags] OPERATION_ID
   ptctl seed materialize status --target PATH [flags] [OPERATION_ID]
   ptctl seed materialize abandon --target PATH --acknowledge-abandon [flags] OPERATION_ID
+  ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [flags] OPERATION_ID
 
 Materialize is copy-only and target-root-local. Run requires one complete live
 discovery and the reviewed plan ID from seed discover --target with the same
@@ -84,6 +87,12 @@ partially staged operation. Status without an operation ID performs a bounded
 name-only listing and never selects a latest operation. Abandon is terminal,
 writes one journal event, retains staged and scratch bytes, and never deletes
 source, staging, or published content.
+
+Prune is the only deletion-capable materialize command. It accepts exactly one
+terminal operation, deletes only its owner-private heavy state, never touches
+the source or final layout, and retains an exact private tombstone. A newly
+started committed prune requires the exact metafile; an abandoned operation or
+a retry with a durable retention intent does not.
 
 Reports never include absolute source, target, journal, scratch, or staging paths.
 Use each subcommand's --help for its complete bounded flag surface.
@@ -497,6 +506,161 @@ func (a *app) seedMaterializeAbandon(args []string) error {
 		TargetRoot: *targetRoot, OperationID: operationID, Limits: materialize.DefaultLimits(),
 	})
 	return a.finishMaterialize(*output, report, operationErr)
+}
+
+func (a *app) seedMaterializePrune(args []string) error {
+	fs := newFlagSet("seed materialize prune")
+	output := fs.String("output", "table", "table or json")
+	targetRoot := fs.String("target", "", "existing target root containing the explicit terminal operation")
+	expectedPlanID := fs.String("expect-plan-id", "", "reviewed 24-hex plan ID recorded by the operation")
+	acknowledge := fs.Bool("acknowledge-operation-state-deletion", false, "acknowledge deletion of private operation state and retention of a tombstone")
+	torrentPath := fs.String("torrent", "", "exact metafile path required for a newly started committed prune")
+	storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
+	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
+	timeout := fs.Duration("timeout", materializeExecutionDefaultTimeout, "bounded proof and private-state deletion wall-clock budget")
+	if handled, err := parseStorageFlags(a, fs, args,
+		"ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [--output table|json] OPERATION_ID",
+		"Prunes one explicit committed or abandoned operation. A new committed prune exactly reverifies the current final layout; retries resume only from a durable private retention intent. Source and final bytes are never deleted. The operation tombstone is retained."); handled || err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *targetRoot == "" {
+		return usageError("seed materialize prune requires --target and exactly one OPERATION_ID")
+	}
+	if !*acknowledge {
+		return usageError("seed materialize prune requires --acknowledge-operation-state-deletion")
+	}
+	if !validMaterializePlanID(*expectedPlanID) {
+		return usageError("seed materialize prune requires a canonical 24-hex --expect-plan-id")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if *timeout <= 0 || *timeout > materializeExecutionMaxTimeout {
+		return usageError("--timeout must be greater than zero and no more than 168h")
+	}
+	operationID, err := materialize.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("seed materialize prune requires a canonical sha256 OPERATION_ID")
+	}
+	journalLimits := materialize.DefaultLimits()
+	retentionLimits := materialize.DefaultRetentionLimits()
+	if err := journalLimits.Validate(); err != nil {
+		return fmt.Errorf("materialize default limits are invalid")
+	}
+	if err := retentionLimits.Validate(); err != nil {
+		return fmt.Errorf("materialize retention default limits are invalid")
+	}
+
+	inputRequested := flagWasSet(fs, "torrent") || flagWasSet(fs, "metafile-store") || flagWasSet(fs, "metafile-variant")
+	var input metafileInput
+	if inputRequested {
+		input, err = flaggedMetafileInput("seed materialize prune", *torrentPath, *storeRoot, *variantID,
+			flagWasSet(fs, "torrent"), flagWasSet(fs, "metafile-store"), flagWasSet(fs, "metafile-variant"))
+		if err != nil {
+			return err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	var meta *metafile.MetaInfo
+	if inputRequested {
+		meta, err = loadMetafileInput(ctx, input)
+		if err != nil {
+			safeErr := materializeMetafileLoadError(err)
+			report := materializeRetentionInputFailureReport(operationID, *expectedPlanID, retentionLimits, safeErr)
+			return a.finishMaterializeRetention(*output, report, safeErr)
+		}
+	}
+	report, operationErr := materialize.Prune(ctx, materialize.PruneOptions{
+		Meta: meta, TargetRoot: *targetRoot, OperationID: operationID, ExpectedPlanID: *expectedPlanID,
+		JournalLimits: journalLimits, RetentionLimits: retentionLimits,
+	})
+	return a.finishMaterializeRetention(*output, report, operationErr)
+}
+
+func materializeRetentionInputFailureReport(operationID materialize.OperationID, expectedPlanID string, retentionLimits materialize.RetentionLimits, failure error) materialize.RetentionReport {
+	report := materialize.RetentionReport{
+		Outcome: materialize.RetentionOutcomeInterrupted,
+		Effect:  []string{"read_exact_metafile_for_retention_proof"},
+		Operation: materialize.OperationReport{
+			ID: operationID.String(), Status: "inspection_incomplete", PhaseBefore: "unknown", PhaseAfter: "unknown",
+		},
+		Plan:    materialize.PlanReport{ExpectedID: expectedPlanID, Strategy: materialize.StrategyCopy},
+		Target:  materialize.RetentionTargetReport{FinalState: "not_observed", StabilityAssurance: "not_observed"},
+		Proof:   materialize.RetentionProofReport{Assurance: "not_observed"},
+		Markers: materialize.RetentionMarkerReport{State: "not_observed"},
+		Limits:  retentionLimits, Blockers: []materialize.Finding{}, Issues: []materialize.Finding{}, Warnings: []string{},
+	}
+	var integrity *integrityErr
+	if errors.As(failure, &integrity) {
+		report.Outcome = materialize.RetentionOutcomeIntegrityFailed
+		report.Issues = append(report.Issues, materialize.Finding{Code: "metafile.integrity_failed", Message: "the selected exact metafile could not be validated"})
+	} else {
+		report.Issues = append(report.Issues, materialize.Finding{Code: "metafile.read_failed", Message: "the selected exact metafile could not be completely read"})
+	}
+	return report
+}
+
+func (a *app) finishMaterializeRetention(output string, report materialize.RetentionReport, operationErr error) error {
+	if writeErr := a.writeMaterializeRetentionReport(output, report); writeErr != nil {
+		return writeErr
+	}
+	if operationErr == nil {
+		return nil
+	}
+	switch report.Outcome {
+	case materialize.RetentionOutcomeBlocked:
+		return &inconclusiveErr{message: "materialize operation pruning was blocked; see report"}
+	case materialize.RetentionOutcomeIntegrityFailed:
+		return &integrityErr{message: "materialize operation pruning failed integrity verification; see report"}
+	default:
+		return fmt.Errorf("materialize operation pruning was interrupted; see report")
+	}
+}
+
+func (a *app) writeMaterializeRetentionReport(output string, report materialize.RetentionReport) error {
+	if output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	return writeMaterializeRetentionHuman(a.stdout, report)
+}
+
+func writeMaterializeRetentionHuman(out io.Writer, report materialize.RetentionReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nTERMINAL PHASE\t%s\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(valueOrUnknown(report.Operation.ID)), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseAfter))
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeMaterializeFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / PROOF\nEXPECTED PLAN\t%s\nOBSERVED PLAN\t%s\nMATCHES\t%t\nMETAFILE VARIANT\t%s\nBASIS\t%s\nCURRENT FINAL VERIFIED\t%t\nCURRENT PUBLICATION ABSENT\t%t\nFINAL VERIFY BYTES\t%d\nHISTORICAL MARKER AUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(report.Plan.ExpectedID), terminalSafe(valueOrUnknown(report.Plan.ObservedID)), report.Plan.Matches,
+		terminalSafe(report.Plan.MetafileVariantID), terminalSafe(materializeValueOr(report.Proof.Basis, "not_observed")),
+		report.Proof.CurrentFinalVerified, report.Proof.CurrentPublicationAbsent, report.Proof.FinalVerifyBytes,
+		report.Proof.HistoricalMarkerAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nTARGET / RETENTION\nROOT IDENTITY BOUND\t%t\nFINAL STATE\t%s\nSTABILITY\t%s\nRETENTION STATE\t%s\nINTENT MARKER\t%s\nCOMPLETE MARKER\t%s\nINTENT DURABLE\t%t\nCOMPLETION DURABLE\t%t\nEXACT TOMBSTONE\t%t\nTOMBSTONE RETAINED\t%t\nPRUNE RESUMABLE\t%t\n",
+		report.Target.RootIdentityBound, terminalSafe(report.Target.FinalState), terminalSafe(report.Target.StabilityAssurance),
+		terminalSafe(report.Markers.State), terminalSafe(valueOrUnknown(report.Markers.IntentMarkerID)), terminalSafe(valueOrUnknown(report.Markers.CompleteMarkerID)),
+		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.OperationStateKept, report.Markers.PruneResumable)
+	fmt.Fprintf(w, "\nWRITE / REMOVAL RECEIPTS\nCONTROL DIRECTORIES CREATED\t%d\nMARKER TEMP FILES\t%d\nMARKER TEMP BYTES\t%d\nMARKER PUBLICATION ATTEMPTS\t%d\nMARKER PUBLICATIONS\t%d\nMARKER DURABILITY CONFIRMATIONS\t%d\nMARKER TEMP REMOVALS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\n",
+		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerTemporaryBytes,
+		report.Writes.MarkerPublicationAttempts, report.Writes.MarkerPublications, report.Writes.MarkerDurabilityConfirms, report.Writes.MarkerTemporaryRemovals,
+		report.Writes.RemovalAttempts, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved,
+		report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals)
+	fmt.Fprintf(w, "\nLIMITS / USED\nMAX OBJECTS\t%d\nMAX PATH BYTES\t%d\nMAX CONTENT BYTES\t%d\nMAX MEMORY BYTES\t%d\nMAX DEPTH\t%d\nMAX FINDINGS\t%d\nOBJECTS CONSIDERED\t%d\nPATH BYTES CONSIDERED\t%d\nCONTENT BYTES CONSIDERED\t%d\nMEMORY BYTES CONSIDERED\t%d\nDIRECTORY ENTRIES EXAMINED\t%d\nDIRECTORY NAME BYTES EXAMINED\t%d\n",
+		report.Limits.MaxObjects, report.Limits.MaxPathBytes, report.Limits.MaxBytes, report.Limits.MaxMemoryBytes, report.Limits.MaxDepth, report.Limits.MaxFindings,
+		report.Used.ObjectsConsidered, report.Used.PathBytesConsidered, report.Used.BytesConsidered, report.Used.MemoryBytesConsidered,
+		report.Used.DirectoryEntriesExamined, report.Used.DirectoryNameBytesExamined)
+	fmt.Fprintln(w, "\nISSUES")
+	writeMaterializeFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	if len(report.Warnings) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
 }
 
 func (a *app) finishMaterialize(output string, report materialize.Report, operationErr error) error {

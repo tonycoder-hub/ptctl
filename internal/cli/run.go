@@ -138,6 +138,7 @@ Usage:
   ptctl seed materialize resume (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [--search-root PATH...] [--output table|json] OPERATION_ID
   ptctl seed materialize status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed materialize abandon --target PATH --acknowledge-abandon [--output table|json] OPERATION_ID
+  ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [--output table|json] OPERATION_ID
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -147,7 +148,7 @@ Safety defaults:
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
-  * Seed materialize requires an explicit write acknowledgement, copies only, never clobbers or deletes, and never reports filesystem paths.
+  * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
 `)
@@ -1428,6 +1429,8 @@ func jsonKind(data any) string {
 		return "content.materialization"
 	case materialize.OperationListResult:
 		return "content.materialization.operation_list"
+	case materialize.RetentionReport:
+		return "content.materialization.retention"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

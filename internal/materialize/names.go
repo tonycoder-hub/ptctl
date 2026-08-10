@@ -20,6 +20,9 @@ const (
 	journalDirectoryName     = "journal"
 	stageDirectoryName       = "stage"
 	scratchDirectoryName     = "scratch"
+	retentionDirectoryName   = "retention"
+	retentionIntentFileName  = "intent.json"
+	retentionCompleteName    = "complete.json"
 	eventFilePrefix          = "event-"
 	eventFileSuffix          = ".json"
 )

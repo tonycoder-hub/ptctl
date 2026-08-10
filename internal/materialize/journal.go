@@ -145,6 +145,18 @@ func createJournal(ctx context.Context, session *fsbind.Session, intent Intent) 
 }
 
 func openJournal(ctx context.Context, session *fsbind.Session, operationID OperationID, limits Limits) (*journal, error) {
+	return openJournalMode(ctx, session, operationID, limits, false)
+}
+
+// openJournalForRetention accepts the one reserved retention directory while
+// preserving every ordinary intent, event, scratch, and stage invariant.
+// Normal resume/status callers use openJournal and therefore fail closed as
+// soon as pruning has started.
+func openJournalForRetention(ctx context.Context, session *fsbind.Session, operationID OperationID, limits Limits) (*journal, error) {
+	return openJournalMode(ctx, session, operationID, limits, true)
+}
+
+func openJournalMode(ctx context.Context, session *fsbind.Session, operationID OperationID, limits Limits, allowRetention bool) (*journal, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -237,6 +249,12 @@ func openJournal(ctx context.Context, session *fsbind.Session, operationID Opera
 		journalDirectoryName: "directory", scratchDirectoryName: "directory", stageDirectoryName: "directory",
 	}
 	for _, entry := range rootListing.Entries {
+		if allowRetention && entry.Name == retentionDirectoryName {
+			if entry.Kind != "directory" {
+				return fail(fmt.Errorf("%w: retention control object is unsafe", ErrCorruptJournal))
+			}
+			continue
+		}
 		if allowed[entry.Name] != entry.Kind {
 			return fail(fmt.Errorf("%w: operation root contains an unexpected object", ErrCorruptJournal))
 		}

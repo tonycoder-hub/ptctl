@@ -448,6 +448,49 @@ func platformPublishNoReplace(session *Session, sourceParent *boundDirectory, so
 	return false, false, rawIdentity{}, ErrPublicationAmbiguous
 }
 
+func platformRemoveObject(session *Session, parent *boundDirectory, name string, wantDirectory bool, expected rawIdentity, expectedSize int64) (bool, bool, rawIdentity, error) {
+	if verifyWindowsParent(session, parent) != nil {
+		return false, false, rawIdentity{}, ErrCrossFilesystem
+	}
+	source, actual, err := openWindowsRelativeTyped(session, parent, name, wantDirectory,
+		windows.FILE_GENERIC_READ|windows.DELETE|windows.READ_CONTROL)
+	if err != nil || actual != expected {
+		if source != nil {
+			_ = source.Close()
+		}
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	if !wantDirectory && expectedSize >= 0 {
+		info, statErr := source.Stat()
+		if statErr != nil || !info.Mode().IsRegular() || info.Size() != expectedSize {
+			_ = source.Close()
+			return false, false, rawIdentity{}, ErrUnsafeObject
+		}
+	}
+	removeErr := markWindowsCreatedForDeletion(windows.Handle(source.Fd()))
+	closeErr := source.Close()
+	remaining, remainingRaw, remainingErr := platformOpenAnySource(session, parent, name, wantDirectory)
+	if remaining != nil {
+		_ = remaining.Close()
+	}
+	if removeErr == nil && closeErr == nil {
+		if errors.Is(remainingErr, ErrNotFound) {
+			if platformSyncDirectory(parent) != nil {
+				return true, false, expected, ErrDurabilityUnconfirmed
+			}
+			return true, true, expected, nil
+		}
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if errors.Is(remainingErr, ErrNotFound) {
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if remainingErr == nil && remainingRaw == expected {
+		return false, false, expected, ErrUnsafeObject
+	}
+	return false, false, rawIdentity{}, ErrRemovalAmbiguous
+}
+
 func openWindowsPrivateRegular(session *Session, parent *boundDirectory, name string, create, exclusiveLock bool) (*os.File, rawIdentity, error) {
 	if err := verifyWindowsParent(session, parent); err != nil {
 		return nil, rawIdentity{}, err

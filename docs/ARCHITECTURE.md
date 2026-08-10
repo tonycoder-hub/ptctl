@@ -537,13 +537,14 @@ modeled safely.
 ## Journaled copy-only materialization
 
 `seed materialize` is the first content-write slice. It is deliberately
-narrower than downloader coordination and has four explicit controls:
+narrower than downloader coordination and has five explicit controls:
 
 ```text
 run     selector + live search roots + target + reviewed plan ID + write ack
 resume  selector + target + reviewed plan ID + write ack + explicit operation ID
 status  target + optional explicit operation ID
 abandon target + abandon ack + explicit operation ID
+prune   target + reviewed plan ID + deletion ack + explicit operation ID
 ```
 
 Both plan surfaces remain `layout_only`, `effect:none`, and
@@ -605,6 +606,18 @@ report before exit `4`. `abandon` writes one terminal event only before
 publication intent. It retains stage and scratch objects and is neither
 cleanup, deletion, nor rollback.
 
+`prune` is the separate retention transition defined in
+[MATERIALIZE_RETENTION.md](MATERIALIZE_RETENTION.md). It accepts only an
+explicit committed or abandoned operation. Before its first deletion, a new
+committed prune reloads the exact metafile and reverifies the current published
+layout; an abandoned prune proves the final name absent. It publishes a small
+canonical retention intent no-replace, then performs a bounded exact inventory
+and identity-bound post-order removal of only the original intent, journal,
+scratch, and stage state. A canonical completion marker is published only
+after the operation root is exactly reduced to its lock plus retention marker
+directory. The retained tombstone makes retries idempotent and never becomes
+authority over source or final bytes.
+
 All usage, selector, acknowledgement, timeout, and budget checks precede
 metafile, source-root, target-root, and journal I/O. Non-usage failures remain
 report-first: exit `0` is a successful transition/read, `1` is operational
@@ -628,7 +641,8 @@ pause client -> record journal -> materialize -> verify target
 
 It must support explicit resume, never overwrite by default, and never infer
 source retirement from successful publication. Cleanup/deletion needs its own
-authority and journal; `abandon` cannot be presented as rollback. Reflink may
+authority and journal; `prune` is limited to private operation state, and
+`abandon` cannot be presented as rollback. Reflink may
 eventually be safer than hardlink because a client repair through a shared
 inode can corrupt a media library, but the implemented strategy is copy only.
 

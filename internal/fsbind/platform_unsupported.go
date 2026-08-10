@@ -59,3 +59,7 @@ func platformReadDirectory(*boundDirectory, int) ([]os.DirEntry, error) {
 func platformPublishNoReplace(*Session, *boundDirectory, string, *boundDirectory, string, bool, rawIdentity) (bool, bool, rawIdentity, error) {
 	return false, false, rawIdentity{}, ErrUnsupported
 }
+
+func platformRemoveObject(*Session, *boundDirectory, string, bool, rawIdentity, int64) (bool, bool, rawIdentity, error) {
+	return false, false, rawIdentity{}, ErrUnsupported
+}

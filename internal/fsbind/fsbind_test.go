@@ -165,6 +165,98 @@ func TestWorkflowCommitInspectListLockAndPublishedOpen(t *testing.T) {
 	}
 }
 
+func TestIdentityBoundRemovalReceipts(t *testing.T) {
+	_, session := newSupportedSession(t)
+	ctx := context.Background()
+	subtree, err := session.CreatePrivateSubtree("removal-operation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = subtree.Close() })
+	if _, err := subtree.MkdirAll(ctx, mustPath(t, "retention")); err != nil {
+		t.Fatal(err)
+	}
+	filePath := mustPath(t, "retention", "marker.tmp")
+	file, err := subtree.CreateRegular(ctx, filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("bounded private marker")
+	if _, err := file.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	fileIdentity := file.Identity()
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongIdentity := identityFromRaw(rawIdentity{volume: 101, mount: 202, fileLow: 303})
+	wrongReceipt, err := subtree.RemoveRegular(ctx, filePath, wrongIdentity)
+	if !errors.Is(err, ErrUnsafeObject) || wrongReceipt.Attempted || wrongReceipt.Removed {
+		t.Fatalf("wrong-identity removal crossed the attempt boundary: %+v %v", wrongReceipt, err)
+	}
+	if _, err := subtree.Inspect(ctx, filePath); err != nil {
+		t.Fatalf("wrong-identity removal changed the object: %v", err)
+	}
+	wrongSize, err := subtree.RemoveRegularExact(ctx, filePath, fileIdentity, int64(len(payload)+1))
+	if !errors.Is(err, ErrUnsafeObject) || wrongSize.Attempted || wrongSize.Removed {
+		t.Fatalf("wrong-size removal crossed the attempt boundary: %+v %v", wrongSize, err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	cancelledReceipt, err := subtree.RemoveRegular(cancelled, filePath, fileIdentity)
+	if !errors.Is(err, context.Canceled) || cancelledReceipt.Attempted || cancelledReceipt.Removed {
+		t.Fatalf("pre-cancelled removal crossed the attempt boundary: %+v %v", cancelledReceipt, err)
+	}
+
+	removed, err := subtree.RemoveRegularExact(ctx, filePath, fileIdentity, int64(len(payload)))
+	if err != nil || !removed.Attempted || !removed.Removed || removed.Durability != DurabilityConfirmed ||
+		!removed.Identity.Equal(fileIdentity) || removed.Kind != ObjectKindRegular || removed.SizeBytes != int64(len(payload)) {
+		t.Fatalf("regular removal receipt: %+v %v", removed, err)
+	}
+	if _, err := subtree.Inspect(ctx, filePath); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed regular remained visible: %v", err)
+	}
+
+	childPath := mustPath(t, "retention", "child")
+	child, err := subtree.CreateRegular(ctx, childPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childIdentity := child.Identity()
+	if err := child.Close(); err != nil {
+		t.Fatal(err)
+	}
+	directoryPath := mustPath(t, "retention")
+	directory, err := subtree.Inspect(ctx, directoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonempty, err := subtree.RemoveEmptyDirectory(ctx, directoryPath, directory.Identity)
+	if err == nil || nonempty.Removed {
+		t.Fatalf("nonempty directory was removed: %+v %v", nonempty, err)
+	}
+	if childRemoval, err := subtree.RemoveRegular(ctx, childPath, childIdentity); err != nil || !childRemoval.Removed {
+		t.Fatalf("remove child after nonempty refusal: %+v %v", childRemoval, err)
+	}
+	directory, err = subtree.Inspect(ctx, directoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directoryRemoval, err := subtree.RemoveEmptyDirectory(ctx, directoryPath, directory.Identity)
+	if err != nil || !directoryRemoval.Attempted || !directoryRemoval.Removed || directoryRemoval.Durability != DurabilityConfirmed ||
+		directoryRemoval.Kind != ObjectKindDirectory || directoryRemoval.SizeBytes != 0 {
+		t.Fatalf("empty-directory removal receipt: %+v %v", directoryRemoval, err)
+	}
+	if _, err := subtree.Inspect(ctx, directoryPath); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed directory remained visible: %v", err)
+	}
+}
+
 func TestCreationReceiptSurvivesPostCreateBindingFailure(t *testing.T) {
 	_, session := newSupportedSession(t)
 	previous := checkHook

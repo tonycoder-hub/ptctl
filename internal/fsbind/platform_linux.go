@@ -474,6 +474,54 @@ func platformPublishNoReplace(session *Session, sourceParent *boundDirectory, so
 	return false, false, rawIdentity{}, ErrPublicationAmbiguous
 }
 
+func platformRemoveObject(session *Session, parent *boundDirectory, name string, wantDirectory bool, expected rawIdentity, expectedSize int64) (bool, bool, rawIdentity, error) {
+	if verifyLinuxDirectory(session, parent) != nil {
+		return false, false, rawIdentity{}, ErrCrossFilesystem
+	}
+	source, actual, err := platformOpenAnySource(session, parent, name, wantDirectory)
+	if err != nil || actual != expected {
+		if source != nil {
+			_ = source.Close()
+		}
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	if !wantDirectory && expectedSize >= 0 {
+		info, statErr := source.Stat()
+		if statErr != nil || !info.Mode().IsRegular() || info.Size() != expectedSize {
+			_ = source.Close()
+			return false, false, rawIdentity{}, ErrUnsafeObject
+		}
+	}
+	if closeErr := source.Close(); closeErr != nil {
+		return false, false, rawIdentity{}, fmt.Errorf("close removal source failed")
+	}
+	flags := 0
+	if wantDirectory {
+		flags = unix.AT_REMOVEDIR
+	}
+	removeErr := unix.Unlinkat(int(parent.file.Fd()), name, flags)
+	remaining, remainingRaw, remainingErr := platformOpenAnySource(session, parent, name, wantDirectory)
+	if remaining != nil {
+		_ = remaining.Close()
+	}
+	if removeErr == nil {
+		if errors.Is(remainingErr, ErrNotFound) {
+			if unix.Fsync(int(parent.file.Fd())) != nil {
+				return true, false, expected, ErrDurabilityUnconfirmed
+			}
+			return true, true, expected, nil
+		}
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if errors.Is(remainingErr, ErrNotFound) {
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if remainingErr == nil && remainingRaw == expected {
+		return false, false, expected, ErrUnsafeObject
+	}
+	return false, false, rawIdentity{}, ErrRemovalAmbiguous
+}
+
 func openLinuxPrivateRegular(session *Session, parent *boundDirectory, name string, create bool) (*os.File, rawIdentity, error) {
 	if err := verifyLinuxDirectory(session, parent); err != nil {
 		return nil, rawIdentity{}, err

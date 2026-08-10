@@ -42,6 +42,109 @@ type materializeJSONEnvelope struct {
 	Data   materialize.Report `json:"data"`
 }
 
+type materializeRetentionJSONEnvelope struct {
+	Schema string                      `json:"schema"`
+	Kind   string                      `json:"kind"`
+	Data   materialize.RetentionReport `json:"data"`
+}
+
+func TestSeedMaterializePruneIsExplicitRecoverableAndPrivate(t *testing.T) {
+	fixture := newMaterializeCLIFixture(t)
+	storeRoot, variantID := storeMaterializeMetafile(t, fixture.torrentPath)
+	var out, errOut bytes.Buffer
+	runArgs := []string{
+		"seed", "materialize", "run", "--metafile-store", storeRoot, "--metafile-variant", variantID,
+		"--search-root", fixture.sourceRoot, "--target", fixture.targetRoot,
+		"--expect-plan-id", fixture.planID, "--acknowledge-filesystem-write", "--output", "json",
+	}
+	if code := Run(runArgs, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	operationID := decodeMaterializeReport(t, out.Bytes()).Data.Operation.ID
+
+	out.Reset()
+	errOut.Reset()
+	withoutMetafile := []string{
+		"seed", "materialize", "prune", "--target", fixture.targetRoot,
+		"--expect-plan-id", fixture.planID, "--acknowledge-operation-state-deletion", "--output", "json", operationID,
+	}
+	if code := Run(withoutMetafile, strings.NewReader(""), &out, &errOut); code != 4 {
+		t.Fatalf("new committed prune without metafile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	blocked := decodeMaterializeRetentionReport(t, out.Bytes())
+	if blocked.Data.Outcome != materialize.RetentionOutcomeBlocked || blocked.Data.WritesPerformed != 0 || len(blocked.Data.Blockers) == 0 {
+		t.Fatalf("committed metafile gate was not zero-write: %s", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	pruneArgs := []string{
+		"seed", "materialize", "prune", "--metafile-store", storeRoot, "--metafile-variant", variantID,
+		"--target", fixture.targetRoot, "--expect-plan-id", fixture.planID,
+		"--acknowledge-operation-state-deletion", "--output", "json", operationID,
+	}
+	if code := Run(pruneArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	pruned := decodeMaterializeRetentionReport(t, out.Bytes())
+	if pruned.Schema != "ptctl.dev/v1" || pruned.Kind != "content.materialization.retention" ||
+		pruned.Data.Outcome != materialize.RetentionOutcomePruned || !pruned.Data.Proof.CurrentFinalVerified ||
+		!pruned.Data.Markers.ExactTombstone || pruned.Data.Writes.FilesRemoved == 0 || pruned.Data.WritesPerformed == 0 ||
+		pruned.Data.Blockers == nil || pruned.Data.Issues == nil || pruned.Data.Warnings == nil {
+		t.Fatalf("unexpected prune report: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.targetRoot, fixture.sourceRoot, fixture.sourcePath, fixture.finalPath, fixture.torrentPath, storeRoot)
+	final, err := os.ReadFile(fixture.finalPath)
+	if err != nil || !bytes.Equal(final, fixture.content) {
+		t.Fatalf("prune changed final bytes: %q %v", final, err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"seed", "materialize", "status", "--target", fixture.targetRoot, "--output", "json", operationID}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("retained status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeMaterializeReport(t, out.Bytes())
+	if status.Data.Outcome != materialize.OutcomeRetained || status.Data.Operation.Status != "retained" || status.Data.Operation.Resumable {
+		t.Fatalf("status did not recognize retention tombstone: %s", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(withoutMetafile, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("idempotent prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	repeated := decodeMaterializeRetentionReport(t, out.Bytes())
+	if repeated.Data.Outcome != materialize.RetentionOutcomeAlreadyPruned || repeated.Data.WritesPerformed != 0 || !repeated.Data.Markers.ExactTombstone {
+		t.Fatalf("idempotent prune changed state: %s", out.String())
+	}
+}
+
+func TestSeedMaterializePruneUsagePrecedesTargetIO(t *testing.T) {
+	target := filepath.Join(physicalCLITempDir(t), "PTCTL-PRUNE-TARGET-MUST-NOT-BE-READ")
+	operationID := "sha256:" + strings.Repeat("1", 64)
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"seed", "materialize", "prune", "--target", target,
+		"--expect-plan-id", strings.Repeat("2", 24), "--output", "json", operationID,
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 2 || out.Len() != 0 || !strings.Contains(errOut.String(), "acknowledge-operation-state-deletion") {
+		t.Fatalf("bad prune usage crossed report boundary: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatal("bad prune usage touched the target locator")
+	}
+}
+
+func decodeMaterializeRetentionReport(t *testing.T, raw []byte) materializeRetentionJSONEnvelope {
+	t.Helper()
+	var envelope materializeRetentionJSONEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode retention report: %v\n%s", err, raw)
+	}
+	return envelope
+}
+
 func TestSeedMaterializeRunStatusResumeAndPrivacy(t *testing.T) {
 	fixture := newMaterializeCLIFixture(t)
 	storeRoot, variantID := storeMaterializeMetafile(t, fixture.torrentPath)

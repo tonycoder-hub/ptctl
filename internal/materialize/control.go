@@ -82,6 +82,9 @@ func Status(ctx context.Context, options ControlOptions) (Report, error) {
 	defer session.Close()
 	handle, err := openJournal(ctx, session, options.OperationID, options.Limits)
 	if err != nil {
+		if retained, observed, retentionErr := controlReportFromRetention(ctx, session, rootInfo, options.OperationID, options.Limits); observed {
+			return retained, retentionErr
+		}
 		classifyJournalOpenReport(&report, err)
 		return report, err
 	}
@@ -145,6 +148,14 @@ func Abandon(ctx context.Context, options ControlOptions) (Report, error) {
 	defer session.Close()
 	handle, err := openJournal(ctx, session, options.OperationID, options.Limits)
 	if err != nil {
+		if retained, observed, retentionErr := controlReportFromRetention(ctx, session, rootInfo, options.OperationID, options.Limits); observed {
+			if retentionErr != nil {
+				return retained, retentionErr
+			}
+			retained.Outcome = OutcomeBlocked
+			retained.addBlocker("operation.prune_in_progress", "resume and abandon cannot cross a durable retention boundary")
+			return retained, fmt.Errorf("%w: operation retention has started", ErrPolicy)
+		}
 		classifyJournalOpenReport(&report, err)
 		return report, err
 	}

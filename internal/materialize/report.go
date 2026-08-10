@@ -20,6 +20,8 @@ const (
 	OutcomePublishedIntegrityFailed       Outcome = "published_integrity_failed"
 	OutcomePublishedDurabilityUnconfirmed Outcome = "published_durability_unconfirmed"
 	OutcomePublicationAmbiguous           Outcome = "publication_ambiguous"
+	OutcomePruning                        Outcome = "pruning"
+	OutcomeRetained                       Outcome = "retained"
 )
 
 type Finding struct {

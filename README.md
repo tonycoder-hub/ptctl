@@ -8,10 +8,12 @@ domains and reconciles them around verifiable torrent metadata.
 > discovery, planning, and reconciliation operations are intentionally
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, and the separately
-> acknowledged target-root-local `seed materialize run|resume|abandon`
+> acknowledged target-root-local `seed materialize run|resume|abandon|prune`
 > workflow. The fetch also crosses a separate,
-> tracker-visible read boundary. Materialize creates a new target layout, but
-> no listed operation overwrites, moves, rewrites, or deletes a source; reads
+> tracker-visible read boundary. Materialize creates a new target layout;
+> `prune` can delete only one explicitly selected operation's owner-private
+> heavy state and retains its tombstone. No listed operation overwrites, moves,
+> rewrites, or deletes a source or published final layout; reads
 > may still update atime or hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
@@ -74,7 +76,9 @@ capabilities at the edge, not assumptions in the core domain model.
 - acknowledged, copy-only `seed materialize run|resume` with a private
   target-root-local journal, same-filesystem staging, exact stage/final proof,
   no-clobber publication, fixed hard limits, explicit operation-ID recovery,
-  bounded status/listing, and terminal no-delete abandon;
+  bounded status/listing, terminal no-delete abandon, and separately
+  acknowledged exact pruning of one terminal operation's private state while
+  retaining a durable tombstone;
 - tracker output reduced to origins so announce passkeys are not printed;
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
@@ -401,6 +405,13 @@ ptctl seed materialize abandon \
   --target "D:\PT" \
   --acknowledge-abandon \
   sha256:OPERATION_DIGEST
+
+ptctl seed materialize prune \
+  --torrent release.torrent \
+  --target "D:\PT" \
+  --expect-plan-id 0123456789abcdef01234567 \
+  --acknowledge-operation-state-deletion \
+  sha256:OPERATION_DIGEST
 ```
 
 `status` without an ID performs a bounded name-only listing whose entries are
@@ -412,8 +423,18 @@ recovery authority. `abandon` is allowed only before publication intent. It
 appends one terminal journal event and deliberately retains staging and scratch
 bytes: it is not cleanup, rollback, or deletion.
 
+`prune` is the only deletion-capable materialize command. It selects exactly
+one full operation ID and reviewed plan ID. A newly started committed prune
+also requires the exact metafile and reverifies the current final namespace and
+bytes; an abandoned operation instead proves the final name absent. It then
+publishes a durable private retention intent before deleting only the original
+intent, journal, scratch, and stage objects. A small exact tombstone remains,
+so retries are explicit and idempotent. Prune never removes source bytes, the
+published final layout, another operation, or a downloader job.
+
 Materialize JSON has kind `content.materialization`; the ID listing uses
-`content.materialization.operation_list`. Reports always keep effect, actual
+`content.materialization.operation_list`; prune uses
+`content.materialization.retention`. Reports always keep effect, actual
 and uncertain writes, phase, plan/source/target assurance, fixed limits/usage,
 and non-null blocker/issue/warning arrays separate. They never expose absolute
 source, target, journal, staging, or scratch paths, and have no path-disclosure
@@ -530,8 +551,9 @@ is still printed first.
 
 Materialize validates every selector, acknowledgement, timeout, and limit
 before opening a metafile, source root, target root, or journal. Successful
-`run`/`resume`, a completed status/list read, and a successful abandon return
-`0`. Operational interruption, cancellation, publication ambiguity, or
+`run`/`resume`, a completed status/list read, a successful abandon, and
+`pruned`/`already_pruned` return `0`. Operational interruption, cancellation,
+publication/removal ambiguity, or
 unconfirmed post-publication durability returns `1`; invalid usage or a
 missing acknowledgement returns `2`; content/journal integrity failure returns
 `3`; and a policy blocker, reviewed-plan mismatch, missing fresh source
@@ -579,14 +601,16 @@ network cost. `ptctl` keeps credentials in memory, rejects secret arguments,
 emits no request bodies, blocks cross-origin/downgrade redirects, never retries
 site reads, bounds network and filesystem work, hides private store/object and
 discovery/reconciliation absolute paths by default, never exposes materialize
-paths, defaults conflicts to failure, and has no delete command. Commands such
+paths, defaults conflicts to failure, and confines deletion to the separately
+acknowledged operation-state-only materialize prune command. Commands such
 as `storage probe` and `seed plan` keep their documented path-display
 contracts. The private store uses owner-only permissions and atomic no-clobber
 publication for both metafiles and allowlisted sealed state records; this is
 access control, not encryption. Store init/import, storage profile
 creation/index refresh, the artifact plus sealed-binding phases of an
 acknowledged site metafile fetch, and acknowledged target-root-local
-materialize operations are the explicit write exceptions to the otherwise
+materialize operations (including explicit retention pruning) are the explicit
+write exceptions to the otherwise
 zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 

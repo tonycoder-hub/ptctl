@@ -245,10 +245,15 @@ downloader password from stdin or materialize accesses either filesystem.
 
 Materialize has a separate target-root write boundary. `run` and `resume`
 require `--acknowledge-filesystem-write`; `abandon` requires the narrower
-`--acknowledge-abandon`. All selectors, acknowledgements, timeouts, fixed-limit
+`--acknowledge-abandon`; `prune` requires
+`--acknowledge-operation-state-deletion`, one full operation ID, and the
+reviewed plan ID. All selectors, acknowledgements, timeouts, fixed-limit
 invariants, operation/plan IDs, and syntactic discovery budgets are validated
 before any metafile, search-root, target-root, or journal I/O. An acknowledgement
-does not authorize overwrite, deletion, downloader mutation, or source changes.
+does not authorize overwrite, downloader mutation, or source changes. Only the
+prune acknowledgement authorizes deletion, and only inside the selected
+owner-private operation subtree; the final layout, source, other operations,
+and retained tombstone remain outside that authority.
 
 The target root must support the fsbind root-identity, no-link/reparse,
 same-filesystem, and no-replace primitives. The plan-review root identity is
@@ -278,6 +283,16 @@ only before publication intent, appends one terminal event, and retains stage
 and scratch bytes. It must never be described as cleanup or rollback. Source
 files are only read: materialize does not move, rewrite, link, or delete them,
 although their reads can still update atime or hydrate placeholders.
+
+Retention pruning never treats an absent object as proof that it removed it.
+Before deletion it binds the terminal journal or an already durable retention
+intent, completely inventories the allowlisted private subtrees within fixed
+object/path/byte/depth limits, and rejects links, reparse points, mounts,
+hardlinks, unsafe types, identity drift, and unexpected names. Each unlink or
+empty-directory removal is identity-bound and separately reports visibility
+and parent-directory durability. The intent marker precedes deletion; the
+completion marker follows an exact tombstone audit. A crash therefore resumes
+from the same explicit operation ID rather than selecting or sweeping state.
 
 Allowlisted sealed state records share the private store's root binding,
 owner-only staging, no-replace, durability, and corruption controls, but use a
@@ -432,7 +447,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- explicit cleanup/retention management for abandoned operation subtrees;
+- explicit retained-tombstone retirement and broader quota/age policy (heavy
+  terminal operation state now has only exact single-operation pruning);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader add/recheck/location transitions and private-mode verification;
@@ -443,8 +459,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - per-account cross-process site rate-limit coordination;
 - signed releases, SBOM, and build provenance.
 
-No deletion, downloader mutation, tracker write, or broader content strategy
-should be added until the relevant gap has a testable control and a
+No broader deletion, downloader mutation, tracker write, or broader content
+strategy should be added until the relevant gap has a testable control and a
 failure-recovery story. The private metafile store grants no authority over
 seeded content, and a materialize acknowledgement grants no authority outside
 its explicit copy-only target-root-local operation.
