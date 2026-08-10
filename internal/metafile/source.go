@@ -102,6 +102,45 @@ func (source *VerifiedSource) Bindings() []SourceBinding {
 	return bindings
 }
 
+// Reverify repeats the exact metafile proof through the same process-local
+// identity-bound openers retained by this source observation. Public Bindings
+// deliberately strip those openers and cannot recreate this authority.
+func (source *VerifiedSource) Reverify(ctx context.Context, meta *MetaInfo) (*VerifiedSource, error) {
+	if source == nil || meta == nil || !source.Matches(meta) || !source.result.Verified || !source.result.snapshotAuthority {
+		return nil, fmt.Errorf("verified source has no process-local reverification authority")
+	}
+	before := make(map[int]SourcePrecondition, len(source.bindings))
+	for _, binding := range source.bindings {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		precondition, err := source.SourcePrecondition(binding.FileIndex)
+		if err != nil {
+			return nil, fmt.Errorf("verified source changed before reverification")
+		}
+		before[binding.FileIndex] = precondition
+	}
+	bindings := make([]SourceBinding, len(source.bindings))
+	copy(bindings, source.bindings)
+	reverified, err := VerifySourceMap(ctx, meta, SourceMap{Bindings: bindings})
+	if err != nil {
+		return nil, err
+	}
+	for _, binding := range source.bindings {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		original, originalErr := source.SourcePrecondition(binding.FileIndex)
+		current, currentErr := reverified.SourcePrecondition(binding.FileIndex)
+		expected := before[binding.FileIndex]
+		if originalErr != nil || currentErr != nil || original.SizeBytes != expected.SizeBytes || current.SizeBytes != expected.SizeBytes ||
+			!original.ModifiedAt.Equal(expected.ModifiedAt) || !current.ModifiedAt.Equal(expected.ModifiedAt) {
+			return nil, fmt.Errorf("verified source changed during reverification")
+		}
+	}
+	return reverified, nil
+}
+
 func (source *VerifiedSource) Path(fileIndex int) (string, bool) {
 	if source == nil {
 		return "", false

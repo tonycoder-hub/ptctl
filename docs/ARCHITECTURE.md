@@ -684,13 +684,14 @@ I/O.
 
 The adoption slice never mutates an existing job, changes its location, starts
 a recheck, resumes or pauses transfer, removes a job, deletes a source, or
-claims source retirement. Existing-job recheck/start is a separate downstream
-plan and journal; the other transitions remain future work:
+claims source retirement. Existing-job recheck/start and read-only source
+retirement eligibility are separate downstream slices; mutation and deletion
+remain future work:
 
 ```text
 explicit client recheck -> bracket result -> optional controlled start
 explicit location change -> current per-file proof -> bracket result
-separate source-retirement proof and deletion authority
+source-retirement eligibility proof -> separate future deletion authority
 ```
 
 They must support explicit resume, preserve the no-overwrite defaults, and
@@ -763,6 +764,47 @@ recheck-completion, and activation-completion markers. Read-only `status`
 chooses only an explicit operation ID, performs no network request or sync, and
 does not upgrade historical marker presence into current client or durability
 evidence.
+
+## Read-only source-retirement eligibility
+
+`seed retire plan` closes only the evidence-planning half of source retirement.
+It consumes four same-process inputs: the exact metafile, one complete live
+`seed.Discover` result with its opaque `VerifiedSource`, a current
+`materialize.VerifiedFinal`, and a `clientactivate.VerifiedCompletion` read from
+one explicit terminal activation journal. Recheck-only plans become terminal at
+their recheck-completion marker; a plan that reviewed start is not terminal
+until its activation-completion marker exists. Public status/JSON cannot
+recreate either capability.
+
+```text
+explicit live source roots -> complete unique exact source map
+explicit materialize operation + exact current final reverify
+explicit activation operation + reviewed terminal marker chain
+  -> per-index named-source identity checks
+  -> reject source beneath or physically aliasing the final
+  -> exact post-selection source reverify
+  -> second exact current-final reverify
+  -> review-only source-retirement plan (deletion authority: none)
+```
+
+The plan ID binds the metafile variant and typed hashes, materialize and
+activation selectors, terminal marker, source-selection ID, target/final
+identities, and for every content-bearing physical source its manifest index,
+size, modification observation, and domain-separated path reference. Displaying
+absolute source paths is presentation-only and does not change the ID. Empty
+files and padding have no source deletion candidate; directories are never
+listed. Search roots that include the final normally make discovery ambiguous;
+if the final itself is uniquely selected, the overlap check blocks it.
+
+This is intentionally not an executable serialized plan. Source proof remains
+same-invocation and bracketed, client completion is a historical client claim,
+and the final can change after the last check. No live client ledger is read, so
+the plan cannot claim that the exact job still uses the materialized final. A
+deletion slice will require a new live source/final proof, a fresh unique typed
+job and effective-file-path observation, an exact expected plan ID, a separate
+deletion acknowledgement, bound no-follow unlink primitives, per-name journal
+receipts, crash recovery, and explicit treatment of partial success. None of
+those authorities are granted here.
 
 ## Plugin direction
 

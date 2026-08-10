@@ -298,6 +298,29 @@ mapping. `run` requires `--acknowledge-client-recheck`; optional start requires
 requires the matching repeat acknowledgement. No acknowledgement grants pause,
 move, removal, deletion, source retirement, or a different job selector.
 
+Source-retirement planning is a separate read-only boundary. It accepts no
+downloader credential or mutation acknowledgement and always reports zero
+writes, zero deletion, and `deletion_authority: none`. Eligibility requires a
+new complete unique live source verification, a current exact final proof, and
+one canonical terminal activation marker chain. Recheck-only is terminal at
+recheck completion; reviewed start requires activation completion. The client
+marker remains historical and is never treated as proof of current process,
+open inode, or private metafile ownership.
+
+For every content-bearing source name, the planner brackets the discovery
+snapshot with named regular-file reobservation, a post-selection exact source
+reverification, and exact final verification.
+It rejects a source path inside the final namespace and rejects a source/final
+`SameFile` alias. Source paths are not opened for writing and qB paths are never
+used as host paths. Default reports retain only domain-separated path
+references; explicit path disclosure does not change the plan ID. The result
+does not cover empty files, padding, directories, symlink targets, cleanup, or
+unlink semantics. Unselected hardlink or alias names may remain, and no space
+reclamation is claimed. It does not contact the downloader or prove its current
+job location. A future deletion must freshly observe the unique typed job and
+its effective per-file paths against the current final. The plan is non-atomic
+review evidence, not a promise that a later delete is safe.
+
 The CLI validates artifact/materialize/adoption/mapping/endpoint selectors and
 inspects an explicit resume journal before password stdin. The activation plan
 also includes a fresh qB version descriptor and current exact job-layout
@@ -541,6 +564,9 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal
   job disappears, and client-side private-variant observability;
+- journaled source deletion with fresh expected-plan reproduction, bound
+  no-follow per-name unlink, partial-success receipts, and crash recovery; the
+  implemented source-retirement plan is zero-write evidence only;
 - current-filesystem completeness tokens or journal-backed incremental index
   invalidation; the existing sealed snapshot is candidate-only;
 - encryption-at-rest or an audited external-key design for private metafile

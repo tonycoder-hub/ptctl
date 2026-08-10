@@ -112,6 +112,10 @@ capabilities at the edge, not assumptions in the core domain model.
   canonical stopped-adoption completion, with version-bound v4/v5 routes,
   durable per-request intent, exact typed job/per-file layout reobservation,
   current-final re-verification, and no automatic replay of unknown requests;
+- zero-write source-retirement eligibility planning from a new complete live
+  source proof, current exact materialized-final proof, and canonical terminal
+  client activation journal, with explicit final-overlap/alias rejection and
+  no deletion authority;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -666,6 +670,41 @@ plus a same-invocation exact final proof, not proof of a raw private variant or
 an atomic client/filesystem snapshot. Each invocation sends at most one
 effectful client POST. JSON kind is `client.activation`.
 
+Review which current source file names could be considered for a future,
+separately authorized retirement operation:
+
+```bash
+ptctl seed retire plan \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --search-root "D:\Media\Original" \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --require-eligible \
+  --output json
+```
+
+This command performs zero writes and always reports
+`deletion_authority: none`. It repeats complete live discovery in the explicit
+search roots, reads the canonical terminal activation marker selected by its
+reviewed action, re-verifies the exact published final before and after source
+identity checks, re-verifies the selected source bytes after those checks, and
+rejects a selected source that is inside or aliases that final. Default output
+contains one-way source-path references; raw source paths
+require `--show-absolute-paths`. Only content-bearing regular-file names are
+represented. Empty files, padding, directories, cleanup, and deletion remain
+out of scope. Unselected hardlink or alias names may remain, so the plan never
+claims that storage would be reclaimed. The terminal activation marker is
+historical: this command does not contact qBittorrent or claim that its current
+job location still names the final. A future deletion command must rebuild the
+same live plan, freshly prove the unique exact job and its effective file paths
+still use the current final, require a separate acknowledgement, and journal
+every unlink result; serialized plan JSON will not be authority. JSON kind is
+`content.source_retirement_plan`.
+
 Reconcile one exact metafile with verified bytes and qBittorrent's read-only
 ledger. The password is used for one login; two bounded torrent-list reads
 bracket the storage proof. For one unique ordinary multi-file job, `auto` mode
@@ -730,7 +769,8 @@ paths remain remote, non-atomic lexical claims and are never opened on the host.
 
 Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
 `ptctl storage profile`, `ptctl storage index`, `ptctl seed discover --help`,
-`ptctl seed materialize --help`, or `ptctl reconcile report --help` for the
+`ptctl seed materialize --help`, `ptctl seed retire --help`, or
+`ptctl reconcile report --help` for the
 complete surface.
 
 Exit code `0` means a report or requested read succeeded, `1` an operational

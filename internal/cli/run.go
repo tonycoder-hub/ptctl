@@ -27,6 +27,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/site"
 	"github.com/tonycoder-hub/ptctl/internal/site/tjupt"
 	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
+	"github.com/tonycoder-hub/ptctl/internal/sourceretire"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
@@ -149,6 +150,7 @@ Usage:
   ptctl seed materialize status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed materialize abandon --target PATH --acknowledge-abandon [--output table|json] OPERATION_ID
   ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [--output table|json] OPERATION_ID
+  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID [--output table|json]
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -159,6 +161,7 @@ Safety defaults:
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
   * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone.
+  * Seed retire plan performs fresh proof reads only; it grants no deletion authority and never removes source or final content.
   * Client adoption only adds an absent exact-infohash qBittorrent job in stopped mode. It journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
@@ -1072,6 +1075,9 @@ func (a *app) seed(args []string) error {
 	if args[0] == "materialize" {
 		return a.seedMaterialize(args[1:])
 	}
+	if args[0] == "retire" {
+		return a.seedRetire(args[1:])
+	}
 	if args[0] != "plan" {
 		return usageError("unknown seed subcommand %q", args[0])
 	}
@@ -1452,6 +1458,8 @@ func jsonKind(data any) string {
 		return "client.adoption"
 	case clientactivate.Report:
 		return "client.activation"
+	case sourceretire.Report:
+		return "content.source_retirement_plan"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

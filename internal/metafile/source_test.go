@@ -88,6 +88,35 @@ func TestVerifiedSourceBindingsHideIdentityOpener(t *testing.T) {
 	if len(bindings) != 1 || bindings[0].Path != path || bindings[0].Open != nil {
 		t.Fatalf("public bindings leaked the process-local opener: %#v", bindings)
 	}
+	reverified, err := verified.Reverify(context.Background(), meta)
+	if err != nil || reverified == nil || !reverified.Result().Verified {
+		t.Fatalf("process-local reverification failed: verified=%v err=%v", reverified != nil, err)
+	}
+}
+
+func TestVerifiedSourceReverifyRejectsExactNamedReplacement(t *testing.T) {
+	content := []byte("content")
+	meta := testSingleV1Meta(t, "source.bin", content)
+	path := filepath.Join(t.TempDir(), "named")
+	writeTestFile(t, path, content)
+	verified, err := VerifySourceMap(context.Background(), meta, SourceMap{Bindings: []SourceBinding{{FileIndex: 0, Path: path}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, content)
+	if err := os.Chtimes(path, observed.ModTime(), observed.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verified.Reverify(context.Background(), meta); err == nil {
+		t.Fatal("an exact same-size, same-mtime named replacement retained reverification authority")
+	}
 }
 
 func TestConsumeVerifiedFileUsesProcessLocalIdentityBoundAuthority(t *testing.T) {

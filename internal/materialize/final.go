@@ -130,6 +130,43 @@ func (verified *VerifiedFinal) ProcessTargetRoot() (string, bool) {
 	return verified.authority.targetRoot, true
 }
 
+// ProcessMetafile returns a private clone of the exact parsed metafile bound to
+// this final authority. Callers may inspect the clone, but modifying it cannot
+// alter the authority retained by VerifiedFinal.
+func (verified *VerifiedFinal) ProcessMetafile() (*metafile.MetaInfo, bool) {
+	if !verified.Verified() {
+		return nil, false
+	}
+	return verified.authority.meta.Clone(), true
+}
+
+// ProcessFinalPath returns the private host locator for the exact published
+// object. It is available only to another same-process internal workflow and
+// never appears in FinalObservation or JSON.
+func (verified *VerifiedFinal) ProcessFinalPath() (string, bool) {
+	if !verified.Verified() {
+		return "", false
+	}
+	authority := verified.authority
+	return filepath.Join(authority.targetRoot, authority.layout.FinalName), true
+}
+
+// ProcessFilePath returns the private host locator and expected length for one
+// physical published manifest file. Padding entries are not physical; empty
+// files are returned because they are part of the published namespace.
+func (verified *VerifiedFinal) ProcessFilePath(fileIndex int) (string, int64, bool) {
+	if !verified.Verified() {
+		return "", 0, false
+	}
+	authority := verified.authority
+	for _, file := range authority.layout.Files {
+		if file.ManifestIndex == fileIndex {
+			return filepath.Join(append([]string{authority.targetRoot}, file.Components...)...), file.Length, true
+		}
+	}
+	return "", 0, false
+}
+
 func (verified *VerifiedFinal) Matches(operation OperationID, planID, variantID string) bool {
 	if !verified.Verified() {
 		return false
