@@ -15,6 +15,7 @@ const (
 	OutcomeAlreadyAdopted        Outcome = "already_adopted_pending_client_recheck"
 	OutcomeHistoricalAdopted     Outcome = "historical_adoption_recorded"
 	OutcomeRequestUnknown        Outcome = "request_result_unknown"
+	OutcomeForgetting            Outcome = "forgetting"
 	OutcomeBlocked               Outcome = "blocked"
 	OutcomeIncomplete            Outcome = "incomplete"
 	OutcomeIntegrityFailed       Outcome = "integrity_failed"

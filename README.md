@@ -9,8 +9,8 @@ domains and reconciles them around verifiable torrent metadata.
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
-> workflow, exact `client adopt run|resume|prune` stopped-add operations, and
-> explicit `client activate run|resume|prune` recheck/start operations. The
+> workflow, exact `client adopt run|resume|prune|forget` stopped-add operations, and
+> explicit `client activate run|resume|prune|forget` recheck/start operations. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
@@ -20,7 +20,9 @@ domains and reconciles them around verifiable torrent metadata.
 > existing job; activation is limited to the reviewed exact job's recheck and
 > optional start transitions. `client adopt prune` separately seals one
 > terminal completion tombstone before deleting only that operation's private
-> request journal. `client activate prune` does the same for one explicitly
+> request journal; `client adopt forget` has a third acknowledgement and
+> irreversibly removes only that adoption tombstone plus its last recovery
+> marker. `client activate prune` does the same for one explicitly
 > selected terminal recheck/start journal while retaining the exact historical
 > completion needed by source-retirement review; `client activate forget` has
 > a third acknowledgement and irreversibly removes only that retained
@@ -648,6 +650,15 @@ ptctl client adopt prune \
   --acknowledge-operation-state-deletion \
   --output json \
   sha256:ADOPTION_OPERATION_DIGEST
+
+# After no downstream workflow needs this historical adoption authority,
+# irreversibly erase the exact tombstone and its final attribution marker.
+ptctl client adopt forget \
+  --target "D:\PT" \
+  --expect-adoption-plan-id ADOPTION_PLAN_ID \
+  --acknowledge-historical-evidence-deletion \
+  --output json \
+  sha256:ADOPTION_OPERATION_DIGEST
 ```
 
 `status` is local and read-only: it never reads a password or contacts the
@@ -674,6 +685,21 @@ retention completion. The resulting two-marker tombstone remains usable by
 so. An intent-only crash state blocks ordinary resume and is recoverable only
 by repeating the same explicit prune selector. JSON kind is
 `client.adoption.retention`; `pruned` and `already_pruned` return `0`.
+
+Adoption `forget` is a third, narrower irreversible boundary. It accepts only
+the full operation ID, reviewed adoption plan ID, and
+`--acknowledge-historical-evidence-deletion`; it reads no credential and makes
+no network request. Before touching the tombstone it copies the exact retained
+intent and completion, including the bounded attempt chain, into a deterministic
+owner-private root recovery intent. It then removes only those retained
+markers, their empty directory, and the exact operation subtree, confirms
+durable absence, and removes the last root intent. Staged, published, and
+operation-removed crash states are recovered only by repeating the same
+selector. While either intent exists, status reports `forgetting` and resume,
+completion proof, and prune stop before client access. After final removal a
+repeat reports `absent_unattributed`, not historical success. JSON kind is
+`client.adoption.forget`. Forget cannot revoke a process-local
+`VerifiedCompletion` already issued to another live caller.
 
 Recheck that adopted job, then optionally start it only after a durable
 completion observation:
@@ -1106,8 +1132,8 @@ emits no request bodies, blocks cross-origin/downgrade redirects, never retries
 site reads, bounds network and filesystem work, hides private store/object and
 discovery/reconciliation absolute paths by default, never exposes materialize
 paths, defaults conflicts to failure, and confines private operation-state
-deletion to separately acknowledged materialize/source-retirement prune
-commands; exact materialize/source-retirement tombstone erasure and source-name
+deletion to separately acknowledged materialize, adoption, activation, and
+source-retirement prune commands; exact tombstone erasure and source-name
 unlink each have their own narrower acknowledgement. Commands such
 as `storage probe` and `seed plan` keep their documented path-display
 contracts. The private store uses owner-only permissions and atomic no-clobber
@@ -1116,8 +1142,9 @@ access control, not encryption. Store init/import, storage profile
 creation/index refresh, the artifact plus sealed-binding phases of an
 acknowledged site metafile fetch, and acknowledged target-root-local
 materialize operations (including explicit retention pruning and exact
-tombstone forgetting), acknowledged exact stopped-job adoption, reviewed
-client recheck/start (including explicit retention pruning and exact tombstone
+tombstone forgetting), acknowledged exact stopped-job adoption (including
+explicit retention pruning and exact tombstone forgetting), reviewed client
+recheck/start (including explicit retention pruning and exact tombstone
 forgetting), and acknowledged
 source-name retirement (including its separate journal pruning and explicit
 last-evidence forget transition), are

@@ -68,6 +68,8 @@ func (a *app) clientAdopt(args []string) error {
 		return a.clientAdoptStatus(args[1:])
 	case "prune":
 		return a.clientAdoptPrune(args[1:])
+	case "forget":
+		return a.clientAdoptForget(args[1:])
 	default:
 		return usageError("unknown client adopt subcommand %q", args[0])
 	}
@@ -80,6 +82,7 @@ func (a *app) clientAdoptHelp() {
   ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add] [--acknowledge-repeat-add] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
   ptctl client adopt prune --target PATH --expect-adoption-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl client adopt forget --target PATH --expect-adoption-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
 Version 1 only adds an absent exact typed-infohash job in stopped mode. It never
 changes an existing job, moves content, rechecks, resumes, deletes, or retires
@@ -94,6 +97,9 @@ Prune is a separate local-only deletion boundary. It copies one terminal
 canonical journal into an owner-private tombstone before deleting only that
 operation's intent, request-attempt markers, completion, and empty scratch.
 The tombstone remains usable as historical authority by client activation.
+Forget is a final, separately acknowledged local-only boundary. It publishes a
+root-level recovery intent, removes one exact retained adoption tombstone, then
+removes that last intent. A repeated call reports only unattributed absence.
 `)
 }
 
@@ -323,6 +329,10 @@ func (a *app) clientAdoptResume(args []string) error {
 		statusErr = fmt.Errorf("%w: explicit client adopt prune must complete the retention boundary", clientadopt.ErrPolicy)
 		return a.finishClientAdopt(prepared.output, status, statusErr)
 	}
+	if status.Operation.Status == "forgetting" {
+		statusErr = fmt.Errorf("%w: explicit client adopt forget must complete historical evidence deletion", clientadopt.ErrPolicy)
+		return a.finishClientAdopt(prepared.output, status, statusErr)
+	}
 	if (initializationIncomplete || status.Journal.AttemptsRecorded == 0 && !status.Journal.CompletionDurable) && !*values.acknowledgeAdd {
 		statusErr = fmt.Errorf("%w: this operation has no add request intent; resume requires explicit downloader-add acknowledgement", clientadopt.ErrPolicy)
 		report := clientadopt.FailureReport(prepared.prepared, *values.expectedAdoptionPlan, "resume", 0, statusErr)
@@ -400,6 +410,36 @@ func (a *app) clientAdoptPrune(args []string) error {
 	return a.finishClientAdoptRetention(*output, report, operationErr)
 }
 
+func (a *app) clientAdoptForget(args []string) error {
+	fs := newFlagSet("client adopt forget")
+	output := fs.String("output", "table", "table or json")
+	targetRoot := fs.String("target", "", "materialized target root")
+	expectedPlanID := fs.String("expect-adoption-plan-id", "", "reviewed 24-hex client adoption plan ID")
+	acknowledge := fs.Bool("acknowledge-historical-evidence-deletion", false, "acknowledge irreversible deletion of the retained adoption tombstone and final historical attribution")
+	timeout := fs.Duration("timeout", time.Minute, "historical-evidence deletion wall-clock budget")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *targetRoot == "" {
+		return usageError("client adopt forget requires --target, --expect-adoption-plan-id, acknowledgement, and one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validMaterializePlanID(*expectedPlanID) || !*acknowledge {
+		return usageError("client adopt forget requires canonical --expect-adoption-plan-id and --acknowledge-historical-evidence-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("client adopt forget --timeout must be in (0,1h]")
+	}
+	operationID, err := clientadopt.ParseOperationID(fs.Arg(0))
+	if err != nil {
+		return usageError("client adopt forget requires a canonical OPERATION_ID")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := clientadopt.Forget(ctx, clientadopt.ForgetOptions{TargetRoot: *targetRoot, OperationID: operationID,
+		ExpectedPlanID: *expectedPlanID, Acknowledge: true, Limits: clientadopt.DefaultForgetLimits()})
+	return a.finishClientAdoptForget(*output, report, operationErr)
+}
+
 func (a *app) finishClientAdopt(output string, report clientadopt.Report, operationErr error) error {
 	if err := a.writeClientAdoptReport(output, report); err != nil {
 		return err
@@ -435,6 +475,29 @@ func (a *app) finishClientAdoptRetention(output string, report clientadopt.Reten
 		return &inconclusiveErr{message: "client adoption retention is blocked; see report"}
 	}
 	return fmt.Errorf("client adoption retention was interrupted; see report")
+}
+
+func (a *app) finishClientAdoptForget(output string, report clientadopt.ForgetReport, operationErr error) error {
+	if output == "json" {
+		if err := writeJSON(a.stdout, report, nil); err != nil {
+			return err
+		}
+	} else if err := writeClientAdoptForgetHuman(a.stdout, report); err != nil {
+		return err
+	}
+	if operationErr == nil && report.Outcome == clientadopt.ForgetOutcomeForgotten {
+		return nil
+	}
+	if report.Outcome == clientadopt.ForgetOutcomeIntegrityFailed {
+		return &integrityErr{message: "client adoption historical evidence failed integrity validation; see report"}
+	}
+	if report.Outcome == clientadopt.ForgetOutcomeBlocked {
+		return &inconclusiveErr{message: "client adoption historical-evidence deletion is blocked; see report"}
+	}
+	if report.Outcome == clientadopt.ForgetOutcomeAbsentUnattributed {
+		return fmt.Errorf("client adoption historical evidence is absent without a remaining attribution marker; see report")
+	}
+	return fmt.Errorf("client adoption historical-evidence deletion was interrupted or its durability is unconfirmed; see report")
 }
 
 func (a *app) writeClientAdoptReport(output string, report clientadopt.Report) error {
@@ -501,6 +564,39 @@ func writeClientAdoptRetentionHuman(out io.Writer, report clientadopt.RetentionR
 		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.PruneResumable,
 		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerTemporaryBytes,
 		report.Writes.MarkerPublications, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved)
+	fmt.Fprintln(w, "\nISSUES")
+	writeClientAdoptFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	if len(report.Warnings) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
+}
+
+func writeClientAdoptForgetHuman(out io.Writer, report clientadopt.ForgetReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nPHASE BEFORE\t%s\nPHASE AFTER\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseBefore), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeClientAdoptFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / TARGET\nPLAN ID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nACTION\t%s\nEXPECTED ROOT IDENTITY\t%s\nOBSERVED ROOT IDENTITY\t%s\nROOT BOUND\t%t\nSTABILITY\t%s\n",
+		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(valueOrUnknown(report.Plan.ExpectedID)), report.Plan.Matches, terminalSafe(report.Plan.Action),
+		terminalSafe(valueOrUnknown(report.Target.ExpectedRootIdentity)), terminalSafe(valueOrUnknown(report.Target.ObservedRootIdentity)),
+		report.Target.RootIdentityBound, terminalSafe(report.Target.StabilityAssurance))
+	fmt.Fprintf(w, "\nAUTHORITY\nSTATE\t%s\nFORGET MARKER\t%s\nMARKER DURABLE\t%t\nRETENTION INTENT\t%s\nRETENTION COMPLETE\t%s\nEXACT TOMBSTONE EVIDENCE AVAILABLE\t%t\nTARGET HISTORICAL EVIDENCE ERASED\t%t\n",
+		terminalSafe(report.Authority.State), terminalSafe(valueOrUnknown(report.Authority.MarkerID)), report.Authority.MarkerDurable,
+		terminalSafe(valueOrUnknown(report.Authority.RetentionIntentMarkerID)), terminalSafe(valueOrUnknown(report.Authority.RetentionCompleteMarkerID)),
+		report.Authority.ExactTombstoneEvidenceAvailable, report.Authority.TargetHistoricalEvidenceErased)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nADOPTION INTENT\t%s\nCOMPLETION\t%s\nATTEMPTS\t%d\nAUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(valueOrUnknown(report.Proof.IntentID)), terminalSafe(valueOrUnknown(report.Proof.CompletionID)),
+		report.Proof.AttemptsRecorded, report.Proof.HistoricalAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nMARKER TEMPORARIES\t%d\nMARKER PUBLICATIONS\t%d\nAMBIGUOUS MARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\nMAX MARKER BYTES\t%d\n",
+		report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications, report.Writes.AmbiguousMarkerPublications, report.Writes.RemovalAttempts,
+		report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals, report.Limits.MaxMarkerBytes)
 	fmt.Fprintln(w, "\nISSUES")
 	writeClientAdoptFindings(w, report.Issues)
 	fmt.Fprintln(w, "\nWARNINGS")

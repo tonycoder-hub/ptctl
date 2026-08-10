@@ -23,6 +23,11 @@ const (
 	// state. clientadopt consumes this exact constant to prevent drift.
 	ClientAdoptOperationDirectoryPrefix = ".ptctl-client-adopt-"
 	clientAdoptDirectoryPrefix          = ClientAdoptOperationDirectoryPrefix
+	// ClientAdoptForgetMarkerPrefix reserves the root-level, owner-private
+	// recovery marker used while one exact retained client-adoption tombstone
+	// is being irreversibly forgotten.
+	ClientAdoptForgetMarkerPrefix = ".ptctl-client-adopt-forget-"
+	clientAdoptForgetMarkerPrefix = ClientAdoptForgetMarkerPrefix
 	// ClientActivateOperationDirectoryPrefix is reserved for explicit
 	// recheck/start coordination state downstream of stopped-job adoption.
 	ClientActivateOperationDirectoryPrefix = ".ptctl-client-activate-"
@@ -53,7 +58,7 @@ const (
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
+	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientAdoptForgetMarkerPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {

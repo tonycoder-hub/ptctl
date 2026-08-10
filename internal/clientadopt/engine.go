@@ -342,6 +342,12 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 	report.Client = ClientReport{Status: "not_observed", BeforeIdentity: "not_observed", AfterIdentity: "not_observed", VariantRelation: "historical_unobservable", Assurance: "not_observed"}
 	handle, _, err := openJournal(ctx, options.TargetRoot, options.OperationID, false, nil)
 	if err != nil {
+		var forgetting *forgetInProgressError
+		if errors.As(err, &forgetting) {
+			applyForgetControlReport(&report, forgetting)
+			report.finalize()
+			return report, nil
+		}
 		if errors.Is(err, ErrInitializationIncomplete) {
 			report.Outcome = OutcomeIncomplete
 			report.Operation.Status = "initialization_incomplete"

@@ -49,6 +49,11 @@ func Prune(ctx context.Context, options PruneOptions) (RetentionReport, error) {
 	report.Target.ObservedRootIdentity = rootInfo.Identity.String()
 	report.Target.RootIdentityBound = true
 	report.Target.StabilityAssurance = "non_atomic_bound_filesystem"
+	if pending, inspectErr := inspectForgetControl(ctx, target, options.OperationID, options.ExpectedPlanID); inspectErr != nil {
+		return finish(inspectErr, "the client adoption forget boundary could not be inspected")
+	} else if pending != nil {
+		return finish(pending, "client adoption historical evidence deletion is already in progress")
+	}
 	directoryName, _ := operationDirectoryName(options.OperationID)
 	object, err := target.InspectRoot(ctx, directoryName)
 	if errors.Is(err, fsbind.ErrNotFound) {
@@ -70,6 +75,9 @@ func Prune(ctx context.Context, options PruneOptions) (RetentionReport, error) {
 	state, err := loadRetentionState(ctx, handle, options.OperationID, rootInfo.Identity)
 	if err != nil {
 		return finish(err, "client adoption retention state could not be loaded")
+	}
+	if state.ForgetPending {
+		return finish(&forgetInProgressError{marker: state.ForgetIntent, markerID: state.ForgetID}, "client adoption historical evidence deletion is already staged")
 	}
 	var marker RetentionIntent
 	var live journalState

@@ -322,6 +322,20 @@ create downstream completion authority only through a fresh bound read; its
 public DTO and JSON round trip remain powerless and it does not establish
 current downloader state.
 
+Adoption tombstone forgetting is a third, separately acknowledged local
+deletion authority. It accepts only one full operation ID and reviewed plan ID.
+The exact retained intent, completion, and bounded attempt chain are copied
+into a canonical domain-separated root recovery intent before any retained
+marker is removed. Its deterministic owner-private name and payload bind the
+target-root and operation identities; publication is no-clobber. Staged intent,
+root intent, partial retained-marker deletion, empty-directory removal,
+operation-root removal, and final-marker removal are fail-closed recovery
+boundaries. Status does not sync, and resume, completion proof, and prune stop
+before credentials or network access. Unexpected objects, another operation,
+client jobs, content, and source names are outside authority. Once the last
+marker is durably absent, later absence is unattributed. Deleting storage cannot
+revoke an opaque process-local completion capability issued before forgetting.
+
 After the POST, a terminal marker requires one unique exact typed job, stopped
 state, reviewed size and exact lexical save/content paths, plus a second exact
 final verification. These are bracketed, non-atomic observations. They neither
@@ -726,11 +740,11 @@ synthetic metafiles; real tracker artifacts are forbidden.
 
 - snapshot-backed materialize authority; current writes require fresh complete
   live discovery rather than historical index hints;
-- adoption-tombstone forgetting and broader quota/age policy
+- broader quota/age policy
   (materialize, adoption, activation, and source-retirement heavy state have
-  exact explicit pruning; materialize, activation, and source-retirement
-  tombstones also have separately acknowledged forget transitions; no
-  operation is selected automatically by policy);
+  exact explicit pruning and each tombstone family has a separately
+  acknowledged forget transition; no operation is selected automatically by
+  policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location/removal transitions, re-adoption after a terminal

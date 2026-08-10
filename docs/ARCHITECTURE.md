@@ -747,6 +747,31 @@ bound target and operation identities. Only that same-invocation read creates
 completion without treating public JSON as authority. The tombstone does not
 claim that the client job or final is current.
 
+`client adopt forget` is the separately acknowledged irreversible boundary
+after prune. It selects one full adoption operation ID and reviewed plan ID.
+Before deleting any retained marker it copies the canonical retention intent,
+completion, and bounded attempt chain into a domain-separated deterministic
+owner-private root recovery intent bound to both target-root and operation
+identities:
+
+```text
+exact retained adoption tombstone
+  -> staged forget intent inside the bound operation
+  -> durable no-clobber root forget intent
+  -> exact retained-marker and operation-subtree removal
+  -> durable operation-name absence
+  -> exact last root-marker removal
+  -> unattributed absence
+```
+
+The staged or root intent blocks ordinary resume, completion proof, and prune;
+only the same explicit forget selector may recover it. Status is read-only and
+does not reassert marker durability. The final removal deliberately destroys
+idempotence evidence, so a later absence cannot be attributed to prior success.
+No credential, downloader request, content mutation, source unlink, or
+cross-operation selection is authorized. An opaque `VerifiedCompletion`
+already issued to another live caller cannot be revoked by deleting storage.
+
 The adoption slice itself never mutates an existing job, changes its location,
 starts a recheck, resumes or pauses transfer, removes a job, deletes a source,
 or claims source retirement. Existing-job recheck/start and source retirement

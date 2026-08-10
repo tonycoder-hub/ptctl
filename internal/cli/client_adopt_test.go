@@ -34,6 +34,12 @@ type clientAdoptRetentionJSONEnvelope struct {
 	Data   clientadopt.RetentionReport `json:"data"`
 }
 
+type clientAdoptForgetJSONEnvelope struct {
+	Schema string                   `json:"schema"`
+	Kind   string                   `json:"kind"`
+	Data   clientadopt.ForgetReport `json:"data"`
+}
+
 type clientAdoptCLIFixture struct {
 	materialize materializeCLIFixture
 	storeRoot   string
@@ -261,6 +267,48 @@ func TestClientAdoptPruneIsLocalAndRetainedResumeStopsBeforeCredentials(t *testi
 	if repeated.Data.Outcome != clientadopt.RetentionOutcomeAlreadyPruned || repeated.Data.WritesPerformed != 0 {
 		t.Fatalf("repeated retention=%#v", repeated.Data)
 	}
+
+	forgetArgs := []string{"client", "adopt", "forget", "--target", fixture.materialize.targetRoot,
+		"--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json", planned.Data.Operation.ID}
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 0 || reader.read || server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("adoption forget code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	forgotten := decodeClientAdoptForgetReport(t, out.Bytes())
+	if forgotten.Data.Outcome != clientadopt.ForgetOutcomeForgotten || !forgotten.Data.Authority.TargetHistoricalEvidenceErased ||
+		forgotten.Data.Authority.MarkerDurable || forgotten.Data.Operation.Resumable || forgotten.Data.WritesPerformed == 0 ||
+		forgotten.Data.Blockers == nil || forgotten.Data.Issues == nil || forgotten.Data.Warnings == nil {
+		t.Fatalf("unexpected adoption forget report: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 1 || reader.read || server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("repeated adoption forget code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	absent := decodeClientAdoptForgetReport(t, out.Bytes())
+	if absent.Data.Outcome != clientadopt.ForgetOutcomeAbsentUnattributed || absent.Data.WritesPerformed != 0 || absent.Data.Authority.TargetHistoricalEvidenceErased {
+		t.Fatalf("repeated adoption forget claimed historical idempotence: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+}
+
+func TestClientAdoptForgetBadUsageDoesNotReadInput(t *testing.T) {
+	planID := strings.Repeat("f", 24)
+	operationID := clientadopt.OperationIDForPlan(planID).String()
+	for _, args := range [][]string{
+		{"client", "adopt", "forget", "--target", `C:\not-opened`, "--expect-adoption-plan-id", planID, operationID},
+		{"client", "adopt", "forget", "--target", `C:\not-opened`, "--expect-adoption-plan-id", "bad", "--acknowledge-historical-evidence-deletion", operationID},
+	} {
+		reader := &trackingReader{}
+		var out, errOut bytes.Buffer
+		if code := Run(args, reader, &out, &errOut); code != 2 || reader.read {
+			t.Fatalf("args=%v code=%d read=%t stdout=%q stderr=%q", args, code, reader.read, out.String(), errOut.String())
+		}
+	}
 }
 
 func newClientAdoptCLIFixture(t *testing.T) clientAdoptCLIFixture {
@@ -399,6 +447,18 @@ func decodeClientAdoptRetentionReport(t *testing.T, raw []byte) clientAdoptReten
 	}
 	if result.Schema != "ptctl.dev/v1" || result.Kind != "client.adoption.retention" {
 		t.Fatalf("unexpected client adoption retention envelope: %s", raw)
+	}
+	return result
+}
+
+func decodeClientAdoptForgetReport(t *testing.T, raw []byte) clientAdoptForgetJSONEnvelope {
+	t.Helper()
+	var result clientAdoptForgetJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode client adoption forget report: %v\n%s", err, raw)
+	}
+	if result.Schema != "ptctl.dev/v1" || result.Kind != "client.adoption.forget" {
+		t.Fatalf("unexpected client adoption forget envelope: %s", raw)
 	}
 	return result
 }

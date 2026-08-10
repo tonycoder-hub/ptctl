@@ -138,6 +138,7 @@ Usage:
   ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add --acknowledge-repeat-add] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
   ptctl client adopt prune --target PATH --expect-adoption-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl client adopt forget --target PATH --expect-adoption-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
   ptctl client activate plan [adoption selectors] --adoption-operation ID --adoption-plan-id ID [--start-after-recheck] [--output table|json]
   ptctl client activate run [same selectors] --expect-activation-plan-id ID --acknowledge-client-recheck [--output table|json]
   ptctl client activate resume [same selectors] --expect-activation-plan-id ID [explicit acknowledgement flags] [--output table|json] OPERATION_ID
@@ -1537,6 +1538,8 @@ func jsonKind(data any) string {
 		return "client.adoption"
 	case clientadopt.RetentionReport:
 		return "client.adoption.retention"
+	case clientadopt.ForgetReport:
+		return "client.adoption.forget"
 	case clientactivate.Report:
 		return "client.activation"
 	case clientactivate.RetentionReport:
