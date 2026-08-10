@@ -512,9 +512,14 @@ func (s *Store) ListRecords(ctx context.Context, kind RecordKind, limits RecordL
 		if openErr != nil {
 			return result, fmt.Errorf("%w: objects directory entry is unsafe", ErrCorruptRecord)
 		}
-		entryInfo, infoErr := entry.Info()
 		closeErr := file.Close()
-		if infoErr != nil || closeErr != nil || platformRejectNamedInfo(entryInfo) || !entryInfo.Mode().IsRegular() || !os.SameFile(entryInfo, info) {
+		// ReadDir entries produced from the POSIX operation-bound directory
+		// handle carry the handle's deliberately opaque os.File name. Calling
+		// entry.Info would therefore perform a path lookup through that opaque
+		// name rather than through the bound store root. openValidated already
+		// performs the required no-follow named lookup, opens the same object,
+		// and proves named/handle identity and type under the root session.
+		if closeErr != nil {
 			return result, fmt.Errorf("%w: objects directory entry is unsafe", ErrCorruptRecord)
 		}
 		if isRecord && (info.Size() < 0 || info.Size() > hardMaxRecordBytes) {
