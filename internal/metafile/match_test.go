@@ -101,7 +101,7 @@ func TestMatchSourceCandidatesCarriesIdentityBoundOpenerThroughV2Proof(t *testin
 	result, err := MatchSourceCandidates(context.Background(), meta, []FileCandidates{{
 		FileIndex: 0,
 		Candidates: []SourceCandidate{{
-			ID: "bound", Path: actual, Open: func() (*os.File, error) {
+			ID: "bound", Path: actual, Open: func() (SourceFile, error) {
 				opens++
 				return os.Open(actual)
 			},

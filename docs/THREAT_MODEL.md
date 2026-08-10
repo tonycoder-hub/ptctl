@@ -28,6 +28,11 @@ default. It emits stable root IDs, display-safe relative paths, and raw
 components in base64. `--show-absolute-paths` is an explicit local disclosure.
 Fatal diagnostics identify roots by ordinal or opaque ID where practical.
 
+Materialize is stricter: neither JSON, tables, nor errors expose absolute or
+raw source, target, operation, journal, staging, or scratch paths, and there is
+no `--show-absolute-paths` mode. Full operation IDs, plan IDs, metafile variant
+IDs, and filesystem identities remain stable correlators, not anonymity.
+
 Reconciliation also hides downloader content paths by default and emits a
 one-way path reference instead. qBittorrent magnet URIs are never placed in a
 domain object or report: the adapter extracts only bounded, typed `xt` hashes
@@ -230,11 +235,49 @@ closed. The first format does not accept UNC/network stores. Unknown future
 formats are not migrated in place automatically.
 
 Every stored-artifact open re-hashes and parses the bounded original bytes.
-Selecting a store object for inspect, verify, seed, or reconciliation grants no
-write authority to that command. The paired `--metafile-store` and
+Selecting a store object for inspect, verify, discovery, planning, or
+reconciliation grants no write authority to that command. For materialize the
+stored pair supplies metafile bytes only; its separate acknowledgement grants
+target-root writes, never store mutation. The paired `--metafile-store` and
 `--metafile-variant` selector is mutually exclusive with a positional metafile
 or `--torrent`; selector validation happens before reconciliation reads a
-downloader password from stdin.
+downloader password from stdin or materialize accesses either filesystem.
+
+Materialize has a separate target-root write boundary. `run` and `resume`
+require `--acknowledge-filesystem-write`; `abandon` requires the narrower
+`--acknowledge-abandon`. All selectors, acknowledgements, timeouts, fixed-limit
+invariants, operation/plan IDs, and syntactic discovery budgets are validated
+before any metafile, search-root, target-root, or journal I/O. An acknowledgement
+does not authorize overwrite, deletion, downloader mutation, or source changes.
+
+The target root must support the fsbind root-identity, no-link/reparse,
+same-filesystem, and no-replace primitives. The plan-review root identity is
+rechecked before journal creation. Journal, scratch, and stage objects live
+beneath an opaque target-root-local operation subtree; the final layout is one
+validated raw relative component. Source locators never enter the durable
+intent. Every recovery selects one canonical full operation ID, replays an
+immutable hash-chain, and rejects an intent, event, object identity, namespace,
+or installed-limit disagreement. Enumeration is available only as a bounded
+name-only list whose results remain `not_inspected`; no latest operation is
+chosen.
+
+The source can still change between non-atomic checks. A successful live
+discovery retains process-local proof plus file preconditions; each copy is
+opened and identity/precondition bracketed against that authority. The complete
+stage and complete final namespace are independently verified against the exact
+metafile. Recovery before stage verification therefore requires new live
+discovery; recovery after it trusts neither a historical source locator nor
+journaled hashes alone and reopens the staged/final objects. This detects
+ordinary replacement and corruption but does not make concurrent filesystem
+mutation atomic.
+
+Publication intent is durable before the no-replace final transition. Any
+ambiguous attempt or failed durability confirmation is reported with its actual
+or uncertain write receipt and is not deleted as rollback. `abandon` is allowed
+only before publication intent, appends one terminal event, and retains stage
+and scratch bytes. It must never be described as cleanup or rollback. Source
+files are only read: materialize does not move, rewrite, link, or delete them,
+although their reads can still update atime or hydrate placeholders.
 
 Allowlisted sealed state records share the private store's root binding,
 owner-only staging, no-replace, durability, and corruption controls, but use a
@@ -312,29 +355,40 @@ files remain unsupported for this full-layout claim. Windows path case is
 compared exactly rather than assuming case-insensitive semantics for a
 particular directory or remote filesystem.
 
-The preview has no apply, overwrite, move, or delete command. A layout plan
-records source metadata preconditions but still requires exact apply-time
-verification.
+Layout-plan output remains zero-write and explicitly reports `layout_only`,
+`effect:none`, and `ready_to_apply:false`. Materialize accepts only a reviewed
+`seed discover --target` plan ID from the same selector/search-root/target
+shape, never the standalone `seed plan` ID and never serialized plan/discovery
+JSON as proof. `run` repeats live discovery and exact verification in the
+writing invocation; early `resume` phases require the same fresh process-local
+authority. The implemented mutation is copy-only and no-clobber. There is still
+no move, source rewrite, source delete, overwrite, or automatic plan-execution
+command.
 
 ### Read side effects and remote storage
 
 For inspect, verify, discovery, planning, reconciliation, ordinary site reads,
-and downloader reads, "read-only" means zero intentional filesystem mutation,
-not zero observable side effect. Metadata and content reads may update atime,
-wake disks, hydrate a cloud placeholder, traverse a FUSE/SMB backend, or incur
-network cost. Network paths that can be recognized syntactically are opt-in,
-and scans use one goroutine with no retry. Context cancellation is checked
-between operations, but a blocked filesystem syscall may not be interruptible.
-Users should narrow roots and budgets before scanning mounted remote storage.
+downloader reads, and the discovery/read phases of materialize, metadata and
+content reads may update atime, wake disks, hydrate a cloud placeholder,
+traverse a FUSE/SMB backend, or incur network cost. "Read-only" means zero
+intentional mutation, not zero observable side effect. Network search roots
+that can be recognized syntactically are opt-in, and scans use one goroutine
+with no retry. Materialize targets remain local-only. Context cancellation is
+checked between operations, but a blocked filesystem syscall may not be
+interruptible. Users should narrow roots and budgets before scanning mounted
+remote storage.
 
 `metafile store init`, `metafile store import`, `storage profile create`,
-`storage index refresh`, and the artifact/binding phases of `site metafile fetch` are the
-explicit write exceptions. Their reported write
+`storage index refresh`, the artifact/binding phases of `site metafile fetch`,
+and acknowledged materialize operations are the explicit write exceptions.
+Store/index/fetch reported write
 count covers logical publication of an accepted store marker or immutable
 object, not private temporary or uninitialized staging entries. It is nonzero
 when that accepted state became visible, including a possible count of `1` for
-`published_durability_unconfirmed`. Store inspect and every existing artifact
-consumer remain zero-write.
+`published_durability_unconfirmed`. Materialize instead separately counts
+operation subtrees/directories, journal objects/events, scratch/staged objects,
+publication attempts, logical publications, ambiguous writes, and bytes. Store
+inspect and every non-materialize artifact consumer remain zero-write.
 
 The B1 site metafile fetch crosses two independent boundaries. The tracker may
 record its passkey-bearing GET, so the command requires an explicit
@@ -374,12 +428,13 @@ OS-specific filesystem security primitives. GitHub Actions are pinned to full
 commit SHAs and receive read-only repository permission. Tests construct
 synthetic metafiles; real tracker artifacts are forbidden.
 
-## Known gaps before mutation support
+## Known gaps before broader mutation support
 
-- handle-relative root confinement or storage-snapshot integration;
-- durable, serializable file identity for apply-time preconditions;
+- snapshot-backed materialize authority; current writes require fresh complete
+  live discovery rather than historical index hints;
+- explicit cleanup/retention management for abandoned operation subtrees;
+- reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
-- journaled copy/reflink workflows with crash injection and rollback;
 - downloader add/recheck/location transitions and private-mode verification;
 - current-filesystem completeness tokens or journal-backed incremental index
   invalidation; the existing sealed snapshot is candidate-only;
@@ -388,7 +443,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - per-account cross-process site rate-limit coordination;
 - signed releases, SBOM, and build provenance.
 
-No content, downloader, or tracker mutation should be added until the relevant
-gap has a testable control and a failure-recovery story. The private metafile
-store is limited to immutable, no-clobber artifact publication and grants no
-authority over seeded content.
+No deletion, downloader mutation, tracker write, or broader content strategy
+should be added until the relevant gap has a testable control and a
+failure-recovery story. The private metafile store grants no authority over
+seeded content, and a materialize acknowledgement grants no authority outside
+its explicit copy-only target-root-local operation.

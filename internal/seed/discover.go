@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -549,7 +548,7 @@ func buildCandidateSetsRanked(
 				ID:   observation.ObservationID,
 				Rank: candidate.rank,
 				Path: candidate.path,
-				Open: func() (*os.File, error) {
+				Open: func() (metafile.SourceFile, error) {
 					if err := ctx.Err(); err != nil {
 						return nil, err
 					}

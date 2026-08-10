@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
@@ -27,26 +28,27 @@ type Operation struct {
 }
 
 type Plan struct {
-	ID                string                      `json:"id"`
-	TorrentName       string                      `json:"torrent_name"`
-	InfoHashV1        string                      `json:"info_hash_v1,omitempty"`
-	InfoHashV2        string                      `json:"info_hash_v2,omitempty"`
-	MetafileVariantID string                      `json:"metafile_variant_id"`
-	Evidence          string                      `json:"evidence"`
-	Effect            string                      `json:"effect"`
-	ReadyToApply      bool                        `json:"ready_to_apply"`
-	Readiness         string                      `json:"readiness"`
-	SourceMode        string                      `json:"source_mode"`
-	SourceRoot        string                      `json:"source_root,omitempty"`
-	TargetRoot        string                      `json:"target_root"`
-	ClientMapping     string                      `json:"client_mapping"`
-	Strategy          string                      `json:"strategy"`
-	EstimatedRead     int64                       `json:"estimated_read_bytes"`
-	EstimatedWrite    int64                       `json:"estimated_write_bytes"`
-	Operations        []Operation                 `json:"operations"`
-	Verification      metafile.VerificationResult `json:"verification"`
-	Warnings          []string                    `json:"warnings,omitempty"`
-	Blockers          []string                    `json:"blockers"`
+	ID                 string                      `json:"id"`
+	TorrentName        string                      `json:"torrent_name"`
+	InfoHashV1         string                      `json:"info_hash_v1,omitempty"`
+	InfoHashV2         string                      `json:"info_hash_v2,omitempty"`
+	MetafileVariantID  string                      `json:"metafile_variant_id"`
+	Evidence           string                      `json:"evidence"`
+	Effect             string                      `json:"effect"`
+	ReadyToApply       bool                        `json:"ready_to_apply"`
+	Readiness          string                      `json:"readiness"`
+	SourceMode         string                      `json:"source_mode"`
+	SourceRoot         string                      `json:"source_root,omitempty"`
+	TargetRoot         string                      `json:"target_root"`
+	TargetRootIdentity string                      `json:"target_root_identity,omitempty"`
+	ClientMapping      string                      `json:"client_mapping"`
+	Strategy           string                      `json:"strategy"`
+	EstimatedRead      int64                       `json:"estimated_read_bytes"`
+	EstimatedWrite     int64                       `json:"estimated_write_bytes"`
+	Operations         []Operation                 `json:"operations"`
+	Verification       metafile.VerificationResult `json:"verification"`
+	Warnings           []string                    `json:"warnings,omitempty"`
+	Blockers           []string                    `json:"blockers"`
 }
 
 var ErrSourceIntegrity = errors.New("source content failed exact torrent verification")
@@ -99,6 +101,11 @@ func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified
 		return Plan{}, err
 	}
 	semantics := targetProbe.Semantics
+	targetRootIdentity := ""
+	if targetSession, targetInfo, bindErr := fsbind.BindExisting(targetProbe.ResolvedPath); bindErr == nil {
+		targetRootIdentity = targetInfo.Identity.String()
+		_ = targetSession.Close()
+	}
 	allTargetPaths := make([][][]byte, 0, len(meta.Files))
 	for _, file := range meta.Files {
 		components := targetComponents(meta, file)
@@ -109,32 +116,39 @@ func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified
 	}
 
 	plan := Plan{
-		TorrentName:       meta.Name,
-		InfoHashV1:        meta.InfoHashV1,
-		InfoHashV2:        meta.InfoHashV2,
-		MetafileVariantID: meta.MetafileVariantID,
-		Evidence:          planEvidence(meta.Version),
-		Effect:            "none",
-		ReadyToApply:      false,
-		Readiness:         "layout_only",
-		SourceMode:        sourceMode,
-		SourceRoot:        sourceRoot,
-		TargetRoot:        targetProbe.ResolvedPath,
-		ClientMapping:     "not_requested",
-		Strategy:          strategy,
-		Verification:      verification,
+		TorrentName:        meta.Name,
+		InfoHashV1:         meta.InfoHashV1,
+		InfoHashV2:         meta.InfoHashV2,
+		MetafileVariantID:  meta.MetafileVariantID,
+		Evidence:           planEvidence(meta.Version),
+		Effect:             "none",
+		ReadyToApply:       false,
+		Readiness:          "layout_only",
+		SourceMode:         sourceMode,
+		SourceRoot:         sourceRoot,
+		TargetRoot:         targetProbe.ResolvedPath,
+		TargetRootIdentity: targetRootIdentity,
+		ClientMapping:      "not_requested",
+		Strategy:           strategy,
+		Verification:       verification,
 		Warnings: []string{
 			"plan only: no filesystem changes were made",
-			"apply is intentionally absent in this alpha; review paths and use a trusted copier or future journaled apply command",
+			"journaled materialize is a separate explicit write command and never treats this serialized plan as source-proof authority",
 		},
 		Blockers: []string{
 			"target filesystem semantics were inferred from the host OS, not measured for this storage root",
 			"no host-to-downloader path mapping or downloader job was reconciled",
 			"no site release identity was bound to the local metafile artifact",
-			"any future apply must repeat exact piece verification immediately before copying",
+			"journaled materialize requires a separately reviewed seed discover --target plan ID and repeats exact source verification in the writing invocation",
 		},
 	}
 	plan.Warnings = append(plan.Warnings, targetProbe.Warnings...)
+	if targetRootIdentity == "" {
+		plan.Warnings = append(plan.Warnings, "the target root could not provide an opaque bound filesystem identity; journaled materialize will remain blocked")
+		plan.Blockers = append(plan.Blockers, "the target root lacks the bound identity required by journaled materialize")
+	} else {
+		plan.Warnings = append(plan.Warnings, "the plan ID includes an opaque read-only observation of the target-root filesystem identity")
+	}
 	for fileIndex, file := range meta.Files {
 		if err := ctx.Err(); err != nil {
 			return Plan{}, err
@@ -212,7 +226,7 @@ func rejectSymlinkPrefix(root, target string) error {
 }
 
 func planID(plan Plan) string {
-	lines := []string{plan.InfoHashV1, plan.InfoHashV2, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceMode, plan.SourceRoot, plan.TargetRoot, plan.Readiness, plan.ClientMapping}
+	lines := []string{plan.InfoHashV1, plan.InfoHashV2, plan.MetafileVariantID, plan.Verification.SourceSnapshotID, plan.SourceMode, plan.SourceRoot, plan.TargetRoot, plan.TargetRootIdentity, plan.Readiness, plan.ClientMapping}
 	operations := make([]string, 0, len(plan.Operations))
 	for _, operation := range plan.Operations {
 		operations = append(operations, fmt.Sprint(operation.ManifestIndex)+"\x00"+operation.Kind+"\x00"+operation.Source+"\x00"+operation.Target+"\x00"+operation.ClientTarget+"\x00"+fmt.Sprint(operation.Bytes))

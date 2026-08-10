@@ -6,13 +6,13 @@ domains and reconciles them around verifiable torrent metadata.
 
 > Status: `v0.4.0-alpha` development. Inspection, downloader, content,
 > discovery, planning, and reconciliation operations are intentionally
-> zero-write. Persistent writes are confined to explicit private-store
-> operations: `metafile store init`, `metafile store import`, `storage profile
-> create`, `storage index refresh`, and the acknowledged `site metafile fetch`.
-> The fetch also crosses a separate,
-> tracker-visible read boundary. None of these operations mutates content or
-> moves, rewrites, or deletes an import source; reads may still update atime or
-> hydrate an offline placeholder.
+> zero-write. Persistent writes are confined to explicit private-store/index
+> operations, the acknowledged `site metafile fetch`, and the separately
+> acknowledged target-root-local `seed materialize run|resume|abandon`
+> workflow. The fetch also crosses a separate,
+> tracker-visible read boundary. Materialize creates a new target layout, but
+> no listed operation overwrites, moves, rewrites, or deletes a source; reads
+> may still update atime or hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
@@ -71,6 +71,10 @@ capabilities at the edge, not assumptions in the core domain model.
 - zero-write, `layout_only` plans for v1, v2, and hybrid metafiles, bound to a
   detected-stable verification observation with apply-time re-verification
   requirements;
+- acknowledged, copy-only `seed materialize run|resume` with a private
+  target-root-local journal, same-filesystem staging, exact stage/final proof,
+  no-clobber publication, fixed hard limits, explicit operation-ID recovery,
+  bounded status/listing, and terminal no-delete abandon;
 - tracker output reduced to origins so announce passkeys are not printed;
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
@@ -97,8 +101,9 @@ capabilities at the edge, not assumptions in the core domain model.
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
 index alone, background refresh/watchers, site torrent-detail reads,
 downloader mutation, attributed/empty-file client-layout reconciliation,
-journaled plan application, deletion, automatic plan execution, site writes,
-browser login, third-party executable plugins, ratio manipulation, or
+reflink/hardlink or cross-filesystem materialization, automatic execution of
+serialized plan reports, source/staging cleanup or rollback, deletion, site
+writes, browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
 
 ## Install
@@ -234,12 +239,14 @@ ptctl reconcile report \
 it remains `declared_unbound`. A binding record cannot be paired with
 `--torrent`, loaded from a separate store, or selected by enumeration/latest.
 
-The same pair is supported by `torrent verify`, `seed plan`, and `reconcile
-report`. Supplying only half the pair, mixing it with a file/`--torrent`, or
-adding a positional metafile to the stored form is invalid usage. Loading from
-the store rechecks the object digest and parses the exact bytes before invoking
-the same verifier, discovery, planning, or reconciliation core. Those consumer
-commands remain zero-write.
+The same pair is supported by `torrent verify`, `seed discover`, `seed plan`,
+`seed materialize run|resume`, and `reconcile report`. Supplying only half the
+pair, mixing it with a file/`--torrent`, or adding a positional metafile to the
+stored form is invalid usage. Loading from the store rechecks the object digest
+and parses the exact bytes before invoking the same core. Inspection,
+verification, discovery, planning, and reconciliation consumers remain
+zero-write; materialize still requires its independent filesystem-write
+acknowledgement.
 
 Create an immutable filesystem scope and explicitly refresh its private index.
 The state store is the same initialized, owner-only store format used for
@@ -345,6 +352,73 @@ ptctl seed plan \
   --output json
 ```
 
+The standalone `seed plan` result remains a zero-write review artifact:
+`effect` is `none`, readiness is `layout_only`, and `ready_to_apply` is false.
+Its `exact_root` plan ID is not an execution selector. To review a layout for
+materialize, use `seed discover --target` with the intended selector, search
+roots, and target (as in the preceding discovery example), retain that
+discovery plan's 24-hex ID, then acknowledge the journal, staging, and target
+writes:
+
+```bash
+ptctl seed materialize run \
+  --torrent release.torrent \
+  --search-root "D:\Media" \
+  --search-root "E:\Archive" \
+  --target "D:\PT" \
+  --expect-plan-id 0123456789abcdef01234567 \
+  --acknowledge-filesystem-write \
+  --output json
+```
+
+`run` does not consume plan or discovery JSON as proof. In the same invocation
+it repeats bounded live discovery with that same selector/search-root/target
+shape, requires one uniquely verified source, rebuilds the copy-only plan from
+the process-local proof, and compares the fresh ID before creating a journal.
+It then uses a private target-root-local
+journal and same-filesystem staging, exactly verifies staged and final bytes,
+and publishes the top-level layout without clobber. The materialize limits are
+fixed by the installed version; only the existing discovery limits are CLI
+flags. Network/UNC source roots still require `--allow-network`; a target root
+must be a supported local filesystem.
+
+Every report hands back a full opaque operation ID as soon as one is durably
+recoverable. Recovery always selects that ID explicitly:
+
+```bash
+ptctl seed materialize status --target "D:\PT"
+ptctl seed materialize status --target "D:\PT" sha256:OPERATION_DIGEST
+
+ptctl seed materialize resume \
+  --torrent release.torrent \
+  --target "D:\PT" \
+  --expect-plan-id 0123456789abcdef01234567 \
+  --acknowledge-filesystem-write \
+  --search-root "D:\Media" \
+  sha256:OPERATION_DIGEST
+
+ptctl seed materialize abandon \
+  --target "D:\PT" \
+  --acknowledge-abandon \
+  sha256:OPERATION_DIGEST
+```
+
+`status` without an ID performs a bounded name-only listing whose entries are
+`not_inspected`; it never chooses a latest operation. `resume` reads fresh
+search roots only for `journaled`, `stage_created`, or `file_staged` phases.
+Omitting roots in one of those phases returns a blocked report; after stage
+verification, supplied roots are not read because staged/final bytes are the
+recovery authority. `abandon` is allowed only before publication intent. It
+appends one terminal journal event and deliberately retains staging and scratch
+bytes: it is not cleanup, rollback, or deletion.
+
+Materialize JSON has kind `content.materialization`; the ID listing uses
+`content.materialization.operation_list`. Reports always keep effect, actual
+and uncertain writes, phase, plan/source/target assurance, fixed limits/usage,
+and non-null blocker/issue/warning arrays separate. They never expose absolute
+source, target, journal, staging, or scratch paths, and have no path-disclosure
+flag. Reads can still update atime, hydrate placeholders, or incur remote cost.
+
 Map a host path to a Dockerized downloader namespace:
 
 ```bash
@@ -441,7 +515,8 @@ paths remain remote, non-atomic lexical claims and are never opened on the host.
 
 Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
 `ptctl storage profile`, `ptctl storage index`, `ptctl seed discover --help`,
-or `ptctl reconcile report --help` for the complete surface.
+`ptctl seed materialize --help`, or `ptctl reconcile report --help` for the
+complete surface.
 
 Exit code `0` means a report or requested read succeeded, `1` an operational
 failure, `2` invalid usage, and `3` an explicit integrity mismatch. Discovery
@@ -453,12 +528,25 @@ Reconciliation is also report-oriented. Add `--require-reconciled` to return
 `4` unless the independently reported local axes are `consistent`; the report
 is still printed first.
 
+Materialize validates every selector, acknowledgement, timeout, and limit
+before opening a metafile, source root, target root, or journal. Successful
+`run`/`resume`, a completed status/list read, and a successful abandon return
+`0`. Operational interruption, cancellation, publication ambiguity, or
+unconfirmed post-publication durability returns `1`; invalid usage or a
+missing acknowledgement returns `2`; content/journal integrity failure returns
+`3`; and a policy blocker, reviewed-plan mismatch, missing fresh source
+authority, explicit operation not found, or incomplete bounded operation
+listing returns `4`. Non-usage outcomes are written before the exit. A failure
+may have nonzero or uncertain writes, and a reported operation ID is the only
+recovery handoff; retries never choose an operation automatically.
+
 For the metafile store, exit `0` includes idempotent `already_initialized` and
 `already_present` outcomes. Missing/uninitialized stores, absent objects, I/O
 failures, unsupported store formats, or inability to enforce the required
 privacy/atomicity controls return `1`; selector conflicts return `2`; invalid
-input artifacts or a stored digest/parse mismatch return `3`. Exit `4` is not
-repurposed and remains the report-first requirement failure described above. A
+input artifacts or a stored digest/parse mismatch return `3`. The store does
+not itself use exit `4`; discovery/reconciliation requirements and blocked
+materialize controls retain their separate report-first meaning. A
 post-publication durability failure reports `published_durability_unconfirmed`
 and returns `1`, even though its write count may already be `1`.
 
@@ -490,14 +578,16 @@ while filesystem reads can update atime, hydrate cloud placeholders, or incur
 network cost. `ptctl` keeps credentials in memory, rejects secret arguments,
 emits no request bodies, blocks cross-origin/downgrade redirects, never retries
 site reads, bounds network and filesystem work, hides private store/object and
-discovery/reconciliation absolute paths by default, defaults conflicts to
-failure, and has no delete or apply command. Commands such as `storage probe`
-and `seed plan` keep their documented path-display contracts. The private
-store uses owner-only permissions and atomic no-clobber publication for both
-metafiles and allowlisted sealed state records; this is access control, not
-encryption. Store init/import, storage profile creation/index refresh, and the
-artifact plus sealed-binding phases of an acknowledged site metafile fetch are
-the explicit write exceptions to the otherwise zero-write operational surface.
+discovery/reconciliation absolute paths by default, never exposes materialize
+paths, defaults conflicts to failure, and has no delete command. Commands such
+as `storage probe` and `seed plan` keep their documented path-display
+contracts. The private store uses owner-only permissions and atomic no-clobber
+publication for both metafiles and allowlisted sealed state records; this is
+access control, not encryption. Store init/import, storage profile
+creation/index refresh, the artifact plus sealed-binding phases of an
+acknowledged site metafile fetch, and acknowledged target-root-local
+materialize operations are the explicit write exceptions to the otherwise
+zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Architecture

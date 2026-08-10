@@ -1,8 +1,11 @@
 package metafile
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,7 +64,7 @@ func TestVerifySourceMapRejectsOpenerForDifferentNamedPath(t *testing.T) {
 	_, err := VerifySourceMap(context.Background(), meta, SourceMap{Bindings: []SourceBinding{{
 		FileIndex: 0,
 		Path:      namedPath,
-		Open:      func() (*os.File, error) { return os.Open(openedPath) },
+		Open:      func() (SourceFile, error) { return os.Open(openedPath) },
 	}}})
 	if err == nil {
 		t.Fatal("an opener for a different file was allowed to authenticate the named path")
@@ -76,7 +79,7 @@ func TestVerifiedSourceBindingsHideIdentityOpener(t *testing.T) {
 	verified, err := VerifySourceMap(context.Background(), meta, SourceMap{Bindings: []SourceBinding{{
 		FileIndex: 0,
 		Path:      path,
-		Open:      func() (*os.File, error) { return os.Open(path) },
+		Open:      func() (SourceFile, error) { return os.Open(path) },
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +87,101 @@ func TestVerifiedSourceBindingsHideIdentityOpener(t *testing.T) {
 	bindings := verified.Bindings()
 	if len(bindings) != 1 || bindings[0].Path != path || bindings[0].Open != nil {
 		t.Fatalf("public bindings leaked the process-local opener: %#v", bindings)
+	}
+}
+
+func TestConsumeVerifiedFileUsesProcessLocalIdentityBoundAuthority(t *testing.T) {
+	content := []byte("content to copy")
+	meta := testSingleV1Meta(t, "source.bin", content)
+	path := filepath.Join(t.TempDir(), "renamed")
+	writeTestFile(t, path, content)
+	verified, err := VerifySourceMap(context.Background(), meta, SourceMap{Bindings: []SourceBinding{{
+		FileIndex: 0,
+		Path:      path,
+		Open:      func() (SourceFile, error) { return os.Open(path) },
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copied bytes.Buffer
+	precondition, err := verified.ConsumeVerifiedFile(context.Background(), 0, func(reader io.Reader) error {
+		_, err := io.Copy(&copied, reader)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(copied.Bytes(), content) || precondition.SizeBytes != int64(len(content)) {
+		t.Fatalf("unexpected consumed bytes or precondition: %q %#v", copied.Bytes(), precondition)
+	}
+}
+
+func TestConsumeVerifiedFileRejectsShortConsumer(t *testing.T) {
+	content := []byte("content")
+	meta := testSingleV1Meta(t, "source.bin", content)
+	path := filepath.Join(t.TempDir(), "renamed")
+	writeTestFile(t, path, content)
+	verified, err := VerifySourceMap(context.Background(), meta, SourceMap{Bindings: []SourceBinding{{FileIndex: 0, Path: path}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verified.ConsumeVerifiedFile(context.Background(), 0, func(reader io.Reader) error {
+		var one [1]byte
+		_, err := reader.Read(one[:])
+		return err
+	}); err == nil {
+		t.Fatal("a consumer that stopped before the exact length was accepted")
+	}
+}
+
+func TestConsumeVerifiedFileRejectsChangedNamedIdentity(t *testing.T) {
+	content := []byte("content")
+	meta := testSingleV1Meta(t, "source.bin", content)
+	path := filepath.Join(t.TempDir(), "renamed")
+	writeTestFile(t, path, content)
+	verified, err := VerifySourceMap(context.Background(), meta, SourceMap{Bindings: []SourceBinding{{FileIndex: 0, Path: path}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, []byte("changed"))
+	if err := os.Chtimes(path, observed.ModTime(), observed.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verified.ConsumeVerifiedFile(context.Background(), 0, func(reader io.Reader) error {
+		_, err := io.Copy(io.Discard, reader)
+		return err
+	}); err == nil {
+		t.Fatal("a same-size, same-mtime named replacement retained copy authority")
+	}
+}
+
+func TestConsumeVerifiedFileHonorsPreCancelledContext(t *testing.T) {
+	content := []byte("content")
+	meta := testSingleV1Meta(t, "source.bin", content)
+	path := filepath.Join(t.TempDir(), "renamed")
+	writeTestFile(t, path, content)
+	verified, err := VerifySourceMap(context.Background(), meta, SourceMap{Bindings: []SourceBinding{{FileIndex: 0, Path: path}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	if _, err := verified.ConsumeVerifiedFile(ctx, 0, func(io.Reader) error {
+		called = true
+		return nil
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if called {
+		t.Fatal("consumer ran after cancellation")
 	}
 }
 

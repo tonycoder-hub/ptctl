@@ -16,6 +16,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
+	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/reconcile"
@@ -133,6 +134,10 @@ Usage:
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
+  ptctl seed materialize run (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH --target PATH --expect-plan-id ID --acknowledge-filesystem-write [--output table|json]
+  ptctl seed materialize resume (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [--search-root PATH...] [--output table|json] OPERATION_ID
+  ptctl seed materialize status --target PATH [--output table|json] [OPERATION_ID]
+  ptctl seed materialize abandon --target PATH --acknowledge-abandon [--output table|json] OPERATION_ID
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -142,6 +147,7 @@ Safety defaults:
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
+  * Seed materialize requires an explicit write acknowledgement, copies only, never clobbers or deletes, and never reports filesystem paths.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
 `)
@@ -1045,6 +1051,9 @@ func (a *app) seed(args []string) error {
 	if args[0] == "discover" {
 		return a.seedDiscover(args[1:])
 	}
+	if args[0] == "materialize" {
+		return a.seedMaterialize(args[1:])
+	}
 	if args[0] != "plan" {
 		return usageError("unknown seed subcommand %q", args[0])
 	}
@@ -1415,6 +1424,10 @@ func jsonKind(data any) string {
 		return "content.layout_plan"
 	case seed.DiscoveryResult:
 		return "content.source_discovery"
+	case materialize.Report:
+		return "content.materialization"
+	case materialize.OperationListResult:
+		return "content.materialization.operation_list"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

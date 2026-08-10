@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 )
 
@@ -135,6 +136,55 @@ func TestPlanIDNormalizesEquivalentSourcePaths(t *testing.T) {
 	}
 	if absolutePlan.ID != relativePlan.ID || absolutePlan.SourceRoot != relativePlan.SourceRoot {
 		t.Fatalf("equivalent paths changed plan identity: absolute=%#v relative=%#v", absolutePlan, relativePlan)
+	}
+}
+
+func TestPlanIDBindsObservedTargetRootIdentity(t *testing.T) {
+	content := []byte("x")
+	piece := sha1.Sum(content)
+	meta, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(1), "name": "x", "piece length": int64(1), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := t.TempDir()
+	source := filepath.Join(sourceRoot, "x")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	session, info, err := fsbind.BindExisting(target)
+	if err != nil {
+		t.Skipf("target filesystem does not provide a bound identity: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := BuildMaterializePlan(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TargetRootIdentity != info.Identity.String() {
+		t.Fatalf("plan omitted the observed target identity: %#v", first)
+	}
+	detached := filepath.Join(parent, "detached")
+	if err := os.Rename(target, detached); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	second, err := BuildMaterializePlan(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.TargetRootIdentity == first.TargetRootIdentity || second.ID == first.ID {
+		t.Fatalf("target replacement retained reviewed plan authority: first=%#v second=%#v", first, second)
 	}
 }
 

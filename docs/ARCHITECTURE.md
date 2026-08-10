@@ -236,16 +236,18 @@ All metafile consumers use one source-selection rule:
 - `torrent inspect` and `torrent verify` retain their single positional file,
   or accept the paired `--metafile-store DIR --metafile-variant ID` flags with
   no positional metafile;
-- `seed discover`, `seed plan`, and `reconcile report` retain `--torrent FILE`,
-  or accept the same stored pair;
+- `seed discover`, `seed plan`, `seed materialize run|resume`, and `reconcile
+  report` retain `--torrent FILE`, or accept the same stored pair;
 - half a stored pair, both source forms, or an extra positional metafile is
   usage error `2`.
 
 After source resolution, every command receives the same parsed `MetaInfo` and
 keeps its existing JSON kind, evidence lattice, and exit semantics. Store-backed
 inspect, verification, discovery, planning, and reconciliation only read the
-store and remain zero-write. Store corruption is an explicit integrity failure,
-not a fallback to a file with the same infohash.
+store and remain zero-write. Materialize may use that selector, but still needs
+its independent write acknowledgement and never writes to the store. Store
+corruption is an explicit integrity failure, not a fallback to a file with the
+same infohash.
 
 The store commands add stable `ptctl.dev/v1` kinds
 `metafile.store.init`, `metafile.store.import`, and
@@ -257,8 +259,9 @@ exit `0`; environmental/store failures are `1`, usage is `2`, and invalid input
 or stored-object corruption is `3`. `published_durability_unconfirmed` is a
 reported operational failure with exit `1` even though its write count may be
 `1`; `published_post_commit_failure` records a completed publication whose
-later cleanup or validation did not complete. Exit `4` remains reserved for the
-existing report-first `--require-verified` and `--require-reconciled` contracts.
+later cleanup or validation did not complete. The store does not use exit `4`;
+report-first discovery/reconciliation requirements and blocked materialize
+controls use it in their own command contracts.
 
 Publication assurance is not reconstructed from current bytes. New successful
 publications are `confirmed_this_invocation`; read-only inspection and
@@ -331,8 +334,7 @@ Raw response bytes, request and redirect URLs, cookies, announce URLs,
 passkeys, server filenames, object paths, and temporary paths never enter JSON,
 human output, errors, or a side record. The ordinary store-root path disclosure
 remains opt-in. Non-usage failures are reported before the command returns its
-operational or integrity exit; exit `4` remains reserved for existing
-verification and reconciliation requirement flags.
+operational or integrity exit; site fetch itself does not use exit `4`.
 
 ## Immutable storage profiles and sealed candidate snapshots
 
@@ -532,9 +534,91 @@ does not. Every result declares its non-atomic stability assurance. v2 padding
 and symbolic-link leaves fail closed until their filesystem semantics can be
 modeled safely.
 
-## Planned mutation workflow
+## Journaled copy-only materialization
 
-A future apply command must be recoverable, not a raw `mv`:
+`seed materialize` is the first content-write slice. It is deliberately
+narrower than downloader coordination and has four explicit controls:
+
+```text
+run     selector + live search roots + target + reviewed plan ID + write ack
+resume  selector + target + reviewed plan ID + write ack + explicit operation ID
+status  target + optional explicit operation ID
+abandon target + abandon ack + explicit operation ID
+```
+
+Both plan surfaces remain `layout_only`, `effect:none`, and
+`ready_to_apply:false`. `run` accepts only the 24-hex plan ID reviewed from
+`seed discover --target` with the same metafile selector, search roots, and
+target. The standalone `seed plan` uses `exact_root` source semantics and its ID
+is not a materialize execution selector. `run` does not deserialize either
+plan/discovery JSON or treat a historical report as proof. Under one timeout it
+loads the selected exact metafile, repeats the bounded live discovery, requires
+`verified_unique`, consumes the process-local opaque `VerifiedSource`, and
+rebuilds the copy-only discovered-map plan. A mismatch blocks before a journal
+is created. Each source copy is identity/precondition bracketed against that
+same-call authority; the complete staged layout is then exactly verified before
+publication.
+
+The target is an existing supported local filesystem root. A bound root
+identity from plan review must still match, the final top-level name must be
+absent, and staging remains on that filesystem. The engine creates an opaque
+operation subtree, immutable intent, and hash-chained event journal, stages by
+copy, verifies the complete staged layout against v1/v2/hybrid commitments,
+records publication intent, performs no-replace top-level publication, verifies
+the complete final layout, and commits. Its durable phases are:
+
+```text
+journaled -> stage_created -> file_staged* -> stage_verified
+          -> publish_intent -> published -> final_verified -> committed
+          -> abandoned  # only from an unpublished pre-intent phase
+```
+
+The intent contains the exact metafile variant, reviewed plan ID, target-root
+identity, final raw relative component, manifest budgets, and fixed installed
+limits. It deliberately contains no absolute target path and no source locator.
+The event chain binds every created/staged/published object identity without
+turning historical identity into content proof. Reports likewise contain no
+absolute or raw source, target, journal, scratch, or staging path, and the CLI
+offers no materialize path-disclosure flag.
+
+Materialize limits are always `materialize.DefaultLimits()` and are sealed into
+the intent; there are no CLI overrides. The run/resume scan and proof budgets
+remain the ordinary discovery flags. Reports use `content.materialization` and
+keep declared effect, actual/uncertain writes, operation phase/resumability,
+plan/source/target assurance, every fixed limit/usage counter, and non-null
+blocker/issue/warning arrays separate. Journal object publications, durability
+confirmations, staged/final publication attempts, bytes, and ambiguous writes
+are not collapsed into the outcome.
+
+`resume` first replays the explicit journal. Only `journaled`, `stage_created`,
+and `file_staged` phases may read supplied search roots and require a fresh
+unique source. Later phases ignore supplied roots and reverify staged or final
+bytes; a durable journal is recovery evidence, never source-content authority.
+Committed recovery rechecks the final namespace and content and returns
+`already_committed`. No command enumerates and silently selects an operation.
+
+`status ID` replays one journal without claiming current content proof.
+`status` without an ID performs a bounded target-root name listing; each result
+is `not_inspected`, the JSON kind is
+`content.materialization.operation_list`, and incomplete listing returns a
+report before exit `4`. `abandon` writes one terminal event only before
+publication intent. It retains stage and scratch objects and is neither
+cleanup, deletion, nor rollback.
+
+All usage, selector, acknowledgement, timeout, and budget checks precede
+metafile, source-root, target-root, and journal I/O. Non-usage failures remain
+report-first: exit `0` is a successful transition/read, `1` is operational
+interruption or uncertain/unconfirmed publication, `2` is usage, `3` is exact
+content or journal integrity failure, and `4` is a policy/source/plan/selector
+blocker, explicit operation not found, or incomplete operation listing. A
+failure can have nonzero or uncertain writes; its explicit operation ID is the
+only resume handoff.
+
+## Future downloader coordination
+
+The implemented materialize engine does not pause, add, relocate, recheck, or
+resume a downloader. A future coordinated command must bracket those separate
+client mutations around the existing recoverable filesystem operation:
 
 ```text
 pause client -> record journal -> materialize -> verify target
@@ -542,10 +626,11 @@ pause client -> record journal -> materialize -> verify target
              -> separately confirm source retirement
 ```
 
-It must support resume and rollback, never overwrite by default, and never
-delete borrowed or externally owned files. Reflink/copy are safer defaults than
-hardlink because a client repair through a shared inode can corrupt a media
-library.
+It must support explicit resume, never overwrite by default, and never infer
+source retirement from successful publication. Cleanup/deletion needs its own
+authority and journal; `abandon` cannot be presented as rollback. Reflink may
+eventually be safer than hardlink because a client repair through a shared
+inode can corrupt a media library, but the implemented strategy is copy only.
 
 ## Plugin direction
 

@@ -94,7 +94,11 @@ func ValidateManifestPaths(paths [][][]byte, semantics PathSemantics) error {
 		for i, component := range components {
 			parts[i] = string(component)
 			if !semantics.CaseSensitive {
-				parts[i] = strings.ToLower(parts[i])
+				if semantics.Windows {
+					parts[i] = windowsSimpleFoldKey(parts[i])
+				} else {
+					parts[i] = strings.ToLower(parts[i])
+				}
 			}
 		}
 		key := strings.Join(parts, "\x00")
@@ -111,6 +115,24 @@ func ValidateManifestPaths(paths [][][]byte, semantics PathSemantics) error {
 		}
 	}
 	return nil
+}
+
+// windowsSimpleFoldKey selects a stable representative from each Unicode
+// simple-fold cycle. Unlike lower-casing, this also unifies folds such as the
+// Greek sigma and final sigma while remaining deterministic across input case.
+func windowsSimpleFoldKey(value string) string {
+	var result strings.Builder
+	result.Grow(len(value))
+	for _, character := range value {
+		minimum := character
+		for folded := unicode.SimpleFold(character); folded != character; folded = unicode.SimpleFold(folded) {
+			if folded < minimum {
+				minimum = folded
+			}
+		}
+		result.WriteRune(minimum)
+	}
+	return result.String()
 }
 
 // SecureJoinExisting joins an existing path while refusing symlink traversal.

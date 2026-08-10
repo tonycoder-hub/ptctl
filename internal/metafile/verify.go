@@ -79,12 +79,23 @@ type SourcePrecondition struct {
 	ModifiedAt time.Time `json:"modified_at"`
 }
 
+// SourceFile is the minimum handle contract required by the exact verifier.
+// It lets filesystem adapters retain handle-relative authority without
+// exposing an absolute-path reopen as the security boundary.
+type SourceFile interface {
+	io.Reader
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
+type SourceOpener func() (SourceFile, error)
+
 type fileSpec struct {
 	path       string
 	length     int64
 	padding    bool
 	empty      bool
-	open       func() (*os.File, error)
+	open       SourceOpener
 	sizeBefore int64
 	modBefore  time.Time
 	infoBefore os.FileInfo
@@ -751,14 +762,14 @@ func ensureStable(specs []fileSpec) error {
 	return nil
 }
 
-func openFileSpec(spec fileSpec) (*os.File, error) {
+func openFileSpec(spec fileSpec) (SourceFile, error) {
 	if spec.open != nil {
 		return spec.open()
 	}
 	return os.Open(spec.path)
 }
 
-func statOpenedContentPath(path string, file *os.File) (os.FileInfo, error) {
+func statOpenedContentPath(path string, file SourceFile) (os.FileInfo, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -790,7 +801,7 @@ func sourceSnapshotID(specs []fileSpec) string {
 type sequenceReader struct {
 	specs         []fileSpec
 	index         int
-	current       *os.File
+	current       SourceFile
 	currentBefore os.FileInfo
 	currentRemain int64
 	pendingErr    error

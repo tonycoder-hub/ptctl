@@ -66,6 +66,27 @@ func TestDetectCaseCollision(t *testing.T) {
 	}
 }
 
+func TestDetectWindowsUnicodeSimpleFoldCollision(t *testing.T) {
+	paths := [][][]byte{{[]byte("σ.mkv")}, {[]byte("ς.mkv")}}
+	if err := ValidateManifestPaths(paths, PathSemantics{Windows: true, CaseSensitive: false}); err == nil {
+		t.Fatal("expected sigma/final-sigma collision")
+	}
+	if err := ValidateManifestPaths(paths, PathSemantics{Windows: true, CaseSensitive: true}); err != nil {
+		t.Fatalf("case-sensitive paths unexpectedly collided: %v", err)
+	}
+}
+
+func TestDetectWindowsSimpleFoldPrefixCollisionWithInterposition(t *testing.T) {
+	paths := [][][]byte{
+		{[]byte("Σ")},
+		{[]byte("Σ-branch")},
+		{[]byte("ς"), []byte("child.mkv")},
+	}
+	if err := ValidateManifestPaths(paths, PathSemantics{Windows: true, CaseSensitive: false}); err == nil {
+		t.Fatal("lexical interposition hid a simple-fold file/directory prefix collision")
+	}
+}
+
 func TestMapHostToClient(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "movies", "a.mkv")

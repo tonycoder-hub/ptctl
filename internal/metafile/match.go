@@ -33,10 +33,10 @@ const (
 )
 
 type SourceCandidate struct {
-	ID   string                   `json:"id"`
-	Rank int                      `json:"rank"`
-	Path string                   `json:"-"`
-	Open func() (*os.File, error) `json:"-"`
+	ID   string       `json:"id"`
+	Rank int          `json:"rank"`
+	Path string       `json:"-"`
+	Open SourceOpener `json:"-"`
 }
 
 type FileCandidates struct {

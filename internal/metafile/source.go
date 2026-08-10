@@ -12,9 +12,9 @@ import (
 )
 
 type SourceBinding struct {
-	FileIndex int                      `json:"file_index"`
-	Path      string                   `json:"source_path"`
-	Open      func() (*os.File, error) `json:"-"`
+	FileIndex int          `json:"file_index"`
+	Path      string       `json:"source_path"`
+	Open      SourceOpener `json:"-"`
 }
 
 type SourceMap struct {
@@ -145,6 +145,139 @@ func (source *VerifiedSource) SourcePrecondition(fileIndex int) (SourcePrecondit
 	return SourcePrecondition{}, fmt.Errorf("planned source %q no longer matches the verified file snapshot", binding.Path)
 }
 
+// ConsumeVerifiedFile reopens one physical manifest file through the
+// identity-bound source capability retained by this verification invocation.
+// The callback must consume exactly the verified byte length. This proves only
+// that the copy read remained attached to the observed file object and named
+// path; the copied layout must still pass the torrent verifier before publish.
+func (source *VerifiedSource) ConsumeVerifiedFile(ctx context.Context, fileIndex int, consume func(io.Reader) error) (SourcePrecondition, error) {
+	if source == nil || !source.result.Verified || !source.result.snapshotAuthority {
+		return SourcePrecondition{}, fmt.Errorf("verified source has no process-local source snapshot authority")
+	}
+	if consume == nil {
+		return SourcePrecondition{}, fmt.Errorf("verified source consumer is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return SourcePrecondition{}, err
+	}
+	position := sort.Search(len(source.bindings), func(i int) bool { return source.bindings[i].FileIndex >= fileIndex })
+	if position >= len(source.bindings) || source.bindings[position].FileIndex != fileIndex {
+		return SourcePrecondition{}, fmt.Errorf("verified source has no physical binding for manifest file %d", fileIndex)
+	}
+	binding := source.bindings[position]
+	file, err := openSourceBinding(binding)
+	if err != nil {
+		return SourcePrecondition{}, err
+	}
+	before, err := statOpenedContentPath(binding.Path, file)
+	if err != nil {
+		_ = file.Close()
+		return SourcePrecondition{}, fmt.Errorf("inspect verified source before consuming: %w", err)
+	}
+	if !sourceSnapshotMatches(source.result.snapshots, binding.Path, before) {
+		_ = file.Close()
+		return SourcePrecondition{}, fmt.Errorf("verified source no longer matches its content-proof observation")
+	}
+	reader := &boundedContextReader{ctx: ctx, reader: file, remaining: before.Size()}
+	consumeErr := consume(reader)
+	if consumeErr == nil && reader.remaining != 0 {
+		consumeErr = fmt.Errorf("verified source consumer stopped before the exact byte length")
+	}
+	if consumeErr == nil {
+		var extra [1]byte
+		if n, readErr := file.Read(extra[:]); n != 0 || (readErr != nil && readErr != io.EOF) {
+			consumeErr = fmt.Errorf("verified source changed length while it was consumed")
+		}
+	}
+	after, statErr := statOpenedContentPath(binding.Path, file)
+	closeErr := file.Close()
+	if consumeErr != nil {
+		return SourcePrecondition{}, consumeErr
+	}
+	if statErr != nil {
+		return SourcePrecondition{}, fmt.Errorf("inspect verified source after consuming: %w", statErr)
+	}
+	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return SourcePrecondition{}, fmt.Errorf("verified source changed while it was consumed")
+	}
+	if closeErr != nil {
+		return SourcePrecondition{}, fmt.Errorf("close verified source after consuming: %w", closeErr)
+	}
+	if err := recheckSourceBinding(binding, before); err != nil {
+		return SourcePrecondition{}, err
+	}
+	return SourcePrecondition{SizeBytes: before.Size(), ModifiedAt: before.ModTime().UTC()}, nil
+}
+
+type boundedContextReader struct {
+	ctx       context.Context
+	reader    io.Reader
+	remaining int64
+}
+
+func (reader *boundedContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if reader.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(buffer)) > reader.remaining {
+		buffer = buffer[:reader.remaining]
+	}
+	n, err := reader.reader.Read(buffer)
+	reader.remaining -= int64(n)
+	if n == 0 && err == nil {
+		return 0, io.ErrNoProgress
+	}
+	return n, err
+}
+
+func openSourceBinding(binding SourceBinding) (SourceFile, error) {
+	var (
+		file SourceFile
+		err  error
+	)
+	if binding.Open != nil {
+		file, err = binding.Open()
+	} else {
+		file, err = os.Open(binding.Path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open verified source: %w", err)
+	}
+	return file, nil
+}
+
+func recheckSourceBinding(binding SourceBinding, expected os.FileInfo) error {
+	file, err := openSourceBinding(binding)
+	if err != nil {
+		return err
+	}
+	info, statErr := statOpenedContentPath(binding.Path, file)
+	closeErr := file.Close()
+	if statErr != nil {
+		return fmt.Errorf("recheck verified source named identity: %w", statErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close verified source recheck: %w", closeErr)
+	}
+	if !os.SameFile(expected, info) || expected.Size() != info.Size() || !expected.ModTime().Equal(info.ModTime()) {
+		return fmt.Errorf("verified source named identity changed after it was consumed")
+	}
+	return nil
+}
+
+func sourceSnapshotMatches(snapshots []snapshotRecord, path string, info os.FileInfo) bool {
+	for _, snapshot := range snapshots {
+		if sameSnapshotPath(snapshot.path, path) && os.SameFile(snapshot.info, info) &&
+			snapshot.info.Size() == info.Size() && snapshot.info.ModTime().Equal(info.ModTime()) {
+			return true
+		}
+	}
+	return false
+}
+
 func specsFromSourceMap(ctx context.Context, meta *MetaInfo, source SourceMap) ([]fileSpec, []SourceBinding, error) {
 	byIndex := make(map[int]SourceBinding, len(source.Bindings))
 	for _, binding := range source.Bindings {
@@ -217,7 +350,7 @@ func ObserveV2FileRoot(ctx context.Context, path string, expectedLength int64) (
 	return observeV2FileRoot(ctx, path, expectedLength, nil)
 }
 
-func observeV2FileRoot(ctx context.Context, path string, expectedLength int64, opener func() (*os.File, error)) (V2FileRootObservation, error) {
+func observeV2FileRoot(ctx context.Context, path string, expectedLength int64, opener SourceOpener) (V2FileRootObservation, error) {
 	if expectedLength <= 0 {
 		return V2FileRootObservation{}, fmt.Errorf("v2 file-root observation requires a positive length")
 	}
