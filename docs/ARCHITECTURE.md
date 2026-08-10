@@ -884,9 +884,17 @@ journal evidence; it never proves a retired name is still absent. Terminal
 resume rebinds local selectors and confirms the exact names remain absent but
 does not read a password or contact the client.
 
+Source-retirement operation discovery is a separate bounded, read-only name
+inventory. Without an explicit ID, `status` examines the target root once,
+retains only canonical operation IDs up to fixed entry/name/result limits, and
+labels every row `not_inspected`. It neither opens a journal nor selects a
+latest operation, and malformed objects in the reserved source-retirement
+namespace make the listing incomplete rather than being ignored.
+
 Terminal source-retirement journals may be retired only through the separate
 `seed retire prune` transition. The selector is one full operation ID plus its
-reviewed plan ID; no list/latest or age-based selection exists. A canonical
+reviewed plan ID; prune has no implicit list/latest or age-based selector. A
+canonical
 retention intent, bound to the operation-root and target-root identities,
 preserves the exact intent/completion digests, metafile/materialize/activation
 lineage, source-selection ID, final identity, client snapshot, and retired

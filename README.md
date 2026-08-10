@@ -750,6 +750,8 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl seed retire run \
 ptctl seed retire status --target "D:\PT" --output json \
   sha256:SOURCE_RETIREMENT_OPERATION_DIGEST
 
+ptctl seed retire status --target "D:\PT" --output json
+
 ptctl seed retire prune --target "D:\PT" \
   --expect-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
   --acknowledge-operation-state-deletion \
@@ -759,7 +761,11 @@ ptctl seed retire prune --target "D:\PT" \
 
 `resume` takes the same local/live selectors, expected plan ID, deletion
 acknowledgement, and one explicit operation ID. Neither run nor resume accepts
-plan JSON as proof or selects a latest operation.
+plan JSON as proof or selects a latest operation. `status` with no operation ID
+performs one bounded target-root name listing and returns only canonical source
+retirement IDs as `not_inspected`; it does not open their journals, select a
+latest operation, expose unrelated names, or claim terminal/source-absence
+state. Passing an ID retains the exact historical journal/tombstone read.
 
 `prune` is a second, narrower deletion boundary. It accepts only one explicit
 terminal operation ID, the exact reviewed plan ID, and

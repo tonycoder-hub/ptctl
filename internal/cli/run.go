@@ -154,7 +154,7 @@ Usage:
   ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
   ptctl seed retire run [same selectors] --expect-plan-id ID --acknowledge-source-deletion [--output table|json]
   ptctl seed retire resume [same selectors] --expect-plan-id ID --acknowledge-source-deletion [--output table|json] OPERATION_ID
-  ptctl seed retire status --target PATH [--output table|json] OPERATION_ID
+  ptctl seed retire status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed retire prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl version [--output table|json]
 
@@ -1533,6 +1533,8 @@ func jsonKind(data any) string {
 		return "content.source_retirement_plan"
 	case sourceretire.ExecutionReport:
 		return "content.source_retirement"
+	case sourceretire.ExecutionOperationListResult:
+		return "content.source_retirement.operation_list"
 	case sourceretire.ExecutionRetentionReport:
 		return "content.source_retirement.retention"
 	case reconcile.Report:

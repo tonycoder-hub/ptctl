@@ -246,7 +246,8 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	errOut.Reset()
 	if code := Run([]string{"seed", "retire", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
 		!strings.Contains(out.String(), "deletion_authority") || !strings.Contains(out.String(), "zero writes") ||
-		!strings.Contains(out.String(), "two bounded job-ledger reads") || !strings.Contains(out.String(), "retains an exact tombstone") {
+		!strings.Contains(out.String(), "two bounded job-ledger reads") || !strings.Contains(out.String(), "retains an exact tombstone") ||
+		!strings.Contains(out.String(), "not_inspected") {
 		t.Fatalf("help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()
@@ -255,6 +256,12 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	plan := "sha256:" + strings.Repeat("b", 64)
 	if code := Run([]string{"seed", "retire", "prune", "--target", "missing", "--expect-plan-id", plan, operation}, reader, &out, &errOut); code != 2 || reader.read {
 		t.Fatalf("missing prune acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "status", "--target", "missing", "--max-operations", "1", operation}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("operation-list flag with explicit selector code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
 	}
 }
 
@@ -354,6 +361,28 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 	if status.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || status.Data.Operation.Status != "historical_complete" || status.Data.WritesPerformed != 0 {
 		t.Fatalf("unexpected status: %s", out.String())
 	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run([]string{"seed", "retire", "status", "--target", fixture.materialize.targetRoot, "--output", "json"}, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("operation list code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	var operationList struct {
+		Schema string                                    `json:"schema"`
+		Kind   string                                    `json:"kind"`
+		Data   sourceretire.ExecutionOperationListResult `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &operationList); err != nil {
+		t.Fatal(err)
+	}
+	if operationList.Schema != "ptctl.dev/v1" || operationList.Kind != "content.source_retirement.operation_list" ||
+		!operationList.Data.Complete || operationList.Data.WritesPerformed != 0 || len(operationList.Data.Operations) != 1 ||
+		operationList.Data.Operations[0].ID.String() != execution.Data.Operation.ID || operationList.Data.Operations[0].Status != "not_inspected" ||
+		operationList.Data.Warnings == nil {
+		t.Fatalf("unexpected source retirement operation list: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
 	out.Reset()
 	errOut.Reset()
 	reader = &trackingReader{}

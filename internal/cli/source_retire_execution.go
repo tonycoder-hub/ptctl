@@ -191,11 +191,15 @@ func (a *app) seedRetireStatus(args []string) error {
 	output := fs.String("output", "table", "table or json")
 	target := fs.String("target", "", "existing local materialized target root")
 	timeout := fs.Duration("timeout", time.Minute, "journal inspection wall-clock budget")
+	listDefaults := sourceretire.DefaultExecutionOperationListLimits()
+	maxRootEntries := fs.Int("max-root-entries", listDefaults.MaxRootEntries, "maximum target-root entries examined when no operation ID is given")
+	maxOperations := fs.Int("max-operations", listDefaults.MaxOperations, "maximum operation IDs retained when no operation ID is given")
+	maxNameBytes := fs.Int64("max-name-bytes", listDefaults.MaxNameBytes, "maximum target-root name bytes retained when no operation ID is given")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 || *target == "" {
-		return usageError("seed retire status requires --target and exactly one OPERATION_ID")
+	if fs.NArg() > 1 || *target == "" {
+		return usageError("seed retire status requires --target and at most one OPERATION_ID")
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
@@ -203,12 +207,37 @@ func (a *app) seedRetireStatus(args []string) error {
 	if *timeout <= 0 || *timeout > time.Hour {
 		return usageError("seed retire status --timeout must be greater than zero and no more than 1h")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	if fs.NArg() == 0 {
+		limits := sourceretire.ExecutionOperationListLimits{MaxRootEntries: *maxRootEntries, MaxOperations: *maxOperations, MaxNameBytes: *maxNameBytes}
+		if err := limits.Validate(); err != nil {
+			return usageError("seed retire status list limits are invalid")
+		}
+		result, listErr := sourceretire.ListExecutionOperations(ctx, *target, limits)
+		if writeErr := a.writeSourceRetireOperationList(*output, result); writeErr != nil {
+			return writeErr
+		}
+		if listErr != nil {
+			if errors.Is(listErr, sourceretire.ErrExecutionPolicy) {
+				return &inconclusiveErr{message: "source retirement operation listing was blocked; see report"}
+			}
+			return fmt.Errorf("source retirement operation listing failed; see report")
+		}
+		if !result.Complete {
+			return &inconclusiveErr{message: "source retirement operation listing was incomplete; see report"}
+		}
+		return nil
+	}
+	for _, name := range []string{"max-root-entries", "max-operations", "max-name-bytes"} {
+		if flagWasSet(fs, name) {
+			return usageError("--%s applies only to status without an OPERATION_ID", name)
+		}
+	}
 	operation, err := sourceretire.ParseOperationID(fs.Arg(0))
 	if err != nil {
 		return usageError("seed retire status requires a canonical sha256 OPERATION_ID")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
 	report, operationErr := sourceretire.Status(ctx, sourceretire.StatusOptions{TargetRoot: *target,
 		OperationID: operation, Limits: sourceretire.DefaultExecutionLimits()})
 	if err := a.writeSourceRetireExecutionReport(*output, report); err != nil {
@@ -353,6 +382,35 @@ func (a *app) writeSourceRetireExecutionReport(output string, report sourceretir
 		return usageError("--output must be table or json")
 	}
 	return writeSourceRetireExecutionHuman(a.stdout, report)
+}
+
+func (a *app) writeSourceRetireOperationList(output string, result sourceretire.ExecutionOperationListResult) error {
+	if output == "json" {
+		return writeJSON(a.stdout, result, nil)
+	}
+	if output != "table" {
+		return usageError("--output must be table or json")
+	}
+	w := tabwriter.NewWriter(a.stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "COMPLETE\t%t\nEFFECT\t%s\nWRITES PERFORMED\t%d\nSTOP REASON\t%s\nMAX ROOT ENTRIES\t%d\nMAX OPERATIONS\t%d\nMAX NAME BYTES\t%d\nROOT ENTRIES EXAMINED\t%d\nROOT NAME BYTES\t%d\n",
+		result.Complete, terminalSafe(result.Effect), result.WritesPerformed, terminalSafe(materializeValueOr(result.StopReason, "none")),
+		result.Limits.MaxRootEntries, result.Limits.MaxOperations, result.Limits.MaxNameBytes,
+		result.RootUsed.EntriesExamined, result.RootUsed.NameBytes)
+	fmt.Fprintln(w, "\nOPERATIONS")
+	if len(result.Operations) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, operation := range result.Operations {
+		fmt.Fprintf(w, "-\t%s\t%s\n", terminalSafe(operation.ID.String()), terminalSafe(operation.Status))
+	}
+	fmt.Fprintln(w, "\nWARNINGS")
+	if len(result.Warnings) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, warning := range result.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
 }
 
 func (a *app) writeSourceRetireRetentionReport(output string, report sourceretire.ExecutionRetentionReport) error {

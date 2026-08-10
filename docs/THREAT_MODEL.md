@@ -467,6 +467,12 @@ and scratch bytes. It must never be described as cleanup or rollback. Source
 files are only read: materialize does not move, rewrite, link, or delete them,
 although their reads can still update atime or hydrate placeholders.
 
+A source-retirement `status` call without an ID is only a bounded root-name
+inventory. It returns canonical operation IDs as `not_inspected`, never opens
+their journals, never chooses a latest operation, and emits no unrelated root
+name. N+1 entry, name-byte, or retained-operation limits make the result
+incomplete; malformed objects under the reserved operation prefix fail closed.
+
 Retention pruning never treats an absent object as proof that it removed it.
 Before deletion it binds the terminal journal or an already durable retention
 intent, completely inventories the allowlisted private subtrees within fixed
