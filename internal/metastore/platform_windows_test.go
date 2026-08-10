@@ -3,6 +3,7 @@
 package metastore
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,17 +13,17 @@ import (
 )
 
 func TestWindowsPrivateDirectoryPrimitiveUsesOwnerOnlyDACL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "private")
 	attributes, err := privateSecurityAttributes()
 	if err != nil {
 		t.Fatalf("privateSecurityAttributes: %v", err)
 	}
-	pointer, err := windows.UTF16PtrFromString(windowsAPIPath(path))
-	if err != nil {
-		t.Fatal(err)
+	owner, _, ownerErr := attributes.SecurityDescriptor.Owner()
+	if ownerErr != nil || owner != nil {
+		t.Fatalf("creation descriptor unexpectedly supplied an owner: owner=%v err=%v", owner, ownerErr)
 	}
-	if err := windows.CreateDirectory(pointer, attributes); err != nil {
-		t.Fatalf("CreateDirectory: %T %v", err, err)
+	path := filepath.Join(t.TempDir(), "private")
+	if err := platformCreatePrivateDirectory(path); err != nil {
+		t.Fatalf("platformCreatePrivateDirectory: %v", err)
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -31,6 +32,51 @@ func TestWindowsPrivateDirectoryPrimitiveUsesOwnerOnlyDACL(t *testing.T) {
 	defer file.Close()
 	if err := platformValidateOpenFile(file, true); err != nil {
 		t.Fatalf("created directory did not validate: %v", err)
+	}
+}
+
+func TestWindowsPrivateFilePrimitiveUsesOwnerOnlyDACL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private.torrent")
+	file, err := platformCreatePrivateFile(path)
+	if err != nil {
+		t.Fatalf("platformCreatePrivateFile: %v", err)
+	}
+	defer file.Close()
+	if err := platformValidateOpenFile(file, false); err != nil {
+		t.Fatalf("created file did not validate: %v", err)
+	}
+}
+
+func TestWindowsOwnerAssignmentFailureCleansCreatedObjectWithoutLeaking(t *testing.T) {
+	const canary = "OWNER-ASSIGNMENT-FAILURE-CANARY"
+	tests := []struct {
+		name   string
+		create func(string) error
+	}{
+		{"directory", platformCreatePrivateDirectory},
+		{"file", func(path string) error {
+			file, err := platformCreatePrivateFile(path)
+			if file != nil {
+				_ = file.Close()
+			}
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			original := setWindowsPrivateOwner
+			setWindowsPrivateOwner = func(windows.Handle) error { return errors.New(canary) }
+			t.Cleanup(func() { setWindowsPrivateOwner = original })
+
+			path := filepath.Join(t.TempDir(), "private-"+test.name)
+			err := test.create(path)
+			if err == nil || strings.Contains(err.Error(), canary) || strings.Contains(err.Error(), path) {
+				t.Fatalf("create returned unsafe error: %v", err)
+			}
+			if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("failed owner assignment left an object: %v", statErr)
+			}
+		})
 	}
 }
 
