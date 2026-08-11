@@ -142,6 +142,37 @@ func (repository *Repository) Load(ctx context.Context, id metastore.RecordID) (
 	return verified, receipt, nil
 }
 
+// ListLocators performs one bounded, deterministic name inventory for sealed
+// site-binding records. It never opens record payloads or linked artifacts and
+// therefore never returns VerifiedSiteBinding authority or selects a latest
+// observation.
+func (repository *Repository) ListLocators(ctx context.Context, limits ListLimits) (ListResult, error) {
+	result := ListResult{
+		Effect: listEffect, Limits: limits, Bindings: []metastore.RecordRef{},
+	}
+	if repository == nil || repository.store == nil {
+		return result, fmt.Errorf("list site metafile bindings: repository is unavailable")
+	}
+	result.Store = repository.store.Info()
+	if err := limits.Validate(); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		result.StopReason = "context_cancelled"
+		return result, err
+	}
+	recordLimits := repository.recordLimits()
+	recordLimits.MaxEntries = limits.MaxEntries
+	recordLimits.MaxRecords = limits.MaxBindings
+	recordLimits.MaxPathBytes = limits.MaxPathBytes
+	listed, err := repository.store.ListRecords(ctx, metastore.RecordKindSiteMetafileBindingV1, recordLimits)
+	result.Complete = listed.Complete
+	result.Used = listed.Used
+	result.StopReason = listed.StopReason
+	result.Bindings = append(result.Bindings, listed.Records...)
+	return result, err
+}
+
 // Select adds an exact caller expectation to explicit-ID Load. It never falls
 // back to another binding record.
 func (repository *Repository) Select(ctx context.Context, id metastore.RecordID, expectedRef domain.TorrentRef, expectedVariantID string) (*VerifiedSiteBinding, LoadReceipt, error) {

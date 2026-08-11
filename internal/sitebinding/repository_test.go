@@ -248,6 +248,58 @@ func TestExplicitRecordIDsDoNotImplyLatestSelection(t *testing.T) {
 	}
 }
 
+func TestListLocatorsIsBoundedAndNeverSelectsOrVerifies(t *testing.T) {
+	fixture := newBindingFixture(t, true)
+	first, _, err := fixture.repository.Seal(context.Background(), fixture.observed, fixture.fetch, fixture.artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondStart := fixture.fetch.ObservedAtStart.Add(time.Hour)
+	secondEnd := fixture.fetch.ObservedAtEnd.Add(time.Hour)
+	fetched, err := site.NewFetchedMetafile(fixture.ref, fixture.fetch.Origin, fixture.fetch.RouteID, secondStart, secondEnd, fixture.raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFetch := fixture.fetch
+	secondFetch.ObservedAtStart = secondStart
+	secondFetch.ObservedAtEnd = secondEnd
+	secondObserved, err := fetched.BindImported(fixture.artifact.MetafileVariantID, fixture.artifact.SizeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := fixture.repository.Seal(context.Background(), secondObserved, secondFetch, fixture.artifact)
+	if err != nil || second.ID == first.ID {
+		t.Fatalf("second record: first=%s second=%s err=%v", first.ID, second.ID, err)
+	}
+
+	listed, err := fixture.repository.ListLocators(context.Background(), DefaultListLimits())
+	if err != nil || !listed.Complete || listed.Effect != listEffect || listed.StopReason != "" ||
+		listed.Store != fixture.store.Info() || len(listed.Bindings) != 2 ||
+		listed.Bindings[0].ID >= listed.Bindings[1].ID || listed.Used.RecordsMatched != 2 {
+		t.Fatalf("complete locator list: result=%+v err=%v", listed, err)
+	}
+	for _, locator := range listed.Bindings {
+		if locator.Kind != metastore.RecordKindSiteMetafileBindingV1 || locator.SizeBytes <= 0 {
+			t.Fatalf("unsafe locator: %+v", locator)
+		}
+	}
+
+	tiny := DefaultListLimits()
+	tiny.MaxBindings = 1
+	limited, err := fixture.repository.ListLocators(context.Background(), tiny)
+	if err != nil || limited.Complete || limited.StopReason != "record_limit" || len(limited.Bindings) != 1 ||
+		limited.Used.RecordsMatched != 2 {
+		t.Fatalf("bounded locator list: result=%+v err=%v", limited, err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped, err := fixture.repository.ListLocators(canceled, DefaultListLimits())
+	if !errors.Is(err, context.Canceled) || stopped.Complete || stopped.StopReason != "context_cancelled" || stopped.Bindings == nil || len(stopped.Bindings) != 0 {
+		t.Fatalf("pre-canceled locator list: result=%+v err=%v", stopped, err)
+	}
+}
+
 type bindingFixture struct {
 	store      *metastore.Store
 	repository *Repository

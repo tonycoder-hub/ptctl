@@ -22,6 +22,7 @@ const (
 
 	sealEffect = "write_private_site_metafile_binding"
 	loadEffect = "read_verified_site_metafile_binding"
+	listEffect = "list_private_site_metafile_binding_locators"
 )
 
 var (
@@ -35,6 +36,44 @@ var (
 // payloads.
 type Limits struct {
 	MaxRecordBytes int64 `json:"max_record_bytes"`
+}
+
+// ListLimits bounds name-only discovery of sealed binding record locators.
+// Listing never reads a record payload or its linked artifact, so a returned
+// locator is deliberately not a verified binding.
+type ListLimits struct {
+	MaxEntries   int   `json:"max_entries"`
+	MaxBindings  int   `json:"max_bindings"`
+	MaxPathBytes int64 `json:"max_path_bytes"`
+}
+
+func DefaultListLimits() ListLimits {
+	defaults := metastore.DefaultRecordLimits()
+	return ListLimits{
+		MaxEntries: defaults.MaxEntries, MaxBindings: defaults.MaxRecords,
+		MaxPathBytes: defaults.MaxPathBytes,
+	}
+}
+
+func (limits ListLimits) Validate() error {
+	recordLimits := metastore.DefaultRecordLimits()
+	recordLimits.MaxEntries = limits.MaxEntries
+	recordLimits.MaxRecords = limits.MaxBindings
+	recordLimits.MaxPathBytes = limits.MaxPathBytes
+	if err := recordLimits.Validate(); err != nil {
+		return fmt.Errorf("site metafile binding list limits are invalid: %w", err)
+	}
+	return nil
+}
+
+type ListResult struct {
+	Effect     string                    `json:"effect"`
+	Complete   bool                      `json:"complete"`
+	Limits     ListLimits                `json:"limits"`
+	Used       metastore.RecordListUsage `json:"used"`
+	Bindings   []metastore.RecordRef     `json:"bindings"`
+	StopReason string                    `json:"stop_reason,omitempty"`
+	Store      metastore.StoreInfo       `json:"store"`
 }
 
 func DefaultLimits() Limits { return Limits{MaxRecordBytes: defaultMaxRecordBytes} }

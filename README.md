@@ -256,7 +256,25 @@ rechecks the sealed record and referenced private artifact under one
 operation-bound physical store identity; it is not a two-object transaction,
 a site signature, or proof that the site's current mapping is unchanged. A
 new acknowledged GET creates a new historical observation even when it returns
-the same variant. No command selects a binding by remote ID or by “latest”.
+the same variant. Bindings can be audited later without credentials:
+
+```bash
+ptctl site metafile binding list \
+  --metafile-store "D:\Private\ptctl-metafiles"
+
+ptctl site metafile binding inspect \
+  --metafile-store "D:\Private\ptctl-metafiles" \
+  sha256:SEALED_BINDING_RECORD_ID
+```
+
+`list` is a bounded, deterministic name inventory. It returns unverified
+record locators only, never reads their payloads or artifacts, and never
+selects a latest observation. `inspect` accepts one explicit record ID and
+jointly re-hashes, strictly parses, and privacy-checks that record's linked
+private metafile under one bound store session. Its result remains historical;
+it does not contact the site or claim that the current remote mapping is
+unchanged. JSON kinds are `site.metafile.binding.list` and
+`site.metafile.binding.inspect`.
 
 The artifact ID hashes the complete raw `.torrent` byte stream, not just its
 `info` dictionary. Two private variants with the same infohash therefore remain
@@ -316,7 +334,9 @@ ptctl reconcile report \
 
 `--site-ref SITE/REMOTE_ID` is an optional expected-ref cross-check. By itself
 it remains `declared_unbound`. A binding record cannot be paired with
-`--torrent`, loaded from a separate store, or selected by enumeration/latest.
+`--torrent`, loaded from a separate store, or selected implicitly by
+enumeration/latest. The name-only list exists solely to hand an explicit record
+ID to inspect or reconciliation.
 
 The same pair is supported by `torrent verify`, `seed discover`, `seed plan`,
 `seed materialize run|resume`, and `reconcile report`. Supplying only half the
@@ -1315,6 +1335,7 @@ name the exact POSIX/Windows comparison mode and an opaque mapping ID. Client
 paths remain remote, non-atomic lexical claims and are never opened on the host.
 
 Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
+`ptctl site metafile binding --help`,
 `ptctl storage profile`, `ptctl storage index`, `ptctl seed discover --help`,
 `ptctl seed materialize --help`, `ptctl client activate --help`,
 `ptctl client remove --help`,
@@ -1331,6 +1352,14 @@ evidence. `torrent verify` prints its result before returning `3`.
 Reconciliation is also report-oriented. Add `--require-reconciled` to return
 `4` unless the independently reported local axes are `consistent`; the report
 is still printed first.
+
+Site-binding inspection returns `0` only after the explicit record and linked
+private artifact verify together and the current built-in adapter accepts the
+recorded provenance. Missing or unreadable records return `1`, usage returns
+`2`, record/artifact corruption returns `3`, and unsupported adapter provenance
+returns `4`, always after any non-usage report. Locator listing returns `0`
+when its bounded inventory is complete and report-first `4` when a record,
+entry, or name-byte limit stops it.
 
 Materialize validates every selector, acknowledgement, timeout, and limit
 before opening a metafile, source root, target root, or journal. Successful

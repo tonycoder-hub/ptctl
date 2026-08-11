@@ -171,6 +171,13 @@ cookie, request URL, announce/passkey, raw bytes, filename, or path. Publication
 and every load jointly verify the record and referenced private artifact under
 one operation-bound store identity.
 
+`site metafile binding list --metafile-store DIR` is deliberately weaker: it
+performs one bounded name inventory and returns only sorted, unverified record
+locators. `site metafile binding inspect --metafile-store DIR RECORD_ID` then
+jointly verifies one explicit canonical record and linked private artifact and
+rechecks the adapter's production origin/route contract. Neither command reads
+a cookie, sends a request, selects by remote ID, or chooses a latest record.
+
 `reconcile report` consumes that provenance only through an explicit
 `--site-binding-record` combined with the same store's
 `--metafile-store/--metafile-variant`. It never enumerates by site/ref or picks

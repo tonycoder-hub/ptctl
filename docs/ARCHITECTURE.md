@@ -368,7 +368,14 @@ operation-bound physical store session. This is not a two-object transaction:
 an artifact may remain as an unreferenced immutable object if marker publication
 fails. Reconciliation accepts only an explicit record ID and returns an opaque
 process-local `VerifiedSiteBinding`; serialization loses that authority. There
-is no list/latest/ref-based automatic selector.
+is no latest/ref-based or implicit list selector. A separate bounded
+`site metafile binding list` inventories record names only and labels every
+result an unverified locator. `site metafile binding inspect` accepts exactly
+one of those IDs, reloads the canonical record and linked private artifact in
+one bound store session, and rechecks the currently installed built-in adapter
+origin/route contract. Inspect reports historical provenance but returns no
+replayable authority; reconciliation must explicitly load the record again in
+its own invocation.
 
 The site observation and store publication/durability facts remain independent
 report axes. A GET may complete with no exact relation or published object,

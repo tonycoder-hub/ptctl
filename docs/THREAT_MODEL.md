@@ -154,6 +154,14 @@ record and complete private artifact under one operation-bound store root.
 Only an explicit record ID can create process-local reconciliation authority;
 JSON round trips and public DTOs cannot recreate it.
 
+Binding discovery is a separate low-evidence operation. It is bounded by
+private-store entries, retained binding locators, and object-name bytes, and
+returns only sorted record IDs observed in the store namespace. It neither
+loads payloads/artifacts nor selects a newest record. Explicit inspection is
+the higher-evidence boundary: one selected record and linked private artifact
+are jointly verified and checked against the installed adapter's origin/route
+contract. It remains historical evidence and sends no site request.
+
 The qBittorrent ledger is capped at 8 MiB and 25,000 jobs. Each magnet claim
 is capped at 64 KiB, 256 query pairs, eight `xt` values, and 256 bytes per
 decoded `xt`. The job array is decoded one object at a time, the N+1 job is

@@ -139,6 +139,8 @@ Usage:
   ptctl site detail --cookie-stdin [--output table|json] SITE REMOTE_ID
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
   ptctl site metafile fetch --cookie-stdin --acknowledge-site-effect --metafile-store DIR [--output table|json] SITE REMOTE_ID
+  ptctl site metafile binding list --metafile-store DIR [--output table|json]
+  ptctl site metafile binding inspect --metafile-store DIR [--output table|json] RECORD_ID
 
   ptctl torrent inspect [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)
   ptctl torrent verify --content PATH [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)
@@ -247,10 +249,15 @@ func (a *app) site(args []string) error {
 	case "detail":
 		return a.siteDetail(args[1:])
 	case "metafile":
-		if len(args) >= 2 && args[1] == "fetch" {
-			return a.siteMetafileFetch(args[2:])
+		if len(args) >= 2 {
+			switch args[1] {
+			case "fetch":
+				return a.siteMetafileFetch(args[2:])
+			case "binding":
+				return a.siteMetafileBinding(args[2:])
+			}
 		}
-		return usageError("site metafile requires fetch")
+		return usageError("site metafile requires fetch or binding")
 	default:
 		return usageError("unknown site subcommand %q", args[0])
 	}
@@ -1589,6 +1596,10 @@ func jsonKind(data any) string {
 	case metafileStoreReport:
 		return typed.kind
 	case siteMetafileFetchReport:
+		return typed.kind
+	case siteBindingListReport:
+		return typed.kind
+	case siteBindingInspectReport:
 		return typed.kind
 	case storageProfileReport:
 		return typed.kind
