@@ -665,10 +665,10 @@ attempt/receipt and returns partial rather than retrying blindly.
 After all names, the exact materialized final is reverified and the same
 authenticated downloader session reobserves the exact typed job/effective
 layout before the terminal marker. These brackets do not freeze a remote client
-or filesystem after the last check. No operation removes a source parent,
-empty/padding entry, unselected hardlink name, final, client job, or private
-metafile. No outcome promises block reclamation, cleanup, rollback, or the
-absence of an out-of-band writer.
+or filesystem after the last check. Source-name retirement does not remove a
+source parent, empty/padding entry, unselected hardlink name, final, client job,
+or private metafile. Its outcome does not promise block reclamation, parent
+cleanup, rollback, or the absence of an out-of-band writer.
 
 The separate `seed retire parent-cleanup plan` command remains zero-write and
 credential-free. It accepts only one explicit terminal retirement operation,
@@ -684,7 +684,33 @@ identity and observed empty a second time. Parent replacement, a reappeared
 retired name, budget exhaustion, cancellation, or an incomplete namespace read
 prevents an eligible plan. The resulting deterministic ID is review evidence
 only, `cleanup_authority` is `none`, and the empty observations remain
-bracketed non-atomic. There is no directory-deletion route in this slice.
+bracketed non-atomic.
+
+The effectful `seed retire parent-cleanup run` route is deliberately separate.
+It requires the exact retirement selectors, original root scope, reviewed
+cleanup-plan ID, and a dedicated irreversible-removal acknowledgement. In the
+same invocation it repeats the live review, retains an opaque authority that
+cannot survive JSON serialization, binds the target root identity, and
+preflights every candidate as the same empty directory before the first
+journal write. The command neither trusts a serialized plan nor falls back to
+names, ages, latest-operation selection, or filesystem heuristics. The CLI
+keeps execution-protocol limits fixed; user-supplied repeated-review budgets
+may only tighten them.
+
+Each candidate then crosses an independent journaled boundary: a durable
+attempt marker, a fresh identity/emptiness read, an exact no-follow removal
+relative to its bound direct parent, parent-directory durability, and a
+durable removed marker. An observed non-empty parent is retained and leaves the
+operation resumable. An absent parent is recoverable only after its durable
+attempt and another bound parent synchronization; absence without an attempt,
+identity replacement, unsafe object type, or journal disagreement fails
+integrity. Terminal completion requires a final absence observation of the
+entire exact set. The route cannot remove files, search roots, higher ancestors,
+or non-empty directories and never performs recursive deletion. `status` is a
+historical journal read only; it intentionally does not claim that source
+namespaces remain absent now. A partial operation namespace created before the
+canonical intent became durable is not repaired or treated as resume authority;
+it remains fail-closed private debris pending a future explicit cleanup design.
 
 All usage, metafile, current-final, terminal-activation, mapping, endpoint, and
 live-source discovery/preflight failures are handled before password stdin and
@@ -991,15 +1017,17 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - broader quota/age policy
   (materialize, adoption, activation, and source-retirement heavy state have
   exact explicit pruning and each tombstone family has a separately
-  acknowledged forget transition; no operation is selected automatically by
+  acknowledged forget transition; the newer parent-cleanup journal does not
+  yet have either transition, and no operation is selected automatically by
   policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location transitions and client-side
   private-variant observability;
-- execution of reviewed source-parent cleanup, block-reclamation accounting, and explicit
-  retirement of unselected aliases; journaled retirement intentionally removes
-  only the reviewed regular-file names;
+- recursive or policy-selected source-parent cleanup, block-reclamation
+  accounting, and explicit retirement of unselected aliases; journaled
+  retirement and the separate acknowledged parent-cleanup operation remove
+  only their exact reviewed names/empty immediate parents;
 - current-filesystem completeness tokens or journal-backed incremental index
   invalidation; the existing sealed snapshot is candidate-only;
 - encryption-at-rest or an audited external-key design for private metafile
@@ -1016,8 +1044,8 @@ ptctl will not infer those guarantees from an HTTP 200 response.
 
 No broader deletion or downloader mutation beyond exact private operation-state
 pruning and explicitly selected tombstone forgetting, acknowledged source-name
-retirement, exact stopped-add, reviewed recheck/start, and exact keep-data
-job-removal slices,
+retirement, exact same-identity empty immediate-parent cleanup, exact
+stopped-add, reviewed recheck/start, and exact keep-data job-removal slices,
 tracker write, or broader content strategy should be added until the relevant
 gap has a testable control and a failure-recovery story. The private metafile
 store grants no authority over seeded content, a materialize acknowledgement

@@ -25,6 +25,7 @@ var (
 	ErrInvalidPath           = errors.New("bound filesystem path is invalid")
 	ErrAlreadyExists         = errors.New("bound filesystem destination already exists")
 	ErrNotFound              = errors.New("bound filesystem object was not found")
+	ErrNotEmpty              = errors.New("bound filesystem directory is not empty")
 	ErrUnsafeObject          = errors.New("bound filesystem object is unsafe")
 	ErrCrossFilesystem       = errors.New("bound filesystem object crossed the reviewed filesystem")
 	ErrBindingChanged        = errors.New("bound filesystem root identity changed")
@@ -287,12 +288,15 @@ type Publication struct {
 // absent after the attempt; Durability remains separate because an absent name
 // does not prove that its parent-directory update reached stable storage.
 type Removal struct {
-	Attempted  bool       `json:"attempted"`
-	Removed    bool       `json:"removed"`
-	Durability string     `json:"durability"`
-	Identity   Identity   `json:"identity,omitempty,omitzero"`
-	Kind       ObjectKind `json:"kind,omitempty"`
-	SizeBytes  int64      `json:"size_bytes,omitempty"`
+	Attempted         bool       `json:"attempted"`
+	Removed           bool       `json:"removed"`
+	Durability        string     `json:"durability"`
+	Identity          Identity   `json:"identity,omitempty,omitzero"`
+	Kind              ObjectKind `json:"kind,omitempty"`
+	SizeBytes         int64      `json:"size_bytes,omitempty"`
+	NamespaceRead     bool       `json:"-"`
+	EntriesExamined   int        `json:"-"`
+	NameBytesExamined int64      `json:"-"`
 }
 
 // checkHook is a deterministic package test seam. It cannot replace the real
@@ -1129,6 +1133,76 @@ func (session *Session) RemoveRootRegularExact(ctx context.Context, name string,
 		removeErr = ErrRemovalAmbiguous
 	}
 	bindingErr := session.check("after_root_regular_remove")
+	if removeErr != nil && bindingErr != nil {
+		return receipt, errors.Join(removeErr, bindingErr)
+	}
+	if removeErr != nil {
+		return receipt, removeErr
+	}
+	return receipt, bindingErr
+}
+
+// RemoveRootEmptyDirectoryExact removes exactly one ordinary empty directory
+// directly beneath the bound root. It never follows links, requires the exact
+// previously reviewed directory identity, performs a bounded empty-directory
+// inventory immediately before the attempt, and fsyncs the parent after a
+// visible removal. An absent name is not accepted as a successful first
+// attempt; crash recovery policy belongs to the caller's durable journal.
+func (session *Session) RemoveRootEmptyDirectoryExact(ctx context.Context, name string, expected Identity) (Removal, error) {
+	receipt := Removal{Durability: durabilityNotPublished, Kind: ObjectKindDirectory}
+	if err := ctx.Err(); err != nil {
+		return receipt, err
+	}
+	if validateSingleComponent(name) != nil || expected.IsZero() {
+		return receipt, ErrInvalidPath
+	}
+	if err := session.check("before_root_empty_directory_remove"); err != nil {
+		return receipt, err
+	}
+	probe, raw, kind, err := platformInspectRootObject(session, name)
+	if err != nil {
+		return receipt, err
+	}
+	directory := &boundDirectory{file: probe, raw: raw, identity: identityFromRaw(raw)}
+	if kind != ObjectKindDirectory || !directory.identity.Equal(expected) {
+		_ = probe.Close()
+		return receipt, ErrUnsafeObject
+	}
+	listing, listErr := listBoundDirectory(ctx, session, directory,
+		ListLimits{MaxEntries: 1, MaxNameBytes: 64 << 10}, "after_root_empty_directory_list")
+	receipt.NamespaceRead = true
+	receipt.EntriesExamined = listing.Used.EntriesExamined
+	receipt.NameBytesExamined = listing.Used.NameBytes
+	closeErr := probe.Close()
+	if listErr != nil {
+		return receipt, listErr
+	}
+	if closeErr != nil {
+		return receipt, fmt.Errorf("close bound root directory failed")
+	}
+	if !listing.Complete || len(listing.Entries) != 0 {
+		return receipt, ErrNotEmpty
+	}
+	if session.hasAnyOpenFiles() {
+		return receipt, fmt.Errorf("remove bound root directory: handle remains open")
+	}
+	receipt.Identity = expected
+	receipt.Attempted = true
+	removed, durable, removedRaw, removeErr := platformRemoveRootEmptyDirectory(session, name, raw)
+	if removed {
+		receipt.Removed = true
+		receipt.Durability = durabilityUnconfirmed
+		if durable {
+			receipt.Durability = durabilityConfirmed
+		}
+		if removedRaw != (rawIdentity{}) && removedRaw != raw {
+			removeErr = errors.Join(removeErr, ErrRemovalAmbiguous)
+		}
+	}
+	if removeErr == nil && !removed {
+		removeErr = ErrRemovalAmbiguous
+	}
+	bindingErr := session.check("after_root_empty_directory_remove")
 	if removeErr != nil && bindingErr != nil {
 		return receipt, errors.Join(removeErr, bindingErr)
 	}

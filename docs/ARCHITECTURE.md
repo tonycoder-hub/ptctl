@@ -1269,8 +1269,10 @@ markers, or disagreement with final/client authority fails closed. Partial
 success is not rolled back: already completed names remain absent and the
 report returns the explicit resumable operation. Status is read-only historical
 journal evidence; it never proves a retired name is still absent. Terminal
-resume rebinds local selectors and confirms the exact names remain absent but
-does not read a password or contact the client.
+resume validates the explicit operation/plan selector and returns the same
+historical completion without reopening source names, reading a password, or
+contacting the client. A current absence claim requires the separate live
+reconciliation or parent-cleanup review.
 
 Source-retirement operation discovery is a separate bounded, read-only name
 inventory. Without an explicit ID, `status` examines the target root once,
@@ -1305,8 +1307,44 @@ and empty in both reads. `protected_search_root` and `retained_nonempty` rows
 can never become candidates in that plan. The proof is still sequential and
 non-atomic, and serialized plan data has no deletion authority. Pruning is an
 intentional boundary: its no-path tombstone cannot recreate this planner's
-live parent authority. No directory-removal executor is implemented in this
-slice.
+live parent authority.
+
+The separate `seed retire parent-cleanup run` boundary repeats that complete
+review, compares the explicitly acknowledged deterministic plan ID, and keeps
+the resulting authority process-local. Before creating operation state it
+binds the target root and reopens every candidate through the original
+normalized search-root scope, requiring the reviewed object identity and an
+empty namespace. The operation ID is deterministically derived from the
+cleanup-plan ID and names one owner-private directory beneath the materialized
+target root. Its canonical intent binds the retirement operation, retirement
+plan/completion, search scope, target-root identity, exact absolute parents,
+parent identities, retired counts, and fixed protocol budgets.
+
+For each parent, an exact durable attempt marker precedes the removal boundary.
+After that journal publication the implementation reobserves the parent,
+handle-binds its direct parent, and requests no-follow removal only for the
+same empty directory identity. Files, links/reparse points, non-empty
+directories, search roots, and higher ancestors are outside the authority.
+The parent-directory durability result is recorded separately from observed
+absence. A crash after the durable attempt can recover a now-absent parent only
+after rebinding and synchronizing the direct parent; absence before an attempt
+is an integrity failure. A removed marker follows each confirmed or recovered
+absence, and the terminal marker is published only after every parent is
+reobserved absent.
+
+`resume` accepts one explicit operation ID, the same plan ID, normalized root
+scope, and acknowledgement. It never consumes plan JSON or selects a latest
+operation. `status` reads only the canonical private journal and labels its
+claims historical; it does not touch the source roots. Reports hide absolute
+parent paths by default and expose bounded attempt/removal/durability receipts.
+The protocol remains bracketed and non-atomic with respect to unrelated writers
+after its final observations; it does not claim recursive cleanup, block
+reclamation, or rollback. This slice deliberately retains the completed or
+partial parent-cleanup operation journal; it does not yet add a prune/forget
+authority for that new state family. A crash or filesystem failure before the
+canonical intent is durably published leaves fail-closed private initialization
+debris rather than resumable authority; the implementation never repairs that
+namespace by inference.
 
 Terminal source-retirement journals may be retired only through the separate
 `seed retire prune` transition. The selector is one full operation ID plus its

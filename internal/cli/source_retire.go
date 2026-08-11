@@ -98,6 +98,9 @@ func (a *app) seedRetireHelp() {
   ptctl seed retire prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl seed retire forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
   ptctl seed retire parent-cleanup plan --target PATH --retirement-operation ID --retirement-plan-id ID --search-root PATH [--search-root PATH...] [--output table|json]
+  ptctl seed retire parent-cleanup run --target PATH --retirement-operation ID --retirement-plan-id ID --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [--output table|json]
+  ptctl seed retire parent-cleanup resume --target PATH --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup status --target PATH [--output table|json] OPERATION_ID
 
 The plan command is read-only. It requires one complete live source discovery,
 a current exact materialized-final proof, one canonical terminal client
@@ -133,11 +136,13 @@ also discover the published final, ambiguity or final-overlap blocks the plan.
 Only content-bearing regular-file names are represented; empty files, padding,
 directories, and broader cleanup remain out of scope.
 
-Parent-cleanup plan is a later, credential-free, zero-write review of the exact
-immediate parents retained by one live terminal retirement journal. It protects
-search roots and every higher ancestor, never reports child names, and grants
-no directory-deletion authority. A pruned tombstone has no path authority and
-is therefore ineligible.
+Parent-cleanup plan is a credential-free, zero-write review of exact immediate
+parents retained by one live terminal retirement journal. It protects search
+roots and every higher ancestor, never reports child names, and grants no
+directory-deletion authority. Run must reproduce an explicit reviewed cleanup
+plan ID, journals each exact attempt, rechecks emptiness after that durable
+delay, and removes only the same empty directory identity. Resume is explicit;
+status is historical only. A pruned tombstone cannot authorize a new plan.
 `)
 }
 

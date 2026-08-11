@@ -155,6 +155,12 @@ func (a *app) seedRetireResume(args []string) error {
 			OperationID: operation, ExpectedPlanID: *expected, Acknowledge: true, Limits: sourceretire.DefaultExecutionLimits()})
 		return a.finishSourceRetireExecution(prepared.output, report, operationErr)
 	}
+	if status.Operation.Status == "historical_complete" {
+		// A terminal resume has no remaining mutation to perform. Returning the
+		// explicit journal status also remains valid after a separately reviewed
+		// empty-parent cleanup removes the old parent namespace.
+		return a.finishSourceRetireExecution(prepared.output, status, nil)
+	}
 	local, err := a.prepareSourceRetireLocal(ctx, prepared, false)
 	if err != nil {
 		return err

@@ -111,6 +111,16 @@ type parentCleanupState struct {
 	files    int
 }
 
+type verifiedParentCleanupAuthority struct {
+	planID                 string
+	targetRootIdentity     string
+	retirementOperationID  OperationID
+	retirementPlanID       string
+	retirementCompletionID string
+	searchScopeID          string
+	candidates             []parentCleanupState
+}
+
 type ParentCleanupReport struct {
 	Outcome               string              `json:"outcome"`
 	Effect                []string            `json:"effect"`
@@ -124,6 +134,7 @@ type ParentCleanupReport struct {
 	Blockers              []Finding           `json:"blockers"`
 	Issues                []Finding           `json:"issues"`
 	Warnings              []string            `json:"warnings"`
+	authority             *verifiedParentCleanupAuthority
 }
 
 func newParentCleanupReport(options ParentCleanupOptions) ParentCleanupReport {
@@ -359,6 +370,18 @@ func BuildParentCleanupPlan(ctx context.Context, options ParentCleanupOptions) (
 	}
 	if report.Plan.CandidateParents > 0 {
 		report.Outcome = ParentCleanupOutcomeEligible
+		candidates := make([]parentCleanupState, 0, report.Plan.CandidateParents)
+		for _, directory := range report.Plan.Directories {
+			if directory.Status == "empty_stable_candidate" {
+				candidates = append(candidates, parents[directory.Sequence])
+			}
+		}
+		report.authority = &verifiedParentCleanupAuthority{
+			planID: report.Plan.ID, targetRootIdentity: completion.authority.intent.TargetRootIdentity,
+			retirementOperationID: options.OperationID,
+			retirementPlanID:      options.ExpectedPlanID, retirementCompletionID: report.Plan.RetirementCompletionID,
+			searchScopeID: report.Plan.SearchScopeID, candidates: candidates,
+		}
 	} else {
 		report.Outcome = ParentCleanupOutcomeNothingToClean
 	}

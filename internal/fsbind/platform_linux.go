@@ -664,6 +664,50 @@ func platformRemoveRootRegular(session *Session, name string, expected rawIdenti
 	return false, false, rawIdentity{}, ErrRemovalAmbiguous
 }
 
+func platformRemoveRootEmptyDirectory(session *Session, name string, expected rawIdentity) (bool, bool, rawIdentity, error) {
+	if verifyLinuxDirectory(session, session.root) != nil {
+		return false, false, rawIdentity{}, ErrCrossFilesystem
+	}
+	source, actual, kind, err := platformInspectRootObject(session, name)
+	if err != nil {
+		if source != nil {
+			_ = source.Close()
+		}
+		return false, false, rawIdentity{}, err
+	}
+	if kind != ObjectKindDirectory || actual != expected {
+		_ = source.Close()
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	if closeErr := source.Close(); closeErr != nil {
+		return false, false, rawIdentity{}, fmt.Errorf("close root directory removal source failed")
+	}
+	removeErr := unix.Unlinkat(int(session.root.file.Fd()), name, unix.AT_REMOVEDIR)
+	remaining, remainingRaw, _, remainingErr := platformInspectRootObject(session, name)
+	if remaining != nil {
+		_ = remaining.Close()
+	}
+	if removeErr == nil {
+		if errors.Is(remainingErr, ErrNotFound) {
+			if unix.Fsync(int(session.root.file.Fd())) != nil {
+				return true, false, expected, ErrDurabilityUnconfirmed
+			}
+			return true, true, expected, nil
+		}
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if errors.Is(removeErr, syscall.ENOTEMPTY) || errors.Is(removeErr, syscall.EEXIST) {
+		return false, false, expected, ErrNotEmpty
+	}
+	if errors.Is(remainingErr, ErrNotFound) {
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if remainingErr == nil && remainingRaw == expected {
+		return false, false, expected, fmt.Errorf("root directory removal failed")
+	}
+	return false, false, rawIdentity{}, ErrRemovalAmbiguous
+}
+
 func openLinuxPrivateRegular(session *Session, parent *boundDirectory, name string, create bool) (*os.File, rawIdentity, error) {
 	if err := verifyLinuxDirectory(session, parent); err != nil {
 		return nil, rawIdentity{}, err

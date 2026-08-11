@@ -287,6 +287,9 @@ func platformOpenRootRegular(session *Session, name string, forDelete bool) (*os
 		if windowsNotFound(err) {
 			return nil, rawIdentity{}, ErrNotFound
 		}
+		if errors.Is(err, windows.STATUS_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+			return nil, rawIdentity{}, ErrBusy
+		}
 		return nil, rawIdentity{}, ErrUnsafeObject
 	}
 	file := os.NewFile(uintptr(handle), "fsbind-root-regular")
@@ -295,6 +298,51 @@ func platformOpenRootRegular(session *Session, name string, forDelete bool) (*os
 		return nil, rawIdentity{}, ErrUnsafeObject
 	}
 	raw, rawErr := windowsRawHandleIdentityAllowLinks(handle, false)
+	if rawErr != nil || raw.volume != session.root.raw.volume {
+		_ = file.Close()
+		if rawErr == nil {
+			rawErr = ErrCrossFilesystem
+		}
+		return nil, rawIdentity{}, rawErr
+	}
+	return file, raw, nil
+}
+
+func platformOpenRootDirectory(session *Session, name string, forDelete bool) (*os.File, rawIdentity, error) {
+	if err := verifyWindowsParent(session, session.root); err != nil {
+		return nil, rawIdentity{}, err
+	}
+	access := uint32(windows.FILE_READ_ATTRIBUTES)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	if forDelete {
+		access |= windows.DELETE
+		// Keep the reviewed directory name bound to this exact handle until
+		// deletion is requested. A competing rename/delete cannot obtain a
+		// DELETE-sharing handle across this boundary.
+		share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+	}
+	handle, err := ntOpenWindowsRelative(windows.Handle(session.root.file.Fd()), name, access,
+		share,
+		windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_WRITE_THROUGH, nil)
+	if err != nil {
+		if windowsNotFound(err) {
+			return nil, rawIdentity{}, ErrNotFound
+		}
+		return nil, rawIdentity{}, ErrUnsafeObject
+	}
+	file := os.NewFile(uintptr(handle), "fsbind-root-directory")
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, rawIdentity{}, ErrUnsafeObject
+	}
+	var information windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(handle, &information) != nil ||
+		information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 ||
+		information.FileAttributes&forbiddenWindowsAttributes != 0 {
+		_ = file.Close()
+		return nil, rawIdentity{}, ErrUnsafeObject
+	}
+	raw, rawErr := windowsRawHandleIdentity(handle, true)
 	if rawErr != nil || raw.volume != session.root.raw.volume {
 		_ = file.Close()
 		if rawErr == nil {
@@ -629,6 +677,48 @@ func platformRemoveRootRegular(session *Session, name string, expected rawIdenti
 	}
 	if remainingErr == nil && remainingRaw == expected {
 		return false, false, expected, ErrUnsafeObject
+	}
+	return false, false, rawIdentity{}, ErrRemovalAmbiguous
+}
+
+func platformRemoveRootEmptyDirectory(session *Session, name string, expected rawIdentity) (bool, bool, rawIdentity, error) {
+	if verifyWindowsParent(session, session.root) != nil {
+		return false, false, rawIdentity{}, ErrCrossFilesystem
+	}
+	source, actual, err := platformOpenRootDirectory(session, name, true)
+	if err != nil {
+		if source != nil {
+			_ = source.Close()
+		}
+		return false, false, rawIdentity{}, err
+	}
+	if actual != expected {
+		_ = source.Close()
+		return false, false, rawIdentity{}, ErrUnsafeObject
+	}
+	removeErr := markWindowsCreatedForDeletion(windows.Handle(source.Fd()))
+	closeErr := source.Close()
+	remaining, remainingRaw, remainingErr := platformOpenRootDirectory(session, name, false)
+	if remaining != nil {
+		_ = remaining.Close()
+	}
+	if removeErr == nil && closeErr == nil {
+		if errors.Is(remainingErr, ErrNotFound) {
+			if platformSyncDirectory(session.root) != nil {
+				return true, false, expected, ErrDurabilityUnconfirmed
+			}
+			return true, true, expected, nil
+		}
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if errors.Is(removeErr, windows.ERROR_DIR_NOT_EMPTY) {
+		return false, false, expected, ErrNotEmpty
+	}
+	if errors.Is(remainingErr, ErrNotFound) {
+		return true, false, expected, ErrRemovalAmbiguous
+	}
+	if remainingErr == nil && remainingRaw == expected {
+		return false, false, expected, fmt.Errorf("root directory removal failed")
 	}
 	return false, false, rawIdentity{}, ErrRemovalAmbiguous
 }

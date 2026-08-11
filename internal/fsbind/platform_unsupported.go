@@ -50,6 +50,9 @@ func platformOpenRootRegular(*Session, string, bool) (*os.File, rawIdentity, err
 func platformRemoveRootRegular(*Session, string, rawIdentity, int64) (bool, bool, rawIdentity, error) {
 	return false, false, rawIdentity{}, ErrUnsupported
 }
+func platformRemoveRootEmptyDirectory(*Session, string, rawIdentity) (bool, bool, rawIdentity, error) {
+	return false, false, rawIdentity{}, ErrUnsupported
+}
 func platformAcquireOperationLock(*Session, *boundDirectory, bool) (*os.File, rawIdentity, error) {
 	return nil, rawIdentity{}, ErrUnsupported
 }

@@ -647,6 +647,113 @@ func TestBoundRootRegularRemovalUsesExactNameIdentityAndSize(t *testing.T) {
 	}
 }
 
+func TestBoundRootEmptyDirectoryRemovalRequiresExactIdentityAndEmptyNamespace(t *testing.T) {
+	root, session := newSupportedSession(t)
+	ctx := context.Background()
+	selected := filepath.Join(root, "selected-directory")
+	other := filepath.Join(root, "other-directory")
+	if err := os.Mkdir(selected, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := session.InspectRoot(ctx, "selected-directory")
+	if err != nil || observed.Kind != ObjectKindDirectory || observed.Identity.IsZero() {
+		t.Fatalf("InspectRoot selected directory = %+v, %v", observed, err)
+	}
+	otherObserved, err := session.InspectRoot(ctx, "other-directory")
+	if err != nil || otherObserved.Kind != ObjectKindDirectory || otherObserved.Identity.IsZero() {
+		t.Fatalf("InspectRoot other directory = %+v, %v", otherObserved, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if receipt, err := session.RemoveRootEmptyDirectoryExact(cancelled, "selected-directory", observed.Identity); !errors.Is(err, context.Canceled) || receipt.Attempted {
+		t.Fatalf("pre-cancelled directory removal crossed attempt boundary: %+v, %v", receipt, err)
+	}
+	if receipt, err := session.RemoveRootEmptyDirectoryExact(ctx, "selected-directory", otherObserved.Identity); !errors.Is(err, ErrUnsafeObject) || receipt.Attempted {
+		t.Fatalf("wrong directory identity reached removal: %+v, %v", receipt, err)
+	}
+	child := filepath.Join(selected, "unrelated.bin")
+	if err := os.WriteFile(child, []byte("unrelated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := session.RemoveRootEmptyDirectoryExact(ctx, "selected-directory", observed.Identity); !errors.Is(err, ErrNotEmpty) || receipt.Attempted ||
+		!receipt.NamespaceRead || receipt.EntriesExamined != 1 || receipt.NameBytesExamined != int64(len("unrelated.bin")) {
+		t.Fatalf("nonempty directory reached removal: %+v, %v", receipt, err)
+	}
+	if err := os.Remove(child); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := session.RemoveRootEmptyDirectoryExact(ctx, "selected-directory", observed.Identity)
+	if err != nil || !receipt.Attempted || !receipt.Removed || receipt.Durability != DurabilityConfirmed ||
+		receipt.Kind != ObjectKindDirectory || !receipt.Identity.Equal(observed.Identity) {
+		t.Fatalf("exact empty-directory removal = %+v, %v", receipt, err)
+	}
+	if _, err := os.Lstat(selected); !os.IsNotExist(err) {
+		t.Fatalf("selected directory remains after removal: %v", err)
+	}
+	if info, err := os.Stat(other); err != nil || !info.IsDir() {
+		t.Fatalf("unselected directory changed: %v", err)
+	}
+
+	raceName := "race-directory"
+	racePath := filepath.Join(root, raceName)
+	oldRacePath := filepath.Join(root, "race-directory-old")
+	if err := os.Mkdir(racePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raceObserved, err := session.InspectRoot(ctx, raceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := false
+	defer func() { checkHook = nil }()
+	checkHook = func(stage string, _ *Session) error {
+		if stage == "after_root_empty_directory_list" && !mutated {
+			mutated = true
+			if err := os.Rename(racePath, oldRacePath); err != nil {
+				t.Fatalf("rename reviewed directory: %v", err)
+			}
+			if err := os.Mkdir(racePath, 0o755); err != nil {
+				t.Fatalf("replace reviewed directory: %v", err)
+			}
+		}
+		return nil
+	}
+	receipt, err = session.RemoveRootEmptyDirectoryExact(ctx, raceName, raceObserved.Identity)
+	checkHook = nil
+	if !errors.Is(err, ErrUnsafeObject) || !receipt.Attempted || receipt.Removed {
+		t.Fatalf("directory identity swap reached removal: %+v, %v", receipt, err)
+	}
+	for _, retained := range []string{racePath, oldRacePath} {
+		if info, err := os.Stat(retained); err != nil || !info.IsDir() {
+			t.Fatalf("identity-swap guard removed %q: %v", retained, err)
+		}
+	}
+
+	concurrentName := "concurrently-removed-directory"
+	concurrentPath := filepath.Join(root, concurrentName)
+	if err := os.Mkdir(concurrentPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	concurrentObserved, err := session.InspectRoot(ctx, concurrentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkHook = func(stage string, _ *Session) error {
+		if stage == "after_root_empty_directory_list" {
+			return os.Remove(concurrentPath)
+		}
+		return nil
+	}
+	receipt, err = session.RemoveRootEmptyDirectoryExact(ctx, concurrentName, concurrentObserved.Identity)
+	checkHook = nil
+	if !errors.Is(err, ErrNotFound) || !receipt.Attempted || receipt.Removed {
+		t.Fatalf("concurrent absence was misclassified: %+v, %v", receipt, err)
+	}
+}
+
 func TestSessionCloseClosesSubtreeAndPublishedFileAuthorities(t *testing.T) {
 	parent := t.TempDir()
 	root := parent + string(os.PathSeparator) + "authority-close"

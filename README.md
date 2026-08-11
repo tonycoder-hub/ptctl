@@ -11,8 +11,9 @@ domains and reconciles them around verifiable torrent metadata.
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
 > workflow, exact `client adopt run|resume|prune|forget` stopped-add operations,
 > explicit `client activate run|resume|prune|forget` recheck/start operations,
-> and acknowledged `client remove run|resume|prune|forget` exact-job removal that always
-> retains local data. The
+> acknowledged `client remove run|resume|prune|forget` exact-job removal that always
+> retains local data, acknowledged source-name retirement, and the separate
+> acknowledged `seed retire parent-cleanup run|resume` empty-directory boundary. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
@@ -29,13 +30,17 @@ domains and reconciles them around verifiable torrent metadata.
 > completion needed by source-retirement review; `client activate forget` has
 > a third acknowledgement and irreversibly removes only that retained
 > activation tombstone plus its last recovery marker. Outside the separately
-> acknowledged source-name retirement workflow, no listed operation
-> overwrites, moves, rewrites, or
-> deletes a source or published final layout. Retirement can unlink only the
-> reviewed exact source names; `seed retire prune` separately deletes only one
+> acknowledged source-name retirement and empty-parent-cleanup workflows, no
+> listed operation overwrites, moves, rewrites, or deletes a source namespace
+> or published final layout. Retirement can unlink only the reviewed exact
+> source names; parent cleanup can remove only reviewed exact empty immediate
+> parents; `seed retire prune` separately deletes only one
 > terminal retirement operation's private journal and retains its tombstone;
 > `seed retire forget` has a third acknowledgement and irreversibly removes
-> that exact tombstone plus its last recovery marker. Reads may still update
+> that exact tombstone plus its last recovery marker. Parent cleanup can remove
+> only reviewed same-identity empty immediate parents, never recursively; its
+> private execution journal has no pruning/forget transition in this slice.
+> Reads may still update
 > atime or hydrate an offline placeholder.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
@@ -192,7 +197,12 @@ capabilities at the edge, not assumptions in the core domain model.
   live terminal source-retirement journal: retired names are proved absent in
   the original root scope, search roots and ancestors are protected, child
   names are never reported, and only same-identity parents observed empty twice
-  become review candidates; the plan grants no directory-deletion authority;
+  become review candidates; the serialized plan grants no deletion authority;
+- separately acknowledged, journaled execution of that exact parent-cleanup
+  review: the writing invocation repeats the live review, preflights every
+  candidate before its first write, removes only same-identity immediate
+  parents that are still empty, and supports explicit resume and historical
+  status without recursive ancestor cleanup;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -201,9 +211,9 @@ index alone, background refresh/watchers, downloader pause/location or broader
 existing-job mutation,
 client-layout reconciliation for attributed file semantics such as padding or
 symlink leaves and for zero-length files without an observed physical binding,
-reflink/hardlink or cross-filesystem materialization, automatic execution of
-serialized plan reports, execution of reviewed source-parent cleanup, staging
-cleanup or rollback,
+  reflink/hardlink or cross-filesystem materialization, automatic execution of
+  serialized plan reports, recursive or policy-selected source-parent cleanup,
+  parent-cleanup journal pruning/forgetting, staging cleanup or rollback,
 published-layout deletion, site
 writes, browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
@@ -1178,6 +1188,26 @@ ptctl seed retire parent-cleanup plan \
   --require-cleanable \
   --output json
 
+ptctl seed retire parent-cleanup run \
+  --target "D:\PT" \
+  --retirement-operation sha256:SOURCE_RETIREMENT_OPERATION_DIGEST \
+  --retirement-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
+  --search-root "D:\Media\Original" \
+  --expect-cleanup-plan-id sha256:PARENT_CLEANUP_PLAN_DIGEST \
+  --acknowledge-empty-parent-removal \
+  --output json
+
+ptctl seed retire parent-cleanup status --target "D:\PT" --output json \
+  sha256:PARENT_CLEANUP_OPERATION_DIGEST
+
+ptctl seed retire parent-cleanup resume \
+  --target "D:\PT" \
+  --search-root "D:\Media\Original" \
+  --expect-cleanup-plan-id sha256:PARENT_CLEANUP_PLAN_DIGEST \
+  --acknowledge-empty-parent-removal \
+  --output json \
+  sha256:PARENT_CLEANUP_OPERATION_DIGEST
+
 ptctl seed retire prune --target "D:\PT" \
   --expect-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
   --acknowledge-operation-state-deletion \
@@ -1211,9 +1241,36 @@ only the journaled immediate parents. A search root is always
 `empty_stable_candidate`. The deterministic cleanup-plan ID excludes the
 timestamped absence-observation ID and optional path display, so a later proof
 can reproduce it without trusting serialized JSON. Child entry names are never
-emitted. The command performs no removal and reports `cleanup_authority: none`;
-this slice intentionally has no cleanup execution command. JSON kind is
+emitted. The planning command performs no removal and reports
+`cleanup_authority: none`. Its JSON kind is
 `content.source_retirement.parent_cleanup_plan`.
+
+`parent-cleanup run` is the separate irreversible boundary. It requires the
+retirement operation and plan IDs, the reviewed cleanup-plan ID, the original
+explicit search-root scope, and `--acknowledge-empty-parent-removal`. Before its
+first write it repeats the full live review in the same invocation, matches the
+plan ID, retains process-local authority, binds the target root, and proves
+every candidate can still be rebound with the reviewed identity and is still
+empty. CLI execution-protocol limits are fixed; the repeated-review flags may
+tighten those limits but cannot raise them. It then creates one owner-private,
+target-root-local journal. A durable
+attempt marker precedes each removal; after that intentional delay the parent
+is observed again, its direct parent is handle-bound, and only the exact empty
+directory identity is removed. A durable removed marker records either a
+confirmed removal or absence recovered after a prior durable attempt and
+parent-directory synchronization. Completion is published only after every
+journaled parent is observed absent again.
+
+`parent-cleanup resume` selects one exact operation and must resupply the same
+cleanup-plan ID, search-root scope, and acknowledgement. It never enumerates or
+selects a latest operation. `status` reads only the explicit private journal;
+its absence claims are historical and it does not reopen source roots. No
+parent-cleanup command recursively removes ancestors, search roots, files, or
+non-empty directories, and no serialized report is accepted as authority.
+Resume authority begins only once the canonical intent is durable; an earlier
+partial initialization fails closed and this slice has no automatic repair or
+prune for that private debris. Execution JSON kind is
+`content.source_retirement.parent_cleanup`.
 
 `prune` is a second, narrower deletion boundary. It accepts only one explicit
 terminal operation ID, the exact reviewed plan ID, and
@@ -1267,10 +1324,10 @@ requests. Active resume uses two proof observations after bootstrap: three/five
 qBittorrent or four/six Transmission requests for single/multi-file. There are
 no retries and no client mutations. `status` reads only one explicit private
 journal or retained tombstone and neither reads credentials nor contacts the
-client. Terminal resume also avoids credential I/O. No command removes a parent
-directory, the final, another name
-for a hardlinked inode, an empty/padding entry, or a downloader job, and no
-report claims reclaimed storage or rollback. Execution JSON kind is
+client. Terminal resume also avoids credential I/O. Source-name retirement
+itself does not remove a parent directory, the final, another name for a
+hardlinked inode, an empty/padding entry, or a downloader job, and no report
+claims reclaimed storage or rollback. Execution JSON kind is
 `content.source_retirement`.
 
 Reconcile one exact metafile with verified bytes and an audited downloader's
