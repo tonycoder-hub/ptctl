@@ -358,10 +358,7 @@ func applyForgetControlReport(report *Report, pending *forgetInProgressError) {
 	}
 	report.Operation = OperationReport{ID: marker.OperationID.String(), Status: "forgetting", PhaseBefore: "retained_adoption_completion", PhaseAfter: phase, Resumable: false}
 	plan := marker.RetentionIntent.Intent.Plan
-	report.Plan = PlanReport{ID: marker.PlanID, ExpectedID: report.Plan.ExpectedID, Matches: report.Plan.ExpectedID == "" || report.Plan.ExpectedID == marker.PlanID,
-		Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
-		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
-		ExpectedContentPathRef: plan.ExpectedContentPathRef}
+	report.Plan = planReport(plan, marker.PlanID, report.Plan.ExpectedID)
 	report.Final = FinalReport{Status: "historical_forget_basis_current_not_observed", Observation: historicalFinalObservation(plan)}
 	report.Client.Status = "historical_forget_basis_current_client_not_observed"
 	report.Journal = JournalReport{Status: phase, RetentionState: "forgetting", RetentionIntentPresent: true, RetentionCompletionPresent: true}
@@ -380,10 +377,7 @@ func populateForgetAuthority(report *ForgetReport, marker ForgetIntent, markerID
 		report.Operation.PhaseBefore = "retained_adoption_completion"
 	}
 	plan := marker.RetentionIntent.Intent.Plan
-	report.Plan = PlanReport{ID: marker.PlanID, ExpectedID: report.Plan.ExpectedID, Matches: marker.PlanID == report.Plan.ExpectedID,
-		Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
-		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
-		ExpectedContentPathRef: plan.ExpectedContentPathRef}
+	report.Plan = planReport(plan, marker.PlanID, report.Plan.ExpectedID)
 	report.Target.ExpectedRootIdentity = marker.TargetRootIdentity
 	report.Authority.MarkerID = markerID.String()
 	report.Authority.RetentionIntentMarkerID = marker.RetentionIntentMarkerID.String()

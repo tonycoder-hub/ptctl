@@ -35,22 +35,36 @@ type OperationReport struct {
 }
 
 type PlanReport struct {
-	ID                     string `json:"id"`
-	ExpectedID             string `json:"expected_id,omitempty"`
-	Matches                bool   `json:"matches"`
-	Action                 string `json:"action"`
-	Driver                 string `json:"driver"`
-	ClientConfigID         string `json:"client_config_id"`
-	PathMappingID          string `json:"path_mapping_id"`
-	ClientPathSemantics    string `json:"client_path_semantics"`
-	ExpectedSavePathRef    string `json:"expected_save_path_ref"`
-	ExpectedContentPathRef string `json:"expected_content_path_ref"`
+	ID                        string `json:"id"`
+	ExpectedID                string `json:"expected_id,omitempty"`
+	Matches                   bool   `json:"matches"`
+	Action                    string `json:"action"`
+	Driver                    string `json:"driver"`
+	ClientConfigID            string `json:"client_config_id"`
+	PathMappingID             string `json:"path_mapping_id"`
+	ClientPathSemantics       string `json:"client_path_semantics"`
+	ExpectedSavePathRef       string `json:"expected_save_path_ref"`
+	ExpectedContentPathRef    string `json:"expected_content_path_ref"`
+	PriorAdoptionOperationID  string `json:"prior_adoption_operation_id,omitempty"`
+	PriorAdoptionPlanID       string `json:"prior_adoption_plan_id,omitempty"`
+	PriorAdoptionCompletionID string `json:"prior_adoption_completion_id,omitempty"`
 }
 
 type FinalReport struct {
 	Status      string                        `json:"status"`
 	Observation materialize.FinalObservation  `json:"observation"`
 	PostAction  *materialize.FinalObservation `json:"post_action_observation,omitempty"`
+}
+
+func planReport(plan Plan, id, expected string) PlanReport {
+	return PlanReport{
+		ID: id, ExpectedID: expected, Matches: expected == "" || expected == id,
+		Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID,
+		PathMappingID: plan.PathMappingID, ClientPathSemantics: plan.ClientPathSemantics,
+		ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef,
+		PriorAdoptionOperationID: plan.PriorAdoptionOperationID, PriorAdoptionPlanID: plan.PriorAdoptionPlanID,
+		PriorAdoptionCompletionID: plan.PriorAdoptionCompletionID,
+	}
 }
 
 type ClientReport struct {
@@ -122,17 +136,12 @@ func newReport(prepared *PreparedPlan, expectedID string) Report {
 			}
 		}
 	}
-	return Report{
+	report := Report{
 		Outcome:   OutcomeIncomplete,
 		Effect:    []string{"read_exact_materialized_final", "read_downloader_ledger"},
 		Operation: OperationReport{ID: operationID, Status: "not_created", PhaseBefore: "planned", PhaseAfter: "planned"},
-		Plan: PlanReport{
-			ID: planID, ExpectedID: expectedID, Matches: expectedID == "" || expectedID == planID,
-			Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
-			ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
-			ExpectedContentPathRef: plan.ExpectedContentPathRef,
-		},
-		Final: FinalReport{Status: finalStatus, Observation: observation},
+		Plan:      planReport(plan, planID, expectedID),
+		Final:     FinalReport{Status: finalStatus, Observation: observation},
 		Client: ClientReport{Status: "not_observed", BeforeIdentity: "not_observed", AfterIdentity: "not_observed",
 			VariantRelation: "unobservable", Assurance: "not_observed"},
 		Journal:  JournalReport{Status: "not_created", RetentionState: "not_requested"},
@@ -143,6 +152,12 @@ func newReport(prepared *PreparedPlan, expectedID string) Report {
 			"client and filesystem observations are bracketed and non-atomic",
 		},
 	}
+	if prepared != nil && prepared.prior != nil {
+		report.Effect = append(report.Effect, "read_private_prior_client_adoption_completion")
+		report.Warnings = append(report.Warnings,
+			"re-adoption is authorized by one explicit historical completion and a fresh complete queue-absence observation; it does not infer why the prior job disappeared")
+	}
+	return report
 }
 
 func (report *Report) addBlocker(code, message string) {

@@ -25,23 +25,26 @@ const (
 )
 
 type clientAdoptFlags struct {
-	output               *string
-	storeRoot            *string
-	variantID            *string
-	targetRoot           *string
-	materializeOperation *string
-	materializePlanID    *string
-	hostRoot             *string
-	clientRoot           *string
-	clientStyle          *string
-	driver               *string
-	endpoint             *string
-	username             *string
-	passwordStdin        *bool
-	timeout              *time.Duration
-	expectedAdoptionPlan *string
-	acknowledgeAdd       *bool
-	repeatAdd            *bool
+	output                 *string
+	storeRoot              *string
+	variantID              *string
+	targetRoot             *string
+	materializeOperation   *string
+	materializePlanID      *string
+	hostRoot               *string
+	clientRoot             *string
+	clientStyle            *string
+	driver                 *string
+	endpoint               *string
+	username               *string
+	passwordStdin          *bool
+	priorAdoptionOperation *string
+	priorAdoptionPlanID    *string
+	timeout                *time.Duration
+	expectedAdoptionPlan   *string
+	acknowledgeAdd         *bool
+	acknowledgeReAdoption  *bool
+	repeatAdd              *bool
 }
 
 type preparedClientAdopt struct {
@@ -78,9 +81,9 @@ func (a *app) clientAdopt(args []string) error {
 
 func (a *app) clientAdoptHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
-  ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
-  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add] [--acknowledge-repeat-add] [--output table|json] OPERATION_ID
+  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--prior-adoption-operation ID --prior-adoption-plan-id ID] [--output table|json]
+  ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--acknowledge-client-re-adoption] [--output table|json]
+  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add] [--acknowledge-repeat-add] [--acknowledge-client-re-adoption] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
   ptctl client adopt prune --target PATH --expect-adoption-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client adopt forget --target PATH --expect-adoption-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
@@ -88,6 +91,13 @@ func (a *app) clientAdoptHelp() {
 Version 1 only adds an absent exact typed-infohash job in stopped mode. It never
 changes an existing job, moves content, rechecks, resumes, deletes, or retires
 source data. Exact raw bytes must come from the private metafile store.
+
+After a terminal exact job disappears, an explicit prior operation/plan pair
+can authorize a new independent adoption lineage. The prior canonical
+completion is read locally, the current complete queue must again prove exact
+absence, and run/resume additionally require
+--acknowledge-client-re-adoption. Prior evidence is retained; no latest
+operation is inferred or forgotten automatically.
 
 Run records a durable target-root-local request intent before its one add POST.
 If the response is lost, resume first observes the queue and never repeats the
@@ -123,10 +133,13 @@ func addClientAdoptFlags(fs *flag.FlagSet, execution bool) *clientAdoptFlags {
 	values.endpoint = fs.String("url", "", "downloader API origin or Transmission RPC URL")
 	values.username = fs.String("username", "", "downloader username")
 	values.passwordStdin = fs.Bool("password-stdin", false, "read downloader password from stdin")
+	values.priorAdoptionOperation = fs.String("prior-adoption-operation", "", "explicit terminal prior adoption operation authorizing re-adoption; pair with --prior-adoption-plan-id")
+	values.priorAdoptionPlanID = fs.String("prior-adoption-plan-id", "", "reviewed prior adoption plan ID; pair with --prior-adoption-operation")
 	values.timeout = fs.Duration("timeout", clientAdoptDefaultTimeout, "shared final-proof and client wall-clock budget")
 	if execution {
 		values.expectedAdoptionPlan = fs.String("expect-adoption-plan-id", "", "reviewed 24-hex client adoption plan ID")
 		values.acknowledgeAdd = fs.Bool("acknowledge-client-add", false, "acknowledge one stopped downloader add request")
+		values.acknowledgeReAdoption = fs.Bool("acknowledge-client-re-adoption", false, "acknowledge a new stopped add lineage after the explicit prior terminal job disappeared")
 		values.repeatAdd = fs.Bool("acknowledge-repeat-add", false, "acknowledge repeating a prior request whose result remains unknown")
 	}
 	return values
@@ -176,6 +189,28 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	if err != nil {
 		return result, usageError("%s downloader configuration is invalid", command)
 	}
+	priorOperationSet := flagWasSet(fs, "prior-adoption-operation")
+	priorPlanSet := flagWasSet(fs, "prior-adoption-plan-id")
+	if priorOperationSet != priorPlanSet || priorOperationSet && (*values.priorAdoptionOperation == "" || *values.priorAdoptionPlanID == "") {
+		return result, usageError("%s requires --prior-adoption-operation and --prior-adoption-plan-id together", command)
+	}
+	var priorCompletion *clientadopt.VerifiedCompletion
+	if priorOperationSet {
+		priorOperation, parseErr := clientadopt.ParseOperationID(*values.priorAdoptionOperation)
+		if parseErr != nil || !validMaterializePlanID(*values.priorAdoptionPlanID) {
+			return result, usageError("%s requires canonical prior adoption operation and plan IDs", command)
+		}
+		verifiedPrior, _, verifyErr := clientadopt.VerifyCompletion(ctx, clientadopt.CompletionProofOptions{
+			TargetRoot: *values.targetRoot, OperationID: priorOperation, ExpectedPlanID: *values.priorAdoptionPlanID,
+		})
+		if errors.Is(verifyErr, clientadopt.ErrIntegrity) {
+			return result, &integrityErr{message: "prior client adoption completion failed integrity validation"}
+		}
+		if verifyErr != nil {
+			return result, &inconclusiveErr{message: "prior client adoption completion is unavailable"}
+		}
+		priorCompletion = verifiedPrior
+	}
 	store, err := metastore.Open(*values.storeRoot)
 	if err != nil {
 		return result, err
@@ -202,6 +237,7 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	}
 	prepared, err := clientadopt.BuildPlan(verified, clientadopt.PlanOptions{
 		Driver: *values.driver, ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot, ClientWindows: windows,
+		PriorCompletion: priorCompletion,
 	})
 	if err != nil {
 		return result, err
@@ -273,6 +309,10 @@ func (a *app) clientAdoptRun(args []string) error {
 	if !validMaterializePlanID(*values.expectedAdoptionPlan) || !*values.acknowledgeAdd || *values.repeatAdd {
 		return usageError("client adopt run requires --expect-adoption-plan-id and --acknowledge-client-add; repeat acknowledgement is resume-only")
 	}
+	priorRequested := flagWasSet(fs, "prior-adoption-operation") || flagWasSet(fs, "prior-adoption-plan-id")
+	if priorRequested != *values.acknowledgeReAdoption {
+		return usageError("client adopt run requires --acknowledge-client-re-adoption exactly when prior adoption selectors are supplied")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), *values.timeout)
 	defer cancel()
 	prepared, err := prepareClientAdopt(ctx, fs, values, "client adopt run", true, false)
@@ -296,7 +336,7 @@ func (a *app) clientAdoptRun(args []string) error {
 	defer session.Close()
 	report, operationErr := clientadopt.Run(ctx, clientadopt.RunOptions{
 		Prepared: prepared.prepared, ExpectedPlanID: *values.expectedAdoptionPlan, Metafile: prepared.payload,
-		Session: session, AcknowledgeAdd: true,
+		Session: session, AcknowledgeAdd: true, AcknowledgeReAdoption: *values.acknowledgeReAdoption,
 	})
 	return a.finishClientAdopt(prepared.output, report, operationErr)
 }
@@ -312,6 +352,10 @@ func (a *app) clientAdoptResume(args []string) error {
 	}
 	if *values.repeatAdd && !*values.acknowledgeAdd {
 		return usageError("--acknowledge-repeat-add also requires --acknowledge-client-add")
+	}
+	priorRequested := flagWasSet(fs, "prior-adoption-operation") || flagWasSet(fs, "prior-adoption-plan-id")
+	if priorRequested != *values.acknowledgeReAdoption {
+		return usageError("client adopt resume requires --acknowledge-client-re-adoption exactly when prior adoption selectors are supplied")
 	}
 	operationID, err := clientadopt.ParseOperationID(fs.Arg(0))
 	if err != nil {
@@ -367,7 +411,8 @@ func (a *app) clientAdoptResume(args []string) error {
 	defer session.Close()
 	report, operationErr := clientadopt.Resume(ctx, operationID, clientadopt.RunOptions{
 		Prepared: prepared.prepared, ExpectedPlanID: *values.expectedAdoptionPlan, Metafile: prepared.payload,
-		Session: session, AcknowledgeAdd: *values.acknowledgeAdd, RepeatAdd: *values.repeatAdd,
+		Session: session, AcknowledgeAdd: *values.acknowledgeAdd, AcknowledgeReAdoption: *values.acknowledgeReAdoption,
+		RepeatAdd: *values.repeatAdd,
 	})
 	return a.finishClientAdopt(prepared.output, report, operationErr)
 }
@@ -534,6 +579,10 @@ func writeClientAdoptHuman(out io.Writer, report clientadopt.Report) error {
 		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(materializeValueOr(report.Plan.ExpectedID, "not_requested")), report.Plan.Matches,
 		terminalSafe(report.Plan.Action), terminalSafe(report.Plan.Driver), terminalSafe(report.Plan.ClientConfigID), terminalSafe(report.Plan.PathMappingID), terminalSafe(report.Plan.ClientPathSemantics),
 		terminalSafe(report.Plan.ExpectedSavePathRef), terminalSafe(report.Plan.ExpectedContentPathRef))
+	if report.Plan.PriorAdoptionOperationID != "" {
+		fmt.Fprintf(w, "PRIOR ADOPTION OPERATION\t%s\nPRIOR ADOPTION PLAN\t%s\nPRIOR COMPLETION\t%s\n",
+			terminalSafe(report.Plan.PriorAdoptionOperationID), terminalSafe(report.Plan.PriorAdoptionPlanID), terminalSafe(report.Plan.PriorAdoptionCompletionID))
+	}
 	fmt.Fprintf(w, "\nMATERIALIZED FINAL\nSTATUS\t%s\nVARIANT\t%s\nMATERIALIZE OPERATION\t%s\nMATERIALIZE PLAN\t%s\nROOT IDENTITY\t%s\nFINAL IDENTITY\t%s\nBYTES VERIFIED\t%d\nASSURANCE\t%s\n",
 		terminalSafe(report.Final.Status), terminalSafe(report.Final.Observation.MetafileVariantID), terminalSafe(report.Final.Observation.OperationID),
 		terminalSafe(report.Final.Observation.MaterializePlanID), terminalSafe(report.Final.Observation.TargetRootIdentity), terminalSafe(report.Final.Observation.FinalObjectIdentity),

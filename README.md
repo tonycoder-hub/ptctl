@@ -133,8 +133,11 @@ capabilities at the edge, not assumptions in the core domain model.
   of a current materialized-final proof, with typed queue-absence gating, a
   durable request-intent journal, one non-retried add POST, after-ledger/path
   checks, exact final re-verification, and no automatic replay of an unknown
-  request; Transmission is intentionally v1-only because its RPC ledger has no
-  typed v2 identity;
+  request; an explicit prior terminal completion can authorize a separate new
+  stopped-add lineage only after another complete queue-absence observation
+  and a dedicated acknowledgement, while preserving the prior evidence;
+  Transmission is intentionally v1-only because its RPC ledger has no typed
+  v2 identity;
 - explicit qBittorrent or Transmission recheck and optional controlled start
   downstream of a canonical same-driver stopped-adoption completion, with
   version-bound qB v4/v5 routes and Transmission v5.3/v6 methods,
@@ -668,6 +671,22 @@ final, and a durable completion marker. Its outcome is
 `adopted_pending_client_recheck`, not “seeding verified”. Neither client proves
 the raw private variant it stored, and no client recheck is performed.
 
+If that exact terminal job later disappears, ptctl does not silently reuse the
+old operation or choose a latest completion. A new `plan`, `run`, or `resume`
+may instead supply the exact pair
+`--prior-adoption-operation PRIOR_OPERATION_ID` and
+`--prior-adoption-plan-id PRIOR_PLAN_ID`. The local canonical completion or
+retention tombstone is verified before password stdin or network access and
+must describe the same driver, client configuration, path mapping, exact
+metafile, materialized final, and typed identity. The current complete client
+ledger must again prove exact absence. The resulting plan binds the prior
+operation, plan, and completion marker into a new independent operation ID;
+execution additionally requires `--acknowledge-client-re-adoption` alongside
+`--acknowledge-client-add`. The prior journal or tombstone remains intact.
+This flow does not infer why the job disappeared, attribute a removal, or
+authorize mutation of any remaining job. A forgotten prior completion cannot
+authorize re-adoption.
+
 Transmission accepts only an explicit `torrent_added` response; its documented
 `torrent_duplicate` success envelope is treated as a rejected adoption, not as
 evidence that this invocation created the observed job. The modern and legacy
@@ -751,6 +770,10 @@ An operation ID is deterministic from the reviewed adoption plan; no command
 enumerates or chooses a “latest” operation. JSON kind `client.adoption` keeps declared
 effects, actual/uncertain journal writes, request counts, before/after typed
 identity states, current-final proof basis, and non-null findings separate.
+Re-adoption reports expose only the opaque prior operation, plan, and
+completion IDs; planning/execution also records the explicit historical-read
+effect, while later local status does not pretend to re-read the prior proof.
+No report copies the prior job locator or paths.
 Raw host/client paths, endpoint, username, password, opaque downloader job key, magnet
 URI, tracker URL, passkey, and raw metafile bytes never enter the report.
 

@@ -166,6 +166,143 @@ func TestClientAdoptPlanRunStatusAndPrivacy(t *testing.T) {
 	}
 }
 
+func TestClientReAdoptionPreservesPriorCompletionAndRequiresFreshAbsence(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newClientAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+	base := clientAdoptBaseArgs(fixture, server.server.URL)
+
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("initial plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	initialPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	initialRun := append(append([]string{"client", "adopt", "run"}, base...),
+		"--expect-adoption-plan-id", initialPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(initialRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("initial run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	initial := decodeClientAdoptReport(t, out.Bytes())
+	server.added.Store(false)
+
+	reBase := append(append([]string(nil), base...), "--prior-adoption-operation", initial.Data.Operation.ID,
+		"--prior-adoption-plan-id", initial.Data.Plan.ID)
+	requestsBefore := server.login.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "adopt", "plan"}, reBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("re-adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	rePlan := decodeClientAdoptReport(t, out.Bytes())
+	if rePlan.Data.Outcome != clientadopt.OutcomeReady || rePlan.Data.Plan.ID == initial.Data.Plan.ID ||
+		rePlan.Data.Operation.ID == initial.Data.Operation.ID ||
+		rePlan.Data.Plan.PriorAdoptionOperationID != initial.Data.Operation.ID ||
+		rePlan.Data.Plan.PriorAdoptionPlanID != initial.Data.Plan.ID || rePlan.Data.Plan.PriorAdoptionCompletionID == "" ||
+		rePlan.Data.Client.BeforeIdentity != "absent" || server.login.Load()+server.ledger.Load()+server.add.Load()-requestsBefore != 2 {
+		t.Fatalf("unexpected re-adoption plan: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+	var human bytes.Buffer
+	if err := writeClientAdoptHuman(&human, rePlan.Data); err != nil ||
+		!strings.Contains(human.String(), "PRIOR ADOPTION OPERATION") || !strings.Contains(human.String(), initial.Data.Operation.ID) ||
+		!strings.Contains(human.String(), "PRIOR ADOPTION PLAN") || !strings.Contains(human.String(), initial.Data.Plan.ID) ||
+		!strings.Contains(human.String(), "PRIOR COMPLETION") || !strings.Contains(human.String(), rePlan.Data.Plan.PriorAdoptionCompletionID) {
+		t.Fatalf("human re-adoption lineage missing: %v\n%s", err, human.String())
+	}
+
+	// A re-adoption acknowledgement without a prior lineage, and a partial
+	// prior selector, are syntax errors before password or network access.
+	reader := &trackingReader{}
+	requestsBefore = server.login.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	ackWithoutPrior := append(append([]string{"client", "adopt", "run"}, base...),
+		"--expect-adoption-plan-id", initial.Data.Plan.ID, "--acknowledge-client-add", "--acknowledge-client-re-adoption")
+	if code := Run(ackWithoutPrior, reader, &out, &errOut); code != 2 || reader.read ||
+		server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("unbound re-adoption ack code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	partialPrior := append(append([]string{"client", "adopt", "plan"}, base...),
+		"--prior-adoption-operation", initial.Data.Operation.ID)
+	if code := Run(partialPrior, reader, &out, &errOut); code != 2 || reader.read ||
+		server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("partial prior selector code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+
+	missingAck := append(append([]string{"client", "adopt", "run"}, reBase...),
+		"--expect-adoption-plan-id", rePlan.Data.Plan.ID, "--acknowledge-client-add")
+	reader = &trackingReader{}
+	requestsBefore = server.login.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(missingAck, reader, &out, &errOut); code != 2 || reader.read ||
+		server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("missing re-adoption ack code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+
+	reRun := append(append([]string(nil), missingAck...), "--acknowledge-client-re-adoption")
+	requestsBefore = server.login.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(reRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("re-adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	reAdopted := decodeClientAdoptReport(t, out.Bytes())
+	if reAdopted.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck || reAdopted.Data.Operation.ID != rePlan.Data.Operation.ID ||
+		!reAdopted.Data.Journal.CompletionDurable || reAdopted.Data.Client.BeforeIdentity != "absent" ||
+		reAdopted.Data.Client.AfterIdentity != "exact_unique" || server.login.Load()+server.ledger.Load()+server.add.Load()-requestsBefore != 4 {
+		t.Fatalf("unexpected re-adoption execution: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	requestsBefore = server.login.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"client", "adopt", "status", "--target", fixture.materialize.targetRoot, "--output", "json",
+		reAdopted.Data.Operation.ID}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("re-adoption status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	reStatus := decodeClientAdoptReport(t, out.Bytes())
+	if reStatus.Data.Plan.PriorAdoptionOperationID != initial.Data.Operation.ID ||
+		reStatus.Data.Plan.PriorAdoptionPlanID != initial.Data.Plan.ID ||
+		reStatus.Data.Plan.PriorAdoptionCompletionID != rePlan.Data.Plan.PriorAdoptionCompletionID ||
+		server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("historical re-adoption lineage was not retained: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	// The prior operation remains independently readable; re-adoption never
+	// prunes or forgets the historical completion it consumed.
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"client", "adopt", "status", "--target", fixture.materialize.targetRoot, "--output", "json",
+		initial.Data.Operation.ID}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("prior status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	priorStatus := decodeClientAdoptReport(t, out.Bytes())
+	if priorStatus.Data.Outcome != clientadopt.OutcomeHistoricalAdopted || priorStatus.Data.Operation.ID != initial.Data.Operation.ID {
+		t.Fatalf("prior completion was not preserved: %s", out.String())
+	}
+
+	// A mismatched prior selector is rejected locally before password or client
+	// I/O; no alternate/latest prior operation is selected.
+	wrongPrior := append(append([]string(nil), base...), "--prior-adoption-operation", initial.Data.Operation.ID,
+		"--prior-adoption-plan-id", strings.Repeat("f", 24))
+	reader = &trackingReader{}
+	requestsBefore = server.login.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "adopt", "plan"}, wrongPrior...), reader, &out, &errOut); code != 4 || reader.read ||
+		server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
+		t.Fatalf("wrong prior code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+}
+
 func TestTransmissionClientAdoptPlanAndRunRemainStoppedAndV1Only(t *testing.T) {
 	fixture := newClientAdoptCLIFixture(t)
 	server := newTransmissionAdoptServer(t, fixture.meta, fixture.raw)
@@ -199,6 +336,47 @@ func TestTransmissionClientAdoptPlanAndRunRemainStoppedAndV1Only(t *testing.T) {
 	}
 	if server.handshake.Load() != 2 || server.session.Load() != 2 || server.ledger.Load() != 3 || server.add.Load() != 1 {
 		t.Fatalf("wire counts handshake=%d session=%d ledger=%d add=%d", server.handshake.Load(), server.session.Load(), server.ledger.Load(), server.add.Load())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	// A disappeared Transmission job can be re-adopted only through the same
+	// explicit prior-completion lineage and remains v1-only and stopped.
+	server.added.Store(false)
+	reBase := append(append([]string(nil), base...), "--prior-adoption-operation", adopted.Data.Operation.ID,
+		"--prior-adoption-plan-id", adopted.Data.Plan.ID)
+	requestsBefore := server.handshake.Load() + server.session.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "adopt", "plan"}, reBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("Transmission re-adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	rePlan := decodeClientAdoptReport(t, out.Bytes())
+	if rePlan.Data.Outcome != clientadopt.OutcomeReady || rePlan.Data.Plan.Driver != "transmission" ||
+		rePlan.Data.Plan.PriorAdoptionOperationID != adopted.Data.Operation.ID ||
+		rePlan.Data.Plan.PriorAdoptionPlanID != adopted.Data.Plan.ID ||
+		rePlan.Data.Plan.PriorAdoptionCompletionID == "" || rePlan.Data.Client.BeforeIdentity != "absent" ||
+		server.handshake.Load()+server.session.Load()+server.ledger.Load()+server.add.Load()-requestsBefore != 3 {
+		t.Fatalf("unexpected Transmission re-adoption plan: %s", out.String())
+	}
+
+	requestsBefore = server.handshake.Load() + server.session.Load() + server.ledger.Load() + server.add.Load()
+	out.Reset()
+	errOut.Reset()
+	reRun := append([]string{"client", "adopt", "run"}, reBase...)
+	reRun = append(reRun, "--expect-adoption-plan-id", rePlan.Data.Plan.ID,
+		"--acknowledge-client-add", "--acknowledge-client-re-adoption")
+	if code := Run(reRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("Transmission re-adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	reAdopted := decodeClientAdoptReport(t, out.Bytes())
+	if reAdopted.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck ||
+		reAdopted.Data.Plan.Driver != "transmission" || !reAdopted.Data.Journal.CompletionDurable ||
+		reAdopted.Data.Client.BeforeIdentity != "absent" || reAdopted.Data.Client.AfterIdentity != "exact_unique" ||
+		server.handshake.Load()+server.session.Load()+server.ledger.Load()+server.add.Load()-requestsBefore != 5 {
+		t.Fatalf("unexpected Transmission re-adoption execution: %s", out.String())
+	}
+	if server.verify.Load() != 0 || server.start.Load() != 0 {
+		t.Fatalf("Transmission re-adoption mutated job state: verify=%d start=%d", server.verify.Load(), server.start.Load())
 	}
 	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
 }

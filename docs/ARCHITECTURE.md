@@ -763,6 +763,26 @@ merely because an exact job appears. This is still a client
 claim: the completion marker says `adopted_pending_client_recheck`, while the
 raw metafile variant remains unobservable to either downloader.
 
+A completed adoption may be used only as an explicit lineage input when its
+exact job is no longer present. The caller supplies the full prior
+operation ID and reviewed prior plan ID; a bound local read of either the
+canonical completion journal or its sealed retention tombstone recreates an
+opaque `VerifiedCompletion`. `BuildPlan` then requires every identity-critical
+field to agree with the new current-final projection: driver, client
+configuration, path mapping and semantics, save/content references, exact
+metafile variant and typed hashes, materialize operation/plan, target/final
+identities, and content shape. The new plan incorporates the prior operation,
+plan, and completion IDs, so it has a distinct deterministic operation ID.
+
+This authority is deliberately historical and narrow. It cannot prove why the
+old client job disappeared or that a removal was intentional. A fresh complete
+typed ledger must independently prove current absence, and the effectful call
+requires the ordinary add acknowledgement plus a dedicated re-adoption
+acknowledgement. No latest/by-age enumeration occurs, the prior operation or
+tombstone is not deleted or rewritten, and public JSON cannot recreate the
+process-local completion authority. The same rule applies to qBittorrent and
+v1-only Transmission adoption.
+
 The deterministic operation directory is reserved by the materialize layout
 validator and contains canonical no-clobber intent, bounded attempt, and
 completion markers. A request attempt is durable before the POST. If its result

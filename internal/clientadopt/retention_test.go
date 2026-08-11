@@ -73,6 +73,23 @@ func TestPruneRetainsExactCompletionAuthorityAndIsIdempotent(t *testing.T) {
 		!strings.Contains(observationAfter.Assurance, "retention_tombstone") {
 		t.Fatalf("retained completion=%#v observation=%#v err=%v", after, observationAfter, err)
 	}
+	root, err := filepath.EvalSymlinks(fixture.materialized.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reAdoption, err := BuildPlan(fixture.materialized.verified, PlanOptions{
+		Driver: fixture.prepared.plan.Driver, ClientConfigID: fixture.prepared.plan.ClientConfigID,
+		HostRoot: root, ClientRoot: "/downloads", PriorCompletion: after,
+	})
+	if err != nil {
+		t.Fatalf("retained completion could not authorize a new plan: %v", err)
+	}
+	previewSession := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{fixture.before}}
+	preview, err := Preview(ctx, reAdoption, previewSession)
+	if err != nil || preview.Outcome != OutcomeReady ||
+		preview.Plan.PriorAdoptionCompletionID != observationAfter.CompletionID {
+		t.Fatalf("retained re-adoption preview=%#v err=%v", preview, err)
+	}
 	repeated, err := Prune(ctx, fixture.pruneOptions())
 	if err != nil || repeated.Outcome != RetentionOutcomeAlreadyPruned || repeated.WritesPerformed != 0 || !repeated.Markers.ExactTombstone {
 		t.Fatalf("repeated prune=%#v err=%v", repeated, err)

@@ -74,6 +74,30 @@ func TestPlanDriverIdentityCapabilitiesAreFailClosed(t *testing.T) {
 	}
 }
 
+func TestPlanPriorAdoptionLineageIsAllOrNothingAndLegacyCanonicalBytesStayStable(t *testing.T) {
+	base := validFormatIntent(t).Plan
+	raw, err := encodeCanonical(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("prior_adoption")) {
+		t.Fatalf("legacy plan unexpectedly serialized empty lineage: %s", raw)
+	}
+	base.PriorAdoptionPlanID = strings.Repeat("c", 24)
+	if err := base.Validate(); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("partial prior lineage accepted: %v", err)
+	}
+	base.PriorAdoptionOperationID = OperationIDForPlan(base.PriorAdoptionPlanID).String()
+	base.PriorAdoptionCompletionID = "sha256:" + strings.Repeat("d", 64)
+	if err := base.Validate(); err != nil {
+		t.Fatalf("complete prior lineage rejected: %v", err)
+	}
+	base.PriorAdoptionOperationID = "sha256:" + strings.Repeat("e", 64)
+	if err := base.Validate(); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("unbound prior operation accepted: %v", err)
+	}
+}
+
 func validFormatIntent(t *testing.T) Intent {
 	t.Helper()
 	shaID := func(character string) string { return "sha256:" + strings.Repeat(character, 64) }

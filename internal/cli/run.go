@@ -155,9 +155,9 @@ Usage:
 
   ptctl client status --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
   ptctl client list --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
-  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
-  ptctl client adopt run [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
-  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add --acknowledge-repeat-add] [--output table|json] OPERATION_ID
+  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--prior-adoption-operation ID --prior-adoption-plan-id ID] [--output table|json]
+  ptctl client adopt run [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--acknowledge-client-re-adoption] [--output table|json]
+  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add --acknowledge-repeat-add] [--acknowledge-client-re-adoption] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
   ptctl client adopt prune --target PATH --expect-adoption-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client adopt forget --target PATH --expect-adoption-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID

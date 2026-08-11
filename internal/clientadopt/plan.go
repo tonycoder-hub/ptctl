@@ -8,11 +8,12 @@ import (
 )
 
 type PlanOptions struct {
-	Driver         string
-	ClientConfigID string
-	HostRoot       string
-	ClientRoot     string
-	ClientWindows  bool
+	Driver          string
+	ClientConfigID  string
+	HostRoot        string
+	ClientRoot      string
+	ClientWindows   bool
+	PriorCompletion *VerifiedCompletion
 }
 
 // PreparedPlan retains the exact-final authority and raw projected client
@@ -24,6 +25,7 @@ type PreparedPlan struct {
 	verified   *materialize.VerifiedFinal
 	projection materialize.FinalClientProjection
 	windows    bool
+	prior      *VerifiedCompletion
 }
 
 func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*PreparedPlan, error) {
@@ -55,13 +57,34 @@ func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*Prepa
 		TargetRootIdentity: observation.TargetRootIdentity, FinalObjectIdentity: observation.FinalObjectIdentity,
 		MultiFile: observation.MultiFile, ManifestFiles: observation.ManifestFiles, ContentBytes: observation.ContentBytes,
 	}
+	if options.PriorCompletion != nil {
+		if !options.PriorCompletion.Verified() {
+			return nil, fmt.Errorf("%w: prior adoption completion authority is invalid", ErrPolicy)
+		}
+		priorPlan := options.PriorCompletion.Plan()
+		priorObservation := options.PriorCompletion.Observation()
+		if priorPlan.Driver != plan.Driver || priorPlan.ClientConfigID != plan.ClientConfigID ||
+			priorPlan.PathMappingID != plan.PathMappingID || priorPlan.ClientPathSemantics != plan.ClientPathSemantics ||
+			priorPlan.ExpectedSavePathRef != plan.ExpectedSavePathRef || priorPlan.ExpectedContentPathRef != plan.ExpectedContentPathRef ||
+			priorPlan.MetafileVariantID != plan.MetafileVariantID || priorPlan.MetafileBytes != plan.MetafileBytes ||
+			priorPlan.InfoHashV1 != plan.InfoHashV1 || priorPlan.InfoHashV2 != plan.InfoHashV2 ||
+			priorPlan.MaterializeOperationID != plan.MaterializeOperationID || priorPlan.MaterializePlanID != plan.MaterializePlanID ||
+			priorPlan.TargetRootIdentity != plan.TargetRootIdentity || priorPlan.FinalObjectIdentity != plan.FinalObjectIdentity ||
+			priorPlan.MultiFile != plan.MultiFile || priorPlan.ManifestFiles != plan.ManifestFiles || priorPlan.ContentBytes != plan.ContentBytes ||
+			priorObservation.FinalObjectIdentity != plan.FinalObjectIdentity {
+			return nil, fmt.Errorf("%w: prior adoption completion belongs to a different final or client configuration", ErrPolicy)
+		}
+		plan.PriorAdoptionOperationID = priorObservation.OperationID
+		plan.PriorAdoptionPlanID = priorObservation.PlanID
+		plan.PriorAdoptionCompletionID = priorObservation.CompletionID
+	}
 	planID, err := PlanID(plan)
 	if err != nil {
 		return nil, err
 	}
 	return &PreparedPlan{
 		plan: plan, planID: planID, operation: OperationIDForPlan(planID), verified: verified,
-		projection: projection, windows: options.ClientWindows,
+		projection: projection, windows: options.ClientWindows, prior: options.PriorCompletion,
 	}, nil
 }
 

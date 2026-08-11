@@ -15,12 +15,13 @@ import (
 )
 
 type RunOptions struct {
-	Prepared       *PreparedPlan
-	ExpectedPlanID string
-	Metafile       *metastore.ArtifactPayload
-	Session        downloader.MutationSession
-	AcknowledgeAdd bool
-	RepeatAdd      bool
+	Prepared              *PreparedPlan
+	ExpectedPlanID        string
+	Metafile              *metastore.ArtifactPayload
+	Session               downloader.MutationSession
+	AcknowledgeAdd        bool
+	AcknowledgeReAdoption bool
+	RepeatAdd             bool
 }
 
 type StatusOptions struct {
@@ -136,6 +137,13 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 	if !options.AcknowledgeAdd {
 		err := fmt.Errorf("%w: explicit downloader-add acknowledgement is required", ErrPolicy)
 		report.addBlocker("acknowledgement.client_add_required", "client adoption requires explicit acknowledgement of the stopped add request")
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	if options.Prepared.prior != nil && !options.AcknowledgeReAdoption {
+		err := fmt.Errorf("%w: explicit re-adoption acknowledgement is required", ErrPolicy)
+		report.addBlocker("acknowledgement.client_re_adoption_required", "re-adoption after a prior terminal job disappeared requires its dedicated acknowledgement")
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
@@ -333,6 +341,13 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 		report.finalize()
 		return report, ErrRequestUnknown
 	}
+	if options.Prepared.prior != nil && !options.AcknowledgeReAdoption {
+		err = fmt.Errorf("%w: explicit re-adoption acknowledgement is required", ErrPolicy)
+		report.addBlocker("acknowledgement.client_re_adoption_required", "re-adoption after a prior terminal job disappeared requires its dedicated acknowledgement")
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
 	if !options.AcknowledgeAdd {
 		err = fmt.Errorf("%w: explicit downloader-add acknowledgement is required", ErrPolicy)
 		report.addBlocker("acknowledgement.client_add_required", "client adoption requires explicit acknowledgement of the stopped add request")
@@ -379,11 +394,7 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 		return report, nil
 	}
 	plan := handle.state.Intent.Plan
-	report.Plan = PlanReport{
-		ID: handle.state.Intent.PlanID, Matches: true, Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID,
-		PathMappingID: plan.PathMappingID, ClientPathSemantics: plan.ClientPathSemantics,
-		ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef,
-	}
+	report.Plan = planReport(plan, handle.state.Intent.PlanID, "")
 	report.Final.Observation = historicalFinalObservation(plan)
 	report.Journal = journalReport(handle.state)
 	report.Warnings = append(report.Warnings, "read-only status observes canonical journal markers but does not refresh directory durability")
@@ -697,6 +708,20 @@ func validatePrepared(prepared *PreparedPlan, expectedPlanID string, payload *me
 	if expectedPlanID != "" && expectedPlanID != prepared.planID {
 		return fmt.Errorf("%w: reviewed adoption plan ID differs", ErrPolicy)
 	}
+	hasPrior := prepared.plan.PriorAdoptionOperationID != ""
+	if hasPrior != (prepared.prior != nil) {
+		return fmt.Errorf("%w: prepared prior adoption authority is unavailable", ErrPolicy)
+	}
+	if hasPrior {
+		if !prepared.prior.Verified() {
+			return fmt.Errorf("%w: prepared prior adoption authority is invalid", ErrPolicy)
+		}
+		observation := prepared.prior.Observation()
+		if observation.OperationID != prepared.plan.PriorAdoptionOperationID || observation.PlanID != prepared.plan.PriorAdoptionPlanID ||
+			observation.CompletionID != prepared.plan.PriorAdoptionCompletionID {
+			return fmt.Errorf("%w: prepared prior adoption authority differs from the reviewed lineage", ErrIntegrity)
+		}
+	}
 	if payload != nil {
 		return validateMetafilePayload(prepared, payload)
 	}
@@ -836,10 +861,7 @@ func applyRetainedJournalReport(report *Report, state journalState) {
 	if state.RetentionIntentID != "" {
 		plan := state.Intent.Plan
 		expected := report.Plan.ExpectedID
-		report.Plan = PlanReport{ID: state.Intent.PlanID, ExpectedID: expected, Matches: expected == "" || expected == state.Intent.PlanID,
-			Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID,
-			PathMappingID: plan.PathMappingID, ClientPathSemantics: plan.ClientPathSemantics,
-			ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef}
+		report.Plan = planReport(plan, state.Intent.PlanID, expected)
 		report.Final.Observation = historicalFinalObservation(plan)
 	}
 	switch {

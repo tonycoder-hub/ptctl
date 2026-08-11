@@ -1,7 +1,8 @@
 // Package clientadopt coordinates one exact, already-materialized layout with
 // a downloader. Version 1 only adds an absent built-in downloader job in
-// stopped mode; it never changes an existing job, rechecks, moves, deletes, or
-// retires data.
+// stopped mode. An optional explicit prior-completion lineage permits a new
+// operation after that exact job disappears; it never changes an existing job,
+// rechecks, moves, deletes, or retires data.
 package clientadopt
 
 import (
@@ -40,25 +41,28 @@ var (
 )
 
 type Plan struct {
-	Schema                 string `json:"schema"`
-	Action                 string `json:"action"`
-	Driver                 string `json:"driver"`
-	ClientConfigID         string `json:"client_config_id"`
-	PathMappingID          string `json:"path_mapping_id"`
-	ClientPathSemantics    string `json:"client_path_semantics"`
-	ExpectedSavePathRef    string `json:"expected_save_path_ref"`
-	ExpectedContentPathRef string `json:"expected_content_path_ref"`
-	MetafileVariantID      string `json:"metafile_variant_id"`
-	MetafileBytes          int64  `json:"metafile_bytes"`
-	InfoHashV1             string `json:"info_hash_v1,omitempty"`
-	InfoHashV2             string `json:"info_hash_v2,omitempty"`
-	MaterializeOperationID string `json:"materialize_operation_id"`
-	MaterializePlanID      string `json:"materialize_plan_id"`
-	TargetRootIdentity     string `json:"target_root_identity"`
-	FinalObjectIdentity    string `json:"final_object_identity"`
-	MultiFile              bool   `json:"multi_file"`
-	ManifestFiles          int    `json:"manifest_files"`
-	ContentBytes           int64  `json:"content_bytes"`
+	Schema                    string `json:"schema"`
+	Action                    string `json:"action"`
+	Driver                    string `json:"driver"`
+	ClientConfigID            string `json:"client_config_id"`
+	PathMappingID             string `json:"path_mapping_id"`
+	ClientPathSemantics       string `json:"client_path_semantics"`
+	ExpectedSavePathRef       string `json:"expected_save_path_ref"`
+	ExpectedContentPathRef    string `json:"expected_content_path_ref"`
+	MetafileVariantID         string `json:"metafile_variant_id"`
+	MetafileBytes             int64  `json:"metafile_bytes"`
+	InfoHashV1                string `json:"info_hash_v1,omitempty"`
+	InfoHashV2                string `json:"info_hash_v2,omitempty"`
+	MaterializeOperationID    string `json:"materialize_operation_id"`
+	MaterializePlanID         string `json:"materialize_plan_id"`
+	TargetRootIdentity        string `json:"target_root_identity"`
+	FinalObjectIdentity       string `json:"final_object_identity"`
+	MultiFile                 bool   `json:"multi_file"`
+	ManifestFiles             int    `json:"manifest_files"`
+	ContentBytes              int64  `json:"content_bytes"`
+	PriorAdoptionOperationID  string `json:"prior_adoption_operation_id,omitempty"`
+	PriorAdoptionPlanID       string `json:"prior_adoption_plan_id,omitempty"`
+	PriorAdoptionCompletionID string `json:"prior_adoption_completion_id,omitempty"`
 }
 
 func (plan Plan) Validate() error {
@@ -89,6 +93,24 @@ func (plan Plan) Validate() error {
 	}
 	if identity, err := fsbind.ParseIdentity(plan.FinalObjectIdentity); err != nil || identity.IsZero() {
 		return fmt.Errorf("%w: final object identity is invalid", ErrPolicy)
+	}
+	priorFields := 0
+	for _, value := range []string{plan.PriorAdoptionOperationID, plan.PriorAdoptionPlanID, plan.PriorAdoptionCompletionID} {
+		if value != "" {
+			priorFields++
+		}
+	}
+	if priorFields != 0 && priorFields != 3 {
+		return fmt.Errorf("%w: prior adoption lineage is incomplete", ErrPolicy)
+	}
+	if priorFields == 3 {
+		priorOperation, err := ParseOperationID(plan.PriorAdoptionOperationID)
+		if err != nil || !canonicalPlanID(plan.PriorAdoptionPlanID) || OperationIDForPlan(plan.PriorAdoptionPlanID) != priorOperation {
+			return fmt.Errorf("%w: prior adoption selector is invalid", ErrPolicy)
+		}
+		if _, err := parseMarkerID(plan.PriorAdoptionCompletionID); err != nil {
+			return fmt.Errorf("%w: prior adoption completion is invalid", ErrPolicy)
+		}
 	}
 	return nil
 }

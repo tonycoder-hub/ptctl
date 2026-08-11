@@ -318,6 +318,19 @@ private target-root-local journal. It does not
 authorize changing an existing job, rechecking, starting, pausing, moving,
 removing, deleting, or retiring content.
 
+Re-adoption after a terminal job disappears is a second explicit lineage, not
+an implicit retry or a rewrite of history. The full prior operation and plan
+selectors are validated locally and must yield a canonical journal completion
+or sealed retention tombstone before password stdin or network access. Its
+opaque same-invocation authority must match the current driver, client
+configuration, path mapping, exact metafile, materialized final, and typed
+identity. A new complete ledger must independently prove that no exact target
+job currently exists, and execution requires the additional
+`--acknowledge-client-re-adoption`. The new plan binds the prior completion ID
+and produces a distinct operation. ptctl never selects latest/by-age history,
+never infers why the old job disappeared, and never prunes, forgets, or mutates
+the prior evidence as part of re-adoption.
+
 One complete before-ledger must prove typed identity absence. A generic job
 hash, name, size, path, progress, or state never selects identity; unavailable,
 invalid, partial, conflicting, or duplicate typed rows make absence
@@ -793,8 +806,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
   policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
-- downloader pause/location/removal transitions, re-adoption after a terminal
-  job disappears, and client-side private-variant observability;
+- downloader pause/location/removal transitions and client-side
+  private-variant observability;
 - source-parent directory cleanup, block-reclamation accounting, and explicit
   retirement of unselected aliases; journaled retirement intentionally removes
   only the reviewed regular-file names;

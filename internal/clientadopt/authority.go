@@ -12,6 +12,7 @@ type CompletionProofOptions struct {
 }
 
 type CompletionObservation struct {
+	Driver                 string `json:"driver"`
 	OperationID            string `json:"operation_id"`
 	PlanID                 string `json:"plan_id"`
 	CompletionID           string `json:"completion_id"`
@@ -83,7 +84,7 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 	authority := verified.authority
 	plan, completion := authority.plan, authority.completion
 	return CompletionObservation{
-		OperationID: authority.operationID.String(), PlanID: authority.planID, CompletionID: authority.completionID.String(),
+		Driver: plan.Driver, OperationID: authority.operationID.String(), PlanID: authority.planID, CompletionID: authority.completionID.String(),
 		MetafileVariantID: plan.MetafileVariantID, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
 		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
 		ExpectedContentPathRef: plan.ExpectedContentPathRef, JobID: completion.JobID, JobState: completion.JobState,

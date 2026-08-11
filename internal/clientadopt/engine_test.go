@@ -175,6 +175,97 @@ func TestRunAdoptsAbsentJobStoppedAndRecordsTerminalJournal(t *testing.T) {
 	}
 }
 
+func TestReAdoptionRequiresExplicitPriorCompletionAbsenceAndAcknowledgement(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	initial := prepareFixturePlan(t, fixture)
+	savePath, _ := initial.savePath()
+	contentPath, _ := initial.contentPath()
+	before := ledgerSnapshot(fixture.meta, nil, time.Now().UTC())
+	firstJob := &downloader.Torrent{
+		Hash: "first-opaque-job", InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
+		State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}
+	firstAfter := ledgerSnapshot(fixture.meta, firstJob, before.ObservedAtEnd.Add(time.Millisecond))
+	firstSession := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, firstAfter}}
+	firstReport, err := Run(ctx, RunOptions{Prepared: initial, ExpectedPlanID: initial.PlanID(), Metafile: fixture.payload(t),
+		Session: firstSession, AcknowledgeAdd: true})
+	if err != nil || firstReport.Outcome != OutcomeAdoptedPendingRecheck {
+		t.Fatalf("first report=%#v err=%v", firstReport, err)
+	}
+	prior, priorObservation, err := VerifyCompletion(ctx, CompletionProofOptions{TargetRoot: fixture.targetRoot,
+		OperationID: initial.OperationID(), ExpectedPlanID: initial.PlanID()})
+	if err != nil || !prior.Verified() || priorObservation.Driver != DriverQBittorrent {
+		t.Fatalf("prior=%#v observation=%#v err=%v", prior, priorObservation, err)
+	}
+	root, err := filepath.EvalSymlinks(fixture.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reAdoption, err := BuildPlan(fixture.verified, PlanOptions{ClientConfigID: initial.plan.ClientConfigID,
+		HostRoot: root, ClientRoot: "/downloads", PriorCompletion: prior})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reAdoption.PlanID() == initial.PlanID() || reAdoption.OperationID() == initial.OperationID() ||
+		reAdoption.plan.PriorAdoptionOperationID != initial.OperationID().String() ||
+		reAdoption.plan.PriorAdoptionPlanID != initial.PlanID() ||
+		reAdoption.plan.PriorAdoptionCompletionID != priorObservation.CompletionID {
+		t.Fatalf("re-adoption lineage was not bound: %#v", reAdoption.plan)
+	}
+	presentSession := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{firstAfter}}
+	present, err := Preview(ctx, reAdoption, presentSession)
+	if !errors.Is(err, ErrPolicy) || present.Outcome != OutcomeBlocked || present.Client.BeforeIdentity != "exact_unique" ||
+		!findingCode(present.Blockers, "client.exact_job_exists") || presentSession.requests != 2 {
+		t.Fatalf("prior completion overrode current exact job: report=%#v requests=%d err=%v", present, presentSession.requests, err)
+	}
+	previewSession := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before}}
+	preview, err := Preview(ctx, reAdoption, previewSession)
+	if err != nil || preview.Outcome != OutcomeReady || preview.Plan.PriorAdoptionCompletionID != priorObservation.CompletionID ||
+		previewSession.requests != 2 {
+		t.Fatalf("preview=%#v requests=%d err=%v", preview, previewSession.requests, err)
+	}
+
+	withoutAck := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, firstAfter}}
+	blocked, err := Run(ctx, RunOptions{Prepared: reAdoption, ExpectedPlanID: reAdoption.PlanID(),
+		Metafile: fixture.payload(t), Session: withoutAck, AcknowledgeAdd: true})
+	if !errors.Is(err, ErrPolicy) || blocked.Outcome != OutcomeBlocked || withoutAck.requests != 1 || withoutAck.adds != 0 ||
+		blocked.WritesPerformed != 0 || blocked.Operation.Status != "not_created" ||
+		!findingCode(blocked.Blockers, "acknowledgement.client_re_adoption_required") {
+		t.Fatalf("blocked=%#v requests=%d adds=%d err=%v", blocked, withoutAck.requests, withoutAck.adds, err)
+	}
+
+	secondJob := *firstJob
+	secondJob.Hash = "second-opaque-job"
+	secondAfter := ledgerSnapshot(fixture.meta, &secondJob, before.ObservedAtEnd.Add(2*time.Millisecond))
+	secondSession := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, secondAfter}}
+	reAdopted, err := Run(ctx, RunOptions{Prepared: reAdoption, ExpectedPlanID: reAdoption.PlanID(),
+		Metafile: fixture.payload(t), Session: secondSession, AcknowledgeAdd: true, AcknowledgeReAdoption: true})
+	if err != nil || reAdopted.Outcome != OutcomeAdoptedPendingRecheck || secondSession.adds != 1 || secondSession.requests != 4 ||
+		!reAdopted.Journal.CompletionDurable || reAdopted.Client.JobID == firstReport.Client.JobID {
+		t.Fatalf("re-adopted=%#v requests=%d adds=%d err=%v", reAdopted, secondSession.requests, secondSession.adds, err)
+	}
+	if _, _, err := VerifyCompletion(ctx, CompletionProofOptions{TargetRoot: fixture.targetRoot,
+		OperationID: reAdoption.OperationID(), ExpectedPlanID: reAdoption.PlanID()}); err != nil {
+		t.Fatalf("new independent completion unavailable: %v", err)
+	}
+
+	other := makeMaterializedFixture(t, ctx)
+	otherRoot, err := filepath.EvalSymlinks(other.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildPlan(other.verified, PlanOptions{ClientConfigID: initial.plan.ClientConfigID,
+		HostRoot: otherRoot, ClientRoot: "/downloads", PriorCompletion: prior}); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("different final accepted prior adoption authority: %v", err)
+	}
+	if _, err := BuildPlan(fixture.verified, PlanOptions{Driver: DriverTransmission, ClientConfigID: initial.plan.ClientConfigID,
+		HostRoot: root, ClientRoot: "/downloads", PriorCompletion: prior}); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("different driver accepted prior adoption authority: %v", err)
+	}
+}
+
 func TestTransmissionRunAdoptsV1StoppedWithoutGrantingUnknownResponseAttribution(t *testing.T) {
 	ctx := context.Background()
 	fixture := makeMaterializedFixture(t, ctx)
@@ -595,6 +686,15 @@ func ledgerSnapshotForDriver(meta *metafile.MetaInfo, driver string, job *downlo
 		Driver: driver, ObservedAtStart: started, ObservedAtEnd: started.Add(time.Millisecond), Complete: true,
 		Capabilities: downloader.LedgerCapabilities{TypedInfoHashes: true, ContentPath: true, JobFiles: true}, Jobs: jobs,
 	}
+}
+
+func findingCode(findings []Finding, code string) bool {
+	for _, finding := range findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func singleV1Metafile(t *testing.T, name string, content []byte) []byte {
