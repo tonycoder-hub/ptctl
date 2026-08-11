@@ -18,6 +18,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
+	"github.com/tonycoder-hub/ptctl/internal/downloader/transmission"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
@@ -49,6 +50,22 @@ type envelope struct {
 	Kind     string   `json:"kind"`
 	Data     any      `json:"data"`
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+type readOnlyDownloaderDriver interface {
+	downloader.Driver
+	downloader.LedgerDriver
+}
+
+func newReadOnlyDownloaderDriver(name, endpoint string) (readOnlyDownloaderDriver, error) {
+	switch name {
+	case downloader.DriverQBittorrent:
+		return qbittorrent.New(endpoint)
+	case downloader.DriverTransmission:
+		return transmission.New(endpoint)
+	default:
+		return nil, fmt.Errorf("unsupported read-only downloader driver %q", name)
+	}
 }
 
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -131,8 +148,8 @@ Usage:
   ptctl storage index refresh --state-store DIR --profile PROFILE [--output table|json]
   ptctl storage index inspect --state-store DIR --profile PROFILE [--snapshot-record ID] [--output table|json]
 
-  ptctl client status --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
-  ptctl client list --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
+  ptctl client status --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
+  ptctl client list --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
   ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
   ptctl client adopt run [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
   ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add --acknowledge-repeat-add] [--output table|json] OPERATION_ID
@@ -239,9 +256,9 @@ func (a *app) client(args []string) error {
 	command := args[0]
 	fs := newFlagSet("client " + command)
 	output := fs.String("output", "table", "table or json")
-	driverName := fs.String("driver", "qbittorrent", "downloader driver")
-	endpoint := fs.String("url", "", "qBittorrent Web API origin")
-	username := fs.String("username", "", "qBittorrent username")
+	driverName := fs.String("driver", downloader.DriverQBittorrent, "read-only downloader driver: qbittorrent or transmission")
+	endpoint := fs.String("url", "", "downloader API origin or RPC URL")
+	username := fs.String("username", "", "downloader username")
 	passwordStdin := fs.Bool("password-stdin", false, "read password from stdin")
 	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *endpoint == "" {
 		return usageError("client %s requires --url and no positional arguments", command)
@@ -249,13 +266,13 @@ func (a *app) client(args []string) error {
 	if err := validateOutput(*output); err != nil {
 		return err
 	}
-	if *driverName != "qbittorrent" {
-		return usageError("--driver currently supports only qbittorrent")
+	if _, ok := downloader.DescribeLedgerDriver(*driverName); !ok {
+		return usageError("--driver must be qbittorrent or transmission for read-only client commands")
 	}
 	if !*passwordStdin {
 		return usageError("--password-stdin is required; downloader passwords are never accepted in argv")
 	}
-	driver, err := qbittorrent.New(*endpoint)
+	driver, err := newReadOnlyDownloaderDriver(*driverName, *endpoint)
 	if err != nil {
 		return err
 	}
@@ -301,7 +318,7 @@ func (a *app) reconcileReport(args []string) error {
 		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around bounded, exact storage discovery. It performs zero writes. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent --url URL --username USER --password-stdin. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
+		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. qBittorrent mutation commands remain qBittorrent-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Flags:")
 		fs.PrintDefaults()
@@ -315,9 +332,9 @@ func (a *app) reconcileReport(args []string) error {
 	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
 	storageProfile := fs.String("storage-profile", "", "stored profile name or immutable ID; pair with --state-store")
 	snapshotRecord := fs.String("snapshot-record", "", "explicit descriptor record ID for stored-profile mode")
-	driverName := fs.String("driver", "qbittorrent", "downloader driver; part of the optional client group")
-	endpoint := fs.String("url", "", "qBittorrent Web API origin; part of the optional client group")
-	username := fs.String("username", "", "qBittorrent username; part of the optional client group")
+	driverName := fs.String("driver", downloader.DriverQBittorrent, "read-only downloader driver: qbittorrent or transmission; part of the optional client group")
+	endpoint := fs.String("url", "", "downloader API origin or RPC URL; part of the optional client group")
+	username := fs.String("username", "", "downloader username; part of the optional client group")
 	passwordStdin := fs.Bool("password-stdin", false, "read downloader password from stdin; part of the optional client group")
 	siteCookieStdin := fs.Bool("site-cookie-stdin", false, "read a site Cookie header from stdin and observe --site-ref live")
 	credentialBundleStdin := fs.Bool("credential-bundle-stdin", false, "read strict JSON containing site_cookie and downloader_password when live site and client reads are both requested")
@@ -436,8 +453,8 @@ func (a *app) reconcileReport(args []string) error {
 		if len(missing) > 0 {
 			return usageError("the optional client group requires %s", strings.Join(missing, ", "))
 		}
-		if *driverName != "qbittorrent" {
-			return usageError("--driver currently supports only qbittorrent")
+		if _, ok := downloader.DescribeLedgerDriver(*driverName); !ok {
+			return usageError("--driver must be qbittorrent or transmission for reconciliation")
 		}
 		if *endpoint == "" || *username == "" {
 			return usageError("the optional client group requires non-empty --url and --username")
@@ -519,9 +536,9 @@ func (a *app) reconcileReport(args []string) error {
 		}
 	}
 
-	var clientAdapter *qbittorrent.Adapter
+	var clientAdapter downloader.LedgerDriver
 	if clientRequested {
-		clientAdapter, err = qbittorrent.New(*endpoint)
+		clientAdapter, err = newReadOnlyDownloaderDriver(*driverName, *endpoint)
 		if err != nil {
 			return usageError("reconcile report downloader endpoint is invalid: %v", err)
 		}

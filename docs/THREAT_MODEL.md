@@ -41,7 +41,9 @@ one-way path reference instead. qBittorrent magnet URIs are never placed in a
 domain object or report: the adapter extracts only bounded, typed `xt` hashes
 and discards tracker, web-seed, display-name, and other query data. The generic
 client hash remains an opaque locator and is represented by a derived report
-ID where possible.
+ID where possible. As identity evidence, Transmission retains only its full
+SHA-1 `hash_string` as a typed v1 claim; response bodies, RPC paths, Basic
+credentials, and session tokens are never report or diagnostic fields.
 These stable references support local correlation; they are hiding controls,
 not anonymity, and a guessable path may still be tested by dictionary attack.
 
@@ -98,19 +100,21 @@ not perform a preceding detail lookup, follow a redirect, retry, or fan out to
 related IDs.
 
 A live reconciliation may first use one independent, bounded site-detail GET.
-It then uses one qBittorrent login and two bounded torrent-list reads,
-sequentially and without retry. When `auto` observes one uniquely
-identified ordinary multi-file job, it attempts up to two bounded file-list
-reads around storage proof; the second is sent only after a complete first
-read. The downloader path therefore makes at most five HTTP requests including
-login; a combined site+downloader invocation makes at most six.
+It then opens one audited read-only downloader session and performs two bounded
+torrent-list reads, sequentially and without retry. qBittorrent uses one login,
+so its downloader path makes three requests, or at most five when `auto`
+attempts two file-list reads for one uniquely identified ordinary multi-file
+job. Transmission requires exactly one initial CSRF 409 version handshake and
+one session-version read, so its corresponding totals are four and six. A
+combined site invocation adds exactly the one site request.
 Authentication, rate-limit, HTTP, parse, or timeout failures make the
 downloader axis incomplete; they do not trigger re-login, fan-out across queue
 jobs, or a client mutation.
-The audit session disables HTTP connection reuse and HTTP/2 so Go's transport
-cannot transparently replay a failed idempotent GET behind the request counter;
-the cookie jar still carries the authenticated session across fresh
-connections.
+Both audit transports disable HTTP connection reuse and HTTP/2 so Go cannot
+transparently replay a request behind the counter. qBittorrent's cookie jar
+still carries its authenticated session across fresh connections.
+Transmission permits only the protocol-required opening 409 replay; a later
+token expiry fails closed rather than resending the RPC call.
 
 Site-only and downloader-only reconciliation retain their single-secret stdin
 formats. A combined invocation requires one `ptctl.credentials/v1` JSON object,
@@ -122,7 +126,7 @@ remain in memory only and never enter a report or diagnostic.
 ### Parser, scanner, and solver exhaustion
 
 Bencode input, string size, depth, and node count are bounded. HTTP bodies and
-qBittorrent responses have explicit limits. Torrent piece length is capped.
+downloader responses have explicit limits. Torrent piece length is capped.
 Metafile-store import and inspection use the same bounded parser and cap raw
 artifact bytes before hashing or retaining them. An on-disk object name or
 side record is never trusted as its digest or parsed identity.
@@ -157,7 +161,15 @@ rejected before decoding, and each object is capped at 256 fields. Query keys
 and `xt` claims must decode to strict ASCII; tracker and web-seed values are
 not materialized. Duplicate JSON fields and opaque job keys fail closed.
 
-Each qBittorrent file-list response has mandatory row, decoded path-byte, and
+The Transmission ledger has the same 8 MiB and 25,000-job caps. It accepts
+only protocol 5.3.x legacy responses or protocol 6.x JSON-RPC responses selected
+by the CSRF version header. JSON nesting and per-object fields are capped;
+duplicate fields, duplicate 40-hex job keys, invalid UTF-8, unpaired surrogates,
+unknown status values, mismatched response IDs/tags, and malformed numeric
+claims fail the whole observation. A 40-hex `hash_string` is never promoted to
+v2 or hybrid identity.
+
+Each downloader file-list response has mandatory row, decoded path-byte, and
 response-byte limits with lower defaults and non-disableable hard caps. Rows
 are decoded incrementally, and row N+1 stops the snapshot before it can expand
 memory. Required fields have explicit presence checks; missing zero-valued
@@ -653,7 +665,10 @@ and have an effective lexical path equal to the independently mapped
 same-call source binding. A matching top-level content path alone cannot reveal
 skipped or renamed files. The qBittorrent formula is fixed as `save_path` plus
 the returned relative file path, while `content_path` must be a consistent
-ancestor; alternate formulas are not tried opportunistically. Any nonempty
+ancestor. Transmission fixes its formula as `download_dir` plus each ordered
+`files[].name`, with `download_dir + name` as the required content ancestor;
+the parallel `file_stats` array must have exactly the same length and order.
+Alternate formulas are not tried opportunistically. Any nonempty
 file attribute (including padding or symlink semantics) and non-padding empty
 files remain unsupported for this full-layout claim. Windows path case is
 compared exactly rather than assuming case-insensitive semantics for a

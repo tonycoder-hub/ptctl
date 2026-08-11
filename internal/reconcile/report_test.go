@@ -784,9 +784,16 @@ func testPathMapping(root string) *PathMappingOptions {
 }
 
 func matchingJob(meta *metafile.MetaInfo, contentPath string) downloader.Torrent {
+	evidence := []string{}
+	if meta.InfoHashV1 != "" {
+		evidence = append(evidence, "magnet_xt_btih_hex")
+	}
+	if meta.InfoHashV2 != "" {
+		evidence = append(evidence, "magnet_xt_btmh_sha256")
+	}
 	return downloader.Torrent{
 		Hash: "opaque-job-one", InfoHashV1: meta.InfoHashV1, InfoHashV2: meta.InfoHashV2,
-		IdentityStatus: downloader.IdentityStatusValid, IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"}, IdentityIssues: []string{},
+		IdentityStatus: downloader.IdentityStatusValid, IdentityEvidence: evidence, IdentityIssues: []string{},
 		Name: "client-claim", SizeBytes: 7, Progress: 1, State: "uploading", SavePath: "/downloads", ContentPath: contentPath,
 	}
 }

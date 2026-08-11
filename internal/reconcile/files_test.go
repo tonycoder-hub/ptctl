@@ -57,6 +57,53 @@ func TestMultiFileLayoutClosesClientStorageRelation(t *testing.T) {
 	}
 }
 
+func TestTransmissionV1MultiFileLayoutClosesClientStorageRelation(t *testing.T) {
+	meta, discovery, source, hostRoot := reconciledMultiFile(t)
+	job, before, after, filesBefore, filesAfter, limits := stableMultiFileBracket(meta)
+	job.Hash = meta.InfoHashV1
+	job.InfoHashV1 = meta.InfoHashV1
+	job.InfoHashV2 = ""
+	job.IdentityEvidence = []string{"transmission_hash_string_sha1"}
+	before.Driver, after.Driver = downloader.DriverTransmission, downloader.DriverTransmission
+	before.Jobs, after.Jobs = []downloader.Torrent{job}, []downloader.Torrent{job}
+	filesBefore.Driver, filesAfter.Driver = downloader.DriverTransmission, downloader.DriverTransmission
+	filesBefore.JobKey, filesAfter.JobKey = job.Hash, job.Hash
+	filesBefore.SavePath, filesAfter.SavePath = job.SavePath, job.SavePath
+	filesBefore.ContentPath, filesAfter.ContentPath = job.ContentPath, job.ContentPath
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		Client: ClientBracket{
+			Requested: true, Before: &before, After: &after, RequestsMade: 6,
+			FileLayoutMode: "auto", FileLimits: limits, FileAttempted: true, FileRequestsMade: 2,
+			FilesBefore: &filesBefore, FilesAfter: &filesAfter,
+		},
+		PathMapping: &PathMappingOptions{HostRoot: hostRoot, ClientRoot: "/downloads"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "consistent" || report.Ledgers.Downloader.Driver != downloader.DriverTransmission || relationStatus(report, "verified_source_vs_job_path") != "same_location" {
+		t.Fatalf("Transmission v1 layout did not reconcile: %#v", report)
+	}
+	clientRelation := relationByKind(report, "client_infohash_relation")
+	pathRelation := relationByKind(report, "verified_source_vs_job_path")
+	if !containsString(clientRelation.EvidenceBasis, "transmission_hash_string_sha1") ||
+		!containsString(pathRelation.EvidenceBasis, "transmission_effective_file_path_claims") ||
+		!containsString(pathRelation.EvidenceBasis, "transmission_wanted_claims") {
+		t.Fatalf("Transmission evidence basis was not preserved: client=%#v path=%#v", clientRelation, pathRelation)
+	}
+}
+
+func TestTransmissionCannotForgeV2Identity(t *testing.T) {
+	job := downloader.Torrent{
+		Hash: strings.Repeat("a", 40), InfoHashV2: strings.Repeat("b", 64), IdentityStatus: downloader.IdentityStatusValid,
+		IdentityEvidence: []string{"transmission_hash_string_sha1"}, IdentityIssues: []string{}, Name: "bundle", State: "uploading",
+	}
+	if validLedgerJobs(downloader.DriverTransmission, []downloader.Torrent{job}) {
+		t.Fatal("Transmission hash_string was accepted as a v2 identity")
+	}
+}
+
 func TestMultiFileSnapshotMutationIsIncomplete(t *testing.T) {
 	meta, discovery, source, hostRoot := reconciledMultiFile(t)
 	_, before, after, filesBefore, filesAfter, limits := stableMultiFileBracket(meta)
@@ -478,4 +525,13 @@ func containsString(items []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func relationByKind(report Report, kind string) Relation {
+	for _, relation := range report.Relations {
+		if relation.Kind == kind {
+			return relation
+		}
+	}
+	return Relation{}
 }

@@ -176,11 +176,11 @@ one operation-bound store identity.
 `--metafile-store/--metafile-variant`. It never enumerates by site/ref or picks
 the newest record. The adapter ref/origin/route is revalidated before any
 downloader password read or request. A valid binding is historical evidence
-only and cannot upgrade incomplete storage/client/path axes or make
-qBittorrent's raw private metafile observable.
+only and cannot upgrade incomplete storage/client/path axes or make the
+downloader's raw private metafile observable.
 
-When live site detail and qBittorrent are requested together, reconciliation
-requires `--credential-bundle-stdin` and accepts exactly:
+When live site detail and a read-only downloader are requested together,
+reconciliation requires `--credential-bundle-stdin` and accepts exactly:
 
 ```json
 {"schema":"ptctl.credentials/v1","site_cookie":"SID=...","downloader_password":"..."}

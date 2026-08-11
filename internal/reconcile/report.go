@@ -339,6 +339,7 @@ func Build(input BuildInput) (Report, error) {
 	report.Ledgers.Storage = storageLedger
 
 	client := assessClientBracket(meta, input.Client, input.ShowAbsolutePaths, clientWindows)
+	clientEvidence, _ := downloader.DescribeLedgerDriver(client.ledger.Driver)
 	fileLayout := assessClientFileLayout(meta, client.job, input.Client, clientWindows, input.ShowAbsolutePaths)
 	client.ledger.FileLayout = fileLayout.ledger
 	report.Ledgers.Downloader = client.ledger
@@ -419,7 +420,7 @@ func Build(input BuildInput) (Report, error) {
 				}
 				fileLayout.ledger.FindingOverflow += mismatchOverflow
 				pathRelation.EvidenceLevel = "lexical"
-				pathRelation.EvidenceBasis = append(pathRelation.EvidenceBasis, "qbittorrent_effective_file_path_claims", "qbittorrent_selection_claims", "bracketed_file_layout", "invocation_scoped_namespace_mapping", "lexical_comparison_only")
+				pathRelation.EvidenceBasis = append(pathRelation.EvidenceBasis, clientEvidence.FilePathBasis, clientEvidence.FileSelectionBasis, "bracketed_file_layout", "invocation_scoped_namespace_mapping", "lexical_comparison_only")
 				pathRelation.LeftIDs = []string{clientPathSetID("verified-source", expectedPaths)}
 				pathRelation.RightIDs = []string{fileLayout.snapshotID}
 				if len(mismatches) == 0 && mismatchOverflow == 0 {
@@ -452,7 +453,7 @@ func Build(input BuildInput) (Report, error) {
 				pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.client_content_path_invalid")
 			} else {
 				pathRelation.EvidenceLevel = "lexical"
-				pathRelation.EvidenceBasis = append(pathRelation.EvidenceBasis, "invocation_scoped_namespace_mapping", "qbittorrent_content_path_claim", "lexical_comparison_only")
+				pathRelation.EvidenceBasis = append(pathRelation.EvidenceBasis, "invocation_scoped_namespace_mapping", clientEvidence.ContentPathBasis, "lexical_comparison_only")
 				pathRelation.LeftIDs = []string{expected.public(input.ShowAbsolutePaths)}
 				pathRelation.RightIDs = []string{claimed.public(input.ShowAbsolutePaths)}
 				if expected.equal(claimed) {
@@ -524,7 +525,8 @@ func assessClientBracket(meta *metafile.MetaInfo, bracket ClientBracket, showAbs
 		return result
 	}
 	before, after := bracket.Before, bracket.After
-	if bracket.RequestsMade != 3+bracket.FileRequestsMade {
+	descriptor, knownDriver := downloader.DescribeLedgerDriver(before.Driver)
+	if !knownDriver || bracket.RequestsMade != descriptor.OpenRequests+2+bracket.FileRequestsMade {
 		result.ledger.StopReason = "client_snapshot_incomplete"
 		result.relation.Status = "incomplete"
 		result.relation.BlockerCodes = append(result.relation.BlockerCodes, "client.snapshot_incomplete")
@@ -562,7 +564,7 @@ func assessClientBracket(meta *metafile.MetaInfo, bracket ClientBracket, showAbs
 	result.ledger.Status = "observed_stable"
 	result.relation.Status = second.status
 	result.relation.EvidenceLevel = "client_claim"
-	result.relation.EvidenceBasis = append(result.relation.EvidenceBasis, "qbittorrent_magnet_uri_xt", "bracketed_before_and_after_storage_proof", "non_atomic_observation")
+	result.relation.EvidenceBasis = append(result.relation.EvidenceBasis, descriptor.IdentityBasis, "bracketed_before_and_after_storage_proof", "non_atomic_observation")
 	for _, item := range second.exact {
 		result.relation.RightIDs = append(result.relation.RightIDs, jobID(item.Hash))
 	}
@@ -586,17 +588,20 @@ func assessClientBracket(meta *metafile.MetaInfo, bracket ClientBracket, showAbs
 }
 
 func validLedgerBracket(before, after downloader.LedgerSnapshot) bool {
-	if !before.Complete || !after.Complete || before.Driver != "qbittorrent" || after.Driver != before.Driver || before.Capabilities != after.Capabilities {
+	if _, ok := downloader.DescribeLedgerDriver(before.Driver); !ok || !before.Complete || !after.Complete || after.Driver != before.Driver || before.Capabilities != after.Capabilities {
 		return false
 	}
 	if before.ObservedAtStart.IsZero() || before.ObservedAtEnd.IsZero() || after.ObservedAtStart.IsZero() || after.ObservedAtEnd.IsZero() ||
 		before.ObservedAtEnd.Before(before.ObservedAtStart) || after.ObservedAtStart.Before(before.ObservedAtEnd) || after.ObservedAtEnd.Before(after.ObservedAtStart) {
 		return false
 	}
-	return validLedgerJobs(before.Jobs) && validLedgerJobs(after.Jobs)
+	return validLedgerJobs(before.Driver, before.Jobs) && validLedgerJobs(after.Driver, after.Jobs)
 }
 
-func validLedgerJobs(jobs []downloader.Torrent) bool {
+func validLedgerJobs(driver string, jobs []downloader.Torrent) bool {
+	if _, ok := downloader.DescribeLedgerDriver(driver); !ok {
+		return false
+	}
 	if len(jobs) > maxLedgerJobs {
 		return false
 	}
@@ -626,8 +631,38 @@ func validLedgerJobs(jobs []downloader.Torrent) bool {
 		default:
 			return false
 		}
+		if !validDriverIdentityClaim(driver, job) {
+			return false
+		}
 	}
 	return true
+}
+
+func validDriverIdentityClaim(driver string, job downloader.Torrent) bool {
+	switch driver {
+	case downloader.DriverQBittorrent:
+		if job.IdentityStatus != downloader.IdentityStatusValid {
+			return true
+		}
+		var hasV1Evidence, hasV2Evidence bool
+		for _, evidence := range job.IdentityEvidence {
+			switch evidence {
+			case "magnet_xt_btih_hex", "magnet_xt_btih_base32":
+				hasV1Evidence = true
+			case "magnet_xt_btmh_sha256":
+				hasV2Evidence = true
+			}
+		}
+		return (job.InfoHashV1 == "" || hasV1Evidence) && (job.InfoHashV2 == "" || hasV2Evidence)
+	case downloader.DriverTransmission:
+		if job.IdentityStatus != downloader.IdentityStatusValid || job.InfoHashV1 == "" || job.InfoHashV2 != "" || len(job.IdentityEvidence) != 1 ||
+			job.IdentityEvidence[0] != "transmission_hash_string_sha1" || len(job.IdentityIssues) != 0 {
+			return false
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func validLedgerIdentityItems(values []string) bool {
@@ -1200,7 +1235,7 @@ func safeIdentityEvidence(values []string) []string {
 	result := make([]string, 0, 3)
 	for _, value := range values {
 		switch value {
-		case "magnet_xt_btih_hex", "magnet_xt_btih_base32", "magnet_xt_btmh_sha256":
+		case "magnet_xt_btih_hex", "magnet_xt_btih_base32", "magnet_xt_btmh_sha256", "transmission_hash_string_sha1":
 			result = append(result, value)
 		}
 	}

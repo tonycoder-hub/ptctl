@@ -117,17 +117,17 @@ capabilities at the edge, not assumptions in the core domain model.
 - an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
   bounded GET with no redirect or retry and publishing the strictly validated
   exact response only into an initialized private metafile store;
-- qBittorrent status and torrent-list reads over HTTPS (or explicit numeric
-  loopback HTTP), with passwords accepted only through stdin;
+- qBittorrent and Transmission status and torrent-list reads over HTTPS (or
+  explicit numeric loopback HTTP), with passwords accepted only through stdin;
 - read-only reconciliation that can first observe one authenticated live site
-  detail page, then brackets storage proof with two qBittorrent ledger
-  snapshots from one login, stream-decodes a bounded job ledger,
-  extracts typed v1/v2 claims from bounded magnet `xt` fields, and reports
-  variant, infohash, content-proof, and path relations as separate evidence
-  axes;
-- bounded qBittorrent per-file ledgers for one uniquely identified ordinary
-  multi-file job, with stable index/size/selection/completion checks and
-  per-binding host-to-client path comparison;
+  detail page, then brackets storage proof with two snapshots from one audited
+  read-only downloader session, stream-decodes a bounded job ledger, and
+  reports variant, infohash, content-proof, and path relations as separate
+  evidence axes; qBittorrent supplies typed v1/v2 magnet claims while
+  Transmission supplies only its full SHA-1/v1 `hash_string` claim;
+- bounded qBittorrent or Transmission per-file ledgers for one uniquely
+  identified ordinary multi-file job, with stable index, size, selection,
+  completion, and per-binding host-to-client path checks;
 - explicitly acknowledged exact qBittorrent stopped-job adoption downstream
   of a current materialized-final proof, with typed queue-absence gating, a
   durable request-intent journal, one non-retried add POST, after-ledger/path
@@ -582,11 +582,19 @@ link, fetch the metafile, or persist an observation. Its display title, optional
 peer counts, and matching internal link are current site claims, not metafile
 identity or storage-content proof.
 
-Read qBittorrent state:
+Read downloader state (read-only commands support qBittorrent and
+Transmission):
 
 ```bash
 printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client status \
+  --driver qbittorrent \
   --url https://seedbox.example \
+  --username admin \
+  --password-stdin
+
+printf '%s' "$TRANSMISSION_PASSWORD" | ptctl client list \
+  --driver transmission \
+  --url https://seedbox.example/transmission/rpc \
   --username admin \
   --password-stdin
 ```
@@ -1010,12 +1018,14 @@ for a hardlinked inode, an empty/padding entry, or a downloader job, and no
 report claims reclaimed storage or rollback. Execution JSON kind is
 `content.source_retirement`.
 
-Reconcile one exact metafile with verified bytes and qBittorrent's read-only
-ledger. The password is used for one login; two bounded torrent-list reads
-bracket the storage proof. For one unique ordinary multi-file job, `auto` mode
-attempts up to two bounded per-file reads around that proof; the second is sent
-only after a complete first read. The complete path is serial, makes at most
-five HTTP requests including login, and never retries.
+Reconcile one exact metafile with verified bytes and an audited downloader's
+read-only ledger. Two bounded torrent-list reads bracket the storage proof. For
+one unique ordinary multi-file job, `auto` mode attempts up to two bounded
+per-file reads around that proof; the second is sent only after a complete
+first read. The qBittorrent path uses one login and makes at most five HTTP
+requests. Transmission deliberately uses the first CSRF 409 as a version
+handshake, performs one version read, and makes at most six HTTP requests. Both
+paths are serial and never automatically retry.
 No pause, recheck, move, add, or filesystem write is performed.
 
 ```bash
@@ -1039,14 +1049,25 @@ The [qBittorrent WebUI API torrent-list fields](https://github.com/qbittorrent/q
 are treated as untrusted client claims. Its generic `hash` remains an opaque
 job locator. Typed identities come only from strictly parsed `xt=urn:btih:...` and
 `xt=urn:btmh:1220...` claims; the complete magnet URI is immediately
-discarded because it may contain tracker or web-seed secrets. A declared
+discarded because it may contain tracker or web-seed secrets.
+
+Transmission 4.0.x uses the legacy 5.3.x RPC protocol; Transmission 4.1 and
+later use JSON-RPC 2.0 with snake-case fields. The adapter determines that
+choice from the official CSRF version header, then checks the session-reported
+version. Its complete 40-hex [`hash_string`](https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md#33-torrent-accessor-torrent_get)
+is an explicit v1/SHA-1 claim only: it is never truncated, length-guessed into
+v2, or allowed to make a pure-v2 or hybrid job exact. A later 409, redirect,
+unknown protocol major, or server that omits the opening CSRF handshake fails
+closed without replay.
+
+A declared
 `--site-ref` does not contact the site and is never presented as a verified
-metafile binding. qBittorrent does not expose the raw private metafile through
-this ledger, so `metafile_variant_relation` remains `unobservable` even when
+metafile binding. Neither read adapter exposes the raw private metafile through
+its ledger, so `metafile_variant_relation` remains `unobservable` even when
 typed infohashes agree.
 
 To observe that remote ID live without a downloader, add
-`--site-cookie-stdin`. To observe both the site and qBittorrent in one command,
+`--site-cookie-stdin`. To observe both the site and a downloader in one command,
 use `--credential-bundle-stdin` instead of the two single-secret flags and pipe
 one bounded strict JSON object:
 
@@ -1068,17 +1089,19 @@ When `--site-binding-record` is explicit, the site axis is accepted only from
 a same-invocation opaque authority produced by jointly re-reading the sealed
 record and its referenced whole-raw private artifact. It is reported as a
 historical exact-response observation; it never upgrades incomplete storage,
-client, or path evidence and never changes qBittorrent's raw-metafile
+client, or path evidence and never changes the downloader's raw-metafile
 unobservability. Binding verification happens before downloader password stdin
 or any downloader request.
 
-For an ordinary multi-file job, the bounded
+For an ordinary multi-file job, qBittorrent's bounded
 [torrent-contents endpoint](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-contents)
-supplies indexed relative paths, sizes, progress, seed state, and selection
-priority. `auto` reads it only for one uniquely identified job, once before and
-once after local proof. Every index must remain stable, agree with the
-metafile, be selected and complete, and map exactly from the same-call verified
-host source into qBittorrent's lexical namespace. Any nonempty file attribute
+or Transmission's ordered
+[`files` and `file_stats`](https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md#33-torrent-accessor-torrent_get)
+supplies indexed relative paths, sizes, progress, seed state, and selection.
+`auto` reads only the one uniquely identified job, once before and once after
+local proof. Every index must remain stable, agree with the metafile, be
+selected and complete, and map exactly from the same-call verified host source
+into the downloader's lexical namespace. Any nonempty file attribute
 (including padding or symlink semantics) and non-padding empty files remain
 unsupported for this full-layout claim.
 Use `--client-file-layout off` to retain a partial report without the two file
@@ -1209,7 +1232,7 @@ See [THREAT_MODEL.md](docs/THREAT_MODEL.md).
                      |          |              |
              Site adapters  Client adapters  Storage inventory
                   |              |                 |
-                TJUPT       qBittorrent       local/mounted*
+                TJUPT    qBittorrent/Transmission  local/mounted*
 ```
 
 `*` A mounted remote is not seedable merely because it can be listed. Random

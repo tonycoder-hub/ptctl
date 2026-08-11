@@ -79,9 +79,10 @@ func normalizeClientFileLayoutMode(requested bool, value string) (string, error)
 // The opaque key is a same-session locator, not BitTorrent identity, and Build
 // independently revalidates both outer ledger snapshots.
 func SelectExactJobForFileRead(meta *metafile.MetaInfo, snapshot downloader.LedgerSnapshot, limits downloader.JobFileLedgerLimits) (string, bool) {
+	_, knownDriver := downloader.DescribeLedgerDriver(snapshot.Driver)
 	if meta == nil || !meta.MultiFile || limits.Validate() != nil || len(meta.Files) > limits.MaxFiles || !manifestSupportsClientFileLayout(meta) ||
-		!snapshot.Complete || snapshot.Driver != "qbittorrent" || !snapshot.Capabilities.TypedInfoHashes || !snapshot.Capabilities.ContentPath || !snapshot.Capabilities.JobFiles ||
-		snapshot.ObservedAtStart.IsZero() || snapshot.ObservedAtEnd.Before(snapshot.ObservedAtStart) || !validLedgerJobs(snapshot.Jobs) {
+		!knownDriver || !snapshot.Complete || !snapshot.Capabilities.TypedInfoHashes || !snapshot.Capabilities.ContentPath || !snapshot.Capabilities.JobFiles ||
+		snapshot.ObservedAtStart.IsZero() || snapshot.ObservedAtEnd.Before(snapshot.ObservedAtStart) || !validLedgerJobs(snapshot.Driver, snapshot.Jobs) {
 		return "", false
 	}
 	assessment := assessSnapshot(meta, snapshot)
@@ -190,7 +191,7 @@ func assessClientFileLayout(meta *metafile.MetaInfo, job *downloader.Torrent, br
 		result.incomplete = true
 		return result
 	}
-	if !validJobFileBracket(bracket, job.Hash, limits) {
+	if !validJobFileBracket(bracket, *job, limits) {
 		result.ledger.Status = "incomplete"
 		result.ledger.StopReasons = append(result.ledger.StopReasons, "client_file_snapshot_incomplete")
 		result.incomplete = true
@@ -299,13 +300,25 @@ func (result *clientFileLayoutAssessment) compareManifest(meta *metafile.MetaInf
 	result.manifestOK = !result.conflict && !result.incomplete && len(result.paths) == len(meta.Files)
 }
 
-func validJobFileBracket(bracket ClientBracket, jobKey string, limits downloader.JobFileLedgerLimits) bool {
+func validJobFileBracket(bracket ClientBracket, job downloader.Torrent, limits downloader.JobFileLedgerLimits) bool {
 	if bracket.Before == nil || bracket.After == nil || bracket.FilesBefore == nil || bracket.FilesAfter == nil || bracket.FileRequestsMade != 2 {
 		return false
 	}
 	beforeFiles, afterFiles := *bracket.FilesBefore, *bracket.FilesAfter
 	if !validJobFileSnapshot(beforeFiles, limits) || !validJobFileSnapshot(afterFiles, limits) || beforeFiles.Driver != bracket.Before.Driver || afterFiles.Driver != bracket.After.Driver ||
-		beforeFiles.JobKey != jobKey || afterFiles.JobKey != jobKey {
+		beforeFiles.JobKey != job.Hash || afterFiles.JobKey != job.Hash {
+		return false
+	}
+	switch beforeFiles.Driver {
+	case downloader.DriverQBittorrent:
+		if beforeFiles.SavePath != "" || beforeFiles.ContentPath != "" || afterFiles.SavePath != "" || afterFiles.ContentPath != "" {
+			return false
+		}
+	case downloader.DriverTransmission:
+		if beforeFiles.SavePath != job.SavePath || afterFiles.SavePath != job.SavePath || beforeFiles.ContentPath != job.ContentPath || afterFiles.ContentPath != job.ContentPath {
+			return false
+		}
+	default:
 		return false
 	}
 	return !beforeFiles.ObservedAtStart.Before(bracket.Before.ObservedAtEnd) &&
@@ -314,10 +327,10 @@ func validJobFileBracket(bracket ClientBracket, jobKey string, limits downloader
 }
 
 func validJobFileSnapshot(snapshot downloader.JobFileLedgerSnapshot, limits downloader.JobFileLedgerLimits) bool {
-	if !snapshot.Complete || snapshot.Driver != "qbittorrent" || !validOpaqueJobKey(snapshot.JobKey) || snapshot.Limits != limits || limits.Validate() != nil ||
+	if _, ok := downloader.DescribeLedgerDriver(snapshot.Driver); !ok || !snapshot.Complete || !validOpaqueJobKey(snapshot.JobKey) || snapshot.Limits != limits || limits.Validate() != nil ||
 		snapshot.ObservedAtStart.IsZero() || snapshot.ObservedAtEnd.Before(snapshot.ObservedAtStart) || len(snapshot.Files) > limits.MaxFiles ||
 		snapshot.Used.ResponseBytes <= 0 || snapshot.Used.ResponseBytes > limits.MaxResponseBytes || snapshot.Used.PathBytes < 0 || snapshot.Used.PathBytes > limits.MaxPathBytes ||
-		snapshot.Used.FilesConsidered != len(snapshot.Files) {
+		snapshot.Used.FilesConsidered != len(snapshot.Files) || !validPrivateClaimPath(snapshot.SavePath) || !validPrivateClaimPath(snapshot.ContentPath) {
 		return false
 	}
 	seenIndex := make(map[int]struct{}, len(snapshot.Files))
@@ -355,6 +368,18 @@ func validJobFileSnapshot(snapshot downloader.JobFileLedgerSnapshot, limits down
 		seenPath[pathKey] = struct{}{}
 	}
 	return pathBytes == snapshot.Used.PathBytes
+}
+
+func validPrivateClaimPath(value string) bool {
+	if len(value) > maxLedgerPathBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character == utf8.RuneError || unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func jobFileSignature(files []downloader.JobFile) string {

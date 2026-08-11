@@ -73,6 +73,57 @@ type LedgerCapabilities struct {
 	JobFiles        bool `json:"job_files"`
 }
 
+const (
+	DriverQBittorrent  = "qbittorrent"
+	DriverTransmission = "transmission"
+)
+
+// LedgerDriver opens a bounded, read-only observation session. Mutation ports
+// remain separate so adding a read adapter cannot accidentally authorize
+// pause, move, recheck, add, or delete operations.
+type LedgerDriver interface {
+	OpenReadSession(context.Context, Credential) (LedgerSession, error)
+}
+
+// LedgerEvidenceDescriptor is a built-in, code-owned description of the
+// normalized claims a driver can make. Reports must not derive evidence labels
+// from untrusted snapshot strings.
+type LedgerEvidenceDescriptor struct {
+	Driver             string
+	IdentityBasis      string
+	ContentPathBasis   string
+	FilePathBasis      string
+	FileSelectionBasis string
+	OpenRequests       int
+}
+
+// DescribeLedgerDriver recognizes only audited built-in adapters. Snapshot
+// capabilities alone never make an unknown driver authoritative.
+func DescribeLedgerDriver(driver string) (LedgerEvidenceDescriptor, bool) {
+	switch driver {
+	case DriverQBittorrent:
+		return LedgerEvidenceDescriptor{
+			Driver:             DriverQBittorrent,
+			IdentityBasis:      "qbittorrent_magnet_uri_xt",
+			ContentPathBasis:   "qbittorrent_content_path_claim",
+			FilePathBasis:      "qbittorrent_effective_file_path_claims",
+			FileSelectionBasis: "qbittorrent_selection_claims",
+			OpenRequests:       1,
+		}, true
+	case DriverTransmission:
+		return LedgerEvidenceDescriptor{
+			Driver:             DriverTransmission,
+			IdentityBasis:      "transmission_hash_string_sha1",
+			ContentPathBasis:   "transmission_download_dir_and_name_claim",
+			FilePathBasis:      "transmission_effective_file_path_claims",
+			FileSelectionBasis: "transmission_wanted_claims",
+			OpenRequests:       2,
+		}, true
+	default:
+		return LedgerEvidenceDescriptor{}, false
+	}
+}
+
 // LedgerSnapshot is one bounded observation of downloader jobs. Observation
 // timestamps bracket the complete request and parse, rather than pretending
 // that all jobs were sampled atomically.
@@ -152,6 +203,8 @@ type JobFileLedgerUsage struct {
 type JobFileLedgerSnapshot struct {
 	Driver          string              `json:"driver"`
 	JobKey          string              `json:"-"`
+	SavePath        string              `json:"-"`
+	ContentPath     string              `json:"-"`
 	ObservedAtStart time.Time           `json:"observed_at_start"`
 	ObservedAtEnd   time.Time           `json:"observed_at_end"`
 	Complete        bool                `json:"complete"`
@@ -161,8 +214,9 @@ type JobFileLedgerSnapshot struct {
 }
 
 // LedgerSession reuses one authenticated read-only downloader session. The
-// request count includes authentication. Close releases idle connections and
-// must not perform an effectful logout request.
+// request count includes every session-opening handshake or authentication
+// request. Close releases idle connections and must not perform an effectful
+// logout request.
 type LedgerSession interface {
 	ReadLedger(context.Context) (LedgerSnapshot, error)
 	ReadJobFiles(context.Context, string, JobFileLedgerLimits) (JobFileLedgerSnapshot, error)

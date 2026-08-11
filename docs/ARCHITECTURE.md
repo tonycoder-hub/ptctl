@@ -50,7 +50,8 @@ internal/site
 
 internal/downloader
     normalized client state
-        `-- qbittorrent
+        |-- qbittorrent
+        `-- transmission
 ```
 
 The core never imports a concrete site or downloader implementation. Site
@@ -115,15 +116,25 @@ both. Names, sizes, progress, state, save path, and generic hash length never
 establish identity. The magnet URI is discarded after parsing because its
 tracker or web-seed parameters may contain credentials.
 
-The job array is decoded incrementally: the job limit is checked before row
-N+1 is decoded, and each object has its own field-count cap. Duplicate JSON
+Transmission's `hash_string` is a complete SHA-1 infohash and is normalized as
+an algorithm-tagged v1 claim only. It is never interpreted as v2, truncated,
+or combined with names, sizes, progress, state, or paths to infer another
+identity family. Consequently Transmission can establish an exact client job
+for a pure-v1 metafile, but a pure-v2 or hybrid metafile remains incomplete.
+Protocol 5.3.x uses Transmission's legacy request envelope and field names;
+protocol 6.x uses JSON-RPC 2.0 and snake case. The first CSRF 409 version header
+selects the envelope, and the following session read must confirm it.
+
+Each adapter's job array is decoded incrementally: the job limit is checked
+before row N+1 is decoded, and each object has its own field-count cap. Duplicate JSON
 fields and duplicate opaque job keys fail the snapshot. State is reduced to a
-known qBittorrent code or `unknown`, so untrusted free text cannot become
-report output.
+known normalized code or `unknown`, so untrusted free text cannot become report
+output. Evidence labels and opening request budgets come from code-owned
+descriptors for audited built-in drivers, never from snapshot text.
 
 The downloader adapter does not expose raw private metafile bytes, so equal
 typed infohash claims still leave `metafile_variant_relation=unobservable`.
-Likewise, qBittorrent paths are untrusted remote claims: they are parsed only
+Likewise, downloader paths are untrusted remote claims: they are parsed only
 for lexical comparison and are never opened as host paths. The path relation
 can become consistent for a single-file job in a stable, complete seeding state
 whose reported size agrees with the metafile. For an ordinary multi-file job it
@@ -131,7 +142,10 @@ additionally requires two stable, complete indexed file observations: every row
 must match its manifest index and size, remain selected and complete, and have
 an effective path equal to the independently projected verified source
 binding. The qBittorrent path contract is fixed as `save_path` plus the returned
-relative file path; `content_path` must be a consistent ancestor. The
+relative file path; `content_path` must be a consistent ancestor. Transmission
+uses `download_dir` plus the current `name` as its content root and
+`download_dir` plus each ordered `files[].name` as the effective file path;
+the paired `file_stats` row supplies selection and completion. The
 implementation never tries alternate path formulas until one happens to match.
 
 Expected paths are projected from the opaque same-call `VerifiedSource`, not
@@ -183,9 +197,9 @@ invocation to show that the selected remote-ID page was observed. It does not
 bind the site ID to a whole-raw metafile variant, cannot replace the historical
 exact fetch binding, and cannot upgrade any local or downloader evidence axis.
 
-Downloader ledgers negotiate normalized capabilities separately:
+Downloader ledgers expose normalized capabilities separately:
 algorithm-tagged infohashes, content paths, raw metafiles, and indexed job
-files. The qBittorrent adapter declares indexed job files only when it can
+files. Both built-in read adapters declare indexed job files only when they can
 supply all required path, size, progress, selection, and seed-state fields;
 partial rows do not become a weaker “supported” layout.
 
