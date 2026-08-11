@@ -228,6 +228,23 @@ to `incomplete`; they never fall back to a raw path. A successful relation is
 observations rather than an atomic snapshot. Optional downloader snapshots
 enclose both local proofs.
 
+Explicit activation reconciliation adds two IDs, not a historical lookup or a
+new downloader read. Before credential input, the selected canonical terminal
+activation journal is checked against the requested metafile, materialize
+operation/plan, downloader driver/configuration, path-mapping fingerprint,
+path semantics, and fixed file-ledger limits. Its `VerifiedCompletion` is
+process-local and proves only historical attribution. Once the current exact
+final has been established inside the existing client bracket,
+`CurrentUseAuthority` independently validates that same bracket's unique typed
+job, opaque job ID, complete stable state, save/content mapping, and, for
+multi-file jobs, every stable selected/complete effective path. It does not send
+another request. Public completion/current-use DTOs do not carry either
+authority. Historical success cannot upgrade an absent, ambiguous, conflicting,
+unstable, incomplete, active, or differently located current claim. Requested
+history that remains unbound prevents consistency; two independently valid but
+disagreeing selectors/configurations are reported as conflict rather than
+journal corruption.
+
 ### Filesystem escape, races, and corruption
 
 Search roots must be explicit, non-overlapping directories. Inventory does not

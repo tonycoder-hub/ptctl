@@ -177,7 +177,7 @@ Usage:
   ptctl client remove prune --target PATH --expect-removal-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client remove forget --target PATH --expect-removal-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
-  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--output table|json]
+  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--activation-operation ID --activation-plan-id ID] [--output table|json]
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
@@ -336,9 +336,9 @@ func (a *app) reconcileReport(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--activation-operation ID --activation-plan-id ID] [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
+		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. Optional activation selectors read one canonical terminal activation journal and bind it to the already requested current exact downloader job without another client request; historical activation, current client claims, and local content proof remain separate axes. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. Exact stopped adoption and reviewed existing-job recheck/start support both built-in drivers; Transmission mutation authority is v1-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
@@ -354,6 +354,8 @@ func (a *app) reconcileReport(args []string) error {
 	materializeTarget := fs.String("target", "", "materialize target root; requires --materialize-operation and --materialize-plan-id")
 	materializeOperationValue := fs.String("materialize-operation", "", "explicit committed or retained materialize operation ID; requires --target and --materialize-plan-id")
 	materializePlanID := fs.String("materialize-plan-id", "", "reviewed materialize plan ID; requires --target and --materialize-operation")
+	activationOperationValue := fs.String("activation-operation", "", "explicit terminal client-activation operation ID; requires materialized-final, client, and mapping selectors")
+	activationPlanID := fs.String("activation-plan-id", "", "reviewed client-activation plan ID; requires --activation-operation")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
 	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
@@ -413,11 +415,15 @@ func (a *app) reconcileReport(args []string) error {
 	exactRequested := explicit["source"]
 	indexedRequested := explicit["state-store"] || explicit["storage-profile"] || explicit["snapshot-record"]
 	materializedRequested := explicit["target"] || explicit["materialize-operation"] || explicit["materialize-plan-id"]
+	activationRequested := explicit["activation-operation"] || explicit["activation-plan-id"]
 	if exactRequested && *exactSource == "" {
 		return usageError("reconcile report requires --source to be non-empty")
 	}
 	if materializedRequested && (!explicit["target"] || !explicit["materialize-operation"] || !explicit["materialize-plan-id"] || *materializeTarget == "" || *materializeOperationValue == "" || *materializePlanID == "") {
 		return usageError("materialized-final mode requires non-empty --target, --materialize-operation, and --materialize-plan-id")
+	}
+	if activationRequested && (!explicit["activation-operation"] || !explicit["activation-plan-id"] || *activationOperationValue == "" || *activationPlanID == "") {
+		return usageError("client-activation mode requires non-empty --activation-operation and --activation-plan-id")
 	}
 	if !exactRequested && len(searchRoots) == 0 && !indexedRequested && !materializedRequested {
 		return usageError("reconcile report requires --source, --search-root, stored-profile mode, or the complete materialized-final selector")
@@ -466,6 +472,17 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("--materialize-plan-id requires a canonical reviewed plan ID")
 		}
 		materializeOperation = parsedOperation
+	}
+	var activationOperation clientactivate.OperationID
+	if activationRequested {
+		parsedOperation, parseErr := clientactivate.ParseOperationID(*activationOperationValue)
+		if parseErr != nil {
+			return usageError("--activation-operation requires a canonical operation ID")
+		}
+		if !validMaterializePlanID(*activationPlanID) {
+			return usageError("--activation-plan-id requires a canonical reviewed plan ID")
+		}
+		activationOperation = parsedOperation
 	}
 	var explicitDescriptor metastore.RecordID
 	if explicit["snapshot-record"] {
@@ -601,12 +618,31 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("reconcile report path mapping is invalid: %v", err)
 		}
 	}
+	if activationRequested {
+		if !materializedRequested || !clientRequested || !mappingRootsRequested {
+			return usageError("client-activation reconciliation requires the complete materialized-final, client, and host/client mapping selectors")
+		}
+		if *clientFileLayout != "auto" || clientFileLimits != downloader.DefaultJobFileLedgerLimits() {
+			return usageError("client-activation reconciliation requires --client-file-layout=auto and the default bounded client file limits")
+		}
+	}
 
 	var clientAdapter downloader.LedgerDriver
+	var clientConfigID string
 	if clientRequested {
 		clientAdapter, err = newReadOnlyDownloaderDriver(*driverName, *endpoint)
 		if err != nil {
 			return usageError("reconcile report downloader endpoint is invalid: %v", err)
+		}
+		if activationRequested {
+			configured, ok := clientAdapter.(configuredLedgerDriver)
+			if !ok {
+				return usageError("reconcile report downloader configuration identity is unavailable")
+			}
+			clientConfigID, err = configured.ClientConfigID(*username)
+			if err != nil {
+				return usageError("reconcile report downloader configuration is invalid")
+			}
 		}
 	}
 	var siteDetailReader site.TorrentDetailReader
@@ -638,6 +674,39 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	activationSelection := reconcile.ClientActivationSelection{Requested: activationRequested}
+	var verifiedActivation *clientactivate.VerifiedCompletion
+	activationGateFailed := false
+	activationIntegrityFailed := false
+	if activationRequested {
+		verified, _, completionErr := clientactivate.VerifyCompletion(ctx, clientactivate.CompletionProofOptions{
+			TargetRoot: *materializeTarget, OperationID: activationOperation, ExpectedPlanID: *activationPlanID,
+		})
+		if completionErr != nil {
+			activationSelection.StopReason = reconciliationActivationStopReason(ctx, completionErr)
+			activationGateFailed = true
+			activationIntegrityFailed = activationSelection.StopReason == "activation_completion_integrity_failed"
+		} else {
+			plan := verified.Plan()
+			semantics := "posix_exact"
+			if *clientStyle == "windows" {
+				semantics = "windows_exact"
+			}
+			mappingID := reconcile.PathMappingFingerprint(reconcile.PathMappingOptions{
+				HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows",
+			})
+			if plan.Driver != *driverName || plan.ClientConfigID != clientConfigID || plan.PathMappingID != mappingID ||
+				plan.ClientPathSemantics != semantics || plan.FileLimits != clientFileLimits ||
+				plan.MetafileVariantID != meta.MetafileVariantID || plan.InfoHashV1 != meta.InfoHashV1 || plan.InfoHashV2 != meta.InfoHashV2 ||
+				plan.MaterializeOperationID != materializeOperation.String() || plan.MaterializePlanID != *materializePlanID {
+				activationSelection.StopReason = "activation_completion_selector_mismatch"
+				activationGateFailed = true
+			} else {
+				verifiedActivation = verified
+				activationSelection.Completion = verified
+			}
+		}
+	}
 	var indexedRepository *storageindex.Repository
 	var indexedProfile storageindex.Profile
 	var indexedDescriptorID metastore.RecordID
@@ -699,7 +768,7 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	var siteCredential site.Credential
 	var clientCredential downloader.Credential
-	if !siteBindingGateFailed {
+	if !siteBindingGateFailed && !activationGateFailed {
 		switch {
 		case siteDetailRequested && clientRequested:
 			siteCredential, clientCredential, err = readReconciliationCredentialBundle(a.stdin, *username)
@@ -716,6 +785,8 @@ func (a *app) reconcileReport(args []string) error {
 	if siteDetailRequested {
 		if siteBindingGateFailed {
 			siteDetailSelection.StopReason = "site_detail_skipped_by_binding_gate"
+		} else if activationGateFailed {
+			siteDetailSelection.StopReason = "site_detail_skipped_by_prerequisite_gate"
 		} else {
 			siteDetailSelection = readReconciliationSiteDetail(ctx, siteDetailReader, siteDetailConfig, *siteRef, siteCredential)
 		}
@@ -726,13 +797,13 @@ func (a *app) reconcileReport(args []string) error {
 		FileLayoutMode: *clientFileLayout,
 		FileLimits:     clientFileLimits,
 	}
-	if clientRequested && siteBindingGateFailed {
+	if clientRequested && (siteBindingGateFailed || activationGateFailed) {
 		bracket.StopReason = "client_snapshot_incomplete"
 	}
 	var session downloader.LedgerSession
 	var fileJobKey string
 	fileBeforeComplete := false
-	if clientRequested && !siteBindingGateFailed {
+	if clientRequested && !siteBindingGateFailed && !activationGateFailed {
 		session, err = clientAdapter.OpenReadSession(ctx, clientCredential)
 		if err != nil {
 			session = nil
@@ -805,6 +876,16 @@ func (a *app) reconcileReport(args []string) error {
 		if finalErr != nil {
 			materializedSelection.StopReason = reconciliationMaterializedFinalStopReason(ctx, finalErr, verifiedFinal != nil)
 			materializedFinalIntegrityFailed = errors.Is(finalErr, materialize.ErrIntegrity) || errors.Is(finalErr, materialize.ErrCorruptJournal)
+		} else if activationRequested && verifiedActivation != nil {
+			currentUse, prepareErr := clientactivate.PrepareCurrentUse(verifiedFinal, verifiedActivation, clientactivate.CurrentUseOptions{
+				ClientConfigID: clientConfigID, HostRoot: *hostRoot, ClientRoot: *clientRoot,
+				ClientWindows: *clientStyle == "windows", FileLimits: clientFileLimits,
+			})
+			if prepareErr != nil {
+				activationSelection.StopReason = "activation_completion_selector_mismatch"
+			} else {
+				activationSelection.CurrentUse = currentUse
+			}
 		}
 	} else if exactRequested {
 		discovery, discoveryErr = seed.ObserveExactSource(ctx, meta, *exactSource, seed.ExactSourceOptions{
@@ -876,6 +957,7 @@ func (a *app) reconcileReport(args []string) error {
 		SiteBinding:       siteSelection,
 		SiteDetail:        siteDetailSelection,
 		MaterializedFinal: materializedSelection,
+		ClientActivation:  activationSelection,
 		PathMapping:       reportMapping,
 		ShowAbsolutePaths: *showAbsolute,
 	})
@@ -895,6 +977,9 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if materializedFinalIntegrityFailed {
 		return &integrityErr{message: "the explicit materialize operation or current final layout failed integrity verification"}
+	}
+	if activationIntegrityFailed {
+		return &integrityErr{message: "the explicit terminal client-activation journal failed integrity verification"}
 	}
 	if *requireReconciled && report.Outcome != "consistent" {
 		return &inconclusiveErr{message: "reconciliation outcome is not consistent"}
@@ -932,6 +1017,19 @@ func siteBindingLoadStopReason(err error) string {
 		return "site_binding_integrity_failed"
 	default:
 		return "site_binding_load_failed"
+	}
+}
+
+func reconciliationActivationStopReason(ctx context.Context, err error) string {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil:
+		return "activation_context_cancelled"
+	case errors.Is(err, clientactivate.ErrIntegrity):
+		return "activation_completion_integrity_failed"
+	case errors.Is(err, clientactivate.ErrPolicy), errors.Is(err, clientactivate.ErrOperationNotFound):
+		return "activation_completion_load_failed"
+	default:
+		return "activation_completion_load_failed"
 	}
 }
 
@@ -1961,6 +2059,31 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(materialized.StopReason))
 	}
 
+	activation := report.Ledgers.Activation
+	activationOperation, activationPlan, terminalMarker, terminalPhase := "-", "-", "-", "-"
+	activationStart, activationEnd, currentUseID, currentJob, currentLayout := "-", "-", "-", "-", "-"
+	if activation.Completion != nil {
+		activationOperation = shortID(activation.Completion.OperationID)
+		activationPlan = activation.Completion.PlanID
+		terminalMarker = shortID(activation.Completion.TerminalMarkerID)
+		terminalPhase = activation.Completion.TerminalPhase
+		activationStart = activation.Completion.ObservedAtStart.Format(time.RFC3339Nano)
+		activationEnd = activation.Completion.ObservedAtEnd.Format(time.RFC3339Nano)
+	}
+	if activation.CurrentUse != nil {
+		currentUseID = shortID(activation.CurrentUse.UseID)
+		currentJob = shortID(activation.CurrentUse.JobID)
+		currentLayout = shortID(activation.CurrentUse.FileLayoutID)
+	}
+	fmt.Fprintf(w, "\nCLIENT ACTIVATION\nREQUESTED\t%t\nSTATUS\t%s\nOPERATION\t%s\nPLAN\t%s\nTERMINAL MARKER\t%s\nTERMINAL PHASE\t%s\nHISTORICAL\t%t\nPROCESS-LOCAL COMPLETION PROOF\t%t\nPROCESS-LOCAL CURRENT-USE BRIDGE\t%t\nCURRENT USE\t%s\nCURRENT JOB\t%s\nCURRENT FILE LAYOUT\t%s\nHISTORICAL OBSERVED START\t%s\nHISTORICAL OBSERVED END\t%s\n",
+		report.Scope.ClientActivationRequested, terminalSafe(activation.Status), terminalSafe(activationOperation), terminalSafe(activationPlan),
+		terminalSafe(terminalMarker), terminalSafe(terminalPhase), activation.Historical, activation.ProcessLocalCompletionProof,
+		activation.ProcessLocalCurrentUseProof, terminalSafe(currentUseID), terminalSafe(currentJob), terminalSafe(currentLayout),
+		terminalSafe(activationStart), terminalSafe(activationEnd))
+	if activation.StopReason != "" {
+		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(activation.StopReason))
+	}
+
 	siteID := "-"
 	if report.Ledgers.Site.Ref != nil {
 		siteID = report.Ledgers.Site.Ref.SiteID + "/" + report.Ledgers.Site.Ref.RemoteID
@@ -1993,6 +2116,15 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 	}
 	fmt.Fprintf(w, "storage\t%s\t%s\t%s\n", terminalSafe(report.Ledgers.Storage.Status), terminalSafe(shortID(storageID)), terminalSafe(storageSummary))
 	fmt.Fprintf(w, "downloader\t%s\t%s\trequests=%d; jobs=%d/%d\n", terminalSafe(report.Ledgers.Downloader.Status), terminalSafe(downloaderID), report.Ledgers.Downloader.RequestsMade, report.Ledgers.Downloader.JobsExaminedBefore, report.Ledgers.Downloader.JobsExaminedAfter)
+	activationSummary := "not requested"
+	activationID := "-"
+	if activation.Completion != nil {
+		activationID = shortID(activation.Completion.OperationID)
+		activationSummary = fmt.Sprintf("historical=%t; current-use bridge=%t", activation.Historical, activation.ProcessLocalCurrentUseProof)
+	} else if report.Scope.ClientActivationRequested {
+		activationSummary = "explicit terminal activation could not be verified"
+	}
+	fmt.Fprintf(w, "client activation\t%s\t%s\t%s\n", terminalSafe(activation.Status), terminalSafe(activationID), terminalSafe(activationSummary))
 
 	fileLayout := report.Ledgers.Downloader.FileLayout
 	fileStops := strings.Join(fileLayout.StopReasons, ",")

@@ -1287,6 +1287,42 @@ downloader before/after reads enclose both. A damaged final is reported before
 the command returns integrity exit `3`. `--source`, live search roots, a stored
 profile selector, and this materialized-final selector are mutually exclusive.
 
+To require attribution to one canonical terminal client-activation journal,
+add its explicit reviewed selectors to materialized-final reconciliation:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
+  --metafile-store .ptctl-private \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\Seed" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --host-root 'D:\Seed' \
+  --client-root /downloads \
+  --client-style posix \
+  --output json
+```
+
+Both activation flags are required together. This mode also requires the full
+materialized-final, client, and path-mapping selectors, `client-file-layout=auto`,
+and the fixed default file-ledger limits used by activation. The command reads
+the terminal journal and checks its metafile, materialize, driver, client
+configuration, and mapping IDs before reading the password or contacting the
+downloader. It then validates the activation against the same existing
+Before/After downloader bracket; it sends no additional request. The
+`client_activation` ledger reports historical completion proof and current-use
+bridge proof separately. Historical activation never upgrades infohash,
+storage-content, or lexical-path evidence. Missing or unbound requested history
+is incomplete, a positive selector/configuration/final disagreement is a
+conflict, and journal corruption retains integrity exit `3` after the report.
+Serialized output cannot recreate either process-local authority.
+
 The [qBittorrent WebUI API torrent-list fields](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-list)
 are treated as untrusted client claims. Its generic `hash` remains an opaque
 job locator. Typed identities come only from strictly parsed `xt=urn:btih:...` and

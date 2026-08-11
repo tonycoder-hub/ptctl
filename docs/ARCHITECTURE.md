@@ -79,6 +79,22 @@ second afterward only when the first completed. The outer job observations and
 successful inner file observations form a serial bracket, not an atomic
 transaction.
 
+An optional explicit `--activation-operation/--activation-plan-id` pair is
+available only with materialized-final mode, the complete downloader group, and
+one host/client mapping. The terminal activation journal is read before any
+downloader credential or request. Its process-local `VerifiedCompletion`
+authority establishes historical attribution only. After the exact final has
+been proved inside the ordinary downloader bracket, `PrepareCurrentUse` creates
+an opaque bridge that revalidates the already-read Before/After job and file
+snapshots without another request. The report therefore keeps terminal
+activation history, current typed client claims, and current local content/path
+proof as three independent axes. A valid historical journal cannot make an
+absent, ambiguous, conflicting, unstable, incomplete, or differently located
+job consistent. A requested activation that cannot be bound prevents overall
+consistency; a positive selector/configuration/final mismatch is a conflict.
+Public JSON retains only normalized IDs, times, states, and assurances and
+cannot recreate either process-local capability.
+
 The metafile input is exactly one of an ordinary `--torrent FILE` or the paired
 `--metafile-store DIR --metafile-variant ID` selector. A stored object is
 bounded, re-hashed, and parsed before reconciliation begins. The selection does

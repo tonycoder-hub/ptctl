@@ -131,6 +131,40 @@ func TestRequestedMaterializedFinalCannotFallBackToOrdinaryExactSourceProof(t *t
 	}
 }
 
+func TestClientActivationRequestFailsClosedAndSanitizesUntrustedStopReason(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	const canary = "ACTIVATION-STOP-SECRET-CANARY"
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ClientActivation: ClientActivationSelection{Requested: true, StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "incomplete" || report.Ledgers.Activation.Status != "incomplete" ||
+		report.Ledgers.Activation.StopReason != "activation_completion_load_failed" ||
+		report.Ledgers.Activation.ProcessLocalCompletionProof || report.Ledgers.Activation.ProcessLocalCurrentUseProof ||
+		strings.Contains(string(raw), canary) {
+		t.Fatalf("unsafe activation failure report: %s", raw)
+	}
+
+	unexpected, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ClientActivation: ClientActivationSelection{StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unexpected.Outcome != "incomplete" || unexpected.Ledgers.Activation.StopReason != "activation_unexpected_activity" ||
+		!containsFinding(unexpected.Blockers, "activation.input_inconsistent") {
+		t.Fatalf("unexpected activation activity was ignored: %#v", unexpected)
+	}
+}
+
 func containsFinding(values []ReportFinding, code string) bool {
 	for _, value := range values {
 		if value.Code == code {
@@ -328,10 +362,18 @@ func TestOverallConflictOutranksAmbiguityAcrossAxes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true); got != "conflict" {
+			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false); got != "conflict" {
 				t.Fatalf("positive contradiction was hidden by ambiguity: got %q", got)
 			}
 		})
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, "selected_activation_mismatch", true); got != "conflict" {
+		t.Fatalf("activation mismatch did not gate the lattice: %q", got)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true); got != "incomplete" {
+		t.Fatalf("unbound requested activation did not make the report incomplete: %q", got)
 	}
 }
 

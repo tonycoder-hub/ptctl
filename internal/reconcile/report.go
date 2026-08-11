@@ -55,8 +55,30 @@ type BuildInput struct {
 	SiteBinding       SiteBindingSelection
 	SiteDetail        SiteDetailSelection
 	MaterializedFinal MaterializedFinalSelection
+	ClientActivation  ClientActivationSelection
 	PathMapping       *PathMappingOptions
 	ShowAbsolutePaths bool
+}
+
+// ClientActivationCompletionProof is implemented only by a process-local
+// activation completion authority. Its public view remains historical and
+// cannot by itself establish a current downloader job.
+type ClientActivationCompletionProof interface {
+	ReconciliationCompletion() (ClientActivationCompletion, bool)
+}
+
+// ClientActivationCurrentUseProof is a process-local bridge from one terminal
+// activation authority and one exact materialized final to the downloader
+// snapshots already supplied to this reconciliation. It performs no request.
+type ClientActivationCurrentUseProof interface {
+	ReconcileCurrentUse(ClientBracket) (ClientActivationCurrentUse, bool)
+}
+
+type ClientActivationSelection struct {
+	Requested  bool
+	Completion ClientActivationCompletionProof
+	CurrentUse ClientActivationCurrentUseProof
+	StopReason string
 }
 
 // MaterializedFinalSelection is an explicit same-invocation read of one
@@ -116,14 +138,59 @@ type ReportScope struct {
 	ClientPathSemantics        string `json:"client_path_semantics"`
 	ClientFileLayoutMode       string `json:"client_file_layout_mode"`
 	MaterializedFinalRequested bool   `json:"materialized_final_requested"`
+	ClientActivationRequested  bool   `json:"client_activation_requested"`
 	AbsolutePathsShown         bool   `json:"absolute_paths_shown"`
 }
 
 type ReportLedgers struct {
-	Site       SiteLedger       `json:"site"`
-	Metafile   MetafileLedger   `json:"metafile"`
-	Storage    StorageLedger    `json:"storage"`
-	Downloader DownloaderLedger `json:"downloader"`
+	Site       SiteLedger             `json:"site"`
+	Metafile   MetafileLedger         `json:"metafile"`
+	Storage    StorageLedger          `json:"storage"`
+	Downloader DownloaderLedger       `json:"downloader"`
+	Activation ClientActivationLedger `json:"client_activation"`
+}
+
+type ClientActivationLedger struct {
+	Status                      string                      `json:"status"`
+	Completion                  *ClientActivationCompletion `json:"completion,omitempty"`
+	CurrentUse                  *ClientActivationCurrentUse `json:"current_use,omitempty"`
+	ProcessLocalCompletionProof bool                        `json:"process_local_completion_proof"`
+	ProcessLocalCurrentUseProof bool                        `json:"process_local_current_use_proof"`
+	Historical                  bool                        `json:"historical"`
+	StopReason                  string                      `json:"stop_reason,omitempty"`
+}
+
+type ClientActivationCompletion struct {
+	Driver                 string    `json:"driver"`
+	OperationID            string    `json:"operation_id"`
+	PlanID                 string    `json:"plan_id"`
+	TerminalMarkerID       string    `json:"terminal_marker_id"`
+	Action                 string    `json:"action"`
+	TerminalPhase          string    `json:"terminal_phase"`
+	TerminalJobState       string    `json:"terminal_job_state"`
+	MetafileVariantID      string    `json:"metafile_variant_id"`
+	MaterializeOperationID string    `json:"materialize_operation_id"`
+	MaterializePlanID      string    `json:"materialize_plan_id"`
+	ClientConfigID         string    `json:"client_config_id"`
+	PathMappingID          string    `json:"path_mapping_id"`
+	JobID                  string    `json:"job_id"`
+	FinalObjectIdentity    string    `json:"final_object_identity"`
+	ObservedAtStart        time.Time `json:"observed_at_start"`
+	ObservedAtEnd          time.Time `json:"observed_at_end"`
+	Assurance              string    `json:"assurance"`
+}
+
+type ClientActivationCurrentUse struct {
+	Driver              string    `json:"driver"`
+	UseID               string    `json:"use_id"`
+	JobID               string    `json:"job_id"`
+	FileLayoutID        string    `json:"file_layout_id"`
+	JobState            string    `json:"job_state"`
+	JobProgress         float64   `json:"job_progress"`
+	ObservedAtStart     time.Time `json:"observed_at_start"`
+	ObservedAtEnd       time.Time `json:"observed_at_end"`
+	FinalObjectIdentity string    `json:"final_object_identity"`
+	Assurance           string    `json:"assurance"`
 }
 
 type SiteLedger struct {
@@ -291,6 +358,7 @@ func Build(input BuildInput) (Report, error) {
 			ClientPathSemantics:        pathSemantics,
 			ClientFileLayoutMode:       fileLayoutMode,
 			MaterializedFinalRequested: input.MaterializedFinal.Requested,
+			ClientActivationRequested:  input.ClientActivation.Requested,
 			AbsolutePathsShown:         input.ShowAbsolutePaths,
 		},
 		Relations: []Relation{},
@@ -302,6 +370,9 @@ func Build(input BuildInput) (Report, error) {
 	}
 	if input.MaterializedFinal.Requested {
 		report.Effect = append(report.Effect, "read_materialize_operation_state", "read_materialized_final_content")
+	}
+	if input.ClientActivation.Requested {
+		report.Effect = append(report.Effect, "read_client_activation_operation_state")
 	}
 	if input.SiteDetail.Requested {
 		report.Effect = append(report.Effect, site.TorrentDetailReadEffect)
@@ -530,6 +601,13 @@ func Build(input BuildInput) (Report, error) {
 			}
 		}
 	}
+	activationLedger, activationBlockers, activationWarnings := assessClientActivation(
+		meta, input.ClientActivation, input.MaterializedFinal, materializedLedger, input.Client,
+		client, fileLayout, pathRelation, pathMappingIDValue,
+	)
+	report.Ledgers.Activation = activationLedger
+	report.Blockers = append(report.Blockers, activationBlockers...)
+	report.Warnings = append(report.Warnings, activationWarnings...)
 	report.Relations = []Relation{siteRelation, variantRelation, client.relation, storageRelation, pathRelation}
 
 	for _, code := range client.relation.BlockerCodes {
@@ -541,7 +619,9 @@ func Build(input BuildInput) (Report, error) {
 	if client.active {
 		report.Warnings = append(report.Warnings, "the matching downloader job is active; lexical path agreement does not prove which bytes the client is currently reading")
 	}
-	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, siteDetailLedger.Status, input.SiteDetail.Requested, storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested)
+	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, siteDetailLedger.Status, input.SiteDetail.Requested,
+		storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested,
+		activationLedger.Status, input.ClientActivation.Requested || activationLedger.Status != "not_requested")
 	if report.Outcome == "consistent" {
 		report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_lexical_path_agreement"
 		if meta.MultiFile {
@@ -555,6 +635,9 @@ func Build(input BuildInput) (Report, error) {
 		}
 		if materializedLedger.Status == "verified_current_final_source" {
 			report.Assurance += "_plus_explicit_materialized_final_sequential_local_proof"
+		}
+		if activationLedger.Status == "historical_completion_current_job_bound" {
+			report.Assurance += "_plus_canonical_historical_client_activation_bound_to_current_exact_job"
 		}
 	}
 	report.Blockers = stableFindings(report.Blockers)
@@ -654,6 +737,171 @@ func safeMaterializedFinalStopReason(value string) string {
 	default:
 		return "materialized_final_verification_failed"
 	}
+}
+
+func assessClientActivation(meta *metafile.MetaInfo, selection ClientActivationSelection, materializedSelection MaterializedFinalSelection,
+	materialized MaterializedFinalLedger, bracket ClientBracket, client clientAssessment, fileLayout clientFileLayoutAssessment,
+	pathRelation Relation, currentPathMappingID string) (ClientActivationLedger, []ReportFinding, []string) {
+	ledger := ClientActivationLedger{Status: "not_requested"}
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	hasActivity := selection.Completion != nil || selection.CurrentUse != nil || selection.StopReason != ""
+	if !selection.Requested {
+		if !hasActivity {
+			return ledger, blockers, warnings
+		}
+		ledger.Status = "incomplete"
+		ledger.StopReason = "activation_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "activation.input_inconsistent", Message: "client-activation proof values were supplied without an explicit activation request"})
+		return ledger, blockers, warnings
+	}
+
+	ledger.Status = "incomplete"
+	ledger.StopReason = safeClientActivationStopReason(selection.StopReason)
+	if ledger.StopReason == "activation_completion_integrity_failed" {
+		ledger.Status = "integrity_failed"
+	}
+	if ledger.StopReason == "activation_completion_selector_mismatch" {
+		ledger.Status = "selected_activation_mismatch"
+	}
+	if selection.Completion == nil {
+		blockers = append(blockers, ReportFinding{Code: "activation.completion_proof_unavailable", Message: "the explicit terminal client-activation journal could not be verified in this invocation"})
+		return ledger, blockers, warnings
+	}
+	completion, ok := selection.Completion.ReconciliationCompletion()
+	if !ok || !validClientActivationCompletion(completion) {
+		ledger.Status = "incomplete"
+		if ledger.StopReason == "" {
+			ledger.StopReason = "activation_completion_load_failed"
+		}
+		blockers = append(blockers, ReportFinding{Code: "activation.completion_proof_unavailable", Message: "the terminal client-activation capability is unavailable or invalid"})
+		return ledger, blockers, warnings
+	}
+	ledger.Completion = &completion
+	ledger.ProcessLocalCompletionProof = true
+	ledger.Historical = true
+	warnings = append(warnings, "the terminal client-activation journal is historical evidence and does not by itself prove current downloader state")
+
+	if meta == nil || completion.MetafileVariantID != meta.MetafileVariantID || !materializedSelection.Requested ||
+		materialized.Observation == nil || !materialized.ProcessLocalFinalProof ||
+		completion.MaterializeOperationID != materialized.Observation.OperationID ||
+		completion.MaterializePlanID != materialized.Observation.MaterializePlanID ||
+		completion.FinalObjectIdentity != materialized.Observation.FinalObjectIdentity ||
+		currentPathMappingID == "" || completion.PathMappingID != currentPathMappingID {
+		ledger.Status = "selected_activation_mismatch"
+		ledger.StopReason = "activation_completion_selector_mismatch"
+		blockers = append(blockers, ReportFinding{Code: "activation.selection_mismatch", Message: "the selected terminal activation does not belong to the requested metafile, materialized final, or client path mapping"})
+		return ledger, blockers, warnings
+	}
+	ledger.Status = "historical_completion_current_job_unbound"
+	if selection.StopReason != "" || selection.CurrentUse == nil || client.relation.Status != "exact_unique" || client.job == nil ||
+		pathRelation.Status != "same_location" || !client.contentStable ||
+		materialized.Status != "verified_current_final_source" ||
+		(meta.MultiFile && (fileLayout.ledger.Status != "observed_stable" || !fileLayout.stable || !fileLayout.manifestOK)) {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "activation_current_use_bridge_failed"
+		}
+		blockers = append(blockers, ReportFinding{Code: "activation.current_job_bridge_unavailable", Message: "the historical terminal activation could not be bound to the current exact downloader job and verified materialized layout"})
+		return ledger, blockers, warnings
+	}
+	current, ok := selection.CurrentUse.ReconcileCurrentUse(bracket)
+	if !ok || !validClientActivationCurrentUse(current) || current.Driver != completion.Driver ||
+		current.JobID != completion.JobID || current.JobID != jobID(client.job.Hash) ||
+		current.JobState != safeClientState(client.job.State) || current.JobProgress != client.job.Progress ||
+		current.FinalObjectIdentity != completion.FinalObjectIdentity ||
+		bracket.Before == nil || bracket.After == nil || current.ObservedAtStart != bracket.Before.ObservedAtStart ||
+		current.ObservedAtEnd != bracket.After.ObservedAtEnd {
+		ledger.StopReason = "activation_current_use_bridge_failed"
+		blockers = append(blockers, ReportFinding{Code: "activation.current_job_bridge_unavailable", Message: "the process-local activation bridge does not match this reconciliation's downloader bracket"})
+		return ledger, blockers, warnings
+	}
+	ledger.Status = "historical_completion_current_job_bound"
+	ledger.CurrentUse = &current
+	ledger.ProcessLocalCurrentUseProof = true
+	ledger.StopReason = ""
+	warnings = append(warnings, "activation attribution, current downloader claims, and local content proof are separate sequential non-atomic observations")
+	return ledger, blockers, warnings
+}
+
+func validClientActivationCompletion(value ClientActivationCompletion) bool {
+	if _, ok := downloader.DescribeLedgerDriver(value.Driver); !ok || !validSHA256ID(value.OperationID) || !validPlanID(value.PlanID) ||
+		!validSHA256ID(value.TerminalMarkerID) || !validSHA256ID(value.MetafileVariantID) || !validSHA256ID(value.MaterializeOperationID) ||
+		!validPlanID(value.MaterializePlanID) || !validSHA256ID(value.ClientConfigID) || !validSHA256ID(value.PathMappingID) ||
+		!validSHA256ID(value.JobID) || value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 ||
+		value.ObservedAtStart.IsZero() || value.ObservedAtEnd.Before(value.ObservedAtStart) || safeClientState(value.TerminalJobState) != value.TerminalJobState {
+		return false
+	}
+	if value.Action == "recheck_only" {
+		if value.TerminalPhase != "recheck_complete_stopped" || !activationStoppedCompleteState(value.TerminalJobState) {
+			return false
+		}
+	} else if value.Action == "recheck_then_start" {
+		if value.TerminalPhase != "started_client_claim_observed" || !activationStartedState(value.TerminalJobState) {
+			return false
+		}
+	} else {
+		return false
+	}
+	return value.Assurance == "same_invocation_bound_canonical_terminal_activation_read_without_durability_or_client_refresh" ||
+		value.Assurance == "same_invocation_bound_canonical_activation_retention_tombstone_read_without_durability_or_client_refresh"
+}
+
+func validClientActivationCurrentUse(value ClientActivationCurrentUse) bool {
+	if _, ok := downloader.DescribeLedgerDriver(value.Driver); !ok || !validSHA256ID(value.UseID) || !validSHA256ID(value.JobID) ||
+		!validSHA256ID(value.FileLayoutID) || value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 ||
+		value.JobProgress != 1 || value.ObservedAtStart.IsZero() || value.ObservedAtEnd.Before(value.ObservedAtStart) ||
+		safeClientState(value.JobState) != value.JobState {
+		return false
+	}
+	if !activationStoppedCompleteState(value.JobState) && !activationStartedState(value.JobState) {
+		return false
+	}
+	return value.Assurance == "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_activation_and_exact_final_non_atomic"
+}
+
+func activationStoppedCompleteState(value string) bool {
+	return value == "pausedUP" || value == "stoppedUP"
+}
+
+func activationStartedState(value string) bool {
+	switch value {
+	case "uploading", "queuedUP", "stalledUP", "forcedUP":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeClientActivationStopReason(value string) string {
+	switch value {
+	case "activation_context_cancelled", "activation_completion_integrity_failed", "activation_completion_load_failed",
+		"activation_completion_selector_mismatch", "activation_current_use_bridge_failed", "activation_unexpected_activity":
+		return value
+	case "":
+		return ""
+	default:
+		return "activation_completion_load_failed"
+	}
+}
+
+func validSHA256ID(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	digest := strings.TrimPrefix(value, "sha256:")
+	if strings.ToLower(digest) != digest {
+		return false
+	}
+	decoded, err := hex.DecodeString(digest)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func validPlanID(value string) bool {
+	if len(value) != 24 || strings.ToLower(value) != value {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 12
 }
 
 func assessClientBracket(meta *metafile.MetaInfo, bracket ClientBracket, showAbsolute, windows bool) clientAssessment {
@@ -1203,7 +1451,7 @@ func safeSiteBindingStopReason(value string) string {
 
 func safeSiteDetailStopReason(value string) string {
 	switch value {
-	case "invalid_limits", "invalid_reference", "context_done", "session_closed", "request_budget_exhausted", "request_accounting_invalid", "site_request_failed", "authentication_required", "not_found", "rate_limited", "redirect_rejected", "http_status_rejected", "empty_response", "challenge_response", "unrecognized_response", "content_type_rejected", "invalid_text_encoding", "response_accounting_invalid", "session_open_failed", "session_close_failed", "receipt_inconsistent", "site_detail_observation_incomplete", "site_detail_receipt_inconsistent", "site_detail_reference_missing", "site_detail_skipped_by_binding_gate":
+	case "invalid_limits", "invalid_reference", "context_done", "session_closed", "request_budget_exhausted", "request_accounting_invalid", "site_request_failed", "authentication_required", "not_found", "rate_limited", "redirect_rejected", "http_status_rejected", "empty_response", "challenge_response", "unrecognized_response", "content_type_rejected", "invalid_text_encoding", "response_accounting_invalid", "session_open_failed", "session_close_failed", "receipt_inconsistent", "site_detail_observation_incomplete", "site_detail_receipt_inconsistent", "site_detail_reference_missing", "site_detail_skipped_by_binding_gate", "site_detail_skipped_by_prerequisite_gate":
 		return value
 	case "":
 		return ""
@@ -1235,17 +1483,25 @@ func boundedSiteDetailBytes(value, maximum int64) int64 {
 	return value
 }
 
-func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStatus string, siteDetailRequested bool, storageStatus string, processProof bool, clientStatus, pathStatus string, clientRequested bool) string {
-	if (siteBindingRequested && siteStatus == "integrity_failed") || storageStatus == "integrity_failed" {
+func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStatus string, siteDetailRequested bool, storageStatus string, processProof bool,
+	clientStatus, pathStatus string, clientRequested bool, activationStatus string, activationRequested bool) string {
+	if (siteBindingRequested && siteStatus == "integrity_failed") || storageStatus == "integrity_failed" ||
+		(activationRequested && activationStatus == "integrity_failed") {
 		return "integrity_failed"
 	}
-	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") || clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
+	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") ||
+		(activationRequested && activationStatus == "selected_activation_mismatch") ||
+		clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
 		return "conflict"
 	}
 	if storageStatus == "verified_ambiguous" || clientStatus == "ambiguous" {
 		return "ambiguous"
 	}
-	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") || (siteDetailRequested && siteDetailStatus != "observed_current_ref") || storageStatus == "incomplete" || (verifiedStorageOutcome(storageStatus) && !processProof) || (clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
+	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") ||
+		(siteDetailRequested && siteDetailStatus != "observed_current_ref") ||
+		(activationRequested && activationStatus != "historical_completion_current_job_bound") ||
+		storageStatus == "incomplete" || (verifiedStorageOutcome(storageStatus) && !processProof) ||
+		(clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
 		return "incomplete"
 	}
 	if processProof && clientStatus == "exact_unique" && pathStatus == "same_location" {
@@ -1305,6 +1561,10 @@ func pathMappingID(value PathMappingOptions) string {
 	digest := sha256.Sum256([]byte(strings.Join([]string{"ptctl-path-mapping-v1", style, hostRoot, clientRoot}, "\x00")))
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
+
+// PathMappingFingerprint returns the same invocation-scoped lexical mapping
+// identity recorded by Build. It contains no raw host or client path.
+func PathMappingFingerprint(value PathMappingOptions) string { return pathMappingID(value) }
 
 func physicalBytes(meta *metafile.MetaInfo) int64 {
 	var total int64

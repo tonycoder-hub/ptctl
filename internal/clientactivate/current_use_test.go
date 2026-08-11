@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
+	"github.com/tonycoder-hub/ptctl/internal/reconcile"
 )
 
 type inflatedCurrentUseSession struct{ *activationSession }
@@ -186,12 +187,83 @@ func TestCurrentUseMultiFileReadsOneBoundedFileLedgerPerObservation(t *testing.T
 	}
 }
 
+func TestReconciliationCurrentUseBindsExistingBracketWithoutAnotherRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		fixture func(*testing.T) activationFixture
+	}{
+		{name: "single", fixture: makeActivationFixture},
+		{name: "transmission v1", fixture: makeTransmissionActivationFixture},
+		{name: "multi", fixture: func(t *testing.T) activationFixture {
+			raw, sources := activationMultiV1Metafile()
+			return makeActivationFixtureFrom(t, raw, sources)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := test.fixture(t)
+			completion := completeRecheckOnlyForCurrentUse(t, fixture)
+			hostRoot, err := filepath.EvalSymlinks(fixture.targetRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			limits := downloader.DefaultJobFileLedgerLimits()
+			authority, err := PrepareCurrentUse(fixture.verifiedFinal, completion, CurrentUseOptions{
+				ClientConfigID: fixture.clientConfig, HostRoot: hostRoot, ClientRoot: "/downloads", FileLimits: limits,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			job := fixture.job("stoppedUP", 1)
+			before := activationLedgerForDriver(fixture.driver, fixture.meta, &job, now)
+			after := activationLedgerForDriver(fixture.driver, fixture.meta, &job, now.Add(time.Second))
+			descriptor, _ := downloader.DescribeLedgerDriver(fixture.driver)
+			bracket := reconcile.ClientBracket{Requested: true, Before: &before, After: &after,
+				RequestsMade: descriptor.OpenRequests + 2, FileLayoutMode: "auto", FileLimits: limits}
+			if fixture.meta.MultiFile {
+				filesBefore := completeActivationFileSnapshot(fixture, before.ObservedAtEnd.Add(time.Millisecond))
+				filesAfter := completeActivationFileSnapshot(fixture, filesBefore.ObservedAtEnd.Add(time.Millisecond))
+				after.ObservedAtStart = filesAfter.ObservedAtEnd.Add(time.Millisecond)
+				after.ObservedAtEnd = after.ObservedAtStart.Add(time.Millisecond)
+				bracket.FileAttempted, bracket.FileRequestsMade = true, 2
+				bracket.RequestsMade += 2
+				bracket.FilesBefore, bracket.FilesAfter = &filesBefore, &filesAfter
+			}
+			view, ok := authority.ReconcileCurrentUse(bracket)
+			completionView, completionOK := completion.ReconciliationCompletion()
+			if !ok || !completionOK || view.JobID != completionView.JobID || view.FileLayoutID != completion.Plan().ExpectedFileLayoutID ||
+				view.ObservedAtStart != before.ObservedAtStart || view.ObservedAtEnd != after.ObservedAtEnd || view.JobProgress != 1 {
+				t.Fatalf("completion=%#v current=%#v completionOK=%t currentOK=%t", completionView, view, completionOK, ok)
+			}
+			raw, err := json.Marshal(authority)
+			if err != nil || strings.Contains(string(raw), fixture.opaqueKey) {
+				t.Fatalf("serialized authority leaked client locator: %s err=%v", raw, err)
+			}
+			var replay CurrentUseAuthority
+			if err := json.Unmarshal(raw, &replay); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := replay.ReconcileCurrentUse(bracket); ok {
+				t.Fatal("serialized current-use DTO regained process-local reconciliation authority")
+			}
+			changed := after
+			changed.Jobs = append([]downloader.Torrent(nil), after.Jobs...)
+			changed.Jobs[0].State = "downloading"
+			bracket.After = &changed
+			if _, ok := authority.ReconcileCurrentUse(bracket); ok {
+				t.Fatal("changed downloader bracket retained activation binding")
+			}
+		})
+	}
+}
+
 func completeRecheckOnlyForCurrentUse(t *testing.T, fixture activationFixture) *VerifiedCompletion {
 	t.Helper()
 	now := time.Now().UTC()
 	incomplete := fixture.job("stoppedDL", 0.25)
 	complete := fixture.job("stoppedUP", 1)
-	previewSession := newActivationSession(fixture, activationLedger(fixture.meta, &incomplete, now))
+	previewSession := newActivationSession(fixture, activationLedgerForDriver(fixture.driver, fixture.meta, &incomplete, now))
 	if fixture.meta.MultiFile {
 		previewSession.files = []downloader.JobFileLedgerSnapshot{
 			activationFileSnapshot(fixture, now.Add(2*time.Millisecond), downloader.JobFileSelectionSelected),
@@ -202,8 +274,8 @@ func completeRecheckOnlyForCurrentUse(t *testing.T, fixture activationFixture) *
 		t.Fatal(err)
 	}
 	runSession := newActivationSession(fixture,
-		activationLedger(fixture.meta, &incomplete, now.Add(time.Second)),
-		activationLedger(fixture.meta, &complete, now.Add(2*time.Second)))
+		activationLedgerForDriver(fixture.driver, fixture.meta, &incomplete, now.Add(time.Second)),
+		activationLedgerForDriver(fixture.driver, fixture.meta, &complete, now.Add(2*time.Second)))
 	if fixture.meta.MultiFile {
 		runSession.files = []downloader.JobFileLedgerSnapshot{
 			activationFileSnapshot(fixture, now.Add(time.Second+2*time.Millisecond), downloader.JobFileSelectionSelected),

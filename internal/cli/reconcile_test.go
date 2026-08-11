@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/reconcile"
@@ -654,6 +655,149 @@ func TestReconcileReportExplicitMaterializedFinalBridgesCurrentProofAndRejectsTa
 	assertJSONStringsExclude(t, out.Bytes(), fixture.targetRoot, fixture.sourceRoot, fixture.sourcePath, fixture.finalPath, fixture.torrentPath)
 }
 
+func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExtraRequests(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newClientActivateServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+	var out, errOut bytes.Buffer
+
+	adoptionBase := clientAdoptBaseArgs(fixture, server.server.URL)
+	if code := Run(append([]string{"client", "adopt", "plan"}, adoptionBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adoptionPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	adoptionRun := append([]string{"client", "adopt", "run"}, adoptionBase...)
+	adoptionRun = append(adoptionRun, "--expect-adoption-plan-id", adoptionPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(adoptionRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+
+	activationBase := clientActivateBaseArgs(fixture, server.server.URL, adopted.Data.Operation.ID, adopted.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "activate", "plan"}, activationBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	planned := decodeClientActivateReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	activationRun := append([]string{"client", "activate", "run"}, activationBase...)
+	activationRun = append(activationRun, "--expect-activation-plan-id", planned.Data.Plan.ID, "--acknowledge-client-recheck")
+	if code := Run(activationRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	running := decodeClientActivateReport(t, out.Bytes())
+	server.setState("stoppedUP", 1)
+	out.Reset()
+	errOut.Reset()
+	activationResume := append([]string{"client", "activate", "resume"}, activationBase...)
+	activationResume = append(activationResume, "--expect-activation-plan-id", planned.Data.Plan.ID, running.Data.Operation.ID)
+	if code := Run(activationResume, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	completed := decodeClientActivateReport(t, out.Bytes())
+	if completed.Data.Outcome != clientactivate.OutcomeCheckedStopped || !completed.Data.Journal.RecheckCompletionDurable {
+		t.Fatalf("activation did not reach terminal completion: %s", out.String())
+	}
+
+	reconcileArgs := []string{
+		"reconcile", "report", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
+		"--target", fixture.materialize.targetRoot, "--materialize-operation", fixture.operation,
+		"--materialize-plan-id", fixture.materialize.planID,
+		"--activation-operation", completed.Data.Operation.ID, "--activation-plan-id", completed.Data.Plan.ID,
+		"--driver", "qbittorrent", "--url", server.server.URL, "--username", clientAdoptUser, "--password-stdin",
+		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--timeout", "1m", "--output", "json",
+	}
+	requestsBefore := server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(reconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("reconcile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("activation reconciliation made %d requests; wanted one login plus the existing two-read bracket", delta)
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	activation := response.Data.Ledgers.Activation
+	if response.Data.Outcome != "consistent" || !response.Data.Scope.ClientActivationRequested ||
+		activation.Status != "historical_completion_current_job_bound" || !activation.Historical ||
+		!activation.ProcessLocalCompletionProof || !activation.ProcessLocalCurrentUseProof ||
+		activation.Completion == nil || activation.CurrentUse == nil ||
+		activation.Completion.OperationID != completed.Data.Operation.ID || activation.CurrentUse.JobID != activation.Completion.JobID ||
+		!strings.Contains(response.Data.Assurance, "canonical_historical_client_activation_bound_to_current_exact_job") || len(response.Data.Relations) != 5 {
+		t.Fatalf("activation axis was not kept separate and bound: %s", out.String())
+	}
+	var human bytes.Buffer
+	if err := writeReconciliationHuman(&human, response.Data); err != nil ||
+		!strings.Contains(human.String(), "CLIENT ACTIVATION") ||
+		!strings.Contains(human.String(), "PROCESS-LOCAL CURRENT-USE BRIDGE  true") ||
+		strings.Index(human.String(), "CLIENT ACTIVATION") > strings.Index(human.String(), "LEDGERS") {
+		t.Fatalf("activation table contract is unclear: err=%v\n%s", err, human.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.materialize.targetRoot, fixture.materialize.sourceRoot,
+		fixture.materialize.sourcePath, fixture.materialize.finalPath, fixture.storeRoot, server.server.URL,
+		clientAdoptUser, clientAdoptPassword, clientAdoptJobKey, clientAdoptRoot)
+
+	wrongPlan := strings.Repeat("f", 24)
+	badArgs := append([]string(nil), reconcileArgs...)
+	for index := range badArgs {
+		if index > 0 && badArgs[index-1] == "--activation-plan-id" {
+			badArgs[index] = wrongPlan
+		}
+	}
+	requestsBefore = server.totalRequests()
+	reader := &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(badArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("bad selector code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("mismatched activation selector contacted the downloader")
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "incomplete" || response.Data.Ledgers.Activation.Status != "incomplete" ||
+		response.Data.Ledgers.Activation.StopReason != "activation_completion_load_failed" ||
+		response.Data.Ledgers.Activation.ProcessLocalCompletionProof || response.Data.Ledgers.Activation.ProcessLocalCurrentUseProof {
+		t.Fatalf("mismatched selector was not a report-first incomplete gate: %s", out.String())
+	}
+
+	configMismatch := append([]string(nil), reconcileArgs...)
+	for index := range configMismatch {
+		if index > 0 && configMismatch[index-1] == "--username" {
+			configMismatch[index] = "different-client-config"
+		}
+	}
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(configMismatch, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("config mismatch code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("mismatched client configuration contacted the downloader")
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "conflict" || response.Data.Ledgers.Activation.Status != "selected_activation_mismatch" ||
+		response.Data.Ledgers.Activation.StopReason != "activation_completion_selector_mismatch" {
+		t.Fatalf("positive activation/config mismatch was not a conflict: %s", out.String())
+	}
+}
+
 func TestReconcileReportExactSourceFailureIsStructuredAndPathPrivate(t *testing.T) {
 	torrentPath, sourceRoot, _ := writeReconciliationFixture(t)
 	missing := filepath.Join(sourceRoot, "PTCTL-EXACT-SOURCE-FAILURE-CANARY.bin")
@@ -680,6 +824,8 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	clientGroup := []string{"--driver", "qbittorrent", "--url", "https://seedbox.invalid", "--username", "alice", "--password-stdin"}
 	validMaterializeOperation := "sha256:" + strings.Repeat("a", 64)
 	validMaterializePlan := strings.Repeat("b", 24)
+	validActivationPlan := strings.Repeat("c", 24)
+	validActivationOperation := clientactivate.OperationIDForPlan(validActivationPlan).String()
 	tooManyRoots := []string{"reconcile", "report", "--torrent", torrentPath}
 	for index := 0; index <= storage.DefaultInventoryLimits().MaxRoots; index++ {
 		tooManyRoots = append(tooManyRoots, "--search-root", searchRoot)
@@ -713,6 +859,13 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", "NOT-A-PLAN"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--max-states", "1"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", "bad", "--activation-plan-id", validActivationPlan}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", "BAD"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--max-client-files", "2"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", missingTorrent, "--search-root", searchRoot}, clientGroup...),
 		tooManyRoots,
 	}
