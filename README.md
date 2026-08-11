@@ -677,6 +677,12 @@ ptctl storage map \
 Read TJUPT without putting a cookie in shell history. Stdin must contain the
 complete `Cookie` header value from a session you control. Interactive TTY
 secret input is refused. Do not paste the value into issues, logs, or chat.
+For ordinary `status`, `account`, `search`, and `bonus-catalog` reads, output
+mode, site/capability/authentication support, the declared typed port, and a
+nonblank search query where applicable are all validated before stdin is read.
+Runtime adapter failures are reduced to fixed public diagnostics; cancellation
+and deadlines remain distinguishable, but cookie or response text is never
+forwarded.
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt

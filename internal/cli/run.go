@@ -1619,14 +1619,7 @@ func (a *app) siteRead(command string, args []string) error {
 	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
 		return fmt.Errorf("site %q does not support cookie_header authentication", descriptor.ID)
 	}
-	credential, err := readCredential(a.stdin)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	var data any
+	var read func(context.Context, site.Credential) (any, error)
 	var warnings []string
 	switch command {
 	case "status":
@@ -1634,34 +1627,65 @@ func (a *app) siteRead(command string, args []string) error {
 		if !ok {
 			return fmt.Errorf("site %q declares %q but does not implement its typed port", descriptor.ID, capability)
 		}
-		data, err = reader.CheckSession(ctx, credential)
+		read = func(ctx context.Context, credential site.Credential) (any, error) {
+			return reader.CheckSession(ctx, credential)
+		}
 	case "account":
 		reader, ok := adapter.(site.AccountReader)
 		if !ok {
 			return fmt.Errorf("site %q declares %q but does not implement its typed port", descriptor.ID, capability)
 		}
-		data, err = reader.Account(ctx, credential)
+		read = func(ctx context.Context, credential site.Credential) (any, error) {
+			return reader.Account(ctx, credential)
+		}
 	case "search":
+		query := strings.TrimSpace(strings.Join(fs.Args()[1:], " "))
+		if query == "" {
+			return usageError("site search query is empty")
+		}
 		reader, ok := adapter.(site.TorrentSearcher)
 		if !ok {
 			return fmt.Errorf("site %q declares %q but does not implement its typed port", descriptor.ID, capability)
 		}
-		data, err = reader.Search(ctx, credential, strings.Join(fs.Args()[1:], " "))
+		read = func(ctx context.Context, credential site.Credential) (any, error) {
+			return reader.Search(ctx, credential, query)
+		}
 	case "bonus-catalog":
 		reader, ok := adapter.(site.BonusCatalogReader)
 		if !ok {
 			return fmt.Errorf("site %q declares %q but does not implement its typed port", descriptor.ID, capability)
 		}
-		data, err = reader.BonusCatalog(ctx, credential)
+		read = func(ctx context.Context, credential site.Credential) (any, error) {
+			return reader.BonusCatalog(ctx, credential)
+		}
 		warnings = append(warnings, "catalog is read-only; this command never submits purchase or redemption forms")
+	default:
+		return usageError("unknown site read command %q", command)
 	}
+	credential, err := readCredential(a.stdin)
 	if err != nil {
 		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	data, err := read(ctx, credential)
+	if err != nil {
+		return siteReadPublicError(ctx, command, err)
 	}
 	if *output == "json" {
 		return writeJSON(a.stdout, data, warnings)
 	}
 	return writeSiteHuman(a.stdout, command, data, warnings)
+}
+
+func siteReadPublicError(ctx context.Context, command string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return fmt.Errorf("site %s canceled: %w", command, context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("site %s timed out: %w", command, context.DeadlineExceeded)
+	}
+	return fmt.Errorf("site %s failed", command)
 }
 
 func (a *app) torrent(args []string) error {

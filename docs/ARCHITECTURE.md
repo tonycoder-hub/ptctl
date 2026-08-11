@@ -58,6 +58,11 @@ internal/downloader
 The core never imports a concrete site or downloader implementation. Site
 adapters do not receive filesystem handles, and storage code does not receive
 credentials. TJUPT is one adapter, not a special case in the content model.
+The ordinary site-read CLI resolves the requested capability to its concrete
+typed port before reading credential stdin; search also rejects a blank query
+at that boundary. Adapter runtime errors are normalized to fixed public codes
+while context cancellation and deadlines retain their typed causes, so an
+adapter cannot relay cookie, URL, response-body, or server diagnostic text.
 
 ## Read-only ledger reconciliation
 

@@ -102,6 +102,12 @@ CAPTCHA bypass.
 
 Ordinary status, account, search, bonus catalog/review, and detail reads use the
 same fresh HTTP/1.1, no-reuse, no-redirect transport as the effectful fetch.
+For the shared ordinary read path (`status`, `account`, `search`, and
+`bonus-catalog`), output mode, site/capability/authentication support, the
+actual typed port, and a nonblank search query are checked before credential
+stdin is consumed. Runtime adapter errors are mapped to fixed diagnostics;
+only cancellation and deadline causes are preserved, never arbitrary cookie,
+URL, header, or response text.
 The detail route sends
 only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
 parameter and never follows the download reference found in the page.

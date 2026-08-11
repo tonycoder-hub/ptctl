@@ -197,6 +197,14 @@ input is refused to avoid echoing secrets; callers must use a pipe. A future cre
 must use an OS keyring or an audited pipe-based helper; plaintext fallback will
 not be automatic.
 
+For ordinary `site status`, `site account`, `site search`, and
+`site bonus-catalog`, the CLI validates output mode, the selected adapter's
+capability and cookie authentication declaration, the corresponding typed
+port, and a nonblank search query where relevant before it reads stdin.
+Adapter runtime errors are exposed only as fixed safe diagnostics, with typed
+context cancellation or deadline causes preserved; raw cookie, request, and
+response details do not cross the CLI boundary.
+
 ## Fixtures
 
 Parser tests use synthetic HTML with fictitious users and values, including
