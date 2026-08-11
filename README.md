@@ -158,6 +158,11 @@ capabilities at the edge, not assumptions in the core domain model.
   intent, no fan-out or automatic retry, complete queue-absence observation,
   and another exact materialized-final verification before completion;
   Transmission remains v1-only;
+- explicit read-only reconciliation of one canonical terminal keep-data
+  removal journal or retained tombstone with current typed queue absence in
+  the existing two-read client bracket and current exact materialized-final
+  content; historical removal, current absence, and local bytes remain
+  separate, and a causality-unproven completion cannot reconcile;
 - zero-write source-retirement eligibility planning from a new complete live
   source proof, current exact materialized-final proof, and canonical terminal
   client activation journal, plus stable before/after reads of the exact live
@@ -1327,6 +1332,54 @@ storage-content, or lexical-path evidence. Missing or unbound requested history
 is incomplete, a positive selector/configuration/final disagreement is a
 conflict, and journal corruption retains integrity exit `3` after the report.
 Serialized output cannot recreate either process-local authority.
+
+To reconcile a completed keep-data client removal instead of current client
+use, add the activation lineage plus one explicit removal operation and its
+reviewed plan ID:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
+  --metafile-store .ptctl-private \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\Seed" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --removal-operation sha256:REMOVAL_OPERATION_DIGEST \
+  --removal-plan-id REMOVAL_PLAN_ID \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --host-root 'D:\Seed' \
+  --client-root /downloads \
+  --client-style posix \
+  --output json
+```
+
+Both removal flags are required together and are mutually exclusive with the
+source-retirement selectors in this slice. Before reading the password or
+contacting the downloader, the command verifies the live terminal journal or
+retained removal tombstone and checks its metafile, materialize, activation,
+driver, client-configuration, mapping, job, and layout lineage. Forgetting the
+tombstone deliberately removes this historical authority. Only a completion
+whose accepted removal response was followed by exact queue absence can close
+the removal axis; absence observed after an unknown response remains
+`historical_absence_causality_unproven` and makes the requested report
+`incomplete`.
+
+No extra downloader request is sent. The same Before/After typed ledger reads
+that bracket the exact final must both show the reviewed job absent, so no
+per-file request is attempted. A successful qBittorrent path therefore remains
+one login plus two ledger reads; Transmission remains its two-request
+bootstrap plus two ledger reads. The report keeps exactly five relations and
+adds a separate `client_removal` ledger: `client_infohash_relation` is
+`absent`, `verified_source_vs_job_path` is `not_comparable`, and consistency
+requires the current exact final plus the bound activation and removal
+lineages. It does not claim that the downloader is using the retained bytes,
+that the absence was observed atomically, or that the job cannot reappear
+after return. Public JSON cannot recreate either process-local capability.
 
 To require source-retirement attribution as well, add one explicit terminal
 retirement operation, its reviewed SHA-256 plan ID, and the original source

@@ -169,7 +169,7 @@ func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified
 			"target filesystem semantics were inferred from the host OS, not measured for this storage root",
 			"no host-to-downloader path mapping or downloader job was reconciled",
 			"no site release identity was bound to the local metafile artifact",
-			"journaled materialize requires the reviewed plan ID and repeats exact source verification in the writing invocation",
+			"journaled materialize requires a separately reviewed matching plan ID: seed plan for exact-root mode or seed discover --target for discovered/indexed mode; the writing invocation repeats exact source verification",
 		},
 	}
 	if sourceMode == "exact_root" {

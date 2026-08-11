@@ -245,6 +245,28 @@ history that remains unbound prevents consistency; two independently valid but
 disagreeing selectors/configurations are reported as conflict rather than
 journal corruption.
 
+Explicit keep-data removal reconciliation is also a credential-free historical
+gate. The full operation ID and reviewed plan ID must select one bound terminal
+removal journal or retained tombstone whose metafile, materialize, activation,
+driver/configuration, mapping, typed job, file-layout, and completion lineage
+all agree. This verification happens before secret stdin or downloader I/O.
+Forgetting the tombstone removes this authority; public JSON cannot reconstruct
+it. Only the completion basis that records an accepted response followed by
+exact absence is attributed to the reviewed mutation. An unknown response plus
+later absence is retained as useful history but cannot close the removal axis.
+
+The current-state half reuses the ordinary two-read downloader bracket. Both
+complete typed snapshots must show the reviewed identity absent, built-in
+adapter provenance and exact request accounting must agree, and no file-list
+request is made for a nonexistent job. This creates a separate opaque current-
+absence capability without adding a request. Even when the overall result is
+consistent, it proves only a sequential combination of current exact local
+content, historical attributed keep-data removal, and bracketed typed queue
+absence. It does not prove atomicity, causality beyond the accepted-response
+record, continued absence after return, a client path, or current downloader
+use of the retained bytes. The five relation axes remain unchanged and the
+removal evidence appears in its own ledger.
+
 Explicit source-retirement reconciliation is another credential-free gate.
 It accepts only one full operation ID, its derived reviewed SHA-256 plan ID,
 and the original explicit source-root scope. Before password input or any

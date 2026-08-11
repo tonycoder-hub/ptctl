@@ -258,6 +258,66 @@ func TestReconciliationCurrentUseBindsExistingBracketWithoutAnotherRequest(t *te
 	}
 }
 
+func TestReconciliationCurrentAbsenceBindsExistingBracketWithoutAnotherRequest(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		fixture func(*testing.T) activationFixture
+	}{
+		{name: "single", fixture: makeActivationFixture},
+		{name: "transmission v1", fixture: makeTransmissionActivationFixture},
+		{name: "multi", fixture: func(t *testing.T) activationFixture {
+			raw, sources := activationMultiV1Metafile()
+			return makeActivationFixtureFrom(t, raw, sources)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := test.fixture(t)
+			completion := completeRecheckOnlyForCurrentUse(t, fixture)
+			hostRoot, err := filepath.EvalSymlinks(fixture.targetRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			limits := downloader.DefaultJobFileLedgerLimits()
+			authority, err := PrepareCurrentUse(fixture.verifiedFinal, completion, CurrentUseOptions{
+				ClientConfigID: fixture.clientConfig, HostRoot: hostRoot, ClientRoot: "/downloads", FileLimits: limits,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			before := activationLedgerForDriver(fixture.driver, fixture.meta, nil, now)
+			after := activationLedgerForDriver(fixture.driver, fixture.meta, nil, now.Add(time.Second))
+			descriptor, _ := downloader.DescribeLedgerDriver(fixture.driver)
+			bracket := reconcile.ClientBracket{Requested: true, Before: &before, After: &after,
+				RequestsMade: descriptor.OpenRequests + 2, FileLayoutMode: "auto", FileLimits: limits}
+			view, ok := authority.ReconcileCurrentAbsence(bracket)
+			if !ok || view.UseID != authority.Expectation().UseID || view.JobID != completion.Plan().JobID ||
+				view.FileLayoutID != completion.Plan().ExpectedFileLayoutID || view.ObservedAtStart != before.ObservedAtStart ||
+				view.ObservedAtEnd != after.ObservedAtEnd || view.RequestsMade != bracket.RequestsMade {
+				t.Fatalf("current absence=%#v ok=%t", view, ok)
+			}
+			raw, err := json.Marshal(authority)
+			if err != nil || strings.Contains(string(raw), fixture.opaqueKey) {
+				t.Fatalf("serialized authority leaked client locator: %s err=%v", raw, err)
+			}
+			var replay CurrentUseAuthority
+			if err := json.Unmarshal(raw, &replay); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := replay.ReconcileCurrentAbsence(bracket); ok {
+				t.Fatal("serialized current-use DTO regained absence authority")
+			}
+			present := after
+			job := fixture.job("stoppedUP", 1)
+			present.Jobs = []downloader.Torrent{job}
+			bracket.After = &present
+			if _, ok := authority.ReconcileCurrentAbsence(bracket); ok {
+				t.Fatal("present exact job was accepted as current absence")
+			}
+		})
+	}
+}
+
 func completeRecheckOnlyForCurrentUse(t *testing.T, fixture activationFixture) *VerifiedCompletion {
 	t.Helper()
 	now := time.Now().UTC()

@@ -16,6 +16,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
+	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
@@ -164,6 +165,96 @@ func TestClientActivationRequestFailsClosedAndSanitizesUntrustedStopReason(t *te
 		!containsFinding(unexpected.Blockers, "activation.input_inconsistent") {
 		t.Fatalf("unexpected activation activity was ignored: %#v", unexpected)
 	}
+}
+
+func TestClientRemovalRequestFailsClosedAndSanitizesUntrustedStopReason(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	const canary = "REMOVAL-STOP-SECRET-CANARY"
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ClientRemoval: ClientRemovalSelection{Requested: true, StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "incomplete" || report.Ledgers.Removal.Status != "incomplete" ||
+		report.Ledgers.Removal.StopReason != "removal_completion_load_failed" ||
+		report.Ledgers.Removal.ProcessLocalCompletionProof || strings.Contains(string(raw), canary) {
+		t.Fatalf("unsafe removal failure report: %s", raw)
+	}
+
+	unexpected, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ClientRemoval: ClientRemovalSelection{StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unexpected.Outcome != "incomplete" || unexpected.Ledgers.Removal.StopReason != "removal_unexpected_activity" ||
+		!containsFinding(unexpected.Blockers, "removal.input_inconsistent") {
+		t.Fatalf("unexpected removal activity was ignored: %#v", unexpected)
+	}
+}
+
+func TestClientRemovalAssessmentRequiresAttributedHistoryAndMatchingCurrentAbsence(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	other := "sha256:" + strings.Repeat("b", 64)
+	planID := strings.Repeat("c", 24)
+	now := time.Now().UTC()
+	completion := ClientRemovalCompletion{
+		Driver: downloader.DriverQBittorrent, OperationID: digest, PlanID: planID, IntentID: digest, CompletionID: other,
+		CompletionBasis: "accepted_response_then_exact_absence", UseID: digest, JobID: other,
+		FileLayoutID: digest, CompleteSnapshotID: other, ClientConfigID: digest, PathMappingID: other,
+		ActivationOperationID: digest, ActivationPlanID: planID, ActivationTerminalID: other,
+		MetafileVariantID: digest, MaterializeOperationID: other, MaterializePlanID: planID,
+		TargetRootIdentity: "fsbind-v1:" + strings.Repeat("d", 64), FinalObjectIdentity: "fsbind-v1:" + strings.Repeat("e", 64),
+		ManifestFiles: 1, ContentBytes: 4, ObservedAtStart: now.Add(time.Second), ObservedAtEnd: now.Add(2 * time.Second),
+		Assurance: "same_invocation_bound_canonical_terminal_client_removal_journal_read_without_current_queue_inference",
+	}
+	meta := &metafile.MetaInfo{MetafileVariantID: digest}
+	materialized := MaterializedFinalLedger{Status: "verified_current_final_source", ProcessLocalFinalProof: true,
+		Observation: &materialize.FinalObservation{OperationID: other, MaterializePlanID: planID, MetafileVariantID: digest,
+			TargetRootIdentity: completion.TargetRootIdentity, FinalObjectIdentity: completion.FinalObjectIdentity,
+			ManifestFiles: 1, ContentBytes: 4}}
+	activation := ClientActivationLedger{Status: "historical_completion_current_job_absent", Historical: true,
+		ProcessLocalCompletionProof: true, ProcessLocalCurrentAbsenceProof: true,
+		Completion: &ClientActivationCompletion{Driver: downloader.DriverQBittorrent, OperationID: digest, PlanID: planID,
+			TerminalMarkerID: other, ClientConfigID: digest, PathMappingID: other, JobID: other,
+			ObservedAtStart: now.Add(-time.Second), ObservedAtEnd: now},
+		CurrentAbsence: &ClientActivationCurrentAbsence{Driver: downloader.DriverQBittorrent, UseID: digest, JobID: other,
+			FileLayoutID: digest, CompleteSnapshotID: other, FinalObjectIdentity: completion.FinalObjectIdentity,
+			ObservedAtStart: now.Add(3 * time.Second), ObservedAtEnd: now.Add(4 * time.Second)},
+	}
+	ledger, blockers, _ := assessClientRemoval(meta, ClientRemovalSelection{Requested: true, CompletionAttempted: true,
+		Completion: removalCompletionStub{value: completion}}, materialized, activation)
+	if ledger.Status != "historical_keep_data_removal_current_job_absent" || !ledger.ProcessLocalCompletionProof ||
+		len(blockers) != 0 || ledger.Completion == nil {
+		t.Fatalf("ledger=%#v blockers=%#v", ledger, blockers)
+	}
+
+	completion.CompletionBasis = "exact_absence_after_unknown_attempt_causality_unproven"
+	unattributed, blockers, _ := assessClientRemoval(meta, ClientRemovalSelection{Requested: true, CompletionAttempted: true,
+		Completion: removalCompletionStub{value: completion}}, materialized, activation)
+	if unattributed.Status != "historical_absence_causality_unproven" ||
+		unattributed.StopReason != "removal_absence_causality_unproven" || !containsFinding(blockers, "removal.absence_causality_unproven") {
+		t.Fatalf("unattributed=%#v blockers=%#v", unattributed, blockers)
+	}
+
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"absent", "not_comparable", true, "historical_completion_current_job_absent", true,
+		"historical_keep_data_removal_current_job_absent", true, "not_requested", false); got != "consistent" {
+		t.Fatalf("terminal removal current absence did not close the expected lattice: %q", got)
+	}
+}
+
+type removalCompletionStub struct{ value ClientRemovalCompletion }
+
+func (stub removalCompletionStub) ReconciliationRemovalCompletion() (ClientRemovalCompletion, bool) {
+	return stub.value, true
 }
 
 func TestSourceRetirementRequestFailsClosedAndSanitizesUntrustedStopReason(t *testing.T) {
@@ -450,26 +541,26 @@ func TestOverallConflictOutranksAmbiguityAcrossAxes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false, "not_requested", false); got != "conflict" {
+			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
 				t.Fatalf("positive contradiction was hidden by ambiguity: got %q", got)
 			}
 		})
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "selected_activation_mismatch", true, "not_requested", false); got != "conflict" {
+		"exact_unique", "same_location", true, "selected_activation_mismatch", true, "not_requested", false, "not_requested", false); got != "conflict" {
 		t.Fatalf("activation mismatch did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true, "not_requested", false); got != "incomplete" {
+		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false); got != "incomplete" {
 		t.Fatalf("unbound requested activation did not make the report incomplete: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "historical_completion_current_job_bound", true, "source_name_reappeared", true); got != "conflict" {
+		"exact_unique", "same_location", true, "historical_completion_current_job_bound", true, "not_requested", false, "source_name_reappeared", true); got != "conflict" {
 		t.Fatalf("reappeared retired source name did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
 		"exact_unique", "same_location", true, "historical_completion_current_job_bound", true,
-		"historical_completion_current_absence_unobserved", true); got != "incomplete" {
+		"not_requested", false, "historical_completion_current_absence_unobserved", true); got != "incomplete" {
 		t.Fatalf("unobserved requested retirement absence did not make the report incomplete: %q", got)
 	}
 }

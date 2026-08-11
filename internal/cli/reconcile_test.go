@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
+	"github.com/tonycoder-hub/ptctl/internal/clientremove"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/reconcile"
@@ -946,6 +947,130 @@ func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExt
 		clientAdoptUser, clientAdoptPassword, clientAdoptJobKey, clientAdoptRoot)
 }
 
+func TestReconcileReportBindsTerminalKeepDataRemovalToCurrentQueueAbsenceWithoutExtraRequests(t *testing.T) {
+	fixture := prepareClientRemoveCLIFixture(t)
+	base := clientRemoveBaseArgs(fixture)
+	planned := runClientRemoveJSON(t, append([]string{"client", "remove", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	runArgs := append([]string{"client", "remove", "run"}, base...)
+	runArgs = append(runArgs, "--expect-removal-plan-id", planned.Data.Plan.ID, "--acknowledge-client-removal")
+	removed := runClientRemoveJSON(t, runArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if removed.Data.Outcome != clientremove.OutcomeRemovedKeepData {
+		t.Fatalf("removal did not complete: %#v", removed.Data)
+	}
+
+	reconcileArgs := append([]string{"reconcile", "report"}, base...)
+	reconcileArgs = append(reconcileArgs, "--removal-operation", removed.Data.Operation.ID, "--removal-plan-id", planned.Data.Plan.ID)
+	var out, errOut bytes.Buffer
+	requestsBefore := fixture.server.totalRequests()
+	if code := Run(reconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("removal reconcile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := fixture.server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("removal reconciliation made %d requests; wanted one login plus the existing two-read bracket", delta)
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	removal := response.Data.Ledgers.Removal
+	activation := response.Data.Ledgers.Activation
+	if response.Data.Outcome != "consistent" || !response.Data.Scope.ClientRemovalRequested ||
+		removal.Status != "historical_keep_data_removal_current_job_absent" || !removal.Historical ||
+		!removal.ProcessLocalCompletionProof || removal.Completion == nil || removal.Completion.RetainedTombstone ||
+		removal.Completion.OperationID != removed.Data.Operation.ID || removal.Completion.CompletionBasis != "accepted_response_then_exact_absence" ||
+		activation.Status != "historical_completion_current_job_absent" || activation.CurrentAbsence == nil ||
+		!activation.ProcessLocalCurrentAbsenceProof || activation.ProcessLocalCurrentUseProof || activation.CurrentUse != nil ||
+		relationStatusCLI(response.Data, "client_infohash_relation") != "absent" ||
+		relationStatusCLI(response.Data, "verified_source_vs_job_path") != "not_comparable" ||
+		hasReportFindingCLI(response.Data.Blockers, "client.exact_job_absent") ||
+		hasReportFindingCLI(response.Data.Blockers, "path.client_identity_unavailable") || len(response.Data.Relations) != 5 ||
+		!strings.Contains(response.Data.Assurance, "canonical_historical_keep_data_removal") ||
+		!slices.Contains(response.Data.Effect, "read_client_removal_operation_state") ||
+		!slices.Contains(response.Data.Effect, "read_downloader_state") || slices.Contains(response.Data.Effect, "read_downloader_file_layout") {
+		t.Fatalf("terminal removal was not reconciled as expected current absence: %s", out.String())
+	}
+	var human bytes.Buffer
+	if err := writeReconciliationHuman(&human, response.Data); err != nil ||
+		!strings.Contains(human.String(), "CLIENT REMOVAL (KEEP DATA)") ||
+		!strings.Contains(human.String(), "PROCESS-LOCAL ABSENCE BRIDGE") ||
+		strings.Index(human.String(), "CLIENT REMOVAL (KEEP DATA)") > strings.Index(human.String(), "LEDGERS") {
+		t.Fatalf("removal table contract is unclear: err=%v\n%s", err, human.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.materialized.materialize.targetRoot, fixture.materialized.materialize.sourceRoot,
+		fixture.materialized.materialize.sourcePath, fixture.materialized.materialize.finalPath, fixture.materialized.storeRoot,
+		fixture.server.server.URL, clientAdoptUser, clientAdoptPassword, clientAdoptJobKey, clientAdoptRoot)
+
+	pruneArgs := []string{"client", "remove", "prune", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-removal-plan-id", planned.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", removed.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(pruneArgs, &trackingReader{}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("removal prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	requestsBefore = fixture.server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(reconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retained removal reconcile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := fixture.server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("retained removal reconciliation made %d requests", delta)
+	}
+	response = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "consistent" || response.Data.Ledgers.Removal.Completion == nil ||
+		!response.Data.Ledgers.Removal.Completion.RetainedTombstone ||
+		response.Data.Ledgers.Removal.Status != "historical_keep_data_removal_current_job_absent" {
+		t.Fatalf("retained tombstone lost exact terminal removal authority: %s", out.String())
+	}
+}
+
+func TestReconcileReportDoesNotConsumeCredentialsForHistoricallyUnattributedRemoval(t *testing.T) {
+	fixture := prepareClientRemoveCLIFixture(t)
+	base := clientRemoveBaseArgs(fixture)
+	planned := runClientRemoveJSON(t, append([]string{"client", "remove", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	fixture.server.setRemoveMode("unknown_job_removed")
+	runArgs := append([]string{"client", "remove", "run"}, base...)
+	runArgs = append(runArgs, "--expect-removal-plan-id", planned.Data.Plan.ID, "--acknowledge-client-removal")
+	removed := runClientRemoveJSON(t, runArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if removed.Data.Outcome != clientremove.OutcomeRemovedUnattributed {
+		t.Fatalf("removal was not historically unattributed: %#v", removed.Data)
+	}
+
+	reconcileArgs := append([]string{"reconcile", "report"}, base...)
+	reconcileArgs = append(reconcileArgs, "--removal-operation", removed.Data.Operation.ID, "--removal-plan-id", planned.Data.Plan.ID)
+	reader := &trackingReader{}
+	requestsBefore := fixture.server.totalRequests()
+	var out, errOut bytes.Buffer
+	if code := Run(reconcileArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("unattributed reconcile code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if fixture.server.totalRequests() != requestsBefore {
+		t.Fatal("known-unattributed removal reconciliation contacted the downloader")
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "incomplete" || response.Data.Ledgers.Removal.Status != "historical_absence_causality_unproven" ||
+		response.Data.Ledgers.Removal.StopReason != "removal_absence_causality_unproven" ||
+		!response.Data.Ledgers.Removal.ProcessLocalCompletionProof || response.Data.Ledgers.Removal.Completion == nil ||
+		response.Data.Ledgers.Removal.Completion.CompletionBasis != "exact_absence_after_unknown_attempt_causality_unproven" ||
+		response.Data.Ledgers.Activation.ProcessLocalCurrentAbsenceProof ||
+		!hasReportFindingCLI(response.Data.Blockers, "removal.absence_causality_unproven") ||
+		slices.Contains(response.Data.Effect, "read_downloader_state") {
+		t.Fatalf("unattributed removal was overstated or erased: %s", out.String())
+	}
+}
+
 func TestReconcileReportExactSourceFailureIsStructuredAndPathPrivate(t *testing.T) {
 	torrentPath, sourceRoot, _ := writeReconciliationFixture(t)
 	missing := filepath.Join(sourceRoot, "PTCTL-EXACT-SOURCE-FAILURE-CANARY.bin")
@@ -974,6 +1099,8 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	validMaterializePlan := strings.Repeat("b", 24)
 	validActivationPlan := strings.Repeat("c", 24)
 	validActivationOperation := clientactivate.OperationIDForPlan(validActivationPlan).String()
+	validRemovalPlan := strings.Repeat("e", 24)
+	validRemovalOperation := clientremove.OperationIDForPlan(validRemovalPlan).String()
 	validRetirementPlan := "sha256:" + strings.Repeat("d", 64)
 	validRetirementOperation, err := sourceretire.OperationIDForPlanID(validRetirementPlan)
 	if err != nil {
@@ -1019,6 +1146,10 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--max-client-files", "2"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", "bad", "--removal-plan-id", validRemovalPlan, "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation, "--removal-plan-id", "BAD", "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation, "--removal-plan-id", validRemovalPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String()}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", "bad", "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", "BAD", "--retirement-search-root", searchRoot}, clientGroup...),
@@ -1026,6 +1157,7 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--retirement-allow-network"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation, "--removal-plan-id", validRemovalPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot, "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", missingTorrent, "--search-root", searchRoot}, clientGroup...),
 		tooManyRoots,
 	}
@@ -1082,7 +1214,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--removal-operation") || !strings.Contains(helpOut.String(), "terminal keep-data removal") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 

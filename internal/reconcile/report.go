@@ -56,6 +56,7 @@ type BuildInput struct {
 	SiteDetail        SiteDetailSelection
 	MaterializedFinal MaterializedFinalSelection
 	ClientActivation  ClientActivationSelection
+	ClientRemoval     ClientRemovalSelection
 	SourceRetirement  SourceRetirementSelection
 	PathMapping       *PathMappingOptions
 	ShowAbsolutePaths bool
@@ -75,11 +76,32 @@ type ClientActivationCurrentUseProof interface {
 	ReconcileCurrentUse(ClientBracket) (ClientActivationCurrentUse, bool)
 }
 
+// ClientActivationCurrentAbsenceProof binds the same terminal activation and
+// exact final authority to a complete two-snapshot typed queue absence. It
+// consumes the existing reconciliation bracket and performs no request.
+type ClientActivationCurrentAbsenceProof interface {
+	ReconcileCurrentAbsence(ClientBracket) (ClientActivationCurrentAbsence, bool)
+}
+
 type ClientActivationSelection struct {
-	Requested  bool
-	Completion ClientActivationCompletionProof
-	CurrentUse ClientActivationCurrentUseProof
-	StopReason string
+	Requested      bool
+	Completion     ClientActivationCompletionProof
+	CurrentUse     ClientActivationCurrentUseProof
+	CurrentAbsence ClientActivationCurrentAbsenceProof
+	StopReason     string
+}
+
+// ClientRemovalCompletionProof is implemented only by a process-local read of
+// one canonical terminal keep-data removal journal or retained tombstone.
+type ClientRemovalCompletionProof interface {
+	ReconciliationRemovalCompletion() (ClientRemovalCompletion, bool)
+}
+
+type ClientRemovalSelection struct {
+	Requested           bool
+	CompletionAttempted bool
+	Completion          ClientRemovalCompletionProof
+	StopReason          string
 }
 
 // SourceRetirementCompletionProof is implemented only by a process-local read
@@ -163,6 +185,7 @@ type ReportScope struct {
 	ClientFileLayoutMode       string `json:"client_file_layout_mode"`
 	MaterializedFinalRequested bool   `json:"materialized_final_requested"`
 	ClientActivationRequested  bool   `json:"client_activation_requested"`
+	ClientRemovalRequested     bool   `json:"client_removal_requested"`
 	SourceRetirementRequested  bool   `json:"source_retirement_requested"`
 	AbsolutePathsShown         bool   `json:"absolute_paths_shown"`
 }
@@ -173,7 +196,47 @@ type ReportLedgers struct {
 	Storage    StorageLedger          `json:"storage"`
 	Downloader DownloaderLedger       `json:"downloader"`
 	Activation ClientActivationLedger `json:"client_activation"`
+	Removal    ClientRemovalLedger    `json:"client_removal"`
 	Retirement SourceRetirementLedger `json:"source_retirement"`
+}
+
+type ClientRemovalLedger struct {
+	Status                      string                   `json:"status"`
+	Completion                  *ClientRemovalCompletion `json:"completion,omitempty"`
+	ProcessLocalCompletionProof bool                     `json:"process_local_completion_proof"`
+	Historical                  bool                     `json:"historical"`
+	StopReason                  string                   `json:"stop_reason,omitempty"`
+}
+
+type ClientRemovalCompletion struct {
+	Driver                 string    `json:"driver"`
+	OperationID            string    `json:"operation_id"`
+	PlanID                 string    `json:"plan_id"`
+	IntentID               string    `json:"intent_id"`
+	CompletionID           string    `json:"completion_id"`
+	CompletionBasis        string    `json:"completion_basis"`
+	UseID                  string    `json:"use_id"`
+	JobID                  string    `json:"job_id"`
+	FileLayoutID           string    `json:"file_layout_id"`
+	CompleteSnapshotID     string    `json:"complete_file_snapshot_id"`
+	ClientConfigID         string    `json:"client_config_id"`
+	PathMappingID          string    `json:"path_mapping_id"`
+	ActivationOperationID  string    `json:"activation_operation_id"`
+	ActivationPlanID       string    `json:"activation_plan_id"`
+	ActivationTerminalID   string    `json:"activation_terminal_id"`
+	MetafileVariantID      string    `json:"metafile_variant_id"`
+	MaterializeOperationID string    `json:"materialize_operation_id"`
+	MaterializePlanID      string    `json:"materialize_plan_id"`
+	TargetRootIdentity     string    `json:"target_root_identity"`
+	FinalObjectIdentity    string    `json:"final_object_identity"`
+	MultiFile              bool      `json:"multi_file"`
+	ManifestFiles          int       `json:"manifest_files"`
+	ContentBytes           int64     `json:"content_bytes"`
+	ObservedAtStart        time.Time `json:"observed_at_start"`
+	ObservedAtEnd          time.Time `json:"observed_at_end"`
+	JobsExamined           int       `json:"jobs_examined"`
+	RetainedTombstone      bool      `json:"retained_tombstone"`
+	Assurance              string    `json:"assurance"`
 }
 
 type SourceRetirementLedger struct {
@@ -224,13 +287,15 @@ type SourceRetirementCurrentAbsence struct {
 }
 
 type ClientActivationLedger struct {
-	Status                      string                      `json:"status"`
-	Completion                  *ClientActivationCompletion `json:"completion,omitempty"`
-	CurrentUse                  *ClientActivationCurrentUse `json:"current_use,omitempty"`
-	ProcessLocalCompletionProof bool                        `json:"process_local_completion_proof"`
-	ProcessLocalCurrentUseProof bool                        `json:"process_local_current_use_proof"`
-	Historical                  bool                        `json:"historical"`
-	StopReason                  string                      `json:"stop_reason,omitempty"`
+	Status                          string                          `json:"status"`
+	Completion                      *ClientActivationCompletion     `json:"completion,omitempty"`
+	CurrentUse                      *ClientActivationCurrentUse     `json:"current_use,omitempty"`
+	CurrentAbsence                  *ClientActivationCurrentAbsence `json:"current_absence,omitempty"`
+	ProcessLocalCompletionProof     bool                            `json:"process_local_completion_proof"`
+	ProcessLocalCurrentUseProof     bool                            `json:"process_local_current_use_proof"`
+	ProcessLocalCurrentAbsenceProof bool                            `json:"process_local_current_absence_proof"`
+	Historical                      bool                            `json:"historical"`
+	StopReason                      string                          `json:"stop_reason,omitempty"`
 }
 
 type ClientActivationCompletion struct {
@@ -263,6 +328,21 @@ type ClientActivationCurrentUse struct {
 	JobProgress         float64   `json:"job_progress"`
 	ObservedAtStart     time.Time `json:"observed_at_start"`
 	ObservedAtEnd       time.Time `json:"observed_at_end"`
+	FinalObjectIdentity string    `json:"final_object_identity"`
+	Assurance           string    `json:"assurance"`
+}
+
+type ClientActivationCurrentAbsence struct {
+	Driver              string    `json:"driver"`
+	UseID               string    `json:"use_id"`
+	JobID               string    `json:"job_id"`
+	FileLayoutID        string    `json:"file_layout_id"`
+	CompleteSnapshotID  string    `json:"complete_file_snapshot_id"`
+	ObservedAtStart     time.Time `json:"observed_at_start"`
+	ObservedAtEnd       time.Time `json:"observed_at_end"`
+	RequestsMade        int       `json:"requests_made"`
+	JobsExaminedBefore  int       `json:"jobs_examined_before"`
+	JobsExaminedAfter   int       `json:"jobs_examined_after"`
 	FinalObjectIdentity string    `json:"final_object_identity"`
 	Assurance           string    `json:"assurance"`
 }
@@ -433,6 +513,7 @@ func Build(input BuildInput) (Report, error) {
 			ClientFileLayoutMode:       fileLayoutMode,
 			MaterializedFinalRequested: input.MaterializedFinal.Requested,
 			ClientActivationRequested:  input.ClientActivation.Requested,
+			ClientRemovalRequested:     input.ClientRemoval.Requested,
 			SourceRetirementRequested:  input.SourceRetirement.Requested,
 			AbsolutePathsShown:         input.ShowAbsolutePaths,
 		},
@@ -448,6 +529,9 @@ func Build(input BuildInput) (Report, error) {
 	}
 	if input.ClientActivation.Requested {
 		report.Effect = append(report.Effect, "read_client_activation_operation_state")
+	}
+	if input.ClientRemoval.CompletionAttempted {
+		report.Effect = append(report.Effect, "read_client_removal_operation_state")
 	}
 	if input.SourceRetirement.CompletionAttempted {
 		report.Effect = append(report.Effect, "read_source_retirement_operation_state")
@@ -689,6 +773,12 @@ func Build(input BuildInput) (Report, error) {
 	report.Ledgers.Activation = activationLedger
 	report.Blockers = append(report.Blockers, activationBlockers...)
 	report.Warnings = append(report.Warnings, activationWarnings...)
+	removalLedger, removalBlockers, removalWarnings := assessClientRemoval(
+		meta, input.ClientRemoval, materializedLedger, activationLedger,
+	)
+	report.Ledgers.Removal = removalLedger
+	report.Blockers = append(report.Blockers, removalBlockers...)
+	report.Warnings = append(report.Warnings, removalWarnings...)
 	retirementLedger, retirementBlockers, retirementWarnings := assessSourceRetirement(
 		meta, input.SourceRetirement, materializedLedger, activationLedger,
 	)
@@ -696,6 +786,12 @@ func Build(input BuildInput) (Report, error) {
 	report.Blockers = append(report.Blockers, retirementBlockers...)
 	report.Warnings = append(report.Warnings, retirementWarnings...)
 	report.Relations = []Relation{siteRelation, variantRelation, client.relation, storageRelation, pathRelation}
+	if removalLedger.Status == "historical_keep_data_removal_current_job_absent" {
+		client.relation.BlockerCodes = withoutString(client.relation.BlockerCodes, "client.exact_job_absent")
+		client.relation.EvidenceBasis = append(client.relation.EvidenceBasis, "terminal_keep_data_removal_expected_current_absence")
+		pathRelation.BlockerCodes = withoutString(pathRelation.BlockerCodes, "path.client_identity_unavailable")
+		report.Relations = []Relation{siteRelation, variantRelation, client.relation, storageRelation, pathRelation}
+	}
 
 	for _, code := range client.relation.BlockerCodes {
 		report.Blockers = append(report.Blockers, findingForClientCode(code))
@@ -709,11 +805,16 @@ func Build(input BuildInput) (Report, error) {
 	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, siteDetailLedger.Status, input.SiteDetail.Requested,
 		storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested,
 		activationLedger.Status, input.ClientActivation.Requested || activationLedger.Status != "not_requested",
+		removalLedger.Status, input.ClientRemoval.Requested || removalLedger.Status != "not_requested",
 		retirementLedger.Status, input.SourceRetirement.Requested || retirementLedger.Status != "not_requested")
 	if report.Outcome == "consistent" {
-		report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_lexical_path_agreement"
-		if meta.MultiFile {
-			report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_bracketed_per_file_lexical_path_agreement"
+		if removalLedger.Status == "historical_keep_data_removal_current_job_absent" {
+			report.Assurance = "current_exact_local_content_plus_bracketed_typed_client_absence_and_canonical_historical_keep_data_removal_non_atomic"
+		} else {
+			report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_lexical_path_agreement"
+			if meta.MultiFile {
+				report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_bracketed_per_file_lexical_path_agreement"
+			}
 		}
 		if input.SiteBinding.Requested && siteRelation.Status == "historical_observed_exact_variant" {
 			report.Assurance += "_plus_sealed_historical_site_observation_current_site_mapping_unobservable"
@@ -726,6 +827,9 @@ func Build(input BuildInput) (Report, error) {
 		}
 		if activationLedger.Status == "historical_completion_current_job_bound" {
 			report.Assurance += "_plus_canonical_historical_client_activation_bound_to_current_exact_job"
+		}
+		if activationLedger.Status == "historical_completion_current_job_absent" {
+			report.Assurance += "_plus_canonical_historical_client_activation_bound_to_current_typed_job_absence"
 		}
 		if retirementLedger.Status == "historical_completion_current_absence_observed" {
 			report.Assurance += "_plus_canonical_historical_source_retirement_with_current_bound_name_absence"
@@ -836,7 +940,7 @@ func assessClientActivation(meta *metafile.MetaInfo, selection ClientActivationS
 	ledger := ClientActivationLedger{Status: "not_requested"}
 	blockers := []ReportFinding{}
 	warnings := []string{}
-	hasActivity := selection.Completion != nil || selection.CurrentUse != nil || selection.StopReason != ""
+	hasActivity := selection.Completion != nil || selection.CurrentUse != nil || selection.CurrentAbsence != nil || selection.StopReason != ""
 	if !selection.Requested {
 		if !hasActivity {
 			return ledger, blockers, warnings
@@ -884,6 +988,38 @@ func assessClientActivation(meta *metafile.MetaInfo, selection ClientActivationS
 		blockers = append(blockers, ReportFinding{Code: "activation.selection_mismatch", Message: "the selected terminal activation does not belong to the requested metafile, materialized final, or client path mapping"})
 		return ledger, blockers, warnings
 	}
+	if selection.CurrentUse != nil && selection.CurrentAbsence != nil {
+		ledger.StopReason = "activation_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "activation.input_inconsistent", Message: "current-use and current-absence activation bridges are mutually exclusive"})
+		return ledger, blockers, warnings
+	}
+	if selection.CurrentAbsence != nil {
+		ledger.Status = "historical_completion_current_job_absence_unbound"
+		if selection.StopReason != "" || client.ledger.Status != "observed_stable" || client.relation.Status != "absent" || client.job != nil ||
+			pathRelation.Status != "not_comparable" || materialized.Status != "verified_current_final_source" ||
+			bracket.FileAttempted || bracket.FileRequestsMade != 0 || bracket.FilesBefore != nil || bracket.FilesAfter != nil {
+			if ledger.StopReason == "" {
+				ledger.StopReason = "activation_current_absence_bridge_failed"
+			}
+			blockers = append(blockers, ReportFinding{Code: "activation.current_absence_bridge_unavailable", Message: "the historical terminal activation could not be bound to complete current typed queue absence and the verified materialized final"})
+			return ledger, blockers, warnings
+		}
+		current, ok := selection.CurrentAbsence.ReconcileCurrentAbsence(bracket)
+		if !ok || !validClientActivationCurrentAbsence(current) || current.Driver != completion.Driver ||
+			current.JobID != completion.JobID || current.FinalObjectIdentity != completion.FinalObjectIdentity ||
+			bracket.Before == nil || bracket.After == nil || current.ObservedAtStart != bracket.Before.ObservedAtStart ||
+			current.ObservedAtEnd != bracket.After.ObservedAtEnd || current.RequestsMade != bracket.RequestsMade {
+			ledger.StopReason = "activation_current_absence_bridge_failed"
+			blockers = append(blockers, ReportFinding{Code: "activation.current_absence_bridge_unavailable", Message: "the process-local activation absence bridge does not match this reconciliation's downloader bracket"})
+			return ledger, blockers, warnings
+		}
+		ledger.Status = "historical_completion_current_job_absent"
+		ledger.CurrentAbsence = &current
+		ledger.ProcessLocalCurrentAbsenceProof = true
+		ledger.StopReason = ""
+		warnings = append(warnings, "activation attribution, current typed queue absence, and local content proof are separate sequential non-atomic observations")
+		return ledger, blockers, warnings
+	}
 	ledger.Status = "historical_completion_current_job_unbound"
 	if selection.StopReason != "" || selection.CurrentUse == nil || client.relation.Status != "exact_unique" || client.job == nil ||
 		pathRelation.Status != "same_location" || !client.contentStable ||
@@ -911,6 +1047,96 @@ func assessClientActivation(meta *metafile.MetaInfo, selection ClientActivationS
 	ledger.ProcessLocalCurrentUseProof = true
 	ledger.StopReason = ""
 	warnings = append(warnings, "activation attribution, current downloader claims, and local content proof are separate sequential non-atomic observations")
+	return ledger, blockers, warnings
+}
+
+func assessClientRemoval(meta *metafile.MetaInfo, selection ClientRemovalSelection, materialized MaterializedFinalLedger,
+	activation ClientActivationLedger) (ClientRemovalLedger, []ReportFinding, []string) {
+	ledger := ClientRemovalLedger{Status: "not_requested"}
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	hasActivity := selection.CompletionAttempted || selection.Completion != nil || selection.StopReason != ""
+	if !selection.Requested {
+		if !hasActivity {
+			return ledger, blockers, warnings
+		}
+		ledger.Status = "incomplete"
+		ledger.StopReason = "removal_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "removal.input_inconsistent", Message: "client-removal proof values were supplied without an explicit removal request"})
+		return ledger, blockers, warnings
+	}
+
+	ledger.Status = "incomplete"
+	ledger.StopReason = safeClientRemovalStopReason(selection.StopReason)
+	if ledger.StopReason == "removal_completion_integrity_failed" {
+		ledger.Status = "integrity_failed"
+	}
+	if ledger.StopReason == "removal_completion_selector_mismatch" {
+		ledger.Status = "selected_removal_mismatch"
+	}
+	if !selection.CompletionAttempted || selection.Completion == nil {
+		blockers = append(blockers, ReportFinding{Code: "removal.completion_proof_unavailable", Message: "the explicit terminal keep-data removal journal could not be verified in this invocation"})
+		return ledger, blockers, warnings
+	}
+	completion, ok := selection.Completion.ReconciliationRemovalCompletion()
+	if !ok || !validClientRemovalCompletion(completion) {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "removal_completion_load_failed"
+		}
+		blockers = append(blockers, ReportFinding{Code: "removal.completion_proof_unavailable", Message: "the terminal keep-data removal capability is unavailable or invalid"})
+		return ledger, blockers, warnings
+	}
+	ledger.Completion = &completion
+	ledger.ProcessLocalCompletionProof = true
+	ledger.Historical = true
+	warnings = append(warnings, "the terminal keep-data removal record is historical evidence and does not by itself prove current queue absence")
+
+	if meta == nil || materialized.Observation == nil || !materialized.ProcessLocalFinalProof ||
+		activation.Completion == nil || !activation.ProcessLocalCompletionProof ||
+		completion.MetafileVariantID != meta.MetafileVariantID ||
+		completion.MaterializeOperationID != materialized.Observation.OperationID ||
+		completion.MaterializePlanID != materialized.Observation.MaterializePlanID ||
+		completion.TargetRootIdentity != materialized.Observation.TargetRootIdentity ||
+		completion.FinalObjectIdentity != materialized.Observation.FinalObjectIdentity ||
+		completion.MultiFile != materialized.Observation.MultiFile || completion.ManifestFiles != materialized.Observation.ManifestFiles ||
+		completion.ContentBytes != materialized.Observation.ContentBytes ||
+		completion.Driver != activation.Completion.Driver || completion.ClientConfigID != activation.Completion.ClientConfigID ||
+		completion.PathMappingID != activation.Completion.PathMappingID ||
+		completion.ActivationOperationID != activation.Completion.OperationID ||
+		completion.ActivationPlanID != activation.Completion.PlanID ||
+		completion.ActivationTerminalID != activation.Completion.TerminalMarkerID ||
+		completion.JobID != activation.Completion.JobID || completion.ObservedAtStart.Before(activation.Completion.ObservedAtEnd) {
+		ledger.Status = "selected_removal_mismatch"
+		ledger.StopReason = "removal_completion_selector_mismatch"
+		blockers = append(blockers, ReportFinding{Code: "removal.selection_mismatch", Message: "the selected terminal keep-data removal does not belong to the requested metafile, materialized final, or activation lineage"})
+		return ledger, blockers, warnings
+	}
+	if completion.CompletionBasis != "accepted_response_then_exact_absence" {
+		ledger.Status = "historical_absence_causality_unproven"
+		ledger.StopReason = "removal_absence_causality_unproven"
+		blockers = append(blockers, ReportFinding{Code: "removal.absence_causality_unproven", Message: "the historical exact absence followed an unknown request result and cannot be attributed to the reviewed keep-data removal"})
+		return ledger, blockers, warnings
+	}
+	if selection.StopReason != "" || activation.Status != "historical_completion_current_job_absent" ||
+		activation.CurrentAbsence == nil || !activation.ProcessLocalCurrentAbsenceProof {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "removal_current_absence_unavailable"
+		}
+		blockers = append(blockers, ReportFinding{Code: "removal.current_absence_unavailable", Message: "the terminal keep-data removal could not be combined with current typed queue absence and exact final proof"})
+		return ledger, blockers, warnings
+	}
+	current := activation.CurrentAbsence
+	if completion.UseID != current.UseID || completion.JobID != current.JobID ||
+		completion.FileLayoutID != current.FileLayoutID || completion.CompleteSnapshotID != current.CompleteSnapshotID ||
+		completion.FinalObjectIdentity != current.FinalObjectIdentity || current.ObservedAtStart.Before(completion.ObservedAtEnd) {
+		ledger.Status = "selected_removal_mismatch"
+		ledger.StopReason = "removal_completion_selector_mismatch"
+		blockers = append(blockers, ReportFinding{Code: "removal.selection_mismatch", Message: "the current typed queue absence does not match the completed keep-data removal lineage"})
+		return ledger, blockers, warnings
+	}
+	ledger.Status = "historical_keep_data_removal_current_job_absent"
+	ledger.StopReason = ""
+	warnings = append(warnings, "removal attribution, current typed queue absence, and current exact local content are separate sequential non-atomic observations")
 	return ledger, blockers, warnings
 }
 
@@ -1091,6 +1317,42 @@ func validClientActivationCurrentUse(value ClientActivationCurrentUse) bool {
 	return value.Assurance == "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_activation_and_exact_final_non_atomic"
 }
 
+func validClientActivationCurrentAbsence(value ClientActivationCurrentAbsence) bool {
+	if _, ok := downloader.DescribeLedgerDriver(value.Driver); !ok || !validSHA256ID(value.UseID) || !validSHA256ID(value.JobID) ||
+		!validSHA256ID(value.FileLayoutID) || !validSHA256ID(value.CompleteSnapshotID) ||
+		value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 || value.ObservedAtStart.IsZero() ||
+		value.ObservedAtEnd.Before(value.ObservedAtStart) || value.RequestsMade < 2 || value.RequestsMade > 4 ||
+		value.JobsExaminedBefore < 0 || value.JobsExaminedBefore > maxLedgerJobs ||
+		value.JobsExaminedAfter < 0 || value.JobsExaminedAfter > maxLedgerJobs {
+		return false
+	}
+	return value.Assurance == "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_activation_and_exact_final_with_typed_job_absence_non_atomic_without_causality_attribution"
+}
+
+func validClientRemovalCompletion(value ClientRemovalCompletion) bool {
+	if _, ok := downloader.DescribeLedgerDriver(value.Driver); !ok || !validSHA256ID(value.OperationID) || !validPlanID(value.PlanID) ||
+		!validSHA256ID(value.IntentID) || !validSHA256ID(value.CompletionID) || !validSHA256ID(value.UseID) ||
+		!validSHA256ID(value.JobID) || !validSHA256ID(value.FileLayoutID) || !validSHA256ID(value.CompleteSnapshotID) ||
+		!validSHA256ID(value.ClientConfigID) || !validSHA256ID(value.PathMappingID) ||
+		!validSHA256ID(value.ActivationOperationID) || !validPlanID(value.ActivationPlanID) ||
+		!validSHA256ID(value.ActivationTerminalID) || !validSHA256ID(value.MetafileVariantID) ||
+		!validSHA256ID(value.MaterializeOperationID) || !validPlanID(value.MaterializePlanID) ||
+		value.TargetRootIdentity == "" || len(value.TargetRootIdentity) > 512 ||
+		value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 || value.ManifestFiles <= 0 ||
+		value.ManifestFiles > 49_999 || value.ContentBytes < 0 || value.ContentBytes > 1<<50 ||
+		value.ObservedAtStart.IsZero() || value.ObservedAtEnd.Before(value.ObservedAtStart) ||
+		value.JobsExamined < 0 || value.JobsExamined > maxLedgerJobs {
+		return false
+	}
+	if value.CompletionBasis != "accepted_response_then_exact_absence" && value.CompletionBasis != "exact_absence_after_unknown_attempt_causality_unproven" {
+		return false
+	}
+	if value.RetainedTombstone {
+		return value.Assurance == "same_invocation_bound_canonical_client_removal_retention_tombstone_read_without_current_queue_inference"
+	}
+	return value.Assurance == "same_invocation_bound_canonical_terminal_client_removal_journal_read_without_current_queue_inference"
+}
+
 func activationStoppedCompleteState(value string) bool {
 	return value == "pausedUP" || value == "stoppedUP"
 }
@@ -1107,12 +1369,25 @@ func activationStartedState(value string) bool {
 func safeClientActivationStopReason(value string) string {
 	switch value {
 	case "activation_context_cancelled", "activation_completion_integrity_failed", "activation_completion_load_failed",
-		"activation_completion_selector_mismatch", "activation_current_use_bridge_failed", "activation_unexpected_activity":
+		"activation_completion_selector_mismatch", "activation_current_use_bridge_failed", "activation_current_absence_bridge_failed", "activation_unexpected_activity":
 		return value
 	case "":
 		return ""
 	default:
 		return "activation_completion_load_failed"
+	}
+}
+
+func safeClientRemovalStopReason(value string) string {
+	switch value {
+	case "removal_context_cancelled", "removal_completion_integrity_failed", "removal_completion_load_failed",
+		"removal_completion_selector_mismatch", "removal_absence_causality_unproven",
+		"removal_current_absence_unavailable", "removal_prerequisite_unavailable", "removal_unexpected_activity":
+		return value
+	case "":
+		return ""
+	default:
+		return "removal_completion_load_failed"
 	}
 }
 
@@ -1717,14 +1992,17 @@ func boundedSiteDetailBytes(value, maximum int64) int64 {
 
 func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStatus string, siteDetailRequested bool, storageStatus string, processProof bool,
 	clientStatus, pathStatus string, clientRequested bool, activationStatus string, activationRequested bool,
+	removalStatus string, removalRequested bool,
 	retirementStatus string, retirementRequested bool) string {
 	if (siteBindingRequested && siteStatus == "integrity_failed") || storageStatus == "integrity_failed" ||
 		(activationRequested && activationStatus == "integrity_failed") ||
+		(removalRequested && removalStatus == "integrity_failed") ||
 		(retirementRequested && retirementStatus == "integrity_failed") {
 		return "integrity_failed"
 	}
 	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") ||
 		(activationRequested && activationStatus == "selected_activation_mismatch") ||
+		(removalRequested && removalStatus == "selected_removal_mismatch") ||
 		(retirementRequested && (retirementStatus == "selected_retirement_mismatch" || retirementStatus == "source_name_reappeared")) ||
 		clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
 		return "conflict"
@@ -1734,13 +2012,16 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 	}
 	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") ||
 		(siteDetailRequested && siteDetailStatus != "observed_current_ref") ||
-		(activationRequested && activationStatus != "historical_completion_current_job_bound") ||
+		(activationRequested && activationStatus != "historical_completion_current_job_bound" && activationStatus != "historical_completion_current_job_absent") ||
+		(removalRequested && removalStatus != "historical_keep_data_removal_current_job_absent") ||
 		(retirementRequested && retirementStatus != "historical_completion_current_absence_observed") ||
 		storageStatus == "incomplete" || (verifiedStorageOutcome(storageStatus) && !processProof) ||
 		(clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
 		return "incomplete"
 	}
-	if processProof && clientStatus == "exact_unique" && pathStatus == "same_location" {
+	if processProof && (clientStatus == "exact_unique" && pathStatus == "same_location" ||
+		removalRequested && removalStatus == "historical_keep_data_removal_current_job_absent" &&
+			clientStatus == "absent" && activationStatus == "historical_completion_current_job_absent" && pathStatus == "not_comparable") {
 		return "consistent"
 	}
 	return "partial"
@@ -2003,5 +2284,15 @@ func stableStrings(items []string) []string {
 		result = append(result, item)
 	}
 	sort.Strings(result)
+	return result
+}
+
+func withoutString(items []string, removed string) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != removed {
+			result = append(result, item)
+		}
+	}
 	return result
 }

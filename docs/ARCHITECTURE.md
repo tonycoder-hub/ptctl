@@ -95,6 +95,28 @@ consistency; a positive selector/configuration/final mismatch is a conflict.
 Public JSON retains only normalized IDs, times, states, and assurances and
 cannot recreate either process-local capability.
 
+An optional explicit `--removal-operation/--removal-plan-id` pair switches the
+activation bridge from current use to current absence. It requires the same
+materialized-final, terminal activation, downloader, and mapping selectors and
+is mutually exclusive with source-retirement reconciliation. Before credential
+input, one canonical terminal keep-data removal journal or retained tombstone
+must reproduce the metafile, final, activation, driver/configuration, mapping,
+typed job, and file-layout lineage. The process-local completion authority is
+historical only. A completion after an accepted removal response is
+attributed; a later exact absence after an unknown response remains explicitly
+causality-unproven and cannot make the requested report consistent.
+
+After the exact final has been proved, `ReconcileCurrentAbsence` validates the
+already-read Before/After typed ledgers without another request. Both must be
+complete and contain no exact job, the request count and built-in adapter
+provenance must match, and no per-file read is permitted for the absent job.
+The report adds a separate `client_removal` ledger while preserving the same
+five relations. Its successful terminal state combines historical attributed
+keep-data removal, current typed queue absence, and current exact local bytes;
+the path relation is `not_comparable` and no conclusion says that a downloader
+uses those bytes. All three observations remain sequential bracketed
+non-atomic, and public DTOs cannot recreate either capability.
+
 An optional explicit source-retirement selector extends that same invocation
 with `--retirement-operation`, its reviewed SHA-256 plan ID, and the exact
 original source-root scope. The canonical terminal retirement journal is read
