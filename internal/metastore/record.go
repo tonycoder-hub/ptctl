@@ -18,10 +18,13 @@ import (
 const (
 	// Record kinds are schema identifiers, not caller-defined labels. Adding a
 	// kind is a store-format compatibility decision and must be explicit here.
-	RecordKindStorageProfileV1         RecordKind = "storage.profile.v1"
-	RecordKindStorageIndexDataV1       RecordKind = "storage.index.data.v1"
-	RecordKindStorageIndexDescriptorV1 RecordKind = "storage.index.descriptor.v1"
-	RecordKindSiteMetafileBindingV1    RecordKind = "site.metafile.binding.v1"
+	RecordKindStorageProfileV1           RecordKind = "storage.profile.v1"
+	RecordKindStorageIndexDataV1         RecordKind = "storage.index.data.v1"
+	RecordKindStorageIndexDescriptorV1   RecordKind = "storage.index.descriptor.v1"
+	RecordKindSiteMetafileBindingV1      RecordKind = "site.metafile.binding.v1"
+	RecordKindSiteBonusExchangeIntentV1  RecordKind = "site.bonus.exchange.intent.v1"
+	RecordKindSiteBonusExchangeAttemptV1 RecordKind = "site.bonus.exchange.attempt.v1"
+	RecordKindSiteBonusExchangeOutcomeV1 RecordKind = "site.bonus.exchange.outcome.v1"
 
 	defaultMaxRecordBytes = int64(64 << 20)
 	hardMaxRecordBytes    = int64(64 << 20)
@@ -68,7 +71,10 @@ func ParseRecordKind(value string) (RecordKind, error) {
 	case RecordKindStorageProfileV1,
 		RecordKindStorageIndexDataV1,
 		RecordKindStorageIndexDescriptorV1,
-		RecordKindSiteMetafileBindingV1:
+		RecordKindSiteMetafileBindingV1,
+		RecordKindSiteBonusExchangeIntentV1,
+		RecordKindSiteBonusExchangeAttemptV1,
+		RecordKindSiteBonusExchangeOutcomeV1:
 		return RecordKind(value), nil
 	default:
 		return "", fmt.Errorf("sealed record kind is invalid")
@@ -177,6 +183,24 @@ type RecordListResult struct {
 }
 
 type RecordConsumer func(io.Reader) error
+
+// ComputeRecordRef derives the exact domain-separated sealed-record identity
+// without publishing anything. It is used by protocols whose recovery path
+// must be able to locate a deterministic marker before or after a crash.
+func ComputeRecordRef(kind RecordKind, payload []byte) (RecordRef, error) {
+	parsedKind, err := ParseRecordKind(string(kind))
+	if err != nil || parsedKind != kind {
+		return RecordRef{}, fmt.Errorf("compute sealed record identity: kind is invalid")
+	}
+	if int64(len(payload)) > hardMaxRecordBytes {
+		return RecordRef{}, fmt.Errorf("compute sealed record identity: byte limit exceeded")
+	}
+	hasher := newRecordHasher(kind)
+	_, _ = hasher.Write(payload)
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return RecordRef{Kind: kind, ID: recordIDFromDigest(digest), SizeBytes: int64(len(payload))}, nil
+}
 
 // ImportRecord stores the exact raw payload under its allowlisted schema. It
 // streams through a private staging file and never buffers the complete value.
@@ -398,24 +422,11 @@ func (s *Store) loadRecordSession(ctx context.Context, session *rootSession, kin
 // from two replaceable store roots.
 func (s *Store) VerifyRecordSet(ctx context.Context, records []RecordRef, limits RecordLimits) (RecordSetVerificationReceipt, error) {
 	receipt := RecordSetVerificationReceipt{Effect: recordVerifyEffect, Store: s.Info()}
-	if s == nil || len(records) == 0 || len(records) > hardMaxRecordSet {
-		return receipt, fmt.Errorf("verify sealed record set: record count is invalid")
+	if s == nil {
+		return receipt, fmt.Errorf("verify sealed record set: store is unavailable")
 	}
-	if err := limits.Validate(); err != nil {
+	if err := validateRecordSet(records, limits); err != nil {
 		return receipt, err
-	}
-	seen := make(map[string]struct{}, len(records))
-	for _, record := range records {
-		kind, kindErr := ParseRecordKind(string(record.Kind))
-		id, idErr := ParseRecordID(record.ID.String())
-		key := string(record.Kind) + "\x00" + record.ID.String()
-		if kindErr != nil || kind != record.Kind || idErr != nil || id != record.ID || record.SizeBytes < 0 {
-			return receipt, fmt.Errorf("verify sealed record set: record identity is invalid")
-		}
-		if _, exists := seen[key]; exists {
-			return receipt, fmt.Errorf("verify sealed record set: record identity is duplicated")
-		}
-		seen[key] = struct{}{}
 	}
 	if err := ctx.Err(); err != nil {
 		return receipt, err
@@ -425,6 +436,34 @@ func (s *Store) VerifyRecordSet(ctx context.Context, records []RecordRef, limits
 		return receipt, safeError("verify sealed record set", err)
 	}
 	defer session.Close()
+	return s.verifyRecordSetSession(ctx, session, records, limits)
+}
+
+func validateRecordSet(records []RecordRef, limits RecordLimits) error {
+	if len(records) == 0 || len(records) > hardMaxRecordSet {
+		return fmt.Errorf("verify sealed record set: record count is invalid")
+	}
+	if err := limits.Validate(); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		kind, kindErr := ParseRecordKind(string(record.Kind))
+		id, idErr := ParseRecordID(record.ID.String())
+		key := string(record.Kind) + "\x00" + record.ID.String()
+		if kindErr != nil || kind != record.Kind || idErr != nil || id != record.ID || record.SizeBytes < 0 {
+			return fmt.Errorf("verify sealed record set: record identity is invalid")
+		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("verify sealed record set: record identity is duplicated")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func (s *Store) verifyRecordSetSession(ctx context.Context, session *rootSession, records []RecordRef, limits RecordLimits) (RecordSetVerificationReceipt, error) {
+	receipt := RecordSetVerificationReceipt{Effect: recordVerifyEffect, Store: s.Info()}
 	for _, record := range records {
 		size, verifyErr := verifyRecordRelative(ctx, session, recordRelativePath(record.Kind, record.ID), record.Kind, record.ID, limits.MaxRecordBytes)
 		if verifyErr != nil || record.SizeBytes != 0 && size != record.SizeBytes {
@@ -448,17 +487,13 @@ func (s *Store) VerifyRecordSet(ctx context.Context, records []RecordRef, limits
 // that. Every directory and result budget has an explicit N+1 stop.
 func (s *Store) ListRecords(ctx context.Context, kind RecordKind, limits RecordLimits) (RecordListResult, error) {
 	result := RecordListResult{Limits: limits, Records: []RecordRef{}}
-	parsedKind, err := ParseRecordKind(string(kind))
 	if s == nil {
 		return result, fmt.Errorf("list sealed records: store is unavailable")
 	}
-	if err != nil || parsedKind != kind {
-		return result, fmt.Errorf("list sealed records: kind is invalid")
-	}
-	result.Kind = kind
-	if err := limits.Validate(); err != nil {
+	if err := validateRecordList(kind, limits); err != nil {
 		return result, err
 	}
+	result.Kind = kind
 	if err := ctx.Err(); err != nil {
 		result.StopReason = "context_cancelled"
 		return result, err
@@ -468,6 +503,23 @@ func (s *Store) ListRecords(ctx context.Context, kind RecordKind, limits RecordL
 		return result, safeError("list sealed records", err)
 	}
 	defer session.Close()
+	return s.listRecordsSession(ctx, session, kind, limits)
+}
+
+func validateRecordList(kind RecordKind, limits RecordLimits) error {
+	parsedKind, err := ParseRecordKind(string(kind))
+	if err != nil || parsedKind != kind {
+		return fmt.Errorf("list sealed records: kind is invalid")
+	}
+	return limits.Validate()
+}
+
+func (s *Store) listRecordsSession(ctx context.Context, session *rootSession, kind RecordKind, limits RecordLimits) (RecordListResult, error) {
+	result := RecordListResult{Kind: kind, Limits: limits, Records: []RecordRef{}}
+	if err := ctx.Err(); err != nil {
+		result.StopReason = "context_cancelled"
+		return result, err
+	}
 
 	directory, before, err := session.openValidated(objectsDir, true)
 	if err != nil {
@@ -611,6 +663,9 @@ func allRecordKinds() []RecordKind {
 		RecordKindStorageIndexDataV1,
 		RecordKindStorageIndexDescriptorV1,
 		RecordKindSiteMetafileBindingV1,
+		RecordKindSiteBonusExchangeIntentV1,
+		RecordKindSiteBonusExchangeAttemptV1,
+		RecordKindSiteBonusExchangeOutcomeV1,
 	}
 }
 

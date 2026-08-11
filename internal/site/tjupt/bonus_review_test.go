@@ -103,6 +103,9 @@ func TestParseBonusReviewClassifiesInputAndAvailability(t *testing.T) {
 		{name: "user input", form: `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><td>Gift</td><td>100</td><input name="username"><input type="submit"></form>`, availability: site.BonusReviewAvailabilityAvailable, inputMode: site.BonusReviewInputRequired, route: BonusExchangeRouteID},
 		{name: "disabled", form: `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><td>VIP</td><td>5000</td><input type="submit" disabled></form>`, availability: site.BonusReviewAvailabilityDisabled, inputMode: site.BonusReviewInputNone, route: BonusExchangeRouteID},
 		{name: "fieldset semantics", form: `<form action="?action=exchange" method="post"><fieldset><input type="hidden" name="option" value="1"><td>VIP</td><td>5000</td><input type="submit"></fieldset></form>`, availability: site.BonusReviewAvailabilityUnknown, inputMode: site.BonusReviewInputUnsupported, route: BonusExchangeRouteID},
+		{name: "unmodeled object control", form: `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><td>VIP</td><td>5000</td><object name="opaque"></object><input type="submit"></form>`, availability: site.BonusReviewAvailabilityUnknown, inputMode: site.BonusReviewInputUnsupported, route: BonusExchangeRouteID},
+		{name: "magic charset control", form: `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><td>VIP</td><td>5000</td><input type="hidden" name="_charset_" value="utf-8"><input type="submit"></form>`, availability: site.BonusReviewAvailabilityUnknown, inputMode: site.BonusReviewInputUnsupported, route: BonusExchangeRouteID},
+		{name: "form associated custom element", form: `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><td>VIP</td><td>5000</td><bonus-token name="opaque"></bonus-token><input type="submit"></form>`, availability: site.BonusReviewAvailabilityUnknown, inputMode: site.BonusReviewInputUnsupported, route: BonusExchangeRouteID},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -129,6 +132,24 @@ func TestBonusReviewUsesInnermostRowAndOmitsScriptText(t *testing.T) {
 	raw, _ := json.Marshal(review)
 	if strings.Contains(string(raw), "VISIBLE-TEXT-CANARY") || strings.Contains(string(raw), "outer-a") {
 		t.Fatalf("review retained non-offer text: %s", raw)
+	}
+}
+
+func TestBonusReviewIDBindsSubmitterValueAndSuccessfulControlShape(t *testing.T) {
+	base := `<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1">%s<input type="submit" name="action" value="%s"></form></tr>`
+	parse := func(extra, submitValue string) domain.BonusOfferReview {
+		t.Helper()
+		review, _, err := parseBonusOfferReview(bonusReviewPage(fmt.Sprintf(base, extra, submitValue)), "1", site.DefaultBonusReviewLimits())
+		if err != nil {
+			t.Fatalf("parse bonus review: %v", err)
+		}
+		return review
+	}
+	original := parse(`<input type="hidden" name="token" value="opaque">`, "exchange")
+	changedSubmit := parse(`<input type="hidden" name="token" value="opaque">`, "other")
+	changedDisabledness := parse(`<input type="hidden" name="token" value="opaque" disabled>`, "exchange")
+	if original.ReviewID == changedSubmit.ReviewID || original.ReviewID == changedDisabledness.ReviewID {
+		t.Fatalf("review ID did not bind stable submit semantics: original=%s submit=%s disabled=%s", original.ReviewID, changedSubmit.ReviewID, changedDisabledness.ReviewID)
 	}
 }
 
@@ -191,10 +212,12 @@ func TestBonusReviewParserFailsClosedOnAmbiguityAndBudgets(t *testing.T) {
 		{name: "malformed action query", body: bonusReviewPage(`<tr><form action="?action=exchange&amp;bad=%zz" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "unrecognized_offer"},
 		{name: "base URL override", body: bonusReviewPage(`<base href="https://example.invalid/"><tr>` + valid + `</tr>`), limits: site.DefaultBonusReviewLimits(), reason: "ambiguous_form_structure"},
 		{name: "disabled selector", body: bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1" disabled><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "selector_ambiguous"},
-		{name: "external selector owner", body: bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1" form="other"><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "selector_ambiguous"},
+		{name: "external selector owner", body: bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1" form="other"><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "ambiguous_form_structure"},
+		{name: "external control outside form", body: bonusReviewPage(`<tr><form id="exchange" action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="submit"></form><input type="hidden" name="csrf" value="opaque" form="exchange"></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "ambiguous_form_structure"},
 		{name: "non-exact selector name", body: bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name=" option " value="1"><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "selector_not_found"},
 		{name: "non-exact selector type", body: bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type=" hidden " name="option" value="1"><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "selector_ambiguous"},
 		{name: "submit action override", body: bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="submit" formaction="other.php"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "unrecognized_offer"},
+		{name: "command submitter", body: bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><button command="--exchange">Go</button></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "unrecognized_offer"},
 		{name: "non-exact method", body: bonusReviewPage(`<tr><form action="?action=exchange" method=" post "><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "unrecognized_offer"},
 		{name: "column retention overflow", body: bonusReviewPage(`<tr>` + strings.Repeat(`<td>x</td>`, 17) + `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><input type="submit"></form></tr>`), limits: site.DefaultBonusReviewLimits(), reason: "unrecognized_offer"},
 	}

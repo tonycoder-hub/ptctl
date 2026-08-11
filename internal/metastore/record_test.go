@@ -22,6 +22,9 @@ func TestRecordKindsIDsAndLimitsAreStrict(t *testing.T) {
 		RecordKindStorageIndexDataV1,
 		RecordKindStorageIndexDescriptorV1,
 		RecordKindSiteMetafileBindingV1,
+		RecordKindSiteBonusExchangeIntentV1,
+		RecordKindSiteBonusExchangeAttemptV1,
+		RecordKindSiteBonusExchangeOutcomeV1,
 	}
 	for _, kind := range kinds {
 		parsed, err := ParseRecordKind(string(kind))

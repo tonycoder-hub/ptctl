@@ -277,9 +277,10 @@ Capabilities are small and explicit:
 - `torrent.metafile.read_effectful`
 - `bonus.catalog.read`
 - `bonus.offer.review`
+- `bonus.exchange.submit_effectful`
 
-Site-specific form or action writes will eventually live under a namespaced
-action schema. They will not be forced into universal fields. The effectful
+Site-specific form or action writes live under narrow namespaced typed ports
+and durable action schemas. They are not forced into universal fields. The effectful
 metafile capability is instead a tracker-visible GET plus a private-store
 publication boundary; it grants no general site-write or detail-read authority.
 
@@ -303,7 +304,74 @@ hash excludes balance and time but includes every
 semantic field a later write would have to reproduce. It is a correlator, not a
 signature or capability.
 Opaque authority exists only in the reading invocation and JSON round trips
-cannot restore it. No form-submission port exists in this slice.
+cannot restore it. The separate effectful port below accepts only a fresh
+authority produced by its own session; serialized review JSON remains
+non-authoritative.
+
+## Durable at-most-once bonus exchange
+
+`site bonus exchange prepare|submit|status` is the first concrete
+`bonus.exchange.submit_effectful` workflow. `prepare` stores one canonical
+private intent containing a random operation ID, the exact reviewed semantic
+ID, canonical site/option/origin/route identifiers, and fixed review/submit
+budgets. It performs no site request. `submit` revalidates the installed
+production adapter, store, intent, selectors, and current durable state before
+reading the cookie.
+
+One operation-bound private-store session then spans the remote protocol. The
+adapter performs one fresh review GET and returns process-local review
+authority plus a private ordered copy of only the successful form controls in
+the adapter's supported static-HTML subset.
+The fresh semantic review must equal the prepared ID and remain available,
+input-free, POST-only, and on the pinned action route. Before returning that
+authority, the adapter runs the exact POST encoder against the intent's form
+field and encoded-byte budgets and binds those same limits to the session; a
+later limit mismatch is rejected before POST. The state layer next publishes a
+deterministic content-addressed attempt marker with atomic no-clobber
+semantics. Only a caller that newly publishes and re-verifies that
+marker receives process-local `ReservedAttempt` authority; finding the marker
+after a restart or losing a publication race never authorizes a POST.
+
+The same site session may consume its exact fresh review authority once. Its
+dedicated HTTP/1.1 POST body is non-replayable, connection reuse and HTTP/2 are
+disabled, redirects are observed but never followed, and only an allowlisted
+same-origin redirect classification crosses the transport boundary. A second
+opaque `ObservedBonusExchange` ties the complete safe receipt to the adapter
+invocation. The state layer requires both that observation and the matching
+`ReservedAttempt` before sealing a deterministic outcome. JSON round trips of
+either capability lose authority.
+
+The sealed state lattice is `prepared`, `attempt_reserved_submission_unknown`,
+`confirmed`, `rejected`, `unknown`, or `not_submitted`. Marker publication is
+the point of no automatic retry: process exit, timeout, response ambiguity, or
+outcome-publication failure after it can only remain unknown. A short bounded
+local finalization context may write the observed outcome after the network
+context ends, but it never repeats the POST. `status` is an explicit-ID,
+credential-free local verification that scans bounded outcome records and
+fails closed on missing links, multiple outcomes, corruption, or inventory
+limits; it never selects a latest record.
+
+At-most-once coordination is scoped to one prepared operation in one
+preserved, uncloned private-store history. A separately prepared operation is
+a separate explicitly acknowledged submission. A restored or independently
+copied history is a different coordinator and cannot be made mutually exclusive
+by a local no-clobber file. Read-only status proves the current record bytes,
+links, and store binding through a
+bounded, detected-stable but non-atomic scan; it does not reconstruct a past
+publication's directory-sync/no-clobber receipt. Operation-scoped durability
+fields are therefore set only by the invocation that crossed
+that publication boundary, separately from current `record_verified` evidence.
+The report also separates a verified marker that blocks future submissions in
+the selected history (`attempt_marker_blocks_future_submissions`) from evidence
+that the one-request receipt is coherently bound to the operation
+(`submission_request_bound_verified`). A live adapter observation can establish
+the latter in the submitting process; read-only status can establish it only by
+jointly verifying the canonical outcome record that contains the receipt.
+
+Form-shape and semantic review hashes are versioned correlators for one audited
+parser contract. Parser changes that alter successful-control semantics may
+change them intentionally, forcing a fresh review and intent instead of
+silently treating an older review as authority.
 
 ## Read-only torrent detail
 

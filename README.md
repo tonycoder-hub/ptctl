@@ -127,6 +127,11 @@ capabilities at the edge, not assumptions in the core domain model.
   omit NexusPHP's view-counting `hit` parameter; bonus review records a bounded
   form-shape digest and semantic review ID but never submits the form; both
   remain site claims only;
+- an explicitly acknowledged, durable TJUPT bonus-exchange state machine:
+  private reviewed intent, fresh exact-option re-observation, deterministic
+  no-clobber attempt marker, at most one non-retried POST, and a separately
+  sealed confirmed/rejected/unknown outcome; a marker without an outcome is
+  permanently submission-unknown and is never retried automatically;
 - an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
   bounded GET with no redirect or retry and publishing the strictly validated
   exact response only into an initialized private metafile store;
@@ -680,8 +685,8 @@ printf '%s' "$TJUPT_COOKIE" | ptctl site bonus-catalog --cookie-stdin tjupt
 printf '%s' "$TJUPT_COOKIE" | ptctl site bonus review --cookie-stdin tjupt OPTION
 ```
 
-Each TJUPT command performs at most one bounded GET and never retries. Do not
-loop or parallelize site reads. `site detail` also refuses redirects and sends
+Each read-only TJUPT command above performs at most one bounded GET and never
+retries. Do not loop or parallelize site reads. `site detail` also refuses redirects and sends
 only `details.php?id=REMOTE_ID`: it does not send `hit=1`, follow the download
 link, fetch the metafile, or persist an observation. Its display title, optional
 peer counts, and matching internal link are current site claims, not metafile
@@ -696,11 +701,92 @@ current submit availability, whether extra user input is required, the
 allowlisted action route, and one-way form-shape/review IDs. Hidden field values,
 raw HTML, and form URLs are not emitted. The action route is a static HTML
 claim; the command does not execute JavaScript or browser rendering/runtime
-behavior. It
-performs zero writes and zero form submissions. Its JSON is deliberately
-non-authoritative; any future
-exchange implementation must fetch a fresh page, reproduce the reviewed
-semantics, and cross a separate acknowledgement and recovery boundary.
+behavior. It performs zero writes and zero form submissions. Its JSON is
+deliberately non-authoritative; the separate exchange workflow therefore
+fetches a fresh page, reproduces the reviewed semantics, and crosses an
+explicit acknowledgement and recovery boundary.
+
+To cross that boundary, first initialize a private state store (the same
+versioned owner-only store format used by metafile artifacts), review the exact
+option, and prepare a local intent from the review ID:
+
+```bash
+ptctl metafile store init --store "$PTCTL_STATE"
+
+printf '%s' "$TJUPT_COOKIE" | \
+  ptctl site bonus review --cookie-stdin --output json tjupt OPTION
+
+ptctl site bonus exchange prepare \
+  --state-store "$PTCTL_STATE" \
+  --expect-review-id REVIEW_ID \
+  tjupt OPTION
+```
+
+`prepare` performs no network request and prints an explicit intent record ID.
+Submitting requires that exact record, the same site/option/review selectors,
+and a separate acknowledgement:
+
+```bash
+printf '%s' "$TJUPT_COOKIE" | \
+  ptctl site bonus exchange submit \
+    --state-store "$PTCTL_STATE" \
+    --intent-record INTENT_RECORD_ID \
+    --expect-review-id REVIEW_ID \
+    --cookie-stdin \
+    --acknowledge-bonus-exchange \
+    tjupt OPTION
+
+ptctl site bonus exchange status \
+  --state-store "$PTCTL_STATE" \
+  --intent-record INTENT_RECORD_ID
+```
+
+Submit performs one fresh bounded GET and verifies the process-local review
+authority before writing the deterministic attempt marker. Within the
+adapter's supported static-HTML subset, it also runs the exact ordered form
+encoder against the intent's field and encoded-byte budgets;
+those same limits are bound to the live authority consumed by the POST. Only
+the invocation that newly and durably creates the marker may send that exact
+freshly observed form, once. The POST uses HTTP/1.1 with no connection reuse,
+redirect following, or retry. An allowlisted site-local redirect can confirm
+the site response; other complete responses are rejected or unknown. If the
+POST may have started but its outcome cannot be durably recorded, `status` remains
+`attempt_reserved_submission_unknown`. Re-running `submit` is refused before
+stdin is read. Hidden form values and the cookie remain in memory only; sealed
+records contain safe identities, counters, time bounds, and fixed outcome
+codes, not raw HTML, fields, URLs, or credentials.
+
+Form-shape and semantic review IDs are versioned correlators for the audited
+parser semantics, not permanent site identifiers. A parser hardening that
+changes which controls affect submission can deliberately change these IDs;
+that requires a fresh review and a newly prepared intent rather than silently
+reusing older authority.
+
+The at-most-once marker coordinates one prepared operation within one
+preserved private-store history. A separately prepared operation is a separate
+explicitly acknowledged submission. Do not clone, roll back, or selectively
+delete the history and then reuse an intent: no local file protocol can
+coordinate independent restored copies. Read-only `status` re-verifies the
+records currently visible in the selected store through a bounded,
+detected-stable but non-atomic scan. It does not
+reconstruct the historical no-clobber or directory-sync receipt. Consequently,
+its `*_record_verified` fields may be true while `outcome_durable` remains
+false; that durability flag is asserted only by the invocation that completed
+the publication boundary.
+
+Reports keep two additional assurance axes separate:
+`attempt_marker_blocks_future_submissions` means the selected preserved history
+contains the verified operation marker that prevents a later submit invocation;
+`submission_request_bound_verified` means a valid live request receipt, or a
+jointly verified outcome record containing that receipt, was bound to the
+operation. Neither field claims global exactly-once coordination across cloned
+or rolled-back stores.
+
+These commands are report-first after valid usage. Complete prepare/status and
+a durably recorded confirmed submission exit `0`; rejected, unknown,
+not-submitted, or operationally incomplete submissions exit `1` after printing
+their state. Usage is `2`, and verified sealed-state corruption is integrity
+exit `3`. The workflow does not use require-style exit `4`.
 
 Read downloader state (read-only commands support qBittorrent and
 Transmission):

@@ -2,28 +2,32 @@
 
 TJUPT is the first experimental site implementation, not a special case
 embedded in the content core. It has not had a credentialed live smoke test in
-this repository. The adapter declares five ordinary read capabilities plus one
-explicitly effectful metafile capability:
+this repository. The adapter declares six ordinary read capabilities plus two
+separately acknowledged effectful capabilities:
 
 - session check;
+- account snapshot read;
 - torrent search;
 - bounded torrent-detail observation;
 - bonus catalog inspection;
 - exact-option, zero-write bonus-offer review;
+- durable at-most-once bonus exchange;
 - acknowledged metafile fetch into the private store.
 
-Each command sends at most one bounded GET, uses the configured TJUPT HTTPS
-origin, does not retry, refuses every redirect, and never submits a form. The
-effectful metafile fetch therefore keeps its explicit acknowledgement scoped to
-at most one tracker-visible request.
+Ordinary read and metafile commands send at most one bounded GET. Bonus exchange
+is the only form-submission surface: it sends one fresh review GET and at most
+one POST after a durable attempt marker. All site transports use the configured
+TJUPT HTTPS origin, do not retry, and refuse to follow redirects. Each
+effectful acknowledgement is therefore scoped to a fixed request count.
 Page recognition is fail-closed: a login page is unauthenticated, a positively
 recognized bonus/search/detail page is accepted, and maintenance, challenge,
 or unknown HTML is indeterminate/an error rather than a successful empty
 result.
 Ordinary site reads perform no intentional filesystem write. TJUPT-related
 local store mutations are `metafile store init`, `metafile store import`, and
-the store phase of `site metafile fetch`; storage profile/index commands are a
-separate filesystem-ledger boundary and never contact TJUPT.
+the store phase of `site metafile fetch`, plus the intent/attempt/outcome record
+phases of `site bonus exchange`; storage profile/index commands are a separate
+filesystem-ledger boundary and never contact TJUPT.
 
 ## Why the bonus catalog remains site-defined
 
@@ -67,8 +71,10 @@ The bounded tokenizer requires authenticated page markers, a balance, exactly
 one form carrying the selected hidden `option`, at least two visible
 site-defined columns, and a recognized form structure. Duplicate options,
 duplicate attributes, nested forms, malformed selected-form structure,
-base-URL or submit-action overrides, unknown response types, and
-form/field/token/text budget overflow fail closed. The public projection
+external form-owner controls, form-associated custom elements, browser-magic
+charset controls, alternate command/popover submitters, base-URL or
+submit-action overrides, unknown response types, and form/field/token/text
+budget overflow fail closed. The public projection
 classifies the submit control as available, disabled, or unknown and separately
 classifies additional user input. A form is considered structurally supported
 only for the production `mybonusapps.php` POST route; recognizing it still
@@ -76,18 +82,93 @@ grants no submission authority. The tokenizer does not execute JavaScript, so
 the normalized route and retained text remain static HTML claims rather than
 browser-rendered proof. The `visible_text_bytes` usage counter refers to bounded
 non-markup tokenizer text; it does not assert CSS-rendered visibility.
+HTML must be valid UTF-8; an explicitly declared conflicting charset is rejected
+before parsing.
 
 Hidden field values and names do not enter the report. Instead, control
-name/type order is reduced to a domain-separated one-way form-shape ID. The
-semantic review ID binds that shape, option, visible columns, action route,
-availability, and input mode, while deliberately excluding the changing
-balance and observation time. Both identifiers are review aids and stable
-correlators, not signatures or replay authority. The typed result has
-process-local authority only; JSON round trips lose it. A future exchange path
-must refetch the page, reproduce the reviewed semantics, use only the fresh
-opaque fields, and cross a separate acknowledgement, durable intent, uncertain
-outcome, and rate-limit design. This slice never submits a purchase or
-redemption form.
+name/type/disabledness order and the stable submitter value are reduced to a
+domain-separated one-way form-shape ID. The semantic review ID binds that
+shape, option, visible columns, action route, availability, and input mode,
+while deliberately excluding changing opaque hidden values, balance, and
+observation time. Both identifiers are review aids and stable correlators, not
+signatures or replay authority. The typed result has
+process-local authority only; JSON round trips lose it. The exchange workflow
+below therefore refetches the page and uses only fresh opaque fields; this
+review command itself never submits a purchase or redemption form.
+
+The identifiers are versioned to the audited parser contract rather than being
+permanent TJUPT identifiers. If parser hardening changes which controls affect
+submission, their values may change intentionally and the operator must perform
+a fresh review and prepare a new intent.
+
+## Acknowledged bonus exchange
+
+The effectful workflow is intentionally three commands rather than a replayable
+`buy` shortcut:
+
+```bash
+ptctl site bonus exchange prepare \
+  --state-store STATE --expect-review-id REVIEW_ID tjupt OPTION
+
+printf '%s' "$TJUPT_COOKIE" | ptctl site bonus exchange submit \
+  --state-store STATE --intent-record INTENT_RECORD_ID \
+  --expect-review-id REVIEW_ID --cookie-stdin \
+  --acknowledge-bonus-exchange tjupt OPTION
+
+ptctl site bonus exchange status \
+  --state-store STATE --intent-record INTENT_RECORD_ID
+```
+
+Prepare is local-only. Submit validates the exact production origin, capability,
+cookie method, canonical option, budgets, private store, sealed intent, explicit
+review ID, and current operation state before reading stdin. It then refetches
+`mybonusapps.php`, requires the same semantic review ID and a unique supported
+input-free static form, and retains its hidden values only in the live session.
+The ordered successful controls must also fit the sealed intent's exact field
+and encoded-byte budgets under the same encoder used by POST. Those limits
+become part of the one-shot in-memory authority; changing them later is
+rejected before submission.
+
+Before any POST, a deterministic sealed attempt marker is published and jointly
+re-verified with the intent under one physically bound store root. Only the
+invocation that newly created that marker may continue. The ordered form is
+sent once with a non-replayable body over a fresh HTTP/1.1 connection. Redirects
+are not followed; exact site-local `do=` outcomes from the audited NexusPHP
+route are reduced to fixed confirmation/rejection codes. All other complete or
+partial responses are unknown.
+
+The adapter returns a second process-local authority for the safe request
+receipt. Together with the live reservation authority, it permits one canonical
+outcome record. Confirmed, rejected, unknown, and known-not-submitted are
+canonical terminal record states. The submitting invocation calls an outcome
+durable only after publication and joint record-set verification succeed. If
+no outcome can be safely sealed after a marker exists, the operation stays
+`attempt_reserved_submission_unknown`.
+Neither a new process nor JSON can recover submission authority, and rerunning
+submit is rejected before the cookie is read. Status is credential-free and
+never contacts TJUPT.
+
+The marker coordinates one prepared operation within one preserved, uncloned
+private-store history. A separately prepared operation is a separate explicitly
+acknowledged submission. Copying, rolling back, or deleting operation records
+can create an independent history that a local file marker cannot coordinate.
+Read-only status proves the records currently visible in its selected store
+through a bounded, detected-stable but
+non-atomic scan; it does not infer the historical directory-sync/no-clobber
+receipt, so current record verification and invocation-scoped durability are
+reported separately.
+The JSON assurance block likewise separates
+`attempt_marker_blocks_future_submissions` from
+`submission_request_bound_verified`: the first records the verified no-clobber
+coordination state in the selected history, while the second requires a valid
+live request receipt or a jointly verified outcome record carrying that
+receipt. Neither extends coordination to copied or rolled-back stores.
+
+After usage validation the commands are report-first. Prepare/status and a
+durably confirmed submission use exit `0`; rejected, unknown, not-submitted, or
+operationally incomplete submission results use exit `1`; usage is `2`; and
+verified sealed-state corruption uses integrity exit `3`. This workflow does
+not assign a meaning to exit `4`.
 
 ## Authentication
 

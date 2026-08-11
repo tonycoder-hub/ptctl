@@ -303,6 +303,15 @@ func validBonusSHA256ID(value string) bool {
 	return err == nil && len(decoded) == sha256.Size
 }
 
+// ValidateBonusReviewID validates the public, domain-separated review
+// correlator without treating it as replay or submission authority.
+func ValidateBonusReviewID(value string) error {
+	if !validBonusSHA256ID(value) {
+		return fmt.Errorf("bonus review ID is invalid")
+	}
+	return nil
+}
+
 func safeBonusText(value string, maxBytes int) bool {
 	if value == "" || len(value) > maxBytes || !utf8.ValidString(value) {
 		return false

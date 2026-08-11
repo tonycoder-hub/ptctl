@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -31,7 +32,22 @@ type StrictResponse struct {
 	ObservedAtEnd      time.Time
 	ResponseBytesRead  int64
 	ResponseBytesKnown bool
+	RedirectID         string
+	RequestFields      int
+	RequestBytes       int64
 }
+
+// FormField is an ordered successful HTML form control. Callers retain raw
+// values only in process memory; PostFormOnce never includes them in a result
+// or diagnostic.
+type FormField struct {
+	Name  string
+	Value string
+}
+
+// RedirectClassifier maps one same-origin redirect target to an allowlisted
+// semantic identifier. The raw Location value never crosses StrictResponse.
+type RedirectClassifier func(*url.URL) (string, bool)
 
 type Client struct {
 	base        *url.URL
@@ -205,19 +221,10 @@ func (c *Client) GetOnce(ctx context.Context, relativePath string, query url.Val
 		result.ObservedAtEnd = time.Now().UTC()
 		return result, fmt.Errorf("site response trailers were rejected")
 	}
-	contentTypes := resp.Header.Values("Content-Type")
-	if len(contentTypes) > 1 {
+	result.MediaType, err = strictResponseMediaType(resp.Header.Values("Content-Type"))
+	if err != nil {
 		result.ObservedAtEnd = time.Now().UTC()
-		return result, fmt.Errorf("site response content type was invalid")
-	}
-	if len(contentTypes) == 1 && strings.TrimSpace(contentTypes[0]) != "" {
-		rawType := strings.TrimSpace(contentTypes[0])
-		mediaType, _, parseErr := mime.ParseMediaType(rawType)
-		if parseErr != nil {
-			result.ObservedAtEnd = time.Now().UTC()
-			return result, fmt.Errorf("site response content type was invalid")
-		}
-		result.MediaType = strings.ToLower(mediaType)
+		return result, err
 	}
 	if resp.ContentLength > maxBody {
 		result.ObservedAtEnd = time.Now().UTC()
@@ -238,6 +245,202 @@ func (c *Client) GetOnce(ctx context.Context, relativePath string, query url.Val
 	result.ResponseBytesKnown = true
 	result.Body = body
 	return result, nil
+}
+
+// PostFormOnce performs one non-following, non-retrying form POST. The request
+// body is intentionally non-replayable, the dedicated transport is fresh and
+// H1-only, and the only redirect data retained is an allowlisted classifier ID.
+func (c *Client) PostFormOnce(ctx context.Context, relativePath string, query url.Values, fields []FormField, accept string, maxFields int, maxFormBytes, maxBody, maxHeaderBytes int64, classify RedirectClassifier) (StrictResponse, error) {
+	var result StrictResponse
+	if maxBody <= 0 || maxBody > 32<<20 || maxHeaderBytes <= 0 || maxHeaderBytes > hardMaxResponseHeaders {
+		return result, fmt.Errorf("site response budget is invalid")
+	}
+	if maxFields <= 0 || maxFields > 1024 || maxFormBytes <= 0 || maxFormBytes > 1<<20 {
+		return result, fmt.Errorf("site form budget is invalid")
+	}
+	if accept == "" || !asciiHeaderValue(accept) {
+		return result, fmt.Errorf("site accept header is invalid")
+	}
+	target, err := c.target(relativePath, query)
+	if err != nil {
+		return result, err
+	}
+	encoded, err := encodeFormFields(fields, maxFields, maxFormBytes)
+	if err != nil {
+		return result, err
+	}
+	if err := c.wait(ctx); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	result.RequestFields = len(fields)
+	result.RequestBytes = int64(len(encoded))
+	body := io.NopCloser(strings.NewReader(encoded))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), body)
+	if err != nil {
+		return result, fmt.Errorf("build site request failed")
+	}
+	req.ContentLength = int64(len(encoded))
+	req.GetBody = nil
+	req.Header.Set("Accept", accept)
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; explicit-effect-client)")
+	if c.cookie != "" {
+		req.Header.Set("Cookie", c.cookie)
+	}
+	req.Close = true
+	if c.strictHTTP == nil {
+		return result, fmt.Errorf("strict site transport is unavailable")
+	}
+
+	result.ObservedAtStart = time.Now().UTC()
+	c.recordRequest()
+	resp, err := c.strictHTTP.Do(req)
+	if err != nil {
+		result.ObservedAtEnd = time.Now().UTC()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, fmt.Errorf("site request canceled: %w", ctxErr)
+		}
+		return result, fmt.Errorf("site request failed")
+	}
+	defer resp.Body.Close()
+	result.StatusCode = resp.StatusCode
+	if responseHeaderSize(resp.Header) > maxHeaderBytes {
+		result.ObservedAtEnd = time.Now().UTC()
+		return result, fmt.Errorf("site response headers exceeded the configured budget")
+	}
+	if len(resp.Header.Values("Content-Range")) != 0 {
+		result.ObservedAtEnd = time.Now().UTC()
+		return result, fmt.Errorf("partial site response was rejected")
+	}
+	encodings := resp.Header.Values("Content-Encoding")
+	if len(encodings) > 1 || (len(encodings) == 1 && !strings.EqualFold(strings.TrimSpace(encodings[0]), "identity")) || resp.Uncompressed {
+		result.ObservedAtEnd = time.Now().UTC()
+		return result, fmt.Errorf("encoded site response was rejected")
+	}
+	if len(resp.TransferEncoding) > 1 || (len(resp.TransferEncoding) == 1 && !strings.EqualFold(resp.TransferEncoding[0], "chunked")) {
+		result.ObservedAtEnd = time.Now().UTC()
+		return result, fmt.Errorf("encoded site transfer was rejected")
+	}
+	if len(resp.Trailer) != 0 {
+		result.ObservedAtEnd = time.Now().UTC()
+		return result, fmt.Errorf("site response trailers were rejected")
+	}
+	result.MediaType, err = strictResponseMediaType(resp.Header.Values("Content-Type"))
+	if err != nil {
+		result.ObservedAtEnd = time.Now().UTC()
+		return result, err
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode <= 399 && classify != nil {
+		locations := resp.Header.Values("Location")
+		if len(locations) == 1 {
+			if location, ok := safeRedirectTarget(c.base, locations[0]); ok {
+				if redirectID, accepted := classify(location); accepted && redirectID != "" && len(redirectID) <= 256 && asciiHeaderValue(redirectID) {
+					result.RedirectID = redirectID
+				}
+			}
+		}
+	}
+	if resp.ContentLength > maxBody {
+		result.ObservedAtEnd = time.Now().UTC()
+		return result, fmt.Errorf("site response exceeded the configured budget")
+	}
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	result.ResponseBytesRead = int64(len(responseBody))
+	result.ObservedAtEnd = time.Now().UTC()
+	if readErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, fmt.Errorf("site response read canceled: %w", ctxErr)
+		}
+		return result, fmt.Errorf("site response read failed")
+	}
+	if int64(len(responseBody)) > maxBody {
+		return result, fmt.Errorf("site response exceeded the configured budget")
+	}
+	result.ResponseBytesKnown = true
+	result.Body = responseBody
+	return result, nil
+}
+
+func encodeFormFields(fields []FormField, maximumFields int, maximumBytes int64) (string, error) {
+	if len(fields) == 0 || len(fields) > maximumFields {
+		return "", fmt.Errorf("site form field count is invalid")
+	}
+	var builder strings.Builder
+	for index, field := range fields {
+		if field.Name == "" || len(field.Name) > 16<<10 || len(field.Value) > 16<<10 ||
+			!utf8.ValidString(field.Name) || !utf8.ValidString(field.Value) || hasControlRune(field.Name) || hasControlRune(field.Value) {
+			return "", fmt.Errorf("site form field is invalid")
+		}
+		if index != 0 {
+			builder.WriteByte('&')
+		}
+		builder.WriteString(url.QueryEscape(field.Name))
+		builder.WriteByte('=')
+		builder.WriteString(url.QueryEscape(field.Value))
+		if int64(builder.Len()) > maximumBytes {
+			return "", fmt.Errorf("site form exceeded the configured budget")
+		}
+	}
+	return builder.String(), nil
+}
+
+// ValidateFormFields applies the exact ordered form encoder and budgets used by
+// PostFormOnce without creating a request. Values remain process-local; only
+// aggregate counts are returned.
+func ValidateFormFields(fields []FormField, maximumFields int, maximumBytes int64) (fieldCount int, encodedBytes int64, err error) {
+	encoded, err := encodeFormFields(fields, maximumFields, maximumBytes)
+	if err != nil {
+		return 0, 0, err
+	}
+	return len(fields), int64(len(encoded)), nil
+}
+
+func hasControlRune(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func strictResponseMediaType(values []string) (string, error) {
+	if len(values) > 1 {
+		return "", fmt.Errorf("site response content type was invalid")
+	}
+	if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+		return "", nil
+	}
+	mediaType, parameters, err := mime.ParseMediaType(strings.TrimSpace(values[0]))
+	if err != nil {
+		return "", fmt.Errorf("site response content type was invalid")
+	}
+	mediaType = strings.ToLower(mediaType)
+	if mediaType == "text/html" {
+		if charset, present := parameters["charset"]; present && !strings.EqualFold(strings.TrimSpace(charset), "utf-8") {
+			return "", fmt.Errorf("site response text encoding was unsupported")
+		}
+	}
+	return mediaType, nil
+}
+
+func safeRedirectTarget(base *url.URL, raw string) (*url.URL, bool) {
+	if base == nil || raw == "" || len(raw) > 4096 || !utf8.ValidString(raw) || hasControlRune(raw) {
+		return nil, false
+	}
+	ref, err := url.Parse(raw)
+	if err != nil || ref.User != nil || ref.Fragment != "" || ref.RawPath != "" {
+		return nil, false
+	}
+	target := base.ResolveReference(ref)
+	if target.Scheme != "https" || !strings.EqualFold(target.Hostname(), base.Hostname()) || effectivePort(target) != effectivePort(base) || target.User != nil || target.Fragment != "" {
+		return nil, false
+	}
+	return target, true
 }
 
 func (c *Client) RequestsMade() int {

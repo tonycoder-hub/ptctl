@@ -50,6 +50,16 @@ not anonymity, and a guessable path may still be tested by dictionary attack.
 The redactor and path hiding are defense in depth, not permission to log secret
 structures or publish private reports.
 
+Bonus-exchange review HTML and form controls cross an even narrower boundary.
+Hidden names and values are retained only inside one process-local adapter
+session long enough to encode one acknowledged POST. Public reports and sealed
+intent/attempt/outcome records contain only canonical site/option/route IDs,
+one-way review IDs, bounded counters and time intervals, and fixed outcome
+codes. They never contain the Cookie header, raw form fields, response body,
+Location header, request URL, or state-store path. The store is permission-
+isolated rather than encrypted, and disclosed record/operation IDs remain
+stable correlators.
+
 Private metafile-store reports expose only an opaque store ID, the
 whole-metafile SHA-256 variant ID, and safe parsed metadata by default. Source,
 and store-root absolute paths require `--show-absolute-paths`; object paths are
@@ -95,6 +105,28 @@ no-reuse, no-redirect transport as the effectful fetch. The detail route sends
 only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
 parameter and never follows the download reference found in the page.
 Bonus review sends only the one GET and has no POST-capable transport surface.
+
+The separate bonus-exchange command has a fixed two-request ceiling: one fresh
+review GET and, only after a new durable deterministic attempt marker, at most
+one form POST. Before the marker, the fresh response's ordered successful
+controls are run through the exact POST encoder using the sealed intent's field
+and encoded-byte budgets. Those limits are bound to the process-local review
+authority, so a different submit budget fails before the POST. The POST body
+is non-replayable; the fresh transport disables HTTP/2, keepalive, proxies,
+compression, redirect following, and automatic retry. A pre-existing or
+ambiguously published marker terminates the invocation before POST. After POST,
+timeout, transport ambiguity, unrecognized response,
+or local outcome-write failure is recorded as rejected/unknown when possible
+and is never used to justify another automatic request.
+
+This coordination applies to one prepared operation and assumes one preserved
+private-store history. A separately prepared operation is a separate explicit
+submission. Copying or rolling back the store before the attempt marker, or
+deleting all records for an operation, can create independent histories that
+no local no-clobber marker can coordinate. Reports state this scope explicitly.
+A later read-only status uses a bounded, detected-stable but non-atomic scan to
+prove currently visible record bytes and links, but cannot retroactively
+prove that an earlier directory sync or no-clobber publication completed.
 
 `site metafile fetch` is scoped to one validated remote ID and one GET. It does
 not perform a preceding detail lookup, follow a redirect, retry, or fan out to
@@ -157,6 +189,45 @@ not anonymity, signatures, or replay authority. The operation reports zero
 form submissions and exposes no POST method. JavaScript is not executed, so the
 normalized action route and retained text are explicitly only static HTML
 claims; CSS-rendered visibility is not evaluated.
+An HTML response that explicitly declares a non-UTF-8 charset is rejected before
+parsing, so reviewed text and submitted controls cannot be derived under
+different declared encodings.
+Those IDs are versioned to the audited parser semantics. Tightening which
+controls contribute to submission may change them and intentionally requires a
+fresh review and newly prepared intent; an older correlator is never migrated
+into authority.
+
+Bonus submission reuses that bounded parser but retains an ordered private form
+projection only when the selected form is uniquely available, requires no
+additional input, has one enabled submit control, and targets the exact pinned
+POST route. External form owners, unmodeled form-associated/custom elements,
+browser-generated charset values, and alternate command/popover submitter
+behavior fail closed. Form fields/count/encoded bytes, response headers/body,
+and total session requests have separate hard limits. The response body is read
+to a bounded completion but discarded by the adapter; only fixed same-origin
+redirect classifications and safe outcome codes survive.
+
+Intent, attempt, and outcome records are canonical one-line JSON with strict
+unknown/duplicate/trailing-data rejection and domain-separated record digests.
+The operation-bound store session holds one physical root identity across the
+marker, remote effect, and outcome. Status bounds object entries, matching
+records, object-name bytes, and total outcome bytes, checks all linked records,
+and treats multiple or orphan outcomes as corruption. A serialized intent,
+attempt, review, or submission receipt cannot recreate process-local write
+authority.
+
+Public reports distinguish the verified marker that blocks a future submit in
+the selected preserved history from verification that a single-request receipt
+is bound to the operation. The former alone does not prove that the POST began;
+the latter comes only from live process-local adapter authority or a jointly
+verified canonical outcome record. Neither is a cross-copy exactly-once claim.
+
+The sealed record digest is content addressing, not a MAC or signature. A
+process with write authority over the owner-private store is inside this local
+trust boundary and can fabricate, delete, clone, or roll back a self-consistent
+history. The protocol prevents accidental replay and coordinates cooperating
+callers in one preserved history; it does not authenticate history against the
+store owner.
 
 A persistent site binding is attempted only after complete artifact-import
 success. Its canonical record is capped at 256 KiB, rejects duplicate/unknown
@@ -1111,6 +1182,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - encryption-at-rest or an audited external-key design for private metafile
   stores on filesystems where owner-only ACLs cannot be enforced;
 - per-account cross-process site rate-limit coordination;
+- tamper-evident append-only state history or external coordination across
+  cloned, rolled-back, or selectively pruned private stores;
 - signed releases, SBOM, and build provenance.
 
 qBittorrent location mutation remains deliberately unsupported. Its official

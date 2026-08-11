@@ -139,6 +139,9 @@ Usage:
   ptctl site detail --cookie-stdin [--output table|json] SITE REMOTE_ID
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
   ptctl site bonus review --cookie-stdin [--output table|json] SITE OPTION
+  ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
+  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID --cookie-stdin --acknowledge-bonus-exchange [--output table|json] SITE OPTION
+  ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site metafile fetch --cookie-stdin --acknowledge-site-effect --metafile-store DIR [--output table|json] SITE REMOTE_ID
   ptctl site metafile binding list --metafile-store DIR [--output table|json]
   ptctl site metafile binding inspect --metafile-store DIR [--output table|json] RECORD_ID
@@ -203,7 +206,7 @@ Usage:
   ptctl version [--output table|json]
 
 Safety defaults:
-  * Site operations are one bounded GET per invocation, with no automatic retry.
+  * Ordinary site reads are one bounded GET per invocation. Bonus exchange is one fresh GET plus at most one acknowledged POST after a durable marker. Site requests are never automatically retried.
   * Session cookies are accepted only through stdin and are never persisted.
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
@@ -257,10 +260,15 @@ func (a *app) site(args []string) error {
 	case "detail":
 		return a.siteDetail(args[1:])
 	case "bonus":
-		if len(args) >= 2 && args[1] == "review" {
-			return a.siteBonusReview(args[2:])
+		if len(args) >= 2 {
+			switch args[1] {
+			case "review":
+				return a.siteBonusReview(args[2:])
+			case "exchange":
+				return a.siteBonusExchange(args[2:])
+			}
 		}
-		return usageError("site bonus requires review")
+		return usageError("site bonus requires review or exchange")
 	case "metafile":
 		if len(args) >= 2 {
 			switch args[1] {
@@ -1645,7 +1653,7 @@ func (a *app) siteRead(command string, args []string) error {
 			return fmt.Errorf("site %q declares %q but does not implement its typed port", descriptor.ID, capability)
 		}
 		data, err = reader.BonusCatalog(ctx, credential)
-		warnings = append(warnings, "catalog is read-only; ptctl never submits purchase or redemption forms")
+		warnings = append(warnings, "catalog is read-only; this command never submits purchase or redemption forms")
 	}
 	if err != nil {
 		return err
@@ -2167,6 +2175,8 @@ func jsonKind(data any) string {
 	case siteDetailReport:
 		return typed.kind
 	case siteBonusReviewReport:
+		return typed.kind
+	case siteBonusExchangeReport:
 		return typed.kind
 	case domain.BonusCatalog:
 		return "site.bonus.catalog"

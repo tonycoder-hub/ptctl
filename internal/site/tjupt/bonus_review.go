@@ -82,11 +82,13 @@ func (a *Adapter) OpenBonusReviewSession(ctx context.Context, credential site.Cr
 }
 
 type bonusReviewSession struct {
-	client guardedClient
-	config site.BonusReviewConfig
-	mu     sync.Mutex
-	used   bool
-	closed bool
+	client            guardedClient
+	config            site.BonusReviewConfig
+	mu                sync.Mutex
+	used              bool
+	closed            bool
+	captureSubmission bool
+	submission        *bonusFormSubmission
 }
 
 func (session *bonusReviewSession) ReadBonusReview(ctx context.Context, selector string, limits site.BonusReviewLimits) (*site.ObservedBonusReview, site.BonusReviewReceipt, error) {
@@ -172,7 +174,15 @@ func (session *bonusReviewSession) ReadBonusReview(ctx context.Context, selector
 		receipt.StopReason = stopReason
 		return nil, receipt, err
 	}
-	review, parseUsage, err := parseBonusOfferReview(response.Body, selector, limits)
+	var review domain.BonusOfferReview
+	var parseUsage bonusParseUsage
+	var submission *bonusFormSubmission
+	var err error
+	if session.captureSubmission {
+		review, submission, parseUsage, err = parseBonusOfferReviewWithSubmission(response.Body, selector, limits)
+	} else {
+		review, parseUsage, err = parseBonusOfferReview(response.Body, selector, limits)
+	}
 	receipt.Used.FormsExamined = parseUsage.forms
 	receipt.Used.FieldsExamined = parseUsage.fields
 	receipt.Used.TokensExamined = parseUsage.tokens
@@ -188,7 +198,29 @@ func (session *bonusReviewSession) ReadBonusReview(ctx context.Context, selector
 		receipt.StopReason = "response_accounting_invalid"
 		return nil, receipt, fmt.Errorf("TJUPT bonus review observation is invalid")
 	}
+	session.mu.Lock()
+	session.submission = submission
+	session.mu.Unlock()
 	return observed, receipt, nil
+}
+
+func (session *bonusReviewSession) capturedSubmission() *bonusFormSubmission {
+	if session == nil {
+		return nil
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.submission == nil {
+		return nil
+	}
+	result := &bonusFormSubmission{
+		target: bonusFormTarget{path: session.submission.target.path, query: make(url.Values, len(session.submission.target.query))},
+		fields: append([]httpguard.FormField(nil), session.submission.fields...),
+	}
+	for key, values := range session.submission.target.query {
+		result.target.query[key] = append([]string(nil), values...)
+	}
+	return result
 }
 
 func (session *bonusReviewSession) RequestsMade() int {
@@ -277,10 +309,22 @@ type parsedBonusForm struct {
 	requiresInput    bool
 	unsupportedInput bool
 	formShape        []string
+	target           bonusFormTarget
+	submissionFields []httpguard.FormField
 	cells            []string
 	cellsOverflow    bool
 	row              *bonusRowState
 	looseText        strings.Builder
+}
+
+type bonusFormTarget struct {
+	path  string
+	query url.Values
+}
+
+type bonusFormSubmission struct {
+	target bonusFormTarget
+	fields []httpguard.FormField
 }
 
 type bonusRowState struct {
@@ -294,6 +338,16 @@ type bonusParseError struct{ reason string }
 func (err *bonusParseError) Error() string { return err.reason }
 
 func parseBonusOfferReview(body []byte, selector string, limits site.BonusReviewLimits) (domain.BonusOfferReview, bonusParseUsage, error) {
+	return parseBonusOfferReviewInto(body, selector, limits, nil)
+}
+
+func parseBonusOfferReviewWithSubmission(body []byte, selector string, limits site.BonusReviewLimits) (domain.BonusOfferReview, *bonusFormSubmission, bonusParseUsage, error) {
+	var submission *bonusFormSubmission
+	review, usage, err := parseBonusOfferReviewInto(body, selector, limits, &submission)
+	return review, submission, usage, err
+}
+
+func parseBonusOfferReviewInto(body []byte, selector string, limits site.BonusReviewLimits, capture **bonusFormSubmission) (domain.BonusOfferReview, bonusParseUsage, error) {
 	var usage bonusParseUsage
 	if err := limits.Validate(); err != nil {
 		return domain.BonusOfferReview{}, usage, err
@@ -332,6 +386,16 @@ func parseBonusOfferReview(body []byte, selector string, limits site.BonusReview
 			if name == "base" || name == "template" {
 				return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "ambiguous_form_structure"}
 			}
+			if isBonusFormControl(name) || strings.Contains(name, "-") {
+				if _, hasExternalOwner := attrs["form"]; hasExternalOwner {
+					// Controls with an explicit form owner can live anywhere in the
+					// document and participate in another form's submission. The
+					// bounded tokenizer deliberately does not implement HTML's global
+					// ID/owner resolution, so accepting one could omit an effectful
+					// successful control from the captured POST.
+					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "ambiguous_form_structure"}
+				}
+			}
 			if name == "script" || name == "style" {
 				if tokenType == html.StartTagToken {
 					skipTextDepth++
@@ -359,8 +423,8 @@ func parseBonusOfferReview(body []byte, selector string, limits site.BonusReview
 				if usage.forms > limits.MaxForms {
 					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "form_budget_exceeded"}
 				}
-				method, route, supported := classifyBonusFormAction(attrs)
-				current = &parsedBonusForm{method: method, actionRouteID: route, actionSupported: supported, cells: make([]string, 0, 4)}
+				method, route, target, supported := classifyBonusFormAction(attrs)
+				current = &parsedBonusForm{method: method, actionRouteID: route, actionSupported: supported, target: target, cells: make([]string, 0, 4)}
 				if len(rows) > 0 {
 					current.row = rows[len(rows)-1]
 				}
@@ -372,6 +436,19 @@ func parseBonusOfferReview(body []byte, selector string, limits site.BonusReview
 				// browser tree semantics rather than a local control attribute. Keep
 				// the observation usable as a review, but never claim its inputs or
 				// submit availability are understood.
+				current.unsupportedInput = true
+			}
+			if current != nil && isUnmodeledBonusFormControl(name) {
+				// These form-associated elements are intentionally outside the
+				// captured successful-control model. Retain a review, but never
+				// expose submission authority for the form.
+				current.unsupportedInput = true
+			}
+			if current != nil && strings.Contains(name, "-") {
+				// A form-associated custom element can contribute opaque entries
+				// through ElementInternals. The tokenizer cannot prove whether a
+				// custom element is form-associated, so it must never authorize an
+				// effectful replay.
 				current.unsupportedInput = true
 			}
 			if (name == "td" || name == "th") && len(rows) > 0 {
@@ -532,6 +609,14 @@ func parseBonusOfferReview(body []byte, selector string, limits site.BonusReview
 		return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "unrecognized_offer"}
 	}
 	review.ReviewID = reviewID
+	if capture != nil && availability == site.BonusReviewAvailabilityAvailable && inputMode == site.BonusReviewInputNone && match.submitCount == 1 && len(match.submissionFields) > 0 {
+		fields := append([]httpguard.FormField(nil), match.submissionFields...)
+		query := make(url.Values, len(match.target.query))
+		for key, values := range match.target.query {
+			query[key] = append([]string(nil), values...)
+		}
+		*capture = &bonusFormSubmission{target: bonusFormTarget{path: match.target.path, query: query}, fields: fields}
+	}
 	return review, usage, nil
 }
 
@@ -562,7 +647,7 @@ func hasBonusControlRune(value string) bool {
 	return false
 }
 
-func classifyBonusFormAction(attrs map[string]string) (string, string, bool) {
+func classifyBonusFormAction(attrs map[string]string) (string, string, bonusFormTarget, bool) {
 	method := strings.ToLower(attrs["method"])
 	if method == "" {
 		method = "get"
@@ -573,7 +658,7 @@ func classifyBonusFormAction(attrs map[string]string) (string, string, bool) {
 	rawAction := strings.Trim(attrs["action"], " ")
 	ref, err := url.Parse(rawAction)
 	if err != nil || ref.IsAbs() || ref.Host != "" || ref.User != nil || ref.Fragment != "" || ref.RawPath != "" {
-		return method, bonusUnknownActionRoute, false
+		return method, bonusUnknownActionRoute, bonusFormTarget{}, false
 	}
 	path := strings.TrimPrefix(ref.Path, "/")
 	if path == "" {
@@ -581,14 +666,14 @@ func classifyBonusFormAction(attrs map[string]string) (string, string, bool) {
 	}
 	query, queryErr := url.ParseQuery(ref.RawQuery)
 	if queryErr != nil {
-		return method, bonusUnknownActionRoute, false
+		return method, bonusUnknownActionRoute, bonusFormTarget{}, false
 	}
 	querySupported := len(query) == 0 || len(query) == 1 && len(query["action"]) == 1 && query.Get("action") == "exchange"
 	supported := method == "post" && path == bonusReviewPath && querySupported && bonusFormSubmissionAttributesSupported(attrs)
 	if !supported {
-		return method, bonusUnknownActionRoute, false
+		return method, bonusUnknownActionRoute, bonusFormTarget{}, false
 	}
-	return method, BonusExchangeRouteID, true
+	return method, BonusExchangeRouteID, bonusFormTarget{path: path, query: query}, true
 }
 
 func isExactBonusLogout(raw string) bool {
@@ -626,7 +711,12 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 	if tag == "button" && typeValue == "" {
 		typeValue = "submit"
 	}
-	form.formShape = append(form.formShape, tag+"\x00"+name+"\x00"+typeValue)
+	_, disabled := attrs["disabled"]
+	disabledShape := "enabled"
+	if disabled {
+		disabledShape = "disabled"
+	}
+	form.formShape = append(form.formShape, tag+"\x00"+name+"\x00"+typeValue+"\x00"+disabledShape)
 	_, hasExternalForm := attrs["form"]
 	if hasExternalForm {
 		form.unsupportedInput = true
@@ -639,15 +729,14 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 	if name == "option" {
 		form.selectorCount++
 		form.optionValues = append(form.optionValues, attrs["value"])
-		_, disabled := attrs["disabled"]
 		if tag != "input" || typeValue != "hidden" || disabled || hasExternalForm || validateBonusSelector(attrs["value"]) != nil {
 			form.unsupportedInput = true
 			return
 		}
 		form.selector = attrs["value"]
+		form.submissionFields = append(form.submissionFields, httpguard.FormField{Name: name, Value: attrs["value"]})
 		return
 	}
-	_, disabled := attrs["disabled"]
 	if disabled && !(tag == "input" && typeValue == "submit") && !(tag == "button" && typeValue == "submit") {
 		return
 	}
@@ -657,6 +746,7 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 		return
 	case "button":
 		if typeValue == "submit" {
+			form.formShape = append(form.formShape, "submit-value\x00"+attrs["value"])
 			if bonusSubmitOverridesAction(attrs) {
 				form.actionSupported = false
 			}
@@ -664,6 +754,9 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 			form.submitCount++
 			if _, disabled := attrs["disabled"]; !disabled {
 				form.enabledSubmit = true
+				if name != "" {
+					form.submissionFields = append(form.submissionFields, httpguard.FormField{Name: name, Value: attrs["value"]})
+				}
 			}
 			return
 		}
@@ -673,9 +766,23 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 		return
 	case "input":
 		switch typeValue {
-		case "hidden", "button", "reset":
+		case "hidden":
+			if strings.EqualFold(name, "_charset_") {
+				// Browsers replace this magic control's value with the chosen
+				// encoding. The explicit HTTP encoder has no browser submission
+				// context, so replaying the attribute value would not model the
+				// successful control exactly.
+				form.unsupportedInput = true
+				return
+			}
+			if name != "" {
+				form.submissionFields = append(form.submissionFields, httpguard.FormField{Name: name, Value: attrs["value"]})
+			}
+			return
+		case "button", "reset":
 			return
 		case "submit":
+			form.formShape = append(form.formShape, "submit-value\x00"+attrs["value"])
 			if bonusSubmitOverridesAction(attrs) {
 				form.actionSupported = false
 			}
@@ -683,6 +790,9 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 			form.submitCount++
 			if _, disabled := attrs["disabled"]; !disabled {
 				form.enabledSubmit = true
+				if name != "" {
+					form.submissionFields = append(form.submissionFields, httpguard.FormField{Name: name, Value: attrs["value"]})
+				}
 			}
 			return
 		case "text", "number", "email", "search", "url", "tel", "date", "datetime-local", "month", "week", "time", "range", "color", "checkbox", "radio":
@@ -695,8 +805,29 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 	}
 }
 
+func isBonusFormControl(name string) bool {
+	switch name {
+	case "input", "button", "select", "textarea", "fieldset", "object", "output", "keygen":
+		return true
+	default:
+		return false
+	}
+}
+
+func isUnmodeledBonusFormControl(name string) bool {
+	switch name {
+	case "object", "output", "keygen":
+		return true
+	default:
+		return false
+	}
+}
+
 func bonusSubmitOverridesAction(attrs map[string]string) bool {
-	for _, key := range []string{"form", "formaction", "formmethod", "formenctype", "formtarget", "formnovalidate"} {
+	for _, key := range []string{
+		"form", "formaction", "formmethod", "formenctype", "formtarget", "formnovalidate",
+		"command", "commandfor", "popovertarget", "popovertargetaction",
+	} {
 		if _, exists := attrs[key]; exists {
 			return true
 		}
@@ -706,7 +837,7 @@ func bonusSubmitOverridesAction(attrs map[string]string) bool {
 
 func bonusFormShapeID(parts []string) string {
 	hash := sha256.New()
-	hash.Write([]byte("ptctl-tjupt-bonus-form-shape-v1\x00"))
+	hash.Write([]byte("ptctl-tjupt-bonus-form-shape-v2\x00"))
 	var length [8]byte
 	for _, part := range parts {
 		binary.BigEndian.PutUint64(length[:], uint64(len(part)))

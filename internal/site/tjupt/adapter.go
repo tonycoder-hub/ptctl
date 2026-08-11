@@ -14,8 +14,9 @@ import (
 
 const DefaultBaseURL = "https://www.tjupt.org/"
 
-// Adapter implements the conservative, read-only subset of TJUPT. It never
-// submits a form and does not retry requests automatically.
+// Adapter implements conservative TJUPT reads plus narrowly reviewed,
+// explicitly acknowledged effectful ports. It never retries requests
+// automatically.
 type Adapter struct {
 	baseURL   string
 	newClient guardedClientFactory
@@ -26,6 +27,11 @@ type guardedClient interface {
 	GetOnce(context.Context, string, url.Values, string, int64, int64) (httpguard.StrictResponse, error)
 	RequestsMade() int
 	Close() error
+}
+
+type guardedExchangeClient interface {
+	guardedClient
+	PostFormOnce(context.Context, string, url.Values, []httpguard.FormField, string, int, int64, int64, int64, httpguard.RedirectClassifier) (httpguard.StrictResponse, error)
 }
 
 type guardedClientFactory func(string, string, time.Duration) (guardedClient, error)
@@ -48,7 +54,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 		domain.CapabilityBonusRead,
 	}
 	if a.baseURL == DefaultBaseURL {
-		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview)
+		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview, domain.CapabilityBonusExchange)
 	}
 	return domain.SiteDescriptor{
 		ID:           "tjupt",

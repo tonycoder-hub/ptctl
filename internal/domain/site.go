@@ -13,13 +13,14 @@ const (
 )
 
 const (
-	CapabilityAuthCheck   Capability = "auth.check"
-	CapabilityAccountRead Capability = "account.read"
-	CapabilitySearch      Capability = "torrent.search"
-	CapabilityDetail      Capability = "torrent.detail"
-	CapabilityMetafile    Capability = "torrent.metafile.read_effectful"
-	CapabilityBonusRead   Capability = "bonus.catalog.read"
-	CapabilityBonusReview Capability = "bonus.offer.review"
+	CapabilityAuthCheck     Capability = "auth.check"
+	CapabilityAccountRead   Capability = "account.read"
+	CapabilitySearch        Capability = "torrent.search"
+	CapabilityDetail        Capability = "torrent.detail"
+	CapabilityMetafile      Capability = "torrent.metafile.read_effectful"
+	CapabilityBonusRead     Capability = "bonus.catalog.read"
+	CapabilityBonusReview   Capability = "bonus.offer.review"
+	CapabilityBonusExchange Capability = "bonus.exchange.submit_effectful"
 )
 
 type SiteDescriptor struct {

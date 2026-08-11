@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -207,6 +208,7 @@ func TestGetOnceResponseBudgetsAndEncodingFailClosed(t *testing.T) {
 		{name: "transfer encoding", body: "CANARY-TRANSFER", bodyLimit: 1024, headLimit: 1024, transfer: []string{"gzip", "chunked"}},
 		{name: "trailer", body: "CANARY-TRAILER", bodyLimit: 1024, headLimit: 1024, trailer: http.Header{"X-Trailer": {"value"}}},
 		{name: "malformed content type", header: http.Header{"Content-Type": {"not a media type ;;;"}}, body: "x", bodyLimit: 1024, headLimit: 1024},
+		{name: "unsupported HTML charset", header: http.Header{"Content-Type": {"text/html; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -227,4 +229,153 @@ func TestGetOnceResponseBudgetsAndEncodingFailClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPostFormOnceIsOrderedNonReplayableAndRetainsOnlyAllowedRedirectID(t *testing.T) {
+	const cookie = "sid=COOKIE-CANARY"
+	calls := 0
+	client := strictTestClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.Method != http.MethodPost || request.URL.Path != "/mybonusapps.php" || request.URL.RawQuery != "action=exchange" ||
+			request.Header.Get("Cookie") != cookie || request.Header.Get("Content-Type") != "application/x-www-form-urlencoded" ||
+			request.Header.Get("Accept-Encoding") != "identity" || !request.Close || request.GetBody != nil ||
+			string(body) != "option=1&csrf=opaque+value&csrf=second&submit=Exchange%21" {
+			t.Fatalf("unexpected strict POST: request=%#v body=%q", request, body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header: http.Header{
+				"Location":     {"/mybonusapps.php?do=upload"},
+				"Content-Type": {"text/html; charset=utf-8"},
+			},
+			Body:          io.NopCloser(strings.NewReader("")),
+			ContentLength: 0,
+		}, nil
+	}), cookie)
+	response, err := client.PostFormOnce(
+		context.Background(), "mybonusapps.php", url.Values{"action": {"exchange"}},
+		[]FormField{{Name: "option", Value: "1"}, {Name: "csrf", Value: "opaque value"}, {Name: "csrf", Value: "second"}, {Name: "submit", Value: "Exchange!"}},
+		"text/html", 8, 1024, 1024, 1024,
+		func(target *url.URL) (string, bool) {
+			if target.Path == "/mybonusapps.php" && target.Query().Get("do") == "upload" {
+				return "test.bonus.confirm.upload.v1", true
+			}
+			return "", false
+		},
+	)
+	if err != nil || calls != 1 || client.RequestsMade() != 1 || response.StatusCode != http.StatusFound ||
+		response.RedirectID != "test.bonus.confirm.upload.v1" || !response.ResponseBytesKnown || response.ResponseBytesRead != 0 {
+		t.Fatalf("response=%#v err=%v calls=%d requests=%d", response, err, calls, client.RequestsMade())
+	}
+}
+
+func TestPostFormOnceResponseBudgetsAndEncodingFailClosed(t *testing.T) {
+	tests := []struct {
+		name      string
+		header    http.Header
+		body      string
+		bodyLimit int64
+		headLimit int64
+		wantRead  int64
+		transfer  []string
+		trailer   http.Header
+		unpacked  bool
+	}{
+		{name: "body n plus one", body: "1234", bodyLimit: 3, headLimit: 1024, wantRead: 4},
+		{name: "header", header: http.Header{"X-Large": {strings.Repeat("x", 32)}}, body: "x", bodyLimit: 1024, headLimit: 8},
+		{name: "content range", header: http.Header{"Content-Range": {"bytes 0-1/10"}}, body: "12", bodyLimit: 1024, headLimit: 1024},
+		{name: "encoding", header: http.Header{"Content-Encoding": {"gzip"}}, body: "CANARY-COMPRESSED", bodyLimit: 1024, headLimit: 1024},
+		{name: "auto unpacked", body: "CANARY-COMPRESSED", bodyLimit: 1024, headLimit: 1024, unpacked: true},
+		{name: "transfer encoding", body: "CANARY-TRANSFER", bodyLimit: 1024, headLimit: 1024, transfer: []string{"gzip", "chunked"}},
+		{name: "trailer", body: "CANARY-TRAILER", bodyLimit: 1024, headLimit: 1024, trailer: http.Header{"X-Trailer": {"value"}}},
+		{name: "malformed content type", header: http.Header{"Content-Type": {"not a media type ;;;"}}, body: "x", bodyLimit: 1024, headLimit: 1024},
+		{name: "unsupported HTML charset", header: http.Header{"Content-Type": {"text/html; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := strictTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:       http.StatusOK,
+					Header:           test.header,
+					Body:             io.NopCloser(strings.NewReader(test.body)),
+					ContentLength:    -1,
+					TransferEncoding: test.transfer,
+					Trailer:          test.trailer,
+					Uncompressed:     test.unpacked,
+				}, nil
+			}), "sid=COOKIE-CANARY")
+			response, err := client.PostFormOnce(
+				context.Background(), "mybonusapps.php", nil, []FormField{{Name: "option", Value: "1"}},
+				"text/html", 4, 1024, test.bodyLimit, test.headLimit, nil,
+			)
+			if err == nil || client.RequestsMade() != 1 || response.ResponseBytesRead != test.wantRead ||
+				response.ResponseBytesKnown || len(response.Body) != 0 || strings.Contains(err.Error(), "CANARY") {
+				t.Fatalf("response=%#v err=%v requests=%d", response, err, client.RequestsMade())
+			}
+		})
+	}
+}
+
+func TestValidateFormFieldsMatchesExactPostEncodingBudget(t *testing.T) {
+	fields := []FormField{{Name: "option", Value: "1"}, {Name: "csrf", Value: "opaque value"}, {Name: "csrf", Value: "second"}}
+	count, encodedBytes, err := ValidateFormFields(fields, len(fields), int64(len("option=1&csrf=opaque+value&csrf=second")))
+	if err != nil || count != len(fields) || encodedBytes != int64(len("option=1&csrf=opaque+value&csrf=second")) {
+		t.Fatalf("count=%d bytes=%d err=%v", count, encodedBytes, err)
+	}
+	if _, _, err := ValidateFormFields(fields, len(fields)-1, 1024); err == nil {
+		t.Fatal("field N+1 unexpectedly passed preflight")
+	}
+	if _, _, err := ValidateFormFields(fields, len(fields), encodedBytes-1); err == nil {
+		t.Fatal("encoded byte N+1 unexpectedly passed preflight")
+	}
+}
+
+func TestPostFormOnceFailsClosedWithoutLeakingOrRetrying(t *testing.T) {
+	tests := []struct {
+		name     string
+		ctx      func() context.Context
+		fields   []FormField
+		location string
+		failure  error
+		wantCall int
+	}{
+		{name: "pre canceled", ctx: canceledHTTPContext, fields: []FormField{{Name: "option", Value: "1"}}, wantCall: 0},
+		{name: "empty field name", ctx: context.Background, fields: []FormField{{Name: "", Value: "CANARY-FIELD"}}, wantCall: 0},
+		{name: "transport", ctx: context.Background, fields: []FormField{{Name: "option", Value: "1"}}, failure: errors.New("https://example.test/?COOKIE-CANARY"), wantCall: 1},
+		{name: "cross origin redirect", ctx: context.Background, fields: []FormField{{Name: "option", Value: "1"}}, location: "https://other.invalid/CANARY-LOCATION", wantCall: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			client := strictTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				if test.failure != nil {
+					return nil, test.failure
+				}
+				return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {test.location}}, Body: io.NopCloser(strings.NewReader(""))}, nil
+			}), "sid=COOKIE-CANARY")
+			response, err := client.PostFormOnce(test.ctx(), "mybonusapps.php", nil, test.fields, "text/html", 4, 1024, 1024, 1024, func(*url.URL) (string, bool) {
+				return "test.allowed.v1", true
+			})
+			if calls != test.wantCall || client.RequestsMade() != test.wantCall || strings.Contains(fmt.Sprint(err), "CANARY") || response.RedirectID != "" {
+				t.Fatalf("response=%#v err=%v calls=%d requests=%d", response, err, calls, client.RequestsMade())
+			}
+			if test.name != "cross origin redirect" && err == nil {
+				t.Fatal("invalid or failed POST unexpectedly succeeded")
+			}
+			if test.name == "cross origin redirect" && err != nil {
+				t.Fatalf("unrecognized redirect should remain a safe response: %v", err)
+			}
+		})
+	}
+}
+
+func canceledHTTPContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }
