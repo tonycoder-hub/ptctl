@@ -216,6 +216,18 @@ The intermediate candidate query also has a private digest over its profile,
 records, accounting, diagnostics, and fresh observations, so relabeling a live
 candidate DTO or replaying JSON cannot synthesize this selection authority.
 
+Reconciliation can instead select one materialize target, full operation ID,
+and reviewed plan ID. Historical journal or retention data alone is not current
+content authority. The command must exactly verify the current final namespace
+and bytes, then immediately establish the ordinary exact-source capability over
+that final. A separate process-local bridge binds the exact `VerifiedFinal`,
+`VerifiedSource`, discovery selection, and source snapshot. Missing, mismatched,
+serialized, or independently reconstructed values force the storage relation
+to `incomplete`; they never fall back to a raw path. A successful relation is
+`verified_materialized_final`, but remains two sequential bracketed filesystem
+observations rather than an atomic snapshot. Optional downloader snapshots
+enclose both local proofs.
+
 ### Filesystem escape, races, and corruption
 
 Search roots must be explicit, non-overlapping directories. Inventory does not
@@ -795,7 +807,7 @@ execution command.
 ### Read side effects and remote storage
 
 For inspect, verify, discovery, planning, reconciliation (including explicit
-exact-layout `--source`), ordinary site reads,
+exact-layout `--source` and materialized-final verification), ordinary site reads,
 downloader reads, and the discovery/read phases of materialize, metadata and
 content reads may update atime, wake disks, hydrate a cloud placeholder,
 traverse a FUSE/SMB backend, or incur network cost. "Read-only" means zero

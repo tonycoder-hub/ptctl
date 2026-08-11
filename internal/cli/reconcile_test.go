@@ -538,6 +538,122 @@ func TestReconcileReportExactSourceIsSelectedProofWithoutUniquenessClaim(t *test
 	}
 }
 
+func TestReconcileReportExplicitMaterializedFinalBridgesCurrentProofAndRejectsTampering(t *testing.T) {
+	fixture := newMaterializeCLIFixture(t)
+	var out, errOut bytes.Buffer
+	if code := Run([]string{
+		"seed", "materialize", "run", "--torrent", fixture.torrentPath,
+		"--search-root", fixture.sourceRoot, "--target", fixture.targetRoot,
+		"--expect-plan-id", fixture.planID, "--acknowledge-filesystem-write", "--output", "json",
+	}, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("materialize code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	operationID := decodeMaterializeReport(t, out.Bytes()).Data.Operation.ID
+	meta, err := metafile.Read(fixture.torrentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientRoot = "/downloads"
+	clientPath := clientRoot + "/" + materializeFinalName
+	var loginRequests, listRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			loginRequests.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "materialized", Path: "/"})
+			_, _ = w.Write([]byte("Ok."))
+		case "/api/v2/torrents/info":
+			listRequests.Add(1)
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"hash": "opaque-materialized-job", "magnet_uri": "magnet:?xt=urn:btih:" + meta.InfoHashV1,
+				"name": materializeFinalName, "size": int64(len(fixture.content)), "progress": 1.0,
+				"state": "uploading", "save_path": clientRoot, "content_path": clientPath,
+				"downloaded": int64(len(fixture.content)), "uploaded": int64(1),
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	out.Reset()
+	errOut.Reset()
+	args := []string{
+		"reconcile", "report", "--torrent", fixture.torrentPath,
+		"--target", fixture.targetRoot, "--materialize-operation", operationID, "--materialize-plan-id", fixture.planID,
+		"--driver", "qbittorrent", "--url", server.URL, "--username", reconciliationClientUser, "--password-stdin",
+		"--host-root", fixture.targetRoot, "--client-root", clientRoot, "--client-style", "posix", "--output", "json",
+	}
+	if code := Run(args, strings.NewReader(reconciliationClientPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("reconcile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var response struct {
+		Kind string           `json:"kind"`
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	materialized := response.Data.Ledgers.Storage.MaterializedFinal
+	if response.Kind != "ledger.reconciliation" || response.Data.Outcome != "consistent" || response.Data.WritesPerformed != 0 ||
+		!response.Data.Scope.MaterializedFinalRequested || response.Data.Ledgers.Storage.Status != "verified_materialized_final" ||
+		relationStatusCLI(response.Data, "storage_content_proof") != "verified_materialized_final" ||
+		materialized.Status != "verified_current_final_source" || !materialized.ProcessLocalFinalProof || !materialized.ProcessLocalSourceBridge ||
+		materialized.Observation == nil || materialized.Observation.OperationID != operationID ||
+		response.Data.Ledgers.Storage.Discovery.SourceOutcome != "verified_exact_root" ||
+		!strings.Contains(response.Data.Assurance, "explicit_materialized_final") {
+		t.Fatalf("materialized final was not represented as paired current proof: %s", out.String())
+	}
+	if loginRequests.Load() != 1 || listRequests.Load() != 2 {
+		t.Fatalf("materialized proof was not inside one client bracket: login=%d list=%d", loginRequests.Load(), listRequests.Load())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.targetRoot, fixture.sourceRoot, fixture.sourcePath, fixture.finalPath, fixture.torrentPath, clientPath, server.URL, reconciliationClientPassword)
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{
+		"reconcile", "report", "--torrent", fixture.torrentPath,
+		"--target", fixture.targetRoot, "--materialize-operation", operationID,
+		"--materialize-plan-id", strings.Repeat("c", 24), "--output", "json",
+	}, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("wrong-plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	materialized = response.Data.Ledgers.Storage.MaterializedFinal
+	if response.Data.Outcome != "incomplete" || response.Data.Ledgers.Storage.Status != "incomplete" ||
+		materialized.Status != "incomplete" || materialized.ProcessLocalFinalProof || materialized.ProcessLocalSourceBridge ||
+		materialized.StopReason != "materialized_final_policy_blocked" {
+		t.Fatalf("wrong reviewed plan fell back to path proof: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.targetRoot, fixture.sourceRoot, fixture.sourcePath, fixture.finalPath, fixture.torrentPath)
+
+	if err := os.WriteFile(fixture.finalPath, bytes.Repeat([]byte{'x'}, len(fixture.content)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{
+		"reconcile", "report", "--torrent", fixture.torrentPath,
+		"--target", fixture.targetRoot, "--materialize-operation", operationID, "--materialize-plan-id", fixture.planID, "--output", "json",
+	}, strings.NewReader(""), &out, &errOut); code != 3 {
+		t.Fatalf("tampered code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	materialized = response.Data.Ledgers.Storage.MaterializedFinal
+	if response.Data.Outcome != "integrity_failed" || response.Data.Ledgers.Storage.Status != "integrity_failed" ||
+		relationStatusCLI(response.Data, "storage_content_proof") != "integrity_failed" ||
+		materialized.Status != "integrity_failed" || materialized.ProcessLocalSourceBridge ||
+		materialized.StopReason != "materialized_final_integrity_failed" ||
+		!hasReportFindingCLI(response.Data.Blockers, "storage.materialized_final_proof_unavailable") {
+		t.Fatalf("tampered materialized final was not report-first integrity evidence: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.targetRoot, fixture.sourceRoot, fixture.sourcePath, fixture.finalPath, fixture.torrentPath)
+}
+
 func TestReconcileReportExactSourceFailureIsStructuredAndPathPrivate(t *testing.T) {
 	torrentPath, sourceRoot, _ := writeReconciliationFixture(t)
 	missing := filepath.Join(sourceRoot, "PTCTL-EXACT-SOURCE-FAILURE-CANARY.bin")
@@ -562,6 +678,8 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	torrentPath, searchRoot, _ := writeReconciliationFixture(t)
 	missingTorrent := filepath.Join(t.TempDir(), "missing.torrent")
 	clientGroup := []string{"--driver", "qbittorrent", "--url", "https://seedbox.invalid", "--username", "alice", "--password-stdin"}
+	validMaterializeOperation := "sha256:" + strings.Repeat("a", 64)
+	validMaterializePlan := strings.Repeat("b", 24)
 	tooManyRoots := []string{"reconcile", "report", "--torrent", torrentPath}
 	for index := 0; index <= storage.DefaultInventoryLimits().MaxRoots; index++ {
 		tooManyRoots = append(tooManyRoots, "--search-root", searchRoot)
@@ -590,6 +708,11 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--site-binding-record", "sha256:" + strings.Repeat("0", 64)}, clientGroup...),
 		append([]string{"reconcile", "report", "--metafile-store", "unused", "--metafile-variant", "sha256:" + strings.Repeat("0", 64), "--site-binding-record", "not-an-id", "--search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--metafile-store", "unused", "--metafile-variant", "sha256:" + strings.Repeat("0", 64), "--site-binding-record=", "--search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", "not-an-operation", "--materialize-plan-id", validMaterializePlan}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", "NOT-A-PLAN"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--max-states", "1"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", missingTorrent, "--search-root", searchRoot}, clientGroup...),
 		tooManyRoots,
 	}
@@ -646,7 +769,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -660,6 +783,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	relations := strings.Index(text, "RELATIONS")
 	siteBinding := strings.Index(text, "SITE BINDING")
 	liveSite := strings.Index(text, "LIVE SITE DETAIL")
+	materialized := strings.Index(text, "MATERIALIZED FINAL")
 	ledgers := strings.Index(text, "LEDGERS")
 	fileLayout := strings.Index(text, "CLIENT FILE LAYOUT (BOUNDED)")
 	fileFindings := strings.Index(text, "CLIENT FILE FINDINGS (BOUNDED)")
@@ -667,7 +791,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	scan := strings.Index(text, "STORAGE SCAN")
 	matches := strings.Index(text, "VERIFIED STORAGE MATCHES")
 	bindings := strings.Index(text, "VERIFIED STORAGE BINDINGS (BOUNDED)")
-	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || ledgers <= liveSite || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
+	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || materialized <= liveSite || ledgers <= materialized || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
 		t.Fatalf("unclear reconciliation human order: %q", text)
 	}
 }

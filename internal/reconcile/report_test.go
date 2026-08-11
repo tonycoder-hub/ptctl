@@ -85,6 +85,61 @@ func TestSerializedDiscoveryCannotBecomeProcessLocalProof(t *testing.T) {
 	}
 }
 
+func TestRequestedMaterializedFinalCannotFallBackToOrdinaryExactSourceProof(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		MaterializedFinal: MaterializedFinalSelection{Requested: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := report.Ledgers.Storage.MaterializedFinal
+	if report.Outcome != "incomplete" || report.Ledgers.Storage.Status != "incomplete" ||
+		relationStatus(report, "storage_content_proof") != "incomplete" || ledger.Status != "incomplete" ||
+		ledger.ProcessLocalFinalProof || ledger.ProcessLocalSourceBridge ||
+		!containsFinding(report.Blockers, "storage.materialized_final_proof_unavailable") {
+		t.Fatalf("materialized-final request fell back to ordinary exact proof: %#v", report)
+	}
+
+	unexpected, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		MaterializedFinal: MaterializedFinalSelection{StopReason: "materialized_final_verification_failed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unexpected.Outcome != "incomplete" || unexpected.Ledgers.Storage.MaterializedFinal.StopReason != "materialized_final_unexpected_activity" ||
+		!containsFinding(unexpected.Blockers, "storage.materialized_final_input_inconsistent") {
+		t.Fatalf("unexpected materialized-final activity was ignored: %#v", unexpected)
+	}
+
+	unsafe, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		MaterializedFinal: MaterializedFinalSelection{Requested: true, StopReason: "MATERIALIZED-FINAL-SECRET-CANARY"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(unsafe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "MATERIALIZED-FINAL-SECRET-CANARY") ||
+		unsafe.Ledgers.Storage.MaterializedFinal.StopReason != "materialized_final_verification_failed" {
+		t.Fatalf("untrusted materialized-final stop reason entered public output: %s", raw)
+	}
+}
+
+func containsFinding(values []ReportFinding, code string) bool {
+	for _, value := range values {
+		if value.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestExplicitSealedSiteBindingAddsHistoricalAxisWithoutUpgradingLocalProof(t *testing.T) {
 	meta, discovery, source, root := reconciledSingleFile(t)
 	recordID, ref, verified := sealedSiteBindingForMeta(t, meta)

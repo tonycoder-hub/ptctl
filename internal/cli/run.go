@@ -177,7 +177,7 @@ Usage:
   ptctl client remove prune --target PATH --expect-removal-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client remove forget --target PATH --expect-removal-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
-  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
+  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--output table|json]
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
@@ -336,9 +336,9 @@ func (a *app) reconcileReport(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE) [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
+		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. Exact stopped adoption and reviewed existing-job recheck/start support both built-in drivers; Transmission mutation authority is v1-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
@@ -351,6 +351,9 @@ func (a *app) reconcileReport(args []string) error {
 	storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
 	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
 	exactSource := fs.String("source", "", "explicit exact-layout source file or content root; mutually exclusive with discovery")
+	materializeTarget := fs.String("target", "", "materialize target root; requires --materialize-operation and --materialize-plan-id")
+	materializeOperationValue := fs.String("materialize-operation", "", "explicit committed or retained materialize operation ID; requires --target and --materialize-plan-id")
+	materializePlanID := fs.String("materialize-plan-id", "", "reviewed materialize plan ID; requires --target and --materialize-operation")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
 	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
@@ -409,11 +412,15 @@ func (a *app) reconcileReport(args []string) error {
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
 	exactRequested := explicit["source"]
 	indexedRequested := explicit["state-store"] || explicit["storage-profile"] || explicit["snapshot-record"]
+	materializedRequested := explicit["target"] || explicit["materialize-operation"] || explicit["materialize-plan-id"]
 	if exactRequested && *exactSource == "" {
 		return usageError("reconcile report requires --source to be non-empty")
 	}
-	if !exactRequested && len(searchRoots) == 0 && !indexedRequested {
-		return usageError("reconcile report requires --source, --search-root, or the --state-store/--storage-profile pair")
+	if materializedRequested && (!explicit["target"] || !explicit["materialize-operation"] || !explicit["materialize-plan-id"] || *materializeTarget == "" || *materializeOperationValue == "" || *materializePlanID == "") {
+		return usageError("materialized-final mode requires non-empty --target, --materialize-operation, and --materialize-plan-id")
+	}
+	if !exactRequested && len(searchRoots) == 0 && !indexedRequested && !materializedRequested {
+		return usageError("reconcile report requires --source, --search-root, stored-profile mode, or the complete materialized-final selector")
 	}
 	sourceModes := 0
 	if exactRequested {
@@ -425,8 +432,11 @@ func (a *app) reconcileReport(args []string) error {
 	if indexedRequested {
 		sourceModes++
 	}
+	if materializedRequested {
+		sourceModes++
+	}
 	if sourceModes > 1 {
-		return usageError("--source, --search-root, and stored-profile index mode are mutually exclusive")
+		return usageError("--source, --search-root, stored-profile index mode, and materialized-final mode are mutually exclusive")
 	}
 	if indexedRequested && (*stateStore == "" || *storageProfile == "") {
 		return usageError("stored-profile mode requires non-empty --state-store and --storage-profile")
@@ -439,12 +449,23 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("--%s applies only to live --search-root scanning; refresh limits are fixed by the storage profile", name)
 		}
 	}
-	if exactRequested {
+	if exactRequested || materializedRequested {
 		for _, name := range []string{"allow-network", "max-depth", "max-directories", "max-entries", "max-directory-entries", "max-candidates", "max-path-bytes", "max-candidates-per-file", "max-candidate-edges", "max-states", "max-verified-layouts", "max-proof-bytes"} {
 			if explicit[name] {
-				return usageError("--%s applies only to discovery source modes, not --source", name)
+				return usageError("--%s applies only to discovery source modes", name)
 			}
 		}
+	}
+	var materializeOperation materialize.OperationID
+	if materializedRequested {
+		parsedOperation, parseErr := materialize.ParseOperationID(*materializeOperationValue)
+		if parseErr != nil {
+			return usageError("--materialize-operation requires a canonical operation ID")
+		}
+		if !validMaterializePlanID(*materializePlanID) {
+			return usageError("--materialize-plan-id requires a canonical reviewed plan ID")
+		}
+		materializeOperation = parsedOperation
 	}
 	var explicitDescriptor metastore.RecordID
 	if explicit["snapshot-record"] {
@@ -569,7 +590,7 @@ func (a *app) reconcileReport(args []string) error {
 	if err := inventoryLimits.Validate(); err != nil {
 		return usageError("reconcile report: %v", err)
 	}
-	if !indexedRequested && !exactRequested && len(searchRoots) > inventoryLimits.MaxRoots {
+	if !indexedRequested && !exactRequested && !materializedRequested && len(searchRoots) > inventoryLimits.MaxRoots {
 		return usageError("reconcile report accepts at most %d --search-root values", inventoryLimits.MaxRoots)
 	}
 	if err := matchLimits.Validate(); err != nil {
@@ -768,7 +789,24 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	var discovery seed.DiscoveryResult
 	var discoveryErr error
-	if exactRequested {
+	materializedSelection := reconcile.MaterializedFinalSelection{Requested: materializedRequested}
+	materializedFinalIntegrityFailed := false
+	if materializedRequested {
+		verifiedFinal, sourceBridge, observed, _, finalErr := materialize.VerifyCurrentFinalSource(ctx, materialize.FinalProofOptions{
+			Meta: meta, TargetRoot: *materializeTarget, OperationID: materializeOperation,
+			ExpectedPlanID: *materializePlanID, Limits: materialize.DefaultLimits(),
+		}, seed.ExactSourceOptions{
+			ShowAbsolutePaths: *showAbsolute,
+			TimeBudget:        *timeout,
+		})
+		discovery = observed
+		materializedSelection.Final = verifiedFinal
+		materializedSelection.Source = sourceBridge
+		if finalErr != nil {
+			materializedSelection.StopReason = reconciliationMaterializedFinalStopReason(ctx, finalErr, verifiedFinal != nil)
+			materializedFinalIntegrityFailed = errors.Is(finalErr, materialize.ErrIntegrity) || errors.Is(finalErr, materialize.ErrCorruptJournal)
+		}
+	} else if exactRequested {
 		discovery, discoveryErr = seed.ObserveExactSource(ctx, meta, *exactSource, seed.ExactSourceOptions{
 			ShowAbsolutePaths: *showAbsolute,
 			TimeBudget:        *timeout,
@@ -837,6 +875,7 @@ func (a *app) reconcileReport(args []string) error {
 		SiteRef:           siteRef,
 		SiteBinding:       siteSelection,
 		SiteDetail:        siteDetailSelection,
+		MaterializedFinal: materializedSelection,
 		PathMapping:       reportMapping,
 		ShowAbsolutePaths: *showAbsolute,
 	})
@@ -853,6 +892,9 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if siteBindingIntegrityFailed {
 		return &integrityErr{message: "the explicit site binding record or linked metafile artifact failed integrity verification"}
+	}
+	if materializedFinalIntegrityFailed {
+		return &integrityErr{message: "the explicit materialize operation or current final layout failed integrity verification"}
 	}
 	if *requireReconciled && report.Outcome != "consistent" {
 		return &inconclusiveErr{message: "reconciliation outcome is not consistent"}
@@ -933,6 +975,23 @@ func reconciliationClientStopReason(ctx context.Context, err error, fallback str
 		return "context_cancelled"
 	}
 	return fallback
+}
+
+func reconciliationMaterializedFinalStopReason(ctx context.Context, err error, finalObserved bool) string {
+	switch {
+	case errors.Is(err, materialize.ErrIntegrity), errors.Is(err, materialize.ErrCorruptJournal):
+		return "materialized_final_integrity_failed"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "materialized_final_context_cancelled"
+	case errors.Is(err, materialize.ErrPolicy), errors.Is(err, materialize.ErrOperationNotFound):
+		return "materialized_final_policy_blocked"
+	case ctx.Err() != nil:
+		return "materialized_final_context_cancelled"
+	case finalObserved:
+		return "materialized_final_source_bridge_failed"
+	default:
+		return "materialized_final_verification_failed"
+	}
 }
 
 func (a *app) siteList(args []string) error {
@@ -1884,6 +1943,24 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(detailLedger.StopReason))
 	}
 
+	materialized := report.Ledgers.Storage.MaterializedFinal
+	materializedOperation, materializedPlan, materializedBasis, materializedAssurance := "-", "-", "-", "-"
+	materializedBytes := int64(0)
+	if materialized.Observation != nil {
+		materializedOperation = shortID(materialized.Observation.OperationID)
+		materializedPlan = materialized.Observation.MaterializePlanID
+		materializedBasis = materialized.Observation.AuthorityBasis
+		materializedAssurance = materialized.Observation.Assurance
+		materializedBytes = materialized.Observation.BytesVerified
+	}
+	fmt.Fprintf(w, "\nMATERIALIZED FINAL\nREQUESTED\t%t\nSTATUS\t%s\nOPERATION\t%s\nPLAN\t%s\nPROCESS-LOCAL FINAL PROOF\t%t\nPROCESS-LOCAL SOURCE BRIDGE\t%t\nBYTES VERIFIED\t%d\nAUTHORITY BASIS\t%s\nASSURANCE\t%s\n",
+		report.Scope.MaterializedFinalRequested, terminalSafe(materialized.Status), terminalSafe(materializedOperation), terminalSafe(materializedPlan),
+		materialized.ProcessLocalFinalProof, materialized.ProcessLocalSourceBridge, materializedBytes,
+		terminalSafe(materializedBasis), terminalSafe(materializedAssurance))
+	if materialized.StopReason != "" {
+		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(materialized.StopReason))
+	}
+
 	siteID := "-"
 	if report.Ledgers.Site.Ref != nil {
 		siteID = report.Ledgers.Site.Ref.SiteID + "/" + report.Ledgers.Site.Ref.RemoteID
@@ -1910,7 +1987,11 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 	}
 	fmt.Fprintf(w, "site\t%s\t%s\t%s\n", terminalSafe(report.Ledgers.Site.Status), terminalSafe(siteID), terminalSafe(siteSummary))
 	fmt.Fprintf(w, "metafile\t%s\t%s\t%s; %s\n", terminalSafe(report.Ledgers.Metafile.Status), terminalSafe(shortID(report.Ledgers.Metafile.VariantID)), terminalSafe(report.Ledgers.Metafile.Version), humanBytes(report.Ledgers.Metafile.PhysicalBytes))
-	fmt.Fprintf(w, "storage\t%s\t%s\tprocess-local proof=%t\n", terminalSafe(report.Ledgers.Storage.Status), terminalSafe(shortID(storageID)), report.Ledgers.Storage.ProcessLocalProof)
+	storageSummary := fmt.Sprintf("process-local proof=%t", report.Ledgers.Storage.ProcessLocalProof)
+	if materialized.Status != "not_requested" {
+		storageSummary += fmt.Sprintf("; materialized-final=%s; source-bridge=%t", materialized.Status, materialized.ProcessLocalSourceBridge)
+	}
+	fmt.Fprintf(w, "storage\t%s\t%s\t%s\n", terminalSafe(report.Ledgers.Storage.Status), terminalSafe(shortID(storageID)), terminalSafe(storageSummary))
 	fmt.Fprintf(w, "downloader\t%s\t%s\trequests=%d; jobs=%d/%d\n", terminalSafe(report.Ledgers.Downloader.Status), terminalSafe(downloaderID), report.Ledgers.Downloader.RequestsMade, report.Ledgers.Downloader.JobsExaminedBefore, report.Ledgers.Downloader.JobsExaminedAfter)
 
 	fileLayout := report.Ledgers.Downloader.FileLayout

@@ -128,7 +128,9 @@ capabilities at the edge, not assumptions in the core domain model.
   explicitly selected exact layout, stream-decodes a bounded job ledger, and
   reports variant, infohash, content-proof, and path relations as separate
   evidence axes; an exact layout proves only the selected root, never
-  filesystem-wide uniqueness, qBittorrent supplies typed v1/v2 magnet claims,
+  filesystem-wide uniqueness; an explicit materialize operation/plan can add a
+  current `verified_materialized_final` relation only through an opaque
+  same-invocation final-to-source bridge; qBittorrent supplies typed v1/v2 magnet claims,
   and Transmission supplies only its full SHA-1/v1 `hash_string` claim;
 - bounded qBittorrent or Transmission per-file ledgers for one uniquely
   identified ordinary multi-file job, with stable index, size, selection,
@@ -1260,8 +1262,30 @@ with `--source PATH`. That path is reopened as one exact single-file object or
 multi-file content root and every non-padding manifest name is verified in the
 same invocation. The report uses `verified_exact_root` and can reconcile that
 selected layout with the client, but it does not claim that another matching
-copy does not exist elsewhere. `--source`, live search roots, and a stored
-profile selector are mutually exclusive.
+copy does not exist elsewhere.
+
+A committed or retained materialize operation can be selected instead of a
+raw path or discovery source:
+
+```bash
+ptctl reconcile report \
+  --torrent release.torrent \
+  --target "D:\Seed" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --output json
+```
+
+All three materialize flags are required. The command first validates the
+explicit journal or retention tombstone and exactly verifies the current final
+namespace and bytes. It then immediately reopens that final through the
+ordinary exact-source verifier. Only the process-local opaque pairing of those
+two proofs can produce `verified_materialized_final`; a public report, a JSON
+round trip, or an independently supplied path cannot recreate it. The two
+local observations are sequential and bracketed non-atomic, and optional
+downloader before/after reads enclose both. A damaged final is reported before
+the command returns integrity exit `3`. `--source`, live search roots, a stored
+profile selector, and this materialized-final selector are mutually exclusive.
 
 The [qBittorrent WebUI API torrent-list fields](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-list)
 are treated as untrusted client claims. Its generic `hash` remains an opaque

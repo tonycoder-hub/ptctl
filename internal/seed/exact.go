@@ -28,13 +28,7 @@ type ExactSourceOptions struct {
 // through the ordinary discovery report shape. The retained authority is
 // process-local and is lost by PublicReportCopy or JSON serialization.
 func ObserveExactSource(ctx context.Context, meta *metafile.MetaInfo, contentPath string, options ExactSourceOptions) (DiscoveryResult, error) {
-	result := newDiscoveryResult(meta, DiscoverOptions{ShowAbsolutePaths: options.ShowAbsolutePaths})
-	result.Scan = DiscoveryScan{
-		Complete: false, VerificationComplete: false, TimeBudgetMillis: options.TimeBudget.Milliseconds(),
-		PathConfinement: "explicit_exact_root", SearchRoots: []DiscoveryRoot{},
-		InventoryLimits: storage.DefaultInventoryLimits(), MatchLimits: metafile.DefaultSourceMatchLimits(),
-		StopReasons: []string{}, InventoryIssues: []storage.ScanIssue{}, MatchIssues: []metafile.SourceMatchIssue{},
-	}
+	result := newIncompleteExactSourceObservation(meta, options)
 	if meta == nil {
 		return result, fmt.Errorf("metafile is nil")
 	}
@@ -169,6 +163,29 @@ func ObserveExactSource(ctx context.Context, meta *metafile.MetaInfo, contentPat
 		"exact-source observation performs metadata and content reads; zero writes were intentionally performed",
 	)
 	return result, nil
+}
+
+// NewIncompleteExactSourceObservation creates an authority-free public report
+// shape for an exact source mode that could not reach its content proof. It can
+// never synthesize VerifiedSource authority and is intended for structured,
+// report-first failures in higher-level read workflows.
+func NewIncompleteExactSourceObservation(meta *metafile.MetaInfo, options ExactSourceOptions, blocker DiscoveryBlocker) DiscoveryResult {
+	result := newIncompleteExactSourceObservation(meta, options)
+	if blocker.Code != "" && blocker.Message != "" {
+		result.Blockers = append(result.Blockers, blocker)
+	}
+	return result
+}
+
+func newIncompleteExactSourceObservation(meta *metafile.MetaInfo, options ExactSourceOptions) DiscoveryResult {
+	result := newDiscoveryResult(meta, DiscoverOptions{ShowAbsolutePaths: options.ShowAbsolutePaths})
+	result.Scan = DiscoveryScan{
+		Complete: false, VerificationComplete: false, TimeBudgetMillis: options.TimeBudget.Milliseconds(),
+		PathConfinement: "explicit_exact_root", SearchRoots: []DiscoveryRoot{},
+		InventoryLimits: storage.DefaultInventoryLimits(), MatchLimits: metafile.DefaultSourceMatchLimits(),
+		StopReasons: []string{}, InventoryIssues: []storage.ScanIssue{}, MatchIssues: []metafile.SourceMatchIssue{},
+	}
+	return result
 }
 
 func exactSourceSelectionID(variantID, snapshotID string) string {

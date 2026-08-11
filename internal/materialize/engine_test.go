@@ -137,6 +137,22 @@ func TestExactRootMaterializesV1V2AndHybridMultiFileLayouts(t *testing.T) {
 					t.Fatalf("exact-root %s final %s differs: %q %v", test.name, name, raw, readErr)
 				}
 			}
+			operationID, err := ParseOperationID(report.Operation.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			final, bridge, exact, observation, err := VerifyCurrentFinalSource(ctx, FinalProofOptions{
+				Meta: meta, TargetRoot: targetRoot, OperationID: operationID,
+				ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+			}, seed.ExactSourceOptions{})
+			if err != nil || final == nil || bridge == nil || exact.SourceOutcome != "verified_exact_root" ||
+				observation.MultiFile != true || observation.ManifestFiles != 2 {
+				t.Fatalf("materialized-final bridge %s failed: observation=%#v discovery=%#v err=%v", test.name, observation, exact, err)
+			}
+			source, ok := exact.VerifiedSource(meta)
+			if !ok || !bridge.Matches(final, meta, &exact, source) {
+				t.Fatalf("materialized-final bridge %s did not retain exact multi-file authority", test.name)
+			}
 		})
 	}
 }
@@ -631,6 +647,22 @@ func TestRunPhysicallyCreatesEmptyManifestFile(t *testing.T) {
 	info, err := os.Stat(filepath.Join(targetRoot, "bundle", "empty"))
 	if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
 		t.Fatalf("empty manifest file was not physically materialized: %#v %v", info, err)
+	}
+	operationID, err := ParseOperationID(report.Operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, bridge, exact, _, err := VerifyCurrentFinalSource(ctx, FinalProofOptions{
+		Meta: meta, TargetRoot: targetRoot, OperationID: operationID,
+		ExpectedPlanID: discovery.Plan.ID, Limits: DefaultLimits(),
+	}, seed.ExactSourceOptions{})
+	if err != nil || final == nil || bridge == nil {
+		t.Fatalf("empty-file materialized-final bridge failed: %#v %v", exact, err)
+	}
+	source, ok := exact.VerifiedSource(meta)
+	if emptyPath, exists := source.Path(1); !ok || !exists || emptyPath != filepath.Join(targetRoot, "bundle", "empty") ||
+		!bridge.Matches(final, meta, &exact, source) {
+		t.Fatalf("empty-file materialized-final bridge lost physical authority: path=%q exists=%t ok=%t", emptyPath, exists, ok)
 	}
 }
 

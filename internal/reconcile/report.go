@@ -12,6 +12,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
+	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
@@ -53,8 +54,20 @@ type BuildInput struct {
 	SiteRef           *domain.TorrentRef
 	SiteBinding       SiteBindingSelection
 	SiteDetail        SiteDetailSelection
+	MaterializedFinal MaterializedFinalSelection
 	PathMapping       *PathMappingOptions
 	ShowAbsolutePaths bool
+}
+
+// MaterializedFinalSelection is an explicit same-invocation read of one
+// materialize operation plus the opaque bridge created only when its current
+// exact final proof is immediately followed by the ordinary exact-source proof
+// used by this reconciliation.
+type MaterializedFinalSelection struct {
+	Requested  bool
+	Final      *materialize.VerifiedFinal
+	Source     *materialize.VerifiedFinalSource
+	StopReason string
 }
 
 // SiteBindingSelection is an explicit, same-invocation read of one sealed
@@ -92,17 +105,18 @@ type Report struct {
 }
 
 type ReportScope struct {
-	MetafileVariantID    string `json:"metafile_variant_id"`
-	SiteRequested        bool   `json:"site_requested"`
-	SiteBindingRequested bool   `json:"site_binding_requested"`
-	SiteBindingSelector  string `json:"site_binding_selector"`
-	SiteDetailRequested  bool   `json:"site_detail_requested"`
-	ClientRequested      bool   `json:"client_requested"`
-	PathMappingRequested bool   `json:"path_mapping_requested"`
-	PathMappingID        string `json:"path_mapping_id,omitempty"`
-	ClientPathSemantics  string `json:"client_path_semantics"`
-	ClientFileLayoutMode string `json:"client_file_layout_mode"`
-	AbsolutePathsShown   bool   `json:"absolute_paths_shown"`
+	MetafileVariantID          string `json:"metafile_variant_id"`
+	SiteRequested              bool   `json:"site_requested"`
+	SiteBindingRequested       bool   `json:"site_binding_requested"`
+	SiteBindingSelector        string `json:"site_binding_selector"`
+	SiteDetailRequested        bool   `json:"site_detail_requested"`
+	ClientRequested            bool   `json:"client_requested"`
+	PathMappingRequested       bool   `json:"path_mapping_requested"`
+	PathMappingID              string `json:"path_mapping_id,omitempty"`
+	ClientPathSemantics        string `json:"client_path_semantics"`
+	ClientFileLayoutMode       string `json:"client_file_layout_mode"`
+	MaterializedFinalRequested bool   `json:"materialized_final_requested"`
+	AbsolutePathsShown         bool   `json:"absolute_paths_shown"`
 }
 
 type ReportLedgers struct {
@@ -154,11 +168,20 @@ type MetafileLedger struct {
 }
 
 type StorageLedger struct {
-	Status            string               `json:"status"`
-	ProcessLocalProof bool                 `json:"process_local_proof"`
-	SelectedSourceID  string               `json:"selected_source_id,omitempty"`
-	SourceSnapshotID  string               `json:"source_snapshot_id,omitempty"`
-	Discovery         seed.DiscoveryResult `json:"discovery"`
+	Status            string                  `json:"status"`
+	ProcessLocalProof bool                    `json:"process_local_proof"`
+	SelectedSourceID  string                  `json:"selected_source_id,omitempty"`
+	SourceSnapshotID  string                  `json:"source_snapshot_id,omitempty"`
+	MaterializedFinal MaterializedFinalLedger `json:"materialized_final"`
+	Discovery         seed.DiscoveryResult    `json:"discovery"`
+}
+
+type MaterializedFinalLedger struct {
+	Status                   string                        `json:"status"`
+	Observation              *materialize.FinalObservation `json:"observation,omitempty"`
+	ProcessLocalFinalProof   bool                          `json:"process_local_final_proof"`
+	ProcessLocalSourceBridge bool                          `json:"process_local_source_bridge"`
+	StopReason               string                        `json:"stop_reason,omitempty"`
 }
 
 type DownloaderLedger struct {
@@ -227,8 +250,10 @@ type clientAssessment struct {
 // Build creates a read-only reconciliation report. VerifiedSource must be the
 // opaque value returned by the same live/indexed discovery or exact-root
 // observation, and Client.Before and Client.After must bracket that
-// observation. A JSON round-trip intentionally loses the storage proof and
-// therefore cannot produce a verified relation.
+// observation. A materialized-final request additionally requires the opaque
+// bridge created by VerifyCurrentFinalSource. A JSON round-trip intentionally
+// loses these storage capabilities and therefore cannot produce a verified
+// relation.
 func Build(input BuildInput) (Report, error) {
 	if input.Meta == nil {
 		return Report{}, fmt.Errorf("metafile is nil")
@@ -255,17 +280,18 @@ func Build(input BuildInput) (Report, error) {
 		Outcome:         "partial",
 		Assurance:       "axis_separated_non_atomic",
 		Scope: ReportScope{
-			MetafileVariantID:    meta.MetafileVariantID,
-			SiteRequested:        input.SiteRef != nil || input.SiteBinding.Requested || input.SiteDetail.Requested,
-			SiteBindingRequested: input.SiteBinding.Requested,
-			SiteBindingSelector:  siteBindingSelector(input.SiteBinding.Requested),
-			SiteDetailRequested:  input.SiteDetail.Requested,
-			ClientRequested:      input.Client.Requested,
-			PathMappingRequested: input.PathMapping != nil,
-			PathMappingID:        pathMappingIDValue,
-			ClientPathSemantics:  pathSemantics,
-			ClientFileLayoutMode: fileLayoutMode,
-			AbsolutePathsShown:   input.ShowAbsolutePaths,
+			MetafileVariantID:          meta.MetafileVariantID,
+			SiteRequested:              input.SiteRef != nil || input.SiteBinding.Requested || input.SiteDetail.Requested,
+			SiteBindingRequested:       input.SiteBinding.Requested,
+			SiteBindingSelector:        siteBindingSelector(input.SiteBinding.Requested),
+			SiteDetailRequested:        input.SiteDetail.Requested,
+			ClientRequested:            input.Client.Requested,
+			PathMappingRequested:       input.PathMapping != nil,
+			PathMappingID:              pathMappingIDValue,
+			ClientPathSemantics:        pathSemantics,
+			ClientFileLayoutMode:       fileLayoutMode,
+			MaterializedFinalRequested: input.MaterializedFinal.Requested,
+			AbsolutePathsShown:         input.ShowAbsolutePaths,
 		},
 		Relations: []Relation{},
 		Blockers:  []ReportFinding{},
@@ -273,6 +299,9 @@ func Build(input BuildInput) (Report, error) {
 	}
 	if input.Client.Requested {
 		report.Effect = append(report.Effect, "read_downloader_state")
+	}
+	if input.MaterializedFinal.Requested {
+		report.Effect = append(report.Effect, "read_materialize_operation_state", "read_materialized_final_content")
 	}
 	if input.SiteDetail.Requested {
 		report.Effect = append(report.Effect, site.TorrentDetailReadEffect)
@@ -308,7 +337,11 @@ func Build(input BuildInput) (Report, error) {
 	storageRelation := newRelation("storage_content_proof")
 	storageRelation.Status = input.Discovery.SourceOutcome
 	storageRelation.LeftIDs = append(storageRelation.LeftIDs, meta.MetafileVariantID)
-	storageLedger := StorageLedger{Status: input.Discovery.SourceOutcome, Discovery: sanitizedDiscovery(input.Discovery, input.ShowAbsolutePaths)}
+	storageLedger := StorageLedger{
+		Status:            input.Discovery.SourceOutcome,
+		MaterializedFinal: MaterializedFinalLedger{Status: "not_requested"},
+		Discovery:         sanitizedDiscovery(input.Discovery, input.ShowAbsolutePaths),
+	}
 	if verifiedStorageOutcome(input.Discovery.SourceOutcome) {
 		storageLedger.SelectedSourceID = input.Discovery.Selection.SelectedID
 		storageRelation.RightIDs = append(storageRelation.RightIDs, input.Discovery.Selection.SelectedID)
@@ -334,6 +367,37 @@ func Build(input BuildInput) (Report, error) {
 		for _, blocker := range input.Discovery.Blockers {
 			storageRelation.BlockerCodes = append(storageRelation.BlockerCodes, blocker.Code)
 			report.Blockers = append(report.Blockers, ReportFinding{Code: blocker.Code, Message: blocker.Message})
+		}
+	}
+	materializedLedger, materializedOK, materializedBlockers, materializedWarnings := assessMaterializedFinal(
+		meta, input.MaterializedFinal, &input.Discovery, input.VerifiedSource,
+	)
+	storageLedger.MaterializedFinal = materializedLedger
+	report.Blockers = append(report.Blockers, materializedBlockers...)
+	report.Warnings = append(report.Warnings, materializedWarnings...)
+	if input.MaterializedFinal.Requested || materializedLedger.Status == "incomplete" {
+		if materializedOK && storageLedger.ProcessLocalProof && verifiedStorageOutcome(storageRelation.Status) {
+			observation := materializedLedger.Observation
+			storageLedger.Status = "verified_materialized_final"
+			storageRelation.Status = "verified_materialized_final"
+			storageRelation.EvidenceLevel = "cryptographic"
+			storageRelation.EvidenceBasis = append(storageRelation.EvidenceBasis,
+				"current_materialized_final_exact_namespace",
+				observation.AuthorityBasis,
+				observation.Assurance,
+				"opaque_materialized_final_source_bridge",
+				"sequential_bracketed_non_atomic",
+			)
+		} else {
+			storageLedger.Status = "incomplete"
+			storageRelation.Status = "incomplete"
+			if materializedLedger.StopReason == "materialized_final_integrity_failed" {
+				storageLedger.Status = "integrity_failed"
+				storageRelation.Status = "integrity_failed"
+			}
+			for _, blocker := range materializedBlockers {
+				storageRelation.BlockerCodes = append(storageRelation.BlockerCodes, blocker.Code)
+			}
 		}
 	}
 	report.Ledgers.Storage = storageLedger
@@ -489,6 +553,9 @@ func Build(input BuildInput) (Report, error) {
 		if input.SiteDetail.Requested && siteDetailLedger.Status == "observed_current_ref" {
 			report.Assurance += "_plus_same_invocation_current_site_ref_claim"
 		}
+		if materializedLedger.Status == "verified_current_final_source" {
+			report.Assurance += "_plus_explicit_materialized_final_sequential_local_proof"
+		}
 	}
 	report.Blockers = stableFindings(report.Blockers)
 	report.Warnings = stableStrings(report.Warnings)
@@ -496,6 +563,97 @@ func Build(input BuildInput) (Report, error) {
 		report.Relations[i].BlockerCodes = stableStrings(report.Relations[i].BlockerCodes)
 	}
 	return report, nil
+}
+
+func assessMaterializedFinal(meta *metafile.MetaInfo, selection MaterializedFinalSelection, discovery *seed.DiscoveryResult, source *metafile.VerifiedSource) (MaterializedFinalLedger, bool, []ReportFinding, []string) {
+	ledger := MaterializedFinalLedger{Status: "not_requested"}
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	hasActivity := selection.Final != nil || selection.Source != nil || selection.StopReason != ""
+	if !selection.Requested {
+		if !hasActivity {
+			return ledger, false, blockers, warnings
+		}
+		ledger.Status = "incomplete"
+		ledger.StopReason = "materialized_final_unexpected_activity"
+		blockers = append(blockers, ReportFinding{
+			Code: "storage.materialized_final_input_inconsistent", Message: "materialized-final proof values were supplied without an explicit materialized-final request",
+		})
+		return ledger, false, blockers, warnings
+	}
+
+	ledger.Status = "incomplete"
+	ledger.StopReason = safeMaterializedFinalStopReason(selection.StopReason)
+	if ledger.StopReason == "materialized_final_integrity_failed" {
+		ledger.Status = "integrity_failed"
+	}
+	if selection.Final == nil || !selection.Final.Verified() {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "materialized_final_verification_failed"
+		}
+		blockers = append(blockers, ReportFinding{
+			Code: "storage.materialized_final_proof_unavailable", Message: "the explicit materialize operation did not establish a current exact final proof",
+		})
+		return ledger, false, blockers, warnings
+	}
+
+	observation := selection.Final.Observation()
+	ledger.Observation = &observation
+	if !materializedObservationMatchesMeta(observation, meta) {
+		ledger.Status = "integrity_failed"
+		ledger.StopReason = "materialized_final_integrity_failed"
+		blockers = append(blockers, ReportFinding{
+			Code: "storage.materialized_final_proof_mismatch", Message: "the current materialized-final proof does not match the requested metafile variant",
+		})
+		return ledger, false, blockers, warnings
+	}
+	ledger.ProcessLocalFinalProof = true
+	if selection.StopReason != "" {
+		blockers = append(blockers, ReportFinding{
+			Code: "storage.materialized_final_source_bridge_unavailable", Message: "the current materialized final could not complete its same-invocation reconciliation source proof",
+		})
+		return ledger, false, blockers, warnings
+	}
+	if selection.Source == nil || discovery == nil || source == nil || !selection.Source.Matches(selection.Final, meta, discovery, source) {
+		ledger.StopReason = "materialized_final_source_bridge_failed"
+		blockers = append(blockers, ReportFinding{
+			Code: "storage.materialized_final_source_bridge_unavailable", Message: "the current materialized final is not paired with the same-invocation reconciliation source proof",
+		})
+		return ledger, false, blockers, warnings
+	}
+
+	ledger.Status = "verified_current_final_source"
+	ledger.ProcessLocalSourceBridge = true
+	ledger.StopReason = ""
+	warnings = append(warnings, "materialize attribution and reconciliation content proof are sequential bracketed observations, not an atomic filesystem snapshot")
+	return ledger, true, blockers, warnings
+}
+
+func materializedObservationMatchesMeta(observation materialize.FinalObservation, meta *metafile.MetaInfo) bool {
+	if meta == nil {
+		return false
+	}
+	physical := physicalBytes(meta)
+	return observation.OperationID != "" && observation.MaterializePlanID != "" &&
+		observation.MetafileVariantID == meta.MetafileVariantID && observation.MetafileBytes == meta.MetafileBytes &&
+		observation.InfoHashV1 == meta.InfoHashV1 && observation.InfoHashV2 == meta.InfoHashV2 &&
+		observation.MultiFile == meta.MultiFile && observation.ManifestFiles == len(meta.Files) &&
+		observation.ContentBytes == physical && observation.BytesVerified == physical &&
+		observation.TargetRootIdentity != "" && observation.FinalObjectIdentity != "" &&
+		(observation.AuthorityBasis == materialize.FinalAuthorityJournal || observation.AuthorityBasis == materialize.FinalAuthorityRetention) &&
+		observation.Assurance == "same_invocation_bracketed_non_atomic_exact_content_and_namespace"
+}
+
+func safeMaterializedFinalStopReason(value string) string {
+	switch value {
+	case "materialized_final_context_cancelled", "materialized_final_integrity_failed", "materialized_final_policy_blocked",
+		"materialized_final_verification_failed", "materialized_final_source_bridge_failed", "materialized_final_unexpected_activity":
+		return value
+	case "":
+		return ""
+	default:
+		return "materialized_final_verification_failed"
+	}
 }
 
 func assessClientBracket(meta *metafile.MetaInfo, bracket ClientBracket, showAbsolute, windows bool) clientAssessment {
@@ -1078,7 +1236,7 @@ func boundedSiteDetailBytes(value, maximum int64) int64 {
 }
 
 func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStatus string, siteDetailRequested bool, storageStatus string, processProof bool, clientStatus, pathStatus string, clientRequested bool) string {
-	if siteBindingRequested && siteStatus == "integrity_failed" {
+	if (siteBindingRequested && siteStatus == "integrity_failed") || storageStatus == "integrity_failed" {
 		return "integrity_failed"
 	}
 	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") || clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
@@ -1097,7 +1255,7 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 }
 
 func verifiedStorageOutcome(status string) bool {
-	return status == "verified_unique" || status == "verified_exact_root"
+	return status == "verified_unique" || status == "verified_exact_root" || status == "verified_materialized_final"
 }
 
 func relationDependencyStatus(status string) string {
@@ -1105,6 +1263,8 @@ func relationDependencyStatus(status string) string {
 	case "verified_ambiguous", "ambiguous":
 		return "ambiguous"
 	case "incomplete", "conflict":
+		return status
+	case "integrity_failed":
 		return status
 	default:
 		return "not_comparable"

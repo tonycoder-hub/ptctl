@@ -11,6 +11,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
@@ -48,6 +49,17 @@ type FinalObservation struct {
 // verification. Its private paths and parsed proof material have no JSON form.
 type VerifiedFinal struct {
 	authority *verifiedFinalAuthority
+}
+
+// VerifiedFinalSource is an opaque, process-local bridge between one current
+// exact materialized-final proof and the immediately following ordinary
+// exact-source proof used by reconciliation. Neither public observation can
+// recreate this pairing after serialization.
+type VerifiedFinalSource struct {
+	final       *VerifiedFinal
+	source      *metafile.VerifiedSource
+	selectionID string
+	snapshotID  string
 }
 
 type verifiedFinalAuthority struct {
@@ -173,6 +185,111 @@ func (verified *VerifiedFinal) Matches(operation OperationID, planID, variantID 
 	}
 	authority := verified.authority
 	return authority.operation == operation && authority.planID == planID && authority.meta.MetafileVariantID == variantID
+}
+
+// VerifyCurrentFinalSource verifies the explicit materialize operation and
+// exact current final namespace first, then immediately reopens the published
+// final through the ordinary exact-source verifier. The second proof supplies
+// identity-bound per-file source authority to reconciliation; the opaque
+// bridge proves that callers did not pair unrelated process-local values.
+func VerifyCurrentFinalSource(ctx context.Context, finalOptions FinalProofOptions, sourceOptions seed.ExactSourceOptions) (*VerifiedFinal, *VerifiedFinalSource, seed.DiscoveryResult, FinalObservation, error) {
+	incomplete := seed.NewIncompleteExactSourceObservation(finalOptions.Meta, sourceOptions, seed.DiscoveryBlocker{
+		Code: "source.materialized_final_verification_failed", Message: "the explicitly selected materialized final could not establish current operation, namespace, and content authority",
+	})
+	if sourceOptions.TimeBudget < 0 {
+		return nil, nil, incomplete, FinalObservation{}, fmt.Errorf("%w: current final source time budget is invalid", ErrPolicy)
+	}
+	final, observation, err := VerifyCurrentFinal(ctx, finalOptions)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			incomplete.Scan.StopReasons = append(incomplete.Scan.StopReasons, "context_cancelled")
+		}
+		return nil, nil, incomplete, observation, err
+	}
+	finalPath, ok := final.ProcessFinalPath()
+	if !ok {
+		return final, nil, incomplete, observation, fmt.Errorf("%w: current final path authority is unavailable", ErrIntegrity)
+	}
+	discovery, err := seed.ObserveExactSource(ctx, finalOptions.Meta, finalPath, sourceOptions)
+	if err != nil {
+		discovery.Blockers = appendDiscoveryBlocker(discovery.Blockers, seed.DiscoveryBlocker{
+			Code: "source.materialized_final_source_bridge_failed", Message: "the current materialized final could not establish reconciliation source authority",
+		})
+		return final, nil, discovery, observation, err
+	}
+	source, ok := discovery.VerifiedSource(finalOptions.Meta)
+	if !ok || !final.matchesVerifiedSource(finalOptions.Meta, source) {
+		discovery.Blockers = appendDiscoveryBlocker(discovery.Blockers, seed.DiscoveryBlocker{
+			Code: "source.materialized_final_source_bridge_failed", Message: "the current materialized final disagreed with its reconciliation source authority",
+		})
+		return final, nil, discovery, observation, fmt.Errorf("%w: current final source bridge disagrees", ErrIntegrity)
+	}
+	verification := source.Result()
+	bridge := &VerifiedFinalSource{
+		final: final, source: source, selectionID: discovery.Selection.SelectedID,
+		snapshotID: verification.SourceSnapshotID,
+	}
+	if !bridge.Matches(final, finalOptions.Meta, &discovery, source) {
+		return final, nil, discovery, observation, fmt.Errorf("%w: current final source bridge is invalid", ErrIntegrity)
+	}
+	discovery.Warnings = append(discovery.Warnings,
+		"the exact source was derived from one explicitly selected materialize operation and was reverified after its current exact-namespace proof",
+		"materialize attribution and reconciliation source proof are sequential bracketed observations, not an atomic filesystem snapshot",
+	)
+	return final, bridge, discovery, observation, nil
+}
+
+// Matches accepts only the same opaque values captured by
+// VerifyCurrentFinalSource. Public discovery mutation, a JSON round trip, or a
+// separately verified path cannot recreate this authority.
+func (bridge *VerifiedFinalSource) Matches(final *VerifiedFinal, meta *metafile.MetaInfo, discovery *seed.DiscoveryResult, source *metafile.VerifiedSource) bool {
+	if bridge == nil || bridge.final == nil || bridge.source == nil || final == nil || meta == nil || discovery == nil || source == nil ||
+		bridge.final != final || bridge.source != source || !final.Verified() || !source.Matches(meta) ||
+		bridge.selectionID == "" || bridge.snapshotID == "" || discovery.Selection.SelectedID != bridge.selectionID {
+		return false
+	}
+	retained, ok := discovery.VerifiedSource(meta)
+	if !ok || retained != source || source.Result().SourceSnapshotID != bridge.snapshotID {
+		return false
+	}
+	return final.matchesVerifiedSource(meta, source)
+}
+
+func (verified *VerifiedFinal) matchesVerifiedSource(meta *metafile.MetaInfo, source *metafile.VerifiedSource) bool {
+	if !verified.Verified() || meta == nil || source == nil || !source.Matches(meta) ||
+		verified.authority.meta.MetafileVariantID != meta.MetafileVariantID {
+		return false
+	}
+	verification := source.Result()
+	if !verification.Verified || verification.SourceSnapshotID == "" {
+		return false
+	}
+	expected := make(map[int]string, len(verified.authority.layout.Files))
+	for _, file := range verified.authority.layout.Files {
+		path := filepath.Join(append([]string{verified.authority.targetRoot}, file.Components...)...)
+		expected[file.ManifestIndex] = filepath.Clean(path)
+	}
+	bindings := source.Bindings()
+	if len(bindings) != len(expected) {
+		return false
+	}
+	for _, binding := range bindings {
+		path, ok := expected[binding.FileIndex]
+		if !ok || path != filepath.Clean(binding.Path) {
+			return false
+		}
+		delete(expected, binding.FileIndex)
+	}
+	return len(expected) == 0
+}
+
+func appendDiscoveryBlocker(values []seed.DiscoveryBlocker, blocker seed.DiscoveryBlocker) []seed.DiscoveryBlocker {
+	for _, existing := range values {
+		if existing.Code == blocker.Code {
+			return values
+		}
+	}
+	return append(values, blocker)
 }
 
 // Reverify repeats the full content and exact-namespace proof from a private

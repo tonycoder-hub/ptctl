@@ -64,9 +64,16 @@ credentials. TJUPT is one adapter, not a special case in the content model.
 parses one exact metafile, optionally reads one authenticated site detail page,
 optionally opens one read-only downloader session, reads a
 bounded job ledger, performs either ordinary storage discovery or an explicitly
-selected exact-layout content proof, then reads the job ledger again. The exact
-mode proves the selected layout only and does not claim filesystem-wide
-uniqueness. For one uniquely identified ordinary multi-file job, `auto`
+selected exact-layout content proof, or verifies one explicitly selected
+materialize operation and its current final, then reads the job ledger again.
+The exact mode proves the selected layout only and does not claim
+filesystem-wide uniqueness. Materialized-final mode first establishes opaque
+`VerifiedFinal` authority from the committed journal or sealed retention
+tombstone and an exact current namespace/content proof, then immediately runs
+ordinary exact-source verification over that final. A private
+`VerifiedFinalSource` value binds those two process-local capabilities to the
+same discovery selection and source snapshot. Neither public DTO can recreate
+the bridge. For one uniquely identified ordinary multi-file job, `auto`
 mode attempts one bounded per-file read before the storage proof and sends a
 second afterward only when the first completed. The outer job observations and
 successful inner file observations form a serial bracket, not an atomic
@@ -502,8 +509,15 @@ used to infer how many other current layouts exist.
 `--search-root` enumeration can establish current absence or unique selection.
 Alternatively, explicit `--source` can establish `verified_exact_root` for one
 selected layout and can become locally consistent with a client, but never
-establishes uniqueness or absence outside that layout. Refresh is a separate
-explicit write; read commands never update an index implicitly.
+establishes uniqueness or absence outside that layout. An explicit
+`--target/--materialize-operation/--materialize-plan-id` selector can elevate
+that same local content relation to `verified_materialized_final`, but only when
+the same invocation retains both the current final proof and its opaque
+exact-source bridge. The relation records the explicit operation only as a
+sequential observation: it binds that operation's exact final proof to the
+immediately following exact-source proof, but does not claim an atomic
+filesystem snapshot. Refresh is a separate explicit
+write; read commands never update an index implicitly.
 
 ## Read-only storage discovery
 
