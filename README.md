@@ -47,7 +47,7 @@ domains and reconciles them around verifiable torrent metadata.
 
 中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
-清晰、可审计的报告与计划。TJU PT 是首个实验性只读站点适配器，而不是写死
+清晰、可审计的报告与计划。TJUPT 是首个实验性只读站点适配器，而不是写死
 在核心里的唯一站点。
 
 ## Why this shape?
@@ -209,6 +209,12 @@ capabilities at the edge, not assumptions in the core domain model.
   an exact no-path historical tombstone, followed only on explicit request by
   recoverable identity-bound deletion of that tombstone and its final root
   attribution marker;
+- explicit read-only reconciliation of one terminal parent-cleanup lineage,
+  keeping its historical completion and a same-invocation two-pass observation
+  of the exact removed parent names separate from source retirement, current
+  downloader use, and current final-content proof; a live cleanup journal can
+  conservatively imply retired-name absence even after the retirement journal
+  was pruned, while a pruned cleanup tombstone remains historical only;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -1589,14 +1595,41 @@ reports historical completion and current-absence proof independently from
 the activation, downloader, and storage ledgers; it does not add a sixth
 relation or upgrade any of the five existing relations. A reappeared retired
 name is a current `conflict` and stops before credential input. A pruned
-tombstone has deliberately discarded path authority, so it can show historical
-completion only and makes requested reconciliation `incomplete`. Corrupt
+retirement tombstone has deliberately discarded direct path authority, so by
+itself it can show historical completion only. A separately selected live
+parent-cleanup journal may still close that current-absence axis by proving the
+removed parent names absent under the same retirement lineage; it never
+recreates the pruned paths. Corrupt
 journal or tombstone state retains report-first integrity exit `3`. Reports
 never emit the original source paths. Windows UNC/network source roots are
 rejected before access unless `--retirement-allow-network` is explicit; this
 permission never applies to the materialized target. Even a consistent result
 is a sequence of identity-bound, bracketed non-atomic observations, not a
 promise that a name cannot reappear after the command returns.
+
+To require the terminal empty-parent cleanup as another explicit ledger axis,
+add its full operation, reviewed plan, and original source-root scope to the
+same command:
+
+```bash
+  --parent-cleanup-operation sha256:PARENT_CLEANUP_OPERATION_DIGEST \
+  --parent-cleanup-plan-id sha256:PARENT_CLEANUP_PLAN_DIGEST \
+  --parent-cleanup-search-root "D:\Originals"
+```
+
+All three selectors are required together and require the complete retirement
+selectors. Before secret stdin or downloader I/O, ptctl reads the canonical
+terminal cleanup journal, checks its exact retirement operation/plan/completion,
+scope, target-root identity, and retired-file count, then observes every
+removed immediate-parent name absent twice. Parent reappearance is a current
+`conflict`; unavailable scope or namespace authority is `incomplete`. The
+`parent_cleanup` ledger reports historical completion and current absence as
+separate process-local proofs and leaves the existing five relations unchanged.
+The removed-parent observation may conservatively imply absence of all retired
+child names in that parent, but it remains sequential and non-atomic. A retained
+parent-cleanup tombstone contains no paths and therefore cannot supply current
+absence or make the requested report consistent. Neither public JSON nor a
+later invocation can recreate these capabilities.
 
 The [qBittorrent WebUI API torrent-list fields](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-list)
 are treated as untrusted client claims. Its generic `hash` remains an opaque

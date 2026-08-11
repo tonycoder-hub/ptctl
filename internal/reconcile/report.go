@@ -59,6 +59,7 @@ type BuildInput struct {
 	ClientActivation  ClientActivationSelection
 	ClientRemoval     ClientRemovalSelection
 	SourceRetirement  SourceRetirementSelection
+	ParentCleanup     ParentCleanupSelection
 	PathMapping       *PathMappingOptions
 	ShowAbsolutePaths bool
 }
@@ -148,6 +149,29 @@ type SourceRetirementSelection struct {
 	StopReason          string
 }
 
+// ParentCleanupCompletionProof is implemented only by a process-local read of
+// one canonical terminal parent-cleanup journal or retained tombstone. The
+// public view is historical and cannot establish current parent absence.
+type ParentCleanupCompletionProof interface {
+	ReconciliationParentCleanupCompletion() (ParentCleanupCompletion, bool)
+}
+
+// ParentCleanupAbsenceProof is process-local authority for a bounded current
+// observation of the exact removed parent names. It performs no downloader
+// request and exposes no source paths.
+type ParentCleanupAbsenceProof interface {
+	ReconcileCurrentRemovedParentAbsence() (ParentCleanupCurrentAbsence, bool)
+}
+
+type ParentCleanupSelection struct {
+	Requested           bool
+	CompletionAttempted bool
+	AbsenceAttempted    bool
+	Completion          ParentCleanupCompletionProof
+	CurrentAbsence      ParentCleanupAbsenceProof
+	StopReason          string
+}
+
 // MaterializedFinalSelection is an explicit same-invocation read of one
 // materialize operation plus the opaque bridge created only when its current
 // exact final proof is immediately followed by the ordinary exact-source proof
@@ -209,18 +233,20 @@ type ReportScope struct {
 	ClientActivationRequested  bool   `json:"client_activation_requested"`
 	ClientRemovalRequested     bool   `json:"client_removal_requested"`
 	SourceRetirementRequested  bool   `json:"source_retirement_requested"`
+	ParentCleanupRequested     bool   `json:"parent_cleanup_requested"`
 	AbsolutePathsShown         bool   `json:"absolute_paths_shown"`
 }
 
 type ReportLedgers struct {
-	Site       SiteLedger             `json:"site"`
-	Metafile   MetafileLedger         `json:"metafile"`
-	Storage    StorageLedger          `json:"storage"`
-	Downloader DownloaderLedger       `json:"downloader"`
-	Adoption   ClientAdoptionLedger   `json:"client_adoption"`
-	Activation ClientActivationLedger `json:"client_activation"`
-	Removal    ClientRemovalLedger    `json:"client_removal"`
-	Retirement SourceRetirementLedger `json:"source_retirement"`
+	Site          SiteLedger             `json:"site"`
+	Metafile      MetafileLedger         `json:"metafile"`
+	Storage       StorageLedger          `json:"storage"`
+	Downloader    DownloaderLedger       `json:"downloader"`
+	Adoption      ClientAdoptionLedger   `json:"client_adoption"`
+	Activation    ClientActivationLedger `json:"client_activation"`
+	Removal       ClientRemovalLedger    `json:"client_removal"`
+	Retirement    SourceRetirementLedger `json:"source_retirement"`
+	ParentCleanup ParentCleanupLedger    `json:"parent_cleanup"`
 }
 
 type ClientAdoptionLedger struct {
@@ -362,6 +388,45 @@ type SourceRetirementCurrentAbsence struct {
 	ObservedAtStart          time.Time `json:"observed_at_start"`
 	ObservedAtEnd            time.Time `json:"observed_at_end"`
 	Assurance                string    `json:"assurance"`
+}
+
+type ParentCleanupLedger struct {
+	Status                      string                       `json:"status"`
+	Completion                  *ParentCleanupCompletion     `json:"completion,omitempty"`
+	CurrentAbsence              *ParentCleanupCurrentAbsence `json:"current_absence,omitempty"`
+	ProcessLocalCompletionProof bool                         `json:"process_local_completion_proof"`
+	ProcessLocalAbsenceProof    bool                         `json:"process_local_absence_proof"`
+	Historical                  bool                         `json:"historical"`
+	StopReason                  string                       `json:"stop_reason,omitempty"`
+}
+
+type ParentCleanupCompletion struct {
+	OperationID            string `json:"operation_id"`
+	CleanupPlanID          string `json:"cleanup_plan_id"`
+	IntentID               string `json:"intent_id"`
+	CompletionID           string `json:"completion_id"`
+	RetirementOperationID  string `json:"retirement_operation_id"`
+	RetirementPlanID       string `json:"retirement_plan_id"`
+	RetirementCompletionID string `json:"retirement_completion_id"`
+	SearchScopeID          string `json:"search_scope_id"`
+	TargetRootIdentity     string `json:"target_root_identity"`
+	ParentsRemoved         int    `json:"parents_removed"`
+	RetiredFiles           int    `json:"retired_files"`
+	RetainedTombstone      bool   `json:"retained_tombstone"`
+	Assurance              string `json:"assurance"`
+}
+
+type ParentCleanupCurrentAbsence struct {
+	OperationID     string    `json:"operation_id"`
+	CleanupPlanID   string    `json:"cleanup_plan_id"`
+	CompletionID    string    `json:"completion_id"`
+	AbsenceID       string    `json:"absence_id"`
+	SearchScopeID   string    `json:"search_scope_id"`
+	ParentsChecked  int       `json:"parents_checked"`
+	RetiredFiles    int       `json:"retired_files"`
+	ObservedAtStart time.Time `json:"observed_at_start"`
+	ObservedAtEnd   time.Time `json:"observed_at_end"`
+	Assurance       string    `json:"assurance"`
 }
 
 type ClientActivationLedger struct {
@@ -597,6 +662,7 @@ func Build(input BuildInput) (Report, error) {
 			ClientActivationRequested:  input.ClientActivation.Requested,
 			ClientRemovalRequested:     input.ClientRemoval.Requested,
 			SourceRetirementRequested:  input.SourceRetirement.Requested,
+			ParentCleanupRequested:     input.ParentCleanup.Requested,
 			AbsolutePathsShown:         input.ShowAbsolutePaths,
 		},
 		Relations: []Relation{},
@@ -623,6 +689,12 @@ func Build(input BuildInput) (Report, error) {
 	}
 	if input.SourceRetirement.AbsenceAttempted {
 		report.Effect = append(report.Effect, "read_retired_source_name_absence")
+	}
+	if input.ParentCleanup.CompletionAttempted {
+		report.Effect = append(report.Effect, "read_parent_cleanup_operation_state")
+	}
+	if input.ParentCleanup.AbsenceAttempted {
+		report.Effect = append(report.Effect, "read_removed_parent_name_absence")
 	}
 	if input.SiteDetail.RequestsMade > 0 || input.SiteDetail.Observed != nil || input.SiteDetail.Receipt.Used.RequestsAttempted > 0 {
 		report.Effect = append(report.Effect, site.TorrentDetailReadEffect)
@@ -876,6 +948,12 @@ func Build(input BuildInput) (Report, error) {
 	report.Ledgers.Retirement = retirementLedger
 	report.Blockers = append(report.Blockers, retirementBlockers...)
 	report.Warnings = append(report.Warnings, retirementWarnings...)
+	parentCleanupLedger, parentCleanupBlockers, parentCleanupWarnings := assessParentCleanup(
+		input.ParentCleanup, retirementLedger,
+	)
+	report.Ledgers.ParentCleanup = parentCleanupLedger
+	report.Blockers = append(report.Blockers, parentCleanupBlockers...)
+	report.Warnings = append(report.Warnings, parentCleanupWarnings...)
 	report.Relations = []Relation{siteRelation, variantRelation, client.relation, storageRelation, pathRelation}
 	if removalLedger.Status == "historical_keep_data_removal_current_job_absent" {
 		client.relation.BlockerCodes = withoutString(client.relation.BlockerCodes, "client.exact_job_absent")
@@ -898,7 +976,8 @@ func Build(input BuildInput) (Report, error) {
 		adoptionLedger.Status, input.ClientAdoption.Requested || adoptionLedger.Status != "not_requested",
 		activationLedger.Status, input.ClientActivation.Requested || activationLedger.Status != "not_requested",
 		removalLedger.Status, input.ClientRemoval.Requested || removalLedger.Status != "not_requested",
-		retirementLedger.Status, input.SourceRetirement.Requested || retirementLedger.Status != "not_requested")
+		retirementLedger.Status, input.SourceRetirement.Requested || retirementLedger.Status != "not_requested",
+		parentCleanupLedger.Status, input.ParentCleanup.Requested || parentCleanupLedger.Status != "not_requested")
 	if report.Outcome == "consistent" {
 		if removalLedger.Status == "historical_keep_data_removal_current_job_absent" {
 			report.Assurance = "current_exact_local_content_plus_bracketed_typed_client_absence_and_canonical_historical_keep_data_removal_non_atomic"
@@ -928,6 +1007,9 @@ func Build(input BuildInput) (Report, error) {
 		}
 		if retirementLedger.Status == "historical_completion_current_absence_observed" {
 			report.Assurance += "_plus_canonical_historical_source_retirement_with_current_bound_name_absence"
+		}
+		if parentCleanupLedger.Status == "historical_completion_current_absence_observed" {
+			report.Assurance += "_plus_canonical_historical_parent_cleanup_with_current_removed_parent_absence"
 		}
 	}
 	report.Blockers = stableFindings(report.Blockers)
@@ -1405,25 +1487,25 @@ func assessSourceRetirement(meta *metafile.MetaInfo, selection SourceRetirementS
 		blockers = append(blockers, ReportFinding{Code: "retirement.source_name_reappeared", Message: "at least one explicitly retired source name is present again in the bound original namespace"})
 		return ledger, blockers, warnings
 	}
-	if completion.RetainedTombstone {
-		ledger.StopReason = "retirement_current_absence_unavailable"
-		blockers = append(blockers, ReportFinding{Code: "retirement.current_absence_unavailable", Message: "the retained retirement tombstone no longer contains authority to reobserve the original source names"})
-		return ledger, blockers, warnings
-	}
 	if selection.StopReason != "" || selection.CurrentAbsence == nil || materialized.Status != "verified_current_final_source" ||
 		activation.Status != "historical_completion_current_job_bound" || activation.CurrentUse == nil || !activation.ProcessLocalCurrentUseProof ||
 		completion.CurrentClientUseID != activation.CurrentUse.UseID || completion.ClientSnapshotID != activation.CurrentUse.CompleteSnapshotID {
 		if ledger.StopReason == "" {
 			ledger.StopReason = "retirement_current_absence_unavailable"
 		}
-		blockers = append(blockers, ReportFinding{Code: "retirement.current_absence_unavailable", Message: "the historical source retirement could not be combined with current bound-name absence, final, and downloader-use proof"})
+		message := "the historical source retirement could not be combined with current bound-name absence, final, and downloader-use proof"
+		if completion.RetainedTombstone && selection.CurrentAbsence == nil {
+			message = "the retained retirement tombstone has no direct path authority and no matching live parent-cleanup absence proof was supplied"
+		}
+		blockers = append(blockers, ReportFinding{Code: "retirement.current_absence_unavailable", Message: message})
 		return ledger, blockers, warnings
 	}
 	absence, ok := selection.CurrentAbsence.ReconcileCurrentRetiredNameAbsence()
 	if !ok || !validSourceRetirementCurrentAbsence(absence) || absence.OperationID != completion.OperationID ||
 		absence.PlanID != completion.PlanID || absence.CompletionID != completion.CompletionID ||
 		absence.SearchScopeID != completion.SearchScopeID || absence.FilesChecked != completion.FilesRetired ||
-		absence.BytesRetired != completion.BytesRetired {
+		absence.BytesRetired != completion.BytesRetired || completion.RetainedTombstone &&
+		absence.Assurance != "same_invocation_two_pass_identity_bound_removed_parent_absence_implies_retired_name_absence_bracketed_non_atomic" {
 		ledger.StopReason = "retirement_current_absence_unavailable"
 		blockers = append(blockers, ReportFinding{Code: "retirement.current_absence_unavailable", Message: "the process-local retired-name absence proof does not match this terminal retirement"})
 		return ledger, blockers, warnings
@@ -1432,7 +1514,116 @@ func assessSourceRetirement(meta *metafile.MetaInfo, selection SourceRetirementS
 	ledger.CurrentAbsence = &absence
 	ledger.ProcessLocalAbsenceProof = true
 	ledger.StopReason = ""
+	if completion.RetainedTombstone {
+		warnings = append(warnings, "the retained retirement tombstone supplied only historical lineage; current retired-name absence was implied by a matching live parent-cleanup absence proof")
+	}
 	warnings = append(warnings, "retirement completion, current source-name absence, current downloader use, and local content proof are separate sequential non-atomic observations")
+	return ledger, blockers, warnings
+}
+
+func assessParentCleanup(selection ParentCleanupSelection, retirement SourceRetirementLedger) (ParentCleanupLedger, []ReportFinding, []string) {
+	ledger := ParentCleanupLedger{Status: "not_requested"}
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	hasActivity := selection.CompletionAttempted || selection.AbsenceAttempted || selection.Completion != nil || selection.CurrentAbsence != nil || selection.StopReason != ""
+	if !selection.Requested {
+		if !hasActivity {
+			return ledger, blockers, warnings
+		}
+		ledger.Status = "incomplete"
+		ledger.StopReason = "parent_cleanup_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.input_inconsistent", Message: "parent-cleanup proof values were supplied without an explicit parent-cleanup request"})
+		return ledger, blockers, warnings
+	}
+
+	ledger.Status = "incomplete"
+	ledger.StopReason = safeParentCleanupStopReason(selection.StopReason)
+	if selection.AbsenceAttempted && !selection.CompletionAttempted || selection.Completion != nil && !selection.CompletionAttempted ||
+		selection.CurrentAbsence != nil && !selection.AbsenceAttempted {
+		ledger.StopReason = "parent_cleanup_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.input_inconsistent", Message: "parent-cleanup proof activity is internally inconsistent"})
+		return ledger, blockers, warnings
+	}
+	if ledger.StopReason == "parent_cleanup_completion_integrity_failed" {
+		ledger.Status = "integrity_failed"
+	}
+	if ledger.StopReason == "parent_cleanup_completion_selector_mismatch" {
+		ledger.Status = "selected_parent_cleanup_mismatch"
+	}
+	if selection.Completion == nil {
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.completion_proof_unavailable", Message: "the explicit terminal parent-cleanup journal could not be verified in this invocation"})
+		return ledger, blockers, warnings
+	}
+	completion, ok := selection.Completion.ReconciliationParentCleanupCompletion()
+	if !ok || !validParentCleanupCompletion(completion) {
+		ledger.Status = "incomplete"
+		if ledger.StopReason == "" {
+			ledger.StopReason = "parent_cleanup_completion_load_failed"
+		}
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.completion_proof_unavailable", Message: "the terminal parent-cleanup capability is unavailable or invalid"})
+		return ledger, blockers, warnings
+	}
+	ledger.Completion = &completion
+	ledger.ProcessLocalCompletionProof = true
+	ledger.Historical = true
+	warnings = append(warnings, "the terminal parent-cleanup record is historical evidence and does not by itself prove that a removed parent remains absent now")
+	if ledger.StopReason == "parent_cleanup_completion_integrity_failed" {
+		ledger.Status = "integrity_failed"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.completion_integrity_failed", Message: "the selected terminal parent-cleanup record failed integrity validation in this invocation"})
+		return ledger, blockers, warnings
+	}
+	if ledger.StopReason == "parent_cleanup_completion_selector_mismatch" {
+		ledger.Status = "selected_parent_cleanup_mismatch"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.selection_mismatch", Message: "the selected terminal parent cleanup does not match the explicit operation or plan selector"})
+		return ledger, blockers, warnings
+	}
+
+	if retirement.Completion == nil || !retirement.ProcessLocalCompletionProof ||
+		completion.RetirementOperationID != retirement.Completion.OperationID ||
+		completion.RetirementPlanID != retirement.Completion.PlanID ||
+		completion.RetirementCompletionID != retirement.Completion.CompletionID ||
+		completion.SearchScopeID != retirement.Completion.SearchScopeID ||
+		completion.TargetRootIdentity != retirement.Completion.TargetRootIdentity ||
+		completion.RetiredFiles != retirement.Completion.FilesRetired {
+		ledger.Status = "selected_parent_cleanup_mismatch"
+		ledger.StopReason = "parent_cleanup_completion_selector_mismatch"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.selection_mismatch", Message: "the selected terminal parent cleanup does not belong to the requested source-retirement lineage"})
+		return ledger, blockers, warnings
+	}
+
+	ledger.Status = "historical_completion_current_absence_unobserved"
+	if ledger.StopReason == "parent_cleanup_removed_parent_reappeared" {
+		ledger.Status = "removed_parent_reappeared"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.removed_parent_reappeared", Message: "at least one explicitly removed parent name is present again in the bound original namespace"})
+		return ledger, blockers, warnings
+	}
+	if completion.RetainedTombstone {
+		ledger.StopReason = "parent_cleanup_current_absence_unavailable"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.current_absence_unavailable", Message: "the retained parent-cleanup tombstone no longer contains authority to reobserve the removed parent names"})
+		return ledger, blockers, warnings
+	}
+	if selection.StopReason != "" || selection.CurrentAbsence == nil || retirement.Status != "historical_completion_current_absence_observed" ||
+		retirement.CurrentAbsence == nil || !retirement.ProcessLocalAbsenceProof {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "parent_cleanup_current_absence_unavailable"
+		}
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.current_absence_unavailable", Message: "the historical parent cleanup could not be combined with current removed-parent absence and source-retirement proof"})
+		return ledger, blockers, warnings
+	}
+	absence, ok := selection.CurrentAbsence.ReconcileCurrentRemovedParentAbsence()
+	if !ok || !validParentCleanupCurrentAbsence(absence) || absence.OperationID != completion.OperationID ||
+		absence.CleanupPlanID != completion.CleanupPlanID || absence.CompletionID != completion.CompletionID ||
+		absence.SearchScopeID != completion.SearchScopeID || absence.ParentsChecked != completion.ParentsRemoved ||
+		absence.RetiredFiles != completion.RetiredFiles {
+		ledger.StopReason = "parent_cleanup_current_absence_unavailable"
+		blockers = append(blockers, ReportFinding{Code: "parent_cleanup.current_absence_unavailable", Message: "the process-local removed-parent absence proof does not match this terminal parent cleanup"})
+		return ledger, blockers, warnings
+	}
+	ledger.Status = "historical_completion_current_absence_observed"
+	ledger.CurrentAbsence = &absence
+	ledger.ProcessLocalAbsenceProof = true
+	ledger.StopReason = ""
+	warnings = append(warnings, "parent-cleanup completion, current removed-parent absence, source retirement, downloader use, and local content proof are separate sequential non-atomic observations")
 	return ledger, blockers, warnings
 }
 
@@ -1459,7 +1650,38 @@ func validSourceRetirementCurrentAbsence(value SourceRetirementCurrentAbsence) b
 		value.BytesRetired > 0 && value.BytesRetired <= 1<<50 && value.ParentDirectoriesChecked > 0 &&
 		value.ParentDirectoriesChecked <= value.FilesChecked && !value.ObservedAtStart.IsZero() &&
 		!value.ObservedAtEnd.Before(value.ObservedAtStart) &&
-		value.Assurance == "same_invocation_two_pass_identity_bound_retired_name_absence_bracketed_non_atomic"
+		(value.Assurance == "same_invocation_two_pass_identity_bound_retired_name_absence_bracketed_non_atomic" ||
+			value.Assurance == "same_invocation_two_pass_identity_bound_removed_parent_absence_implies_retired_name_absence_bracketed_non_atomic")
+}
+
+func validParentCleanupCompletion(value ParentCleanupCompletion) bool {
+	if !validParentCleanupOperationForPlan(value.OperationID, value.CleanupPlanID) || !validSHA256ID(value.IntentID) ||
+		!validSHA256ID(value.CompletionID) || !validSHA256ID(value.RetirementOperationID) ||
+		!validSHA256ID(value.RetirementPlanID) || !validSHA256ID(value.RetirementCompletionID) ||
+		!validSHA256ID(value.SearchScopeID) || value.TargetRootIdentity == "" || len(value.TargetRootIdentity) > 512 ||
+		value.ParentsRemoved <= 0 || value.ParentsRemoved > 49_000 || value.RetiredFiles <= 0 || value.RetiredFiles > 49_999 {
+		return false
+	}
+	if value.RetainedTombstone {
+		return value.Assurance == "same_invocation_bound_canonical_parent_cleanup_retention_tombstone_read_without_current_absence_inference"
+	}
+	return value.Assurance == "same_invocation_bound_canonical_terminal_parent_cleanup_journal_read_without_current_absence_inference"
+}
+
+func validParentCleanupOperationForPlan(operationID, planID string) bool {
+	if !validSHA256ID(operationID) || !validSHA256ID(planID) {
+		return false
+	}
+	digest := sha256.Sum256([]byte("ptctl-source-retirement-parent-cleanup-operation-v1\x00" + planID))
+	return operationID == "sha256:"+hex.EncodeToString(digest[:])
+}
+
+func validParentCleanupCurrentAbsence(value ParentCleanupCurrentAbsence) bool {
+	return validSHA256ID(value.OperationID) && validSHA256ID(value.CleanupPlanID) && validSHA256ID(value.CompletionID) &&
+		validSHA256ID(value.AbsenceID) && validSHA256ID(value.SearchScopeID) && value.ParentsChecked > 0 &&
+		value.ParentsChecked <= 49_000 && value.RetiredFiles > 0 && value.RetiredFiles <= 49_999 &&
+		!value.ObservedAtStart.IsZero() && !value.ObservedAtEnd.Before(value.ObservedAtStart) &&
+		value.Assurance == "same_invocation_two_pass_identity_bound_removed_parent_name_absence_bracketed_non_atomic"
 }
 
 func validClientAdoptionCompletion(value ClientAdoptionCompletion) bool {
@@ -1524,6 +1746,19 @@ func safeSourceRetirementStopReason(value string) string {
 		return ""
 	default:
 		return "retirement_completion_load_failed"
+	}
+}
+
+func safeParentCleanupStopReason(value string) string {
+	switch value {
+	case "parent_cleanup_context_cancelled", "parent_cleanup_completion_integrity_failed", "parent_cleanup_completion_load_failed",
+		"parent_cleanup_completion_selector_mismatch", "parent_cleanup_current_absence_unavailable", "parent_cleanup_removed_parent_reappeared",
+		"parent_cleanup_prerequisite_unavailable", "parent_cleanup_unexpected_activity":
+		return value
+	case "":
+		return ""
+	default:
+		return "parent_cleanup_completion_load_failed"
 	}
 }
 
@@ -2254,12 +2489,14 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 	clientStatus, pathStatus string, clientRequested bool, adoptionStatus string, adoptionRequested bool,
 	activationStatus string, activationRequested bool,
 	removalStatus string, removalRequested bool,
-	retirementStatus string, retirementRequested bool) string {
+	retirementStatus string, retirementRequested bool,
+	parentCleanupStatus string, parentCleanupRequested bool) string {
 	if (siteBindingRequested && siteStatus == "integrity_failed") || storageStatus == "integrity_failed" ||
 		(adoptionRequested && adoptionStatus == "integrity_failed") ||
 		(activationRequested && activationStatus == "integrity_failed") ||
 		(removalRequested && removalStatus == "integrity_failed") ||
-		(retirementRequested && retirementStatus == "integrity_failed") {
+		(retirementRequested && retirementStatus == "integrity_failed") ||
+		(parentCleanupRequested && parentCleanupStatus == "integrity_failed") {
 		return "integrity_failed"
 	}
 	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") ||
@@ -2267,6 +2504,7 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 		(activationRequested && activationStatus == "selected_activation_mismatch") ||
 		(removalRequested && removalStatus == "selected_removal_mismatch") ||
 		(retirementRequested && (retirementStatus == "selected_retirement_mismatch" || retirementStatus == "source_name_reappeared")) ||
+		(parentCleanupRequested && (parentCleanupStatus == "selected_parent_cleanup_mismatch" || parentCleanupStatus == "removed_parent_reappeared")) ||
 		clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
 		return "conflict"
 	}
@@ -2279,6 +2517,7 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 		(activationRequested && activationStatus != "historical_completion_current_job_bound" && activationStatus != "historical_completion_current_job_absent") ||
 		(removalRequested && removalStatus != "historical_keep_data_removal_current_job_absent") ||
 		(retirementRequested && retirementStatus != "historical_completion_current_absence_observed") ||
+		(parentCleanupRequested && parentCleanupStatus != "historical_completion_current_absence_observed") ||
 		storageStatus == "incomplete" || (verifiedStorageOutcome(storageStatus) && !processProof) ||
 		(clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
 		return "incomplete"

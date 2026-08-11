@@ -1180,11 +1180,29 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	validParentCleanupPlan := "sha256:" + strings.Repeat("1", 64)
+	validParentCleanupOperation, err := sourceretire.ParentCleanupOperationIDForPlanID(validParentCleanupPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherParentCleanupPlan := "sha256:" + strings.Repeat("2", 64)
+	otherParentCleanupOperation, err := sourceretire.ParentCleanupOperationIDForPlanID(otherParentCleanupPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tooManyRoots := []string{"reconcile", "report", "--torrent", torrentPath}
 	for index := 0; index <= storage.DefaultInventoryLimits().MaxRoots; index++ {
 		tooManyRoots = append(tooManyRoots, "--search-root", searchRoot)
 	}
 	tooManyRoots = append(tooManyRoots, clientGroup...)
+	tooManyParentCleanupRoots := []string{
+		"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot,
+		"--parent-cleanup-operation", validParentCleanupOperation.String(), "--parent-cleanup-plan-id", validParentCleanupPlan,
+	}
+	for index := 0; index <= 64; index++ {
+		tooManyParentCleanupRoots = append(tooManyParentCleanupRoots, "--parent-cleanup-search-root", searchRoot)
+	}
+	tooManyParentCleanupRoots = append(tooManyParentCleanupRoots, clientGroup...)
 	tests := [][]string{
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--state-store", "unused", "--storage-profile", "unused"}, clientGroup...),
@@ -1239,8 +1257,14 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation, "--removal-plan-id", validRemovalPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot, "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--parent-cleanup-operation", validParentCleanupOperation.String()}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--parent-cleanup-operation", "bad", "--parent-cleanup-plan-id", validParentCleanupPlan, "--parent-cleanup-search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--parent-cleanup-operation", validParentCleanupOperation.String(), "--parent-cleanup-plan-id", "BAD", "--parent-cleanup-search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--parent-cleanup-operation", otherParentCleanupOperation.String(), "--parent-cleanup-plan-id", validParentCleanupPlan, "--parent-cleanup-search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--parent-cleanup-operation", validParentCleanupOperation.String(), "--parent-cleanup-plan-id", validParentCleanupPlan, "--parent-cleanup-search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", missingTorrent, "--search-root", searchRoot}, clientGroup...),
 		tooManyRoots,
+		tooManyParentCleanupRoots,
 	}
 	for _, args := range tests {
 		reader := &trackingReader{}
@@ -1295,7 +1319,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--adoption-operation") || !strings.Contains(helpOut.String(), "terminal stopped-add journal or retained tombstone") || !strings.Contains(helpOut.String(), "job incarnation remains unobservable") || !strings.Contains(helpOut.String(), "--removal-operation") || !strings.Contains(helpOut.String(), "terminal keep-data removal") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--adoption-operation") || !strings.Contains(helpOut.String(), "terminal stopped-add journal or retained tombstone") || !strings.Contains(helpOut.String(), "job incarnation remains unobservable") || !strings.Contains(helpOut.String(), "--removal-operation") || !strings.Contains(helpOut.String(), "terminal keep-data removal") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "--parent-cleanup-operation") || !strings.Contains(helpOut.String(), "--parent-cleanup-search-root") || !strings.Contains(helpOut.String(), "parent-cleanup selectors") || !strings.Contains(helpOut.String(), "twice reobserve the exact removed parent names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -1313,6 +1337,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	adoption := strings.Index(text, "CLIENT ADOPTION (STOPPED ADD)")
 	activation := strings.Index(text, "CLIENT ACTIVATION")
 	retirement := strings.Index(text, "SOURCE RETIREMENT")
+	parentCleanup := strings.Index(text, "PARENT CLEANUP")
 	ledgers := strings.Index(text, "LEDGERS")
 	fileLayout := strings.Index(text, "CLIENT FILE LAYOUT (BOUNDED)")
 	fileFindings := strings.Index(text, "CLIENT FILE FINDINGS (BOUNDED)")
@@ -1320,7 +1345,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	scan := strings.Index(text, "STORAGE SCAN")
 	matches := strings.Index(text, "VERIFIED STORAGE MATCHES")
 	bindings := strings.Index(text, "VERIFIED STORAGE BINDINGS (BOUNDED)")
-	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || materialized <= liveSite || adoption <= materialized || activation <= adoption || retirement <= activation || ledgers <= retirement || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
+	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || materialized <= liveSite || adoption <= materialized || activation <= adoption || retirement <= activation || parentCleanup <= retirement || ledgers <= parentCleanup || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
 		t.Fatalf("unclear reconciliation human order: %q", text)
 	}
 }

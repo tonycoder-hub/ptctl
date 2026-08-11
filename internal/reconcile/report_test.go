@@ -243,7 +243,7 @@ func TestClientAdoptionAssessmentBindsHistoricalCompletionToExistingBracket(t *t
 		t.Fatalf("ledger=%#v blockers=%#v warnings=%#v", ledger, blockers, warnings)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, ledger.Status, true, "not_requested", false, "not_requested", false, "not_requested", false); got != "consistent" {
+		"exact_unique", "same_location", true, ledger.Status, true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "consistent" {
 		t.Fatalf("bound adoption did not preserve ordinary consistent lattice: %q", got)
 	}
 }
@@ -339,7 +339,7 @@ func TestClientRemovalAssessmentRequiresAttributedHistoryAndMatchingCurrentAbsen
 
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
 		"absent", "not_comparable", true, "not_requested", false, "historical_completion_current_job_absent", true,
-		"historical_keep_data_removal_current_job_absent", true, "not_requested", false); got != "consistent" {
+		"historical_keep_data_removal_current_job_absent", true, "not_requested", false, "not_requested", false); got != "consistent" {
 		t.Fatalf("terminal removal current absence did not close the expected lattice: %q", got)
 	}
 }
@@ -424,6 +424,14 @@ func (stub retirementCompletionStub) ReconciliationRetirementCompletion() (Sourc
 	return stub.value, true
 }
 
+type retirementAbsenceStub struct {
+	value SourceRetirementCurrentAbsence
+}
+
+func (stub retirementAbsenceStub) ReconcileCurrentRetiredNameAbsence() (SourceRetirementCurrentAbsence, bool) {
+	return stub.value, true
+}
+
 func validRetirementCompletionFixture() SourceRetirementCompletion {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	return SourceRetirementCompletion{
@@ -434,6 +442,201 @@ func validRetirementCompletionFixture() SourceRetirementCompletion {
 		FinalObjectIdentity: "fsbind-v1:" + strings.Repeat("e", 64), ClientSnapshotID: digest,
 		FilesRetired: 1, BytesRetired: 1,
 		Assurance: "same_invocation_bound_canonical_terminal_source_retirement_journal_read_without_current_absence_inference",
+	}
+}
+
+func TestRetainedRetirementCanUseMatchingLiveParentCleanupAbsence(t *testing.T) {
+	completion := validRetirementCompletionFixture()
+	completion.RetainedTombstone = true
+	completion.Assurance = "same_invocation_bound_canonical_source_retirement_retention_tombstone_read_without_current_absence_inference"
+	now := time.Now().UTC()
+	absence := SourceRetirementCurrentAbsence{
+		OperationID: completion.OperationID, PlanID: completion.PlanID, CompletionID: completion.CompletionID,
+		AbsenceID: "sha256:" + strings.Repeat("9", 64), SearchScopeID: completion.SearchScopeID,
+		FilesChecked: completion.FilesRetired, BytesRetired: completion.BytesRetired, ParentDirectoriesChecked: 1,
+		ObservedAtStart: now, ObservedAtEnd: now.Add(time.Millisecond),
+		Assurance: "same_invocation_two_pass_identity_bound_removed_parent_absence_implies_retired_name_absence_bracketed_non_atomic",
+	}
+	meta := &metafile.MetaInfo{MetafileVariantID: completion.MetafileVariantID}
+	materialized := MaterializedFinalLedger{
+		Status: "verified_current_final_source", ProcessLocalFinalProof: true,
+		Observation: &materialize.FinalObservation{
+			OperationID: completion.MaterializeOperationID, MaterializePlanID: completion.MaterializePlanID,
+			MetafileVariantID: completion.MetafileVariantID, TargetRootIdentity: completion.TargetRootIdentity,
+			FinalObjectIdentity: completion.FinalObjectIdentity,
+		},
+	}
+	activation := ClientActivationLedger{
+		Status: "historical_completion_current_job_bound", ProcessLocalCompletionProof: true, ProcessLocalCurrentUseProof: true,
+		Completion: &ClientActivationCompletion{
+			OperationID: completion.ActivationOperationID, PlanID: completion.ActivationPlanID,
+			TerminalMarkerID: completion.ClientCompletionID,
+		},
+		CurrentUse: &ClientActivationCurrentUse{UseID: completion.CurrentClientUseID, CompleteSnapshotID: completion.ClientSnapshotID},
+	}
+	ledger, blockers, warnings := assessSourceRetirement(meta, SourceRetirementSelection{
+		Requested: true, CompletionAttempted: true, AbsenceAttempted: true,
+		Completion: retirementCompletionStub{value: completion}, CurrentAbsence: retirementAbsenceStub{value: absence},
+	}, materialized, activation)
+	if ledger.Status != "historical_completion_current_absence_observed" || ledger.CurrentAbsence == nil ||
+		!ledger.ProcessLocalCompletionProof || !ledger.ProcessLocalAbsenceProof || len(blockers) != 0 ||
+		!slices.Contains(warnings, "the retained retirement tombstone supplied only historical lineage; current retired-name absence was implied by a matching live parent-cleanup absence proof") {
+		t.Fatalf("ledger=%#v blockers=%#v warnings=%#v", ledger, blockers, warnings)
+	}
+
+	absence.Assurance = "same_invocation_two_pass_identity_bound_retired_name_absence_bracketed_non_atomic"
+	rejected, blockers, _ := assessSourceRetirement(meta, SourceRetirementSelection{
+		Requested: true, CompletionAttempted: true, AbsenceAttempted: true,
+		Completion: retirementCompletionStub{value: completion}, CurrentAbsence: retirementAbsenceStub{value: absence},
+	}, materialized, activation)
+	if rejected.Status != "historical_completion_current_absence_unobserved" || rejected.ProcessLocalAbsenceProof ||
+		rejected.CurrentAbsence != nil || !containsFinding(blockers, "retirement.current_absence_unavailable") {
+		t.Fatalf("retained retirement accepted direct path authority: ledger=%#v blockers=%#v", rejected, blockers)
+	}
+}
+
+func TestParentCleanupRequestFailsClosedAndSanitizesUntrustedStopReason(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	const canary = "PARENT-CLEANUP-STOP-SECRET-CANARY"
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ParentCleanup: ParentCleanupSelection{Requested: true, StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "incomplete" || report.Ledgers.ParentCleanup.Status != "incomplete" ||
+		report.Ledgers.ParentCleanup.StopReason != "parent_cleanup_completion_load_failed" ||
+		report.Ledgers.ParentCleanup.ProcessLocalCompletionProof || report.Ledgers.ParentCleanup.ProcessLocalAbsenceProof ||
+		strings.Contains(string(raw), canary) || slices.Contains(report.Effect, "read_parent_cleanup_operation_state") ||
+		slices.Contains(report.Effect, "read_removed_parent_name_absence") {
+		t.Fatalf("unsafe parent-cleanup failure report: %s", raw)
+	}
+
+	attempted, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		Client: ClientBracket{Requested: true, StopReason: "client_snapshot_incomplete"},
+		ParentCleanup: ParentCleanupSelection{
+			Requested: true, CompletionAttempted: true, AbsenceAttempted: true, StopReason: canary,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(attempted.Effect, "read_parent_cleanup_operation_state") ||
+		!slices.Contains(attempted.Effect, "read_removed_parent_name_absence") || slices.Contains(attempted.Effect, "read_downloader_state") {
+		t.Fatalf("report effects did not distinguish attempted parent-cleanup reads from a skipped client gate: %#v", attempted.Effect)
+	}
+
+	unexpected, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ParentCleanup: ParentCleanupSelection{StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unexpected.Outcome != "incomplete" || unexpected.Ledgers.ParentCleanup.StopReason != "parent_cleanup_unexpected_activity" ||
+		!containsFinding(unexpected.Blockers, "parent_cleanup.input_inconsistent") {
+		t.Fatalf("unexpected parent-cleanup activity was ignored: %#v", unexpected)
+	}
+}
+
+func TestParentCleanupRequestRequiresMatchingHistoricalAndCurrentProof(t *testing.T) {
+	retirementCompletion := validRetirementCompletionFixture()
+	retirement := SourceRetirementLedger{
+		Status: "historical_completion_current_absence_observed", Completion: &retirementCompletion,
+		CurrentAbsence:              &SourceRetirementCurrentAbsence{AbsenceID: "sha256:" + strings.Repeat("f", 64)},
+		ProcessLocalCompletionProof: true, ProcessLocalAbsenceProof: true, Historical: true,
+	}
+	completion := validParentCleanupCompletionFixture(retirementCompletion)
+	now := time.Now().UTC()
+	absence := ParentCleanupCurrentAbsence{
+		OperationID: completion.OperationID, CleanupPlanID: completion.CleanupPlanID, CompletionID: completion.CompletionID,
+		AbsenceID: "sha256:" + strings.Repeat("9", 64), SearchScopeID: completion.SearchScopeID,
+		ParentsChecked: completion.ParentsRemoved, RetiredFiles: completion.RetiredFiles,
+		ObservedAtStart: now, ObservedAtEnd: now.Add(time.Millisecond),
+		Assurance: "same_invocation_two_pass_identity_bound_removed_parent_name_absence_bracketed_non_atomic",
+	}
+	ledger, blockers, warnings := assessParentCleanup(ParentCleanupSelection{
+		Requested: true, CompletionAttempted: true, AbsenceAttempted: true,
+		Completion: parentCleanupCompletionStub{value: completion}, CurrentAbsence: parentCleanupAbsenceStub{value: absence},
+	}, retirement)
+	if ledger.Status != "historical_completion_current_absence_observed" || !ledger.ProcessLocalCompletionProof ||
+		!ledger.ProcessLocalAbsenceProof || ledger.Completion == nil || ledger.CurrentAbsence == nil || len(blockers) != 0 || len(warnings) < 2 {
+		t.Fatalf("ledger=%#v blockers=%#v warnings=%#v", ledger, blockers, warnings)
+	}
+	selectorMismatch, blockers, _ := assessParentCleanup(ParentCleanupSelection{
+		Requested: true, CompletionAttempted: true, Completion: parentCleanupCompletionStub{value: completion},
+		StopReason: "parent_cleanup_completion_selector_mismatch",
+	}, retirement)
+	if selectorMismatch.Status != "selected_parent_cleanup_mismatch" || !selectorMismatch.ProcessLocalCompletionProof ||
+		!containsFinding(blockers, "parent_cleanup.selection_mismatch") {
+		t.Fatalf("selector mismatch=%#v blockers=%#v", selectorMismatch, blockers)
+	}
+	integrityFailed, blockers, _ := assessParentCleanup(ParentCleanupSelection{
+		Requested: true, CompletionAttempted: true, Completion: parentCleanupCompletionStub{value: completion},
+		StopReason: "parent_cleanup_completion_integrity_failed",
+	}, retirement)
+	if integrityFailed.Status != "integrity_failed" || !integrityFailed.ProcessLocalCompletionProof ||
+		!containsFinding(blockers, "parent_cleanup.completion_integrity_failed") {
+		t.Fatalf("integrity failed=%#v blockers=%#v", integrityFailed, blockers)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_bound", true,
+		"not_requested", false, retirement.Status, true, ledger.Status, true); got != "consistent" {
+		t.Fatalf("parent cleanup did not preserve a fully proven consistent lattice: %q", got)
+	}
+
+	reappeared, blockers, _ := assessParentCleanup(ParentCleanupSelection{
+		Requested: true, CompletionAttempted: true, Completion: parentCleanupCompletionStub{value: completion},
+		StopReason: "parent_cleanup_removed_parent_reappeared",
+	}, retirement)
+	if reappeared.Status != "removed_parent_reappeared" || !containsFinding(blockers, "parent_cleanup.removed_parent_reappeared") {
+		t.Fatalf("reappeared=%#v blockers=%#v", reappeared, blockers)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_ambiguous", true,
+		"ambiguous", "not_comparable", true, "not_requested", false, "historical_completion_current_job_bound", true,
+		"not_requested", false, retirement.Status, true, reappeared.Status, true); got != "conflict" {
+		t.Fatalf("current parent conflict was hidden by ambiguity: %q", got)
+	}
+
+	completion.RetainedTombstone = true
+	completion.Assurance = "same_invocation_bound_canonical_parent_cleanup_retention_tombstone_read_without_current_absence_inference"
+	retained, blockers, _ := assessParentCleanup(ParentCleanupSelection{
+		Requested: true, CompletionAttempted: true, Completion: parentCleanupCompletionStub{value: completion},
+	}, retirement)
+	if retained.Status != "historical_completion_current_absence_unobserved" || retained.StopReason != "parent_cleanup_current_absence_unavailable" ||
+		!containsFinding(blockers, "parent_cleanup.current_absence_unavailable") {
+		t.Fatalf("retained=%#v blockers=%#v", retained, blockers)
+	}
+}
+
+type parentCleanupCompletionStub struct{ value ParentCleanupCompletion }
+
+func (stub parentCleanupCompletionStub) ReconciliationParentCleanupCompletion() (ParentCleanupCompletion, bool) {
+	return stub.value, true
+}
+
+type parentCleanupAbsenceStub struct{ value ParentCleanupCurrentAbsence }
+
+func (stub parentCleanupAbsenceStub) ReconcileCurrentRemovedParentAbsence() (ParentCleanupCurrentAbsence, bool) {
+	return stub.value, true
+}
+
+func validParentCleanupCompletionFixture(retirement SourceRetirementCompletion) ParentCleanupCompletion {
+	planID := "sha256:" + strings.Repeat("7", 64)
+	digest := sha256.Sum256([]byte("ptctl-source-retirement-parent-cleanup-operation-v1\x00" + planID))
+	return ParentCleanupCompletion{
+		OperationID: "sha256:" + hex.EncodeToString(digest[:]), CleanupPlanID: planID,
+		IntentID: "sha256:" + strings.Repeat("8", 64), CompletionID: "sha256:" + strings.Repeat("6", 64),
+		RetirementOperationID: retirement.OperationID, RetirementPlanID: retirement.PlanID,
+		RetirementCompletionID: retirement.CompletionID, SearchScopeID: retirement.SearchScopeID,
+		TargetRootIdentity: retirement.TargetRootIdentity, ParentsRemoved: 1, RetiredFiles: retirement.FilesRetired,
+		Assurance: "same_invocation_bound_canonical_terminal_parent_cleanup_journal_read_without_current_absence_inference",
 	}
 }
 
@@ -634,34 +837,34 @@ func TestOverallConflictOutranksAmbiguityAcrossAxes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
+			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
 				t.Fatalf("positive contradiction was hidden by ambiguity: got %q", got)
 			}
 		})
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "not_requested", false, "selected_activation_mismatch", true, "not_requested", false, "not_requested", false); got != "conflict" {
+		"exact_unique", "same_location", true, "not_requested", false, "selected_activation_mismatch", true, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
 		t.Fatalf("activation mismatch did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "selected_adoption_mismatch", true, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
+		"exact_unique", "same_location", true, "selected_adoption_mismatch", true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
 		t.Fatalf("adoption mismatch did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false, "not_requested", false); got != "incomplete" {
+		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "incomplete" {
 		t.Fatalf("unbound requested adoption did not make the report incomplete: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false); got != "incomplete" {
+		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false, "not_requested", false); got != "incomplete" {
 		t.Fatalf("unbound requested activation did not make the report incomplete: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_bound", true, "not_requested", false, "source_name_reappeared", true); got != "conflict" {
+		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_bound", true, "not_requested", false, "source_name_reappeared", true, "not_requested", false); got != "conflict" {
 		t.Fatalf("reappeared retired source name did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
 		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_bound", true,
-		"not_requested", false, "historical_completion_current_absence_unobserved", true); got != "incomplete" {
+		"not_requested", false, "historical_completion_current_absence_unobserved", true, "not_requested", false); got != "incomplete" {
 		t.Fatalf("unobserved requested retirement absence did not make the report incomplete: %q", got)
 	}
 }

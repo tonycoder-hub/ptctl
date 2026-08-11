@@ -177,7 +177,7 @@ Usage:
   ptctl client remove prune --target PATH --expect-removal-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client remove forget --target PATH --expect-removal-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
-  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH...] [--output table|json]
+  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [--output table|json]
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
@@ -343,9 +343,9 @@ func (a *app) reconcileReport(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--removal-operation ID --removal-plan-id ID | --retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH...] [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--removal-operation ID --removal-plan-id ID | --retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. Optional adoption selectors read one canonical terminal stopped-add journal or retained tombstone and bind its historical completion to the already requested current exact typed job claim without another client request; downloader job incarnation remains unobservable. Optional activation selectors similarly bind one canonical terminal activation journal to the current bracket and, when adoption is also selected, must share that adoption lineage. Optional removal selectors instead require activation, read one canonical terminal keep-data removal journal or retained tombstone, and bind its attributed completion to typed job absence in the existing two-read client bracket. Optional retirement selectors read one canonical terminal source-retirement journal and twice reobserve its exact retired names absent under explicit source roots. Adoption and removal are mutually exclusive because their current-job predicates conflict; removal and source-retirement terminal modes are also mutually exclusive in this slice. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
+		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. Optional adoption selectors read one canonical terminal stopped-add journal or retained tombstone and bind its historical completion to the already requested current exact typed job claim without another client request; downloader job incarnation remains unobservable. Optional activation selectors similarly bind one canonical terminal activation journal to the current bracket and, when adoption is also selected, must share that adoption lineage. Optional removal selectors instead require activation, read one canonical terminal keep-data removal journal or retained tombstone, and bind its attributed completion to typed job absence in the existing two-read client bracket. Optional retirement selectors read one canonical terminal source-retirement journal and twice reobserve its exact retired names absent under explicit source roots. Optional parent-cleanup selectors additionally require that retirement proof, read one canonical terminal cleanup journal, and twice reobserve the exact removed parent names absent; a retained cleanup tombstone is historical only and cannot restore path authority. Adoption and removal are mutually exclusive because their current-job predicates conflict; removal and source-retirement terminal modes are also mutually exclusive in this slice. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. Exact stopped adoption and reviewed existing-job recheck/start support both built-in drivers; Transmission mutation authority is v1-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
@@ -372,6 +372,11 @@ func (a *app) reconcileReport(args []string) error {
 	retirementAllowNetwork := fs.Bool("retirement-allow-network", false, "allow explicit network/UNC retirement source roots; never applies to the target")
 	var retirementSearchRoots stringListFlag
 	fs.Var(&retirementSearchRoots, "retirement-search-root", "original source root used by the retirement operation; repeatable and required with retirement selectors")
+	parentCleanupOperationValue := fs.String("parent-cleanup-operation", "", "explicit terminal parent-cleanup operation ID; requires source-retirement selectors")
+	parentCleanupPlanID := fs.String("parent-cleanup-plan-id", "", "reviewed sha256 parent-cleanup plan ID; requires --parent-cleanup-operation")
+	parentCleanupAllowNetwork := fs.Bool("parent-cleanup-allow-network", false, "allow explicit network/UNC parent-cleanup source roots; never applies to the target")
+	var parentCleanupSearchRoots stringListFlag
+	fs.Var(&parentCleanupSearchRoots, "parent-cleanup-search-root", "original source root used by the parent-cleanup operation; repeatable and required with parent-cleanup selectors")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
 	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
@@ -435,6 +440,7 @@ func (a *app) reconcileReport(args []string) error {
 	activationRequested := explicit["activation-operation"] || explicit["activation-plan-id"]
 	removalRequested := explicit["removal-operation"] || explicit["removal-plan-id"]
 	retirementRequested := explicit["retirement-operation"] || explicit["retirement-plan-id"] || explicit["retirement-search-root"] || explicit["retirement-allow-network"]
+	parentCleanupRequested := explicit["parent-cleanup-operation"] || explicit["parent-cleanup-plan-id"] || explicit["parent-cleanup-search-root"] || explicit["parent-cleanup-allow-network"]
 	if exactRequested && *exactSource == "" {
 		return usageError("reconcile report requires --source to be non-empty")
 	}
@@ -462,6 +468,13 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if len(retirementSearchRoots) > 64 {
 		return usageError("reconcile report accepts at most 64 --retirement-search-root values")
+	}
+	if parentCleanupRequested && (!explicit["parent-cleanup-operation"] || !explicit["parent-cleanup-plan-id"] || !explicit["parent-cleanup-search-root"] ||
+		*parentCleanupOperationValue == "" || *parentCleanupPlanID == "" || len(parentCleanupSearchRoots) == 0) {
+		return usageError("parent-cleanup mode requires non-empty --parent-cleanup-operation, --parent-cleanup-plan-id, and at least one --parent-cleanup-search-root")
+	}
+	if len(parentCleanupSearchRoots) > 64 {
+		return usageError("reconcile report accepts at most 64 --parent-cleanup-search-root values")
 	}
 	if !exactRequested && len(searchRoots) == 0 && !indexedRequested && !materializedRequested {
 		return usageError("reconcile report requires --source, --search-root, stored-profile mode, or the complete materialized-final selector")
@@ -564,6 +577,21 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("--retirement-operation does not match --retirement-plan-id")
 		}
 		retirementOperation = parsedOperation
+	}
+	var parentCleanupOperation sourceretire.ParentCleanupOperationID
+	if parentCleanupRequested {
+		parsedOperation, parseErr := sourceretire.ParseParentCleanupOperationID(*parentCleanupOperationValue)
+		if parseErr != nil {
+			return usageError("--parent-cleanup-operation requires a canonical operation ID")
+		}
+		if !validSourceRetireExecutionPlanID(*parentCleanupPlanID) {
+			return usageError("--parent-cleanup-plan-id requires a canonical reviewed sha256 plan ID")
+		}
+		derivedOperation, deriveErr := sourceretire.ParentCleanupOperationIDForPlanID(*parentCleanupPlanID)
+		if deriveErr != nil || derivedOperation != parsedOperation {
+			return usageError("--parent-cleanup-operation does not match --parent-cleanup-plan-id")
+		}
+		parentCleanupOperation = parsedOperation
 	}
 	var explicitDescriptor metastore.RecordID
 	if explicit["snapshot-record"] {
@@ -731,6 +759,9 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("source-retirement reconciliation requires --client-file-layout=auto and the default bounded client file limits")
 		}
 	}
+	if parentCleanupRequested && !retirementRequested {
+		return usageError("parent-cleanup reconciliation requires the complete source-retirement selectors")
+	}
 
 	var clientAdapter downloader.LedgerDriver
 	var clientConfigID string
@@ -897,12 +928,15 @@ func (a *app) reconcileReport(args []string) error {
 		}
 	}
 	retirementSelection := reconcile.SourceRetirementSelection{Requested: retirementRequested}
+	var verifiedRetirement *sourceretire.VerifiedCompletion
 	retirementGateFailed := false
+	retirementCompletionGateFailed := false
 	retirementIntegrityFailed := false
 	if retirementRequested {
 		if activationGateFailed || verifiedActivation == nil {
 			retirementSelection.StopReason = "retirement_prerequisite_unavailable"
 			retirementGateFailed = true
+			retirementCompletionGateFailed = true
 		} else {
 			retirementSelection.CompletionAttempted = true
 			verified, observation, completionErr := sourceretire.VerifyCompletion(ctx, sourceretire.CompletionProofOptions{
@@ -912,9 +946,11 @@ func (a *app) reconcileReport(args []string) error {
 			if completionErr != nil {
 				retirementSelection.StopReason = reconciliationRetirementCompletionStopReason(ctx, completionErr)
 				retirementGateFailed = true
+				retirementCompletionGateFailed = true
 				retirementIntegrityFailed = retirementSelection.StopReason == "retirement_completion_integrity_failed"
 			} else {
 				retirementSelection.Completion = verified
+				verifiedRetirement = verified
 				activationObservation := verifiedActivation.Observation()
 				if observation.MetafileVariantID != meta.MetafileVariantID ||
 					observation.MaterializeOperationID != materializeOperation.String() || observation.MaterializePlanID != *materializePlanID ||
@@ -922,6 +958,7 @@ func (a *app) reconcileReport(args []string) error {
 					observation.ClientCompletionID != activationObservation.TerminalMarkerID {
 					retirementSelection.StopReason = "retirement_completion_selector_mismatch"
 					retirementGateFailed = true
+					retirementCompletionGateFailed = true
 				} else if observation.RetainedTombstone {
 					retirementSelection.StopReason = "retirement_current_absence_unavailable"
 					retirementGateFailed = true
@@ -933,6 +970,60 @@ func (a *app) reconcileReport(args []string) error {
 						retirementGateFailed = true
 					} else {
 						retirementSelection.CurrentAbsence = absence
+					}
+				}
+			}
+		}
+	}
+	parentCleanupSelection := reconcile.ParentCleanupSelection{Requested: parentCleanupRequested}
+	parentCleanupGateFailed := false
+	parentCleanupIntegrityFailed := false
+	if parentCleanupRequested {
+		if retirementCompletionGateFailed || verifiedRetirement == nil {
+			parentCleanupSelection.StopReason = "parent_cleanup_prerequisite_unavailable"
+			parentCleanupGateFailed = true
+		} else {
+			parentCleanupSelection.CompletionAttempted = true
+			verified, observation, completionErr := sourceretire.VerifyParentCleanupCompletion(ctx, sourceretire.ParentCleanupCompletionProofOptions{
+				TargetRoot: *materializeTarget, OperationID: parentCleanupOperation, ExpectedCleanupPlanID: *parentCleanupPlanID,
+				Limits: sourceretire.DefaultParentCleanupExecutionLimits(),
+			})
+			if completionErr != nil {
+				parentCleanupSelection.StopReason = reconciliationParentCleanupCompletionStopReason(ctx, completionErr)
+				parentCleanupGateFailed = true
+				parentCleanupIntegrityFailed = parentCleanupSelection.StopReason == "parent_cleanup_completion_integrity_failed"
+			} else {
+				parentCleanupSelection.Completion = verified
+				retirementObservation := verifiedRetirement.Observation()
+				if observation.RetirementOperationID != retirementOperation.String() ||
+					observation.RetirementPlanID != *retirementPlanID ||
+					observation.RetirementCompletionID != retirementObservation.CompletionID ||
+					observation.SearchScopeID != retirementObservation.SearchScopeID ||
+					observation.TargetRootIdentity != retirementObservation.TargetRootIdentity {
+					parentCleanupSelection.StopReason = "parent_cleanup_completion_selector_mismatch"
+					parentCleanupGateFailed = true
+				} else if observation.RetainedTombstone {
+					parentCleanupSelection.StopReason = "parent_cleanup_current_absence_unavailable"
+					parentCleanupGateFailed = true
+				} else {
+					parentCleanupSelection.AbsenceAttempted = true
+					absence, _, absenceErr := sourceretire.VerifyCurrentParentCleanupAbsence(ctx, verified, append([]string(nil), parentCleanupSearchRoots...), *parentCleanupAllowNetwork)
+					if absenceErr != nil {
+						parentCleanupSelection.StopReason = reconciliationParentCleanupAbsenceStopReason(ctx, absenceErr)
+						parentCleanupGateFailed = true
+					} else {
+						parentCleanupSelection.CurrentAbsence = absence
+						if retirementSelection.CurrentAbsence == nil {
+							derivedAbsence, _, deriveErr := sourceretire.BindCurrentRetiredNameAbsenceFromParentCleanup(verifiedRetirement, verified, absence)
+							if deriveErr != nil {
+								parentCleanupSelection.StopReason = "parent_cleanup_current_absence_unavailable"
+								parentCleanupGateFailed = true
+							} else {
+								retirementSelection.CurrentAbsence = derivedAbsence
+								retirementSelection.StopReason = ""
+								retirementGateFailed = false
+							}
+						}
 					}
 				}
 			}
@@ -999,7 +1090,7 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	var siteCredential site.Credential
 	var clientCredential downloader.Credential
-	if !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !removalGateFailed && !retirementGateFailed {
+	if !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !removalGateFailed && !retirementGateFailed && !parentCleanupGateFailed {
 		switch {
 		case siteDetailRequested && clientRequested:
 			siteCredential, clientCredential, err = readReconciliationCredentialBundle(a.stdin, *username)
@@ -1016,7 +1107,7 @@ func (a *app) reconcileReport(args []string) error {
 	if siteDetailRequested {
 		if siteBindingGateFailed {
 			siteDetailSelection.StopReason = "site_detail_skipped_by_binding_gate"
-		} else if adoptionGateFailed || activationGateFailed || removalGateFailed || retirementGateFailed {
+		} else if adoptionGateFailed || activationGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed {
 			siteDetailSelection.StopReason = "site_detail_skipped_by_prerequisite_gate"
 		} else {
 			siteDetailSelection = readReconciliationSiteDetail(ctx, siteDetailReader, siteDetailConfig, *siteRef, siteCredential)
@@ -1028,7 +1119,7 @@ func (a *app) reconcileReport(args []string) error {
 		FileLayoutMode: *clientFileLayout,
 		FileLimits:     clientFileLimits,
 	}
-	if clientRequested && (siteBindingGateFailed || adoptionGateFailed || activationGateFailed || removalGateFailed || retirementGateFailed) {
+	if clientRequested && (siteBindingGateFailed || adoptionGateFailed || activationGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed) {
 		bracket.StopReason = "client_snapshot_incomplete"
 	}
 	var session downloader.LedgerSession
@@ -1194,6 +1285,7 @@ func (a *app) reconcileReport(args []string) error {
 		ClientActivation:  activationSelection,
 		ClientRemoval:     removalSelection,
 		SourceRetirement:  retirementSelection,
+		ParentCleanup:     parentCleanupSelection,
 		PathMapping:       reportMapping,
 		ShowAbsolutePaths: *showAbsolute,
 	})
@@ -1225,6 +1317,9 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if retirementIntegrityFailed {
 		return &integrityErr{message: "the explicit terminal source-retirement journal failed integrity verification"}
+	}
+	if parentCleanupIntegrityFailed {
+		return &integrityErr{message: "the explicit terminal parent-cleanup journal failed integrity verification"}
 	}
 	if *requireReconciled && report.Outcome != "consistent" {
 		return &inconclusiveErr{message: "reconciliation outcome is not consistent"}
@@ -1325,6 +1420,30 @@ func reconciliationRetirementAbsenceStopReason(ctx context.Context, err error) s
 		return "retirement_source_name_reappeared"
 	default:
 		return "retirement_current_absence_unavailable"
+	}
+}
+
+func reconciliationParentCleanupCompletionStopReason(ctx context.Context, err error) string {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil:
+		return "parent_cleanup_context_cancelled"
+	case errors.Is(err, sourceretire.ErrExecutionIntegrity):
+		return "parent_cleanup_completion_integrity_failed"
+	case errors.Is(err, sourceretire.ErrExecutionPolicy), errors.Is(err, sourceretire.ErrOperationNotFound):
+		return "parent_cleanup_completion_load_failed"
+	default:
+		return "parent_cleanup_completion_load_failed"
+	}
+}
+
+func reconciliationParentCleanupAbsenceStopReason(ctx context.Context, err error) string {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil:
+		return "parent_cleanup_context_cancelled"
+	case errors.Is(err, sourceretire.ErrRemovedParentPresent):
+		return "parent_cleanup_removed_parent_reappeared"
+	default:
+		return "parent_cleanup_current_absence_unavailable"
 	}
 }
 
@@ -2467,6 +2586,32 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(retirement.StopReason))
 	}
 
+	parentCleanup := report.Ledgers.ParentCleanup
+	cleanupOperation, cleanupPlan, cleanupCompletion, cleanupAbsence := "-", "-", "-", "-"
+	cleanupParents, cleanupFiles := 0, 0
+	cleanupStart, cleanupEnd := "-", "-"
+	cleanupRetained := false
+	if parentCleanup.Completion != nil {
+		cleanupOperation = shortID(parentCleanup.Completion.OperationID)
+		cleanupPlan = shortID(parentCleanup.Completion.CleanupPlanID)
+		cleanupCompletion = shortID(parentCleanup.Completion.CompletionID)
+		cleanupParents, cleanupFiles = parentCleanup.Completion.ParentsRemoved, parentCleanup.Completion.RetiredFiles
+		cleanupRetained = parentCleanup.Completion.RetainedTombstone
+	}
+	if parentCleanup.CurrentAbsence != nil {
+		cleanupAbsence = shortID(parentCleanup.CurrentAbsence.AbsenceID)
+		cleanupStart = parentCleanup.CurrentAbsence.ObservedAtStart.Format(time.RFC3339Nano)
+		cleanupEnd = parentCleanup.CurrentAbsence.ObservedAtEnd.Format(time.RFC3339Nano)
+	}
+	fmt.Fprintf(w, "\nPARENT CLEANUP\nREQUESTED\t%t\nSTATUS\t%s\nOPERATION\t%s\nPLAN\t%s\nCOMPLETION\t%s\nHISTORICAL\t%t\nRETAINED TOMBSTONE\t%t\nPROCESS-LOCAL COMPLETION PROOF\t%t\nPROCESS-LOCAL CURRENT-ABSENCE PROOF\t%t\nCURRENT ABSENCE\t%s\nPARENTS REMOVED / CHECKED\t%d\nRETIRED FILES\t%d\nCURRENT OBSERVED START\t%s\nCURRENT OBSERVED END\t%s\n",
+		report.Scope.ParentCleanupRequested, terminalSafe(parentCleanup.Status), terminalSafe(cleanupOperation), terminalSafe(cleanupPlan),
+		terminalSafe(cleanupCompletion), parentCleanup.Historical, cleanupRetained, parentCleanup.ProcessLocalCompletionProof,
+		parentCleanup.ProcessLocalAbsenceProof, terminalSafe(cleanupAbsence), cleanupParents, cleanupFiles,
+		terminalSafe(cleanupStart), terminalSafe(cleanupEnd))
+	if parentCleanup.StopReason != "" {
+		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(parentCleanup.StopReason))
+	}
+
 	siteID := "-"
 	if report.Ledgers.Site.Ref != nil {
 		siteID = report.Ledgers.Site.Ref.SiteID + "/" + report.Ledgers.Site.Ref.RemoteID
@@ -2535,6 +2680,15 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		retirementSummary = "explicit terminal source retirement could not be verified"
 	}
 	fmt.Fprintf(w, "source retirement\t%s\t%s\t%s\n", terminalSafe(retirement.Status), terminalSafe(retirementID), terminalSafe(retirementSummary))
+	parentCleanupSummary := "not requested"
+	parentCleanupID := "-"
+	if parentCleanup.Completion != nil {
+		parentCleanupID = shortID(parentCleanup.Completion.OperationID)
+		parentCleanupSummary = fmt.Sprintf("historical=%t; current-absence=%t; parents=%d", parentCleanup.Historical, parentCleanup.ProcessLocalAbsenceProof, parentCleanup.Completion.ParentsRemoved)
+	} else if report.Scope.ParentCleanupRequested {
+		parentCleanupSummary = "explicit terminal parent cleanup could not be verified"
+	}
+	fmt.Fprintf(w, "parent cleanup\t%s\t%s\t%s\n", terminalSafe(parentCleanup.Status), terminalSafe(parentCleanupID), terminalSafe(parentCleanupSummary))
 
 	fileLayout := report.Ledgers.Downloader.FileLayout
 	fileStops := strings.Join(fileLayout.StopReasons, ",")

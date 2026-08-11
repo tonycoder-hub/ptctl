@@ -284,15 +284,37 @@ Windows UNC/network source roots require the separate
 resolved root is accessed; it grants no authority over the local target.
 
 Pruning deliberately destroys the journal's path authority. Its retained
-tombstone can establish historical completion but can never be used to infer a
-current negative filesystem fact; requested reconciliation therefore remains
-incomplete. Public completion and absence DTOs contain only bounded IDs,
+tombstone can establish historical completion but cannot itself infer a
+current negative filesystem fact. Requested reconciliation therefore remains
+incomplete unless a separately selected live parent-cleanup journal matches the
+exact retirement lineage and proves the removed parent names absent now. That
+proof implies the retired child names are absent without recovering or trusting
+paths from the tombstone. Public completion and absence DTOs contain only bounded IDs,
 counts, and times, omit source paths, and lose their process-local authority on
 serialization. The successful absence observation is still two-pass,
 identity-bound, and bracketed non-atomic: a cooperating or malicious writer can
 recreate a name after the last observation. It is not a filesystem snapshot,
 negative uniqueness proof, or guarantee that storage was reclaimed. This axis
 reuses the existing client bracket and adds no downloader request or mutation.
+
+Explicit parent-cleanup reconciliation is another pre-credential local gate.
+The operation, reviewed cleanup plan, and original source-root scope are all
+mandatory and must be accompanied by the complete retirement selectors. The
+terminal cleanup journal must reproduce the retirement operation, plan,
+completion, scope, target-root identity, and retired-file count before its
+private paths are used. Every removed immediate-parent name is then observed
+absent twice through fresh bound parent-directory sessions. A present parent is
+a current conflict; cancellation, unsafe objects, scope drift, or unavailable
+namespace authority is incomplete and prevents secret input or client I/O.
+Network/UNC roots require a separate `--parent-cleanup-allow-network` flag.
+
+The derived retired-name absence and the parent-cleanup observation use
+distinct assurance text bound into the former's domain-separated ID. Neither
+claims atomicity, continued absence, original-parent identity continuity, block
+reclamation, or filesystem-wide negative uniqueness. A retained cleanup
+tombstone has no paths and can provide historical completion only. JSON cannot
+recreate completion, current-absence, or derived-absence authority, and reports
+never emit the recorded parent or child names.
 
 ### Filesystem escape, races, and corruption
 

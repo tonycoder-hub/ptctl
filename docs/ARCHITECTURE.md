@@ -151,12 +151,29 @@ A Windows UNC/network source scope additionally requires the dedicated
 `--retirement-allow-network` permission before either the lexical or resolved
 root is touched; it never authorizes a network materialized target.
 A retained tombstone has intentionally discarded names and parents and cannot
-recreate this authority. Reappeared names are positive current conflicts;
-unavailable scope, parent, or tombstone authority is incomplete. The report
+recreate direct path authority. By itself it therefore remains incomplete; a
+matching live parent-cleanup journal can separately prove its removed parent
+names absent and conservatively imply absence of the retired children without
+recovering those paths. Reappeared names are positive current conflicts;
+unavailable scope or namespace authority is incomplete. The report
 adds a separate `source_retirement` ledger while preserving exactly the five
 existing relations. Historical retirement, current name absence, current
 typed client use, and current exact final proof remain sequential non-atomic
 axes, and serialized DTOs cannot recreate either retirement capability.
+
+Optional `--parent-cleanup-operation`, `--parent-cleanup-plan-id`, and repeated
+`--parent-cleanup-search-root` selectors require that complete retirement axis.
+Before credential input, one canonical terminal cleanup journal must match the
+selected retirement operation, plan, completion, search scope, target-root
+identity, and retired-file total. The live journal supplies private path
+authority for two passes over the exact removed immediate-parent names. The
+report exposes only IDs, counts, times, and assurance in a separate
+`parent_cleanup` ledger; it adds no relation. Parent reappearance is a current
+conflict, while an unavailable bound namespace is incomplete. A retained
+cleanup tombstone is historical only because it deliberately contains no
+paths. Completion authority, current parent absence, the derived retired-name
+absence, downloader use, and final-content proof are distinct process-local,
+sequential, bracketed non-atomic observations that JSON cannot recreate.
 
 The metafile input is exactly one of an ordinary `--torrent FILE` or the paired
 `--metafile-store DIR --metafile-variant ID` selector. A stored object is

@@ -11,6 +11,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
+	"github.com/tonycoder-hub/ptctl/internal/reconcile"
 	"github.com/tonycoder-hub/ptctl/internal/sourceretire"
 )
 
@@ -761,6 +762,89 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 		t.Fatalf("parent cleanup terminal resume disagrees: %s", out.String())
 	}
 
+	parentCleanupReconcileArgs := []string{
+		"reconcile", "report", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
+		"--target", fixture.materialize.targetRoot, "--materialize-operation", fixture.operation,
+		"--materialize-plan-id", fixture.materialize.planID,
+		"--adoption-operation", adopted.Data.Operation.ID, "--adoption-plan-id", adopted.Data.Plan.ID,
+		"--activation-operation", activationPlan.Data.Operation.ID, "--activation-plan-id", activationPlan.Data.Plan.ID,
+		"--retirement-operation", execution.Data.Operation.ID, "--retirement-plan-id", plan.Data.Plan.ID,
+		"--retirement-search-root", fixture.materialize.sourceRoot,
+		"--parent-cleanup-operation", cleanupExecution.Data.Operation.ID, "--parent-cleanup-plan-id", cleanup.Data.Plan.ID,
+		"--parent-cleanup-search-root", fixture.materialize.sourceRoot,
+		"--driver", "qbittorrent", "--url", server.server.URL, "--username", clientAdoptUser, "--password-stdin",
+		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--timeout", "1m", "--output", "json",
+	}
+	requestsBefore = server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(parentCleanupReconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("parent-cleanup reconciliation code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("parent-cleanup reconciliation made %d requests; wanted the unchanged login plus two-read bracket: %s", delta, out.String())
+	}
+	var reconciled struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLedger := reconciled.Data.Ledgers.ParentCleanup
+	if reconciled.Data.Outcome != "consistent" || !reconciled.Data.Scope.ParentCleanupRequested ||
+		cleanupLedger.Status != "historical_completion_current_absence_observed" || !cleanupLedger.Historical ||
+		!cleanupLedger.ProcessLocalCompletionProof || !cleanupLedger.ProcessLocalAbsenceProof ||
+		cleanupLedger.Completion == nil || cleanupLedger.CurrentAbsence == nil || cleanupLedger.Completion.RetainedTombstone ||
+		cleanupLedger.Completion.OperationID != cleanupExecution.Data.Operation.ID ||
+		cleanupLedger.CurrentAbsence.OperationID != cleanupLedger.Completion.OperationID ||
+		cleanupLedger.CurrentAbsence.ParentsChecked != cleanupLedger.Completion.ParentsRemoved ||
+		!strings.Contains(reconciled.Data.Assurance, "canonical_historical_parent_cleanup_with_current_removed_parent_absence") ||
+		!strings.Contains(out.String(), "read_parent_cleanup_operation_state") || !strings.Contains(out.String(), "read_removed_parent_name_absence") {
+		t.Fatalf("parent-cleanup axis was not kept separate and currently rebound: %s", out.String())
+	}
+	var cleanupHuman bytes.Buffer
+	if err := writeReconciliationHuman(&cleanupHuman, reconciled.Data); err != nil ||
+		!strings.Contains(cleanupHuman.String(), "PARENT CLEANUP") ||
+		!strings.Contains(cleanupHuman.String(), "PROCESS-LOCAL CURRENT-ABSENCE PROOF  true") ||
+		strings.Index(cleanupHuman.String(), "PARENT CLEANUP") > strings.Index(cleanupHuman.String(), "LEDGERS") {
+		t.Fatalf("parent-cleanup table contract is unclear: err=%v\n%s", err, cleanupHuman.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+	if strings.Contains(out.String(), cleanupParent) || strings.Contains(out.String(), filepath.Base(cleanupParent)) {
+		t.Fatalf("parent-cleanup reconciliation leaked the removed parent: %s", out.String())
+	}
+
+	if err := os.Mkdir(cleanupParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(parentCleanupReconcileArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("reappeared parent code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("reappeared removed parent contacted the downloader")
+	}
+	reconciled = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLedger = reconciled.Data.Ledgers.ParentCleanup
+	if reconciled.Data.Outcome != "conflict" || cleanupLedger.Status != "removed_parent_reappeared" ||
+		cleanupLedger.StopReason != "parent_cleanup_removed_parent_reappeared" || !cleanupLedger.ProcessLocalCompletionProof ||
+		cleanupLedger.ProcessLocalAbsenceProof || cleanupLedger.CurrentAbsence != nil ||
+		!hasReportFindingCLI(reconciled.Data.Blockers, "parent_cleanup.removed_parent_reappeared") {
+		t.Fatalf("reappeared removed parent was not a current conflict: %s", out.String())
+	}
+	if err := os.Remove(cleanupParent); err != nil {
+		t.Fatal(err)
+	}
+
 	cleanupPruneArgs := []string{"seed", "retire", "parent-cleanup", "prune", "--target", fixture.materialize.targetRoot,
 		"--expect-cleanup-plan-id", cleanup.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json",
 		cleanupExecution.Data.Operation.ID}
@@ -791,6 +875,31 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 	if cleanupRetained.Data.Outcome != sourceretire.ParentCleanupExecutionOutcomeAlreadyRemoved ||
 		cleanupRetained.Data.Operation.Status != "retained" || cleanupRetained.Data.WritesPerformed != 0 || len(cleanupRetained.Data.Directories) != 0 {
 		t.Fatalf("retained parent cleanup status disagrees: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(parentCleanupReconcileArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("retained parent-cleanup reconciliation code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("retained parent-cleanup tombstone contacted the downloader")
+	}
+	reconciled = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLedger = reconciled.Data.Ledgers.ParentCleanup
+	if reconciled.Data.Outcome != "incomplete" || cleanupLedger.Status != "historical_completion_current_absence_unobserved" ||
+		cleanupLedger.StopReason != "parent_cleanup_current_absence_unavailable" || !cleanupLedger.ProcessLocalCompletionProof ||
+		cleanupLedger.ProcessLocalAbsenceProof || cleanupLedger.Completion == nil || !cleanupLedger.Completion.RetainedTombstone ||
+		cleanupLedger.CurrentAbsence != nil || !hasReportFindingCLI(reconciled.Data.Blockers, "parent_cleanup.current_absence_unavailable") {
+		t.Fatalf("retained parent-cleanup tombstone was treated as current absence proof: %s", out.String())
 	}
 	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
 

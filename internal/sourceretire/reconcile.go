@@ -37,3 +37,36 @@ func (verified *VerifiedCurrentAbsence) ReconcileCurrentRetiredNameAbsence() (re
 		ObservedAtStart: value.ObservedAtStart, ObservedAtEnd: value.ObservedAtEnd, Assurance: value.Assurance,
 	}, true
 }
+
+// ReconciliationParentCleanupCompletion exposes a bounded public view only
+// while the process-local parent-cleanup completion authority remains valid.
+func (verified *VerifiedParentCleanupCompletion) ReconciliationParentCleanupCompletion() (reconcile.ParentCleanupCompletion, bool) {
+	if !verified.Verified() {
+		return reconcile.ParentCleanupCompletion{}, false
+	}
+	value := verified.Observation()
+	return reconcile.ParentCleanupCompletion{
+		OperationID: value.OperationID, CleanupPlanID: value.CleanupPlanID, IntentID: value.IntentID,
+		CompletionID: value.CompletionID, RetirementOperationID: value.RetirementOperationID,
+		RetirementPlanID: value.RetirementPlanID, RetirementCompletionID: value.RetirementCompletionID,
+		SearchScopeID: value.SearchScopeID, TargetRootIdentity: value.TargetRootIdentity,
+		ParentsRemoved: value.ParentsRemoved, RetiredFiles: value.RetiredFiles,
+		RetainedTombstone: value.RetainedTombstone, Assurance: value.Assurance,
+	}, true
+}
+
+// ReconcileCurrentRemovedParentAbsence returns the public view of the already
+// completed local absence observation. It performs no filesystem or network
+// operation and cannot be recreated from its JSON DTO.
+func (verified *VerifiedParentCleanupCurrentAbsence) ReconcileCurrentRemovedParentAbsence() (reconcile.ParentCleanupCurrentAbsence, bool) {
+	if !verified.Verified() {
+		return reconcile.ParentCleanupCurrentAbsence{}, false
+	}
+	value := verified.Observation()
+	return reconcile.ParentCleanupCurrentAbsence{
+		OperationID: value.OperationID, CleanupPlanID: value.CleanupPlanID, CompletionID: value.CompletionID,
+		AbsenceID: value.AbsenceID, SearchScopeID: value.SearchScopeID, ParentsChecked: value.ParentsChecked,
+		RetiredFiles: value.RetiredFiles, ObservedAtStart: value.ObservedAtStart, ObservedAtEnd: value.ObservedAtEnd,
+		Assurance: value.Assurance,
+	}, true
+}

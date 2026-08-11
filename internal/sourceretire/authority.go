@@ -384,7 +384,9 @@ func validCurrentAbsenceObservation(value CurrentAbsenceObservation) bool {
 		!canonicalSHA256ID(value.AbsenceID) || !canonicalSHA256ID(value.SearchScopeID) || value.FilesChecked <= 0 ||
 		value.FilesChecked > hardExecutionMaxFiles || value.BytesRetired <= 0 || value.BytesRetired > hardExecutionMaxContent ||
 		value.ParentDirectoriesChecked <= 0 || value.ParentDirectoriesChecked > value.FilesChecked || value.ObservedAtStart.IsZero() ||
-		value.ObservedAtEnd.Before(value.ObservedAtStart) || value.Assurance != "same_invocation_two_pass_identity_bound_retired_name_absence_bracketed_non_atomic" {
+		value.ObservedAtEnd.Before(value.ObservedAtStart) ||
+		(value.Assurance != "same_invocation_two_pass_identity_bound_retired_name_absence_bracketed_non_atomic" &&
+			value.Assurance != "same_invocation_two_pass_identity_bound_removed_parent_absence_implies_retired_name_absence_bracketed_non_atomic") {
 		return false
 	}
 	return currentAbsenceID(value) == value.AbsenceID
@@ -393,7 +395,7 @@ func validCurrentAbsenceObservation(value CurrentAbsenceObservation) bool {
 func currentAbsenceID(value CurrentAbsenceObservation) string {
 	parts := []string{value.OperationID, value.PlanID, value.CompletionID, value.SearchScopeID,
 		strconv.Itoa(value.FilesChecked), strconv.FormatInt(value.BytesRetired, 10), strconv.Itoa(value.ParentDirectoriesChecked),
-		value.ObservedAtStart.UTC().Format(time.RFC3339Nano), value.ObservedAtEnd.UTC().Format(time.RFC3339Nano)}
-	digest := sha256.Sum256([]byte("ptctl-source-retirement-current-absence-v1\x00" + strings.Join(parts, "\x00")))
+		value.ObservedAtStart.UTC().Format(time.RFC3339Nano), value.ObservedAtEnd.UTC().Format(time.RFC3339Nano), value.Assurance}
+	digest := sha256.Sum256([]byte("ptctl-source-retirement-current-absence-v2\x00" + strings.Join(parts, "\x00")))
 	return markerIDPrefix + hex.EncodeToString(digest[:])
 }
