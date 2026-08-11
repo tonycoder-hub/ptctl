@@ -3,8 +3,10 @@ package downloader
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -102,8 +104,10 @@ func (descriptor StoppedAddDescriptor) SupportsIdentity(identity TypedIdentity) 
 }
 
 const (
-	ControlProtocolQBittorrentV4 = "qbittorrent_webapi_v4"
-	ControlProtocolQBittorrentV5 = "qbittorrent_webapi_v5"
+	ControlProtocolQBittorrentV4  = "qbittorrent_webapi_v4"
+	ControlProtocolQBittorrentV5  = "qbittorrent_webapi_v5"
+	ControlProtocolTransmissionV5 = "transmission_rpc_v5_3"
+	ControlProtocolTransmissionV6 = "transmission_rpc_v6"
 
 	ControlEffectRecheck = "request_existing_job_recheck"
 	ControlEffectStart   = "request_existing_job_start"
@@ -111,7 +115,7 @@ const (
 
 // ExistingJobControlDescriptor is a bounded, normalized capability result for
 // mutations of an already identified downloader job. Protocol is deliberately
-// explicit because qBittorrent 4.x and 5.x use different start routes.
+// explicit because each built-in adapter has version-bound method names.
 type ExistingJobControlDescriptor struct {
 	Driver         string `json:"driver"`
 	Protocol       string `json:"protocol"`
@@ -120,22 +124,58 @@ type ExistingJobControlDescriptor struct {
 }
 
 func (descriptor ExistingJobControlDescriptor) Validate() error {
-	if descriptor.Driver != "qbittorrent" || descriptor.RecheckRouteID != "qbittorrent.torrents.recheck.v1" {
-		return fmt.Errorf("downloader existing-job control descriptor is invalid")
-	}
-	switch descriptor.Protocol {
-	case ControlProtocolQBittorrentV4:
-		if descriptor.StartRouteID != "qbittorrent.torrents.resume.v1" {
+	switch descriptor.Driver {
+	case DriverQBittorrent:
+		if descriptor.RecheckRouteID != "qbittorrent.torrents.recheck.v1" {
 			return fmt.Errorf("downloader existing-job control descriptor is invalid")
 		}
-	case ControlProtocolQBittorrentV5:
-		if descriptor.StartRouteID != "qbittorrent.torrents.start.v1" {
+		switch descriptor.Protocol {
+		case ControlProtocolQBittorrentV4:
+			if descriptor.StartRouteID != "qbittorrent.torrents.resume.v1" {
+				return fmt.Errorf("downloader existing-job control descriptor is invalid")
+			}
+		case ControlProtocolQBittorrentV5:
+			if descriptor.StartRouteID != "qbittorrent.torrents.start.v1" {
+				return fmt.Errorf("downloader existing-job control descriptor is invalid")
+			}
+		default:
+			return fmt.Errorf("downloader existing-job control protocol is unsupported")
+		}
+	case DriverTransmission:
+		if descriptor.RecheckRouteID != "transmission.torrent.verify.v1" || descriptor.StartRouteID != "transmission.torrent.start.v1" {
 			return fmt.Errorf("downloader existing-job control descriptor is invalid")
+		}
+		if descriptor.Protocol != ControlProtocolTransmissionV5 && descriptor.Protocol != ControlProtocolTransmissionV6 {
+			return fmt.Errorf("downloader existing-job control protocol is unsupported")
 		}
 	default:
-		return fmt.Errorf("downloader existing-job control protocol is unsupported")
+		return fmt.Errorf("downloader existing-job control descriptor is invalid")
 	}
 	return nil
+}
+
+// ExistingJobControlPolicy is code-owned request-count and identity policy for
+// one audited built-in control adapter.
+type ExistingJobControlPolicy struct {
+	Driver             string
+	OpenRequests       int
+	DescriptorRequests int
+}
+
+func DescribeExistingJobControlDriver(driver string) (ExistingJobControlPolicy, bool) {
+	switch driver {
+	case DriverQBittorrent:
+		return ExistingJobControlPolicy{Driver: driver, OpenRequests: 1, DescriptorRequests: 1}, true
+	case DriverTransmission:
+		return ExistingJobControlPolicy{Driver: driver, OpenRequests: 2, DescriptorRequests: 0}, true
+	default:
+		return ExistingJobControlPolicy{}, false
+	}
+}
+
+func (policy ExistingJobControlPolicy) SupportsIdentity(identity TypedIdentity) bool {
+	descriptor, ok := DescribeStoppedAddDriver(policy.Driver)
+	return ok && descriptor.SupportsIdentity(identity)
 }
 
 type ExistingJobMutationRequest struct {
@@ -154,6 +194,7 @@ type ExistingJobMutationReceipt struct {
 	RedirectsFollowed int       `json:"redirects_followed"`
 	RequestBytes      int64     `json:"request_bytes"`
 	RequestBytesKnown bool      `json:"request_bytes_known"`
+	RequestID         int64     `json:"request_id,omitempty"`
 	StopReason        string    `json:"stop_reason,omitempty"`
 }
 
@@ -166,6 +207,59 @@ type ExistingJobMutationSession interface {
 	ReadExistingJobControlDescriptor(context.Context) (ExistingJobControlDescriptor, error)
 	Recheck(context.Context, ExistingJobMutationRequest) (ExistingJobMutationReceipt, error)
 	Start(context.Context, ExistingJobMutationRequest) (ExistingJobMutationReceipt, error)
+}
+
+// ExistingJobControlDriver is the deliberately narrow built-in port used by
+// client activation. It cannot add, stop, move, remove, or delete a job.
+type ExistingJobControlDriver interface {
+	LedgerDriver
+	OpenExistingJobMutationSession(context.Context, Credential) (ExistingJobMutationSession, error)
+	ClientConfigID(string) (string, error)
+}
+
+// MarshalExistingJobMutationRequest returns the exact bounded wire body for a
+// reviewed built-in descriptor. It centralizes request-size validation between
+// adapters and the activation receipt verifier.
+func MarshalExistingJobMutationRequest(descriptor ExistingJobControlDescriptor, effect, jobKey string, requestID int64) ([]byte, error) {
+	if descriptor.Validate() != nil || len(jobKey) == 0 || len(jobKey) > 256 {
+		return nil, fmt.Errorf("downloader existing-job request is invalid")
+	}
+	for index := range jobKey {
+		if jobKey[index] < 0x21 || jobKey[index] > 0x7e {
+			return nil, fmt.Errorf("downloader existing-job request is invalid")
+		}
+	}
+	if effect != ControlEffectRecheck && effect != ControlEffectStart {
+		return nil, fmt.Errorf("downloader existing-job action is invalid")
+	}
+	if descriptor.Driver == DriverQBittorrent {
+		if requestID != 0 {
+			return nil, fmt.Errorf("downloader existing-job request ID is invalid")
+		}
+		return []byte(url.Values{"hashes": {jobKey}}.Encode()), nil
+	}
+	if !canonicalHex(jobKey, 40) || requestID <= 0 {
+		return nil, fmt.Errorf("Transmission existing-job selector is invalid")
+	}
+	method := "torrent-verify"
+	if effect == ControlEffectStart {
+		method = "torrent-start"
+	}
+	arguments := map[string]any{"ids": []string{jobKey}}
+	if descriptor.Protocol == ControlProtocolTransmissionV6 {
+		method = strings.ReplaceAll(method, "-", "_")
+		return json.Marshal(struct {
+			JSONRPC string         `json:"jsonrpc"`
+			Method  string         `json:"method"`
+			Params  map[string]any `json:"params"`
+			ID      int64          `json:"id"`
+		}{JSONRPC: "2.0", Method: method, Params: arguments, ID: requestID})
+	}
+	return json.Marshal(struct {
+		Method    string         `json:"method"`
+		Arguments map[string]any `json:"arguments"`
+		Tag       int64          `json:"tag"`
+	}{Method: method, Arguments: arguments, Tag: requestID})
 }
 
 type TypedIdentity struct {

@@ -47,15 +47,17 @@ type readSession struct {
 	transport  *http.Transport
 	credential downloader.Credential
 
-	mu           sync.Mutex
-	requestsMade int
-	closed       bool
-	csrfToken    string
-	protocol     protocol
-	nextID       int64
-	version      string
-	rpcVersion   string
-	addAttempted bool
+	mu                sync.Mutex
+	requestsMade      int
+	closed            bool
+	csrfToken         string
+	protocol          protocol
+	nextID            int64
+	version           string
+	rpcVersion        string
+	addAttempted      bool
+	controlAttempted  bool
+	controlDescriptor downloader.ExistingJobControlDescriptor
 }
 
 type openSessionError struct {
@@ -68,11 +70,13 @@ func (err *openSessionError) Unwrap() error     { return err.err }
 func (err *openSessionError) RequestsMade() int { return err.requests }
 
 var (
-	_ downloader.Driver           = (*Adapter)(nil)
-	_ downloader.LedgerDriver     = (*Adapter)(nil)
-	_ downloader.StoppedAddDriver = (*Adapter)(nil)
-	_ downloader.LedgerSession    = (*readSession)(nil)
-	_ downloader.MutationSession  = (*readSession)(nil)
+	_ downloader.Driver                     = (*Adapter)(nil)
+	_ downloader.LedgerDriver               = (*Adapter)(nil)
+	_ downloader.StoppedAddDriver           = (*Adapter)(nil)
+	_ downloader.ExistingJobControlDriver   = (*Adapter)(nil)
+	_ downloader.LedgerSession              = (*readSession)(nil)
+	_ downloader.MutationSession            = (*readSession)(nil)
+	_ downloader.ExistingJobMutationSession = (*readSession)(nil)
 )
 
 func New(endpoint string) (*Adapter, error) {

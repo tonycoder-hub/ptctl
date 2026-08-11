@@ -105,7 +105,7 @@ func PrepareCurrentUse(final *materialize.VerifiedFinal, completion *VerifiedCom
 	}
 	prepared := &PreparedAuthority{
 		verifiedFinal: final, final: finalObservation, projection: projection, clientConfigID: options.ClientConfigID,
-		expectedJobID: plan.JobID, windows: options.ClientWindows, fileLimits: options.FileLimits,
+		driver: plan.Driver, expectedJobID: plan.JobID, windows: options.ClientWindows, fileLimits: options.FileLimits,
 	}
 	useID, err := currentUseID(plan)
 	if err != nil {

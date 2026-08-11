@@ -14,6 +14,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
+	"github.com/tonycoder-hub/ptctl/internal/downloader/transmission"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
@@ -54,7 +55,7 @@ type preparedClientActivate struct {
 	timeout    time.Duration
 	targetRoot string
 	authority  *clientactivate.PreparedAuthority
-	adapter    *qbittorrent.Adapter
+	adapter    downloader.ExistingJobControlDriver
 	username   string
 }
 
@@ -83,7 +84,7 @@ func (a *app) clientActivate(args []string) error {
 
 func (a *app) clientActivateHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl client activate plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --adoption-operation ID --adoption-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [--start-after-recheck] [--output table|json]
+  ptctl client activate plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --adoption-operation ID --adoption-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--start-after-recheck] [--output table|json]
   ptctl client activate run [same selectors] --expect-activation-plan-id ID --acknowledge-client-recheck [--output table|json]
   ptctl client activate resume [same selectors] --expect-activation-plan-id ID [--acknowledge-client-recheck --acknowledge-repeat-recheck] [--acknowledge-client-start --acknowledge-repeat-start] [--output table|json] OPERATION_ID
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
@@ -92,7 +93,8 @@ func (a *app) clientActivateHelp() {
 
 This workflow only targets one exact typed-infohash job established by a
 canonical stopped-adoption journal and a current exact materialized-final
-proof. Run durably records request intent before one qBittorrent recheck POST.
+proof. Run durably records request intent before one downloader recheck POST.
+Transmission activation is v1-only and uses its exact hash-string selector.
 
 HTTP success is not recheck completion. Completion requires either a durable
 checking observation followed by complete stopped state, or a bracketed
@@ -125,17 +127,17 @@ func addClientActivateFlags(fs *flag.FlagSet, execution bool) *clientActivateFla
 	values.hostRoot = fs.String("host-root", "", "host namespace root containing the target")
 	values.clientRoot = fs.String("client-root", "", "downloader-visible namespace root")
 	values.clientStyle = fs.String("client-style", "posix", "downloader path style: posix or windows")
-	values.driver = fs.String("driver", "qbittorrent", "downloader driver")
-	values.endpoint = fs.String("url", "", "qBittorrent Web API origin")
-	values.username = fs.String("username", "", "qBittorrent username")
+	values.driver = fs.String("driver", "qbittorrent", "downloader driver: qbittorrent or transmission")
+	values.endpoint = fs.String("url", "", "downloader API origin or Transmission RPC URL")
+	values.username = fs.String("username", "", "downloader username")
 	values.passwordStdin = fs.Bool("password-stdin", false, "read downloader password from stdin")
 	values.timeout = fs.Duration("timeout", clientActivateDefaultTimeout, "shared proof, journal, and client wall-clock budget")
 	values.startAfterRecheck = fs.Bool("start-after-recheck", false, "review an optional start after durable recheck completion")
 	if execution {
 		values.expectedPlanID = fs.String("expect-activation-plan-id", "", "reviewed 24-hex client activation plan ID")
-		values.acknowledgeRecheck = fs.Bool("acknowledge-client-recheck", false, "acknowledge one qBittorrent recheck request")
+		values.acknowledgeRecheck = fs.Bool("acknowledge-client-recheck", false, "acknowledge one downloader recheck request")
 		values.repeatRecheck = fs.Bool("acknowledge-repeat-recheck", false, "acknowledge repeating an inconclusive recheck request")
-		values.acknowledgeStart = fs.Bool("acknowledge-client-start", false, "acknowledge one qBittorrent start request")
+		values.acknowledgeStart = fs.Bool("acknowledge-client-start", false, "acknowledge one downloader start request")
 		values.repeatStart = fs.Bool("acknowledge-repeat-start", false, "acknowledge repeating an inconclusive start request")
 	}
 	return values
@@ -160,8 +162,8 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 	if !*values.passwordStdin {
 		return result, usageError("%s requires --password-stdin", command)
 	}
-	if *values.driver != "qbittorrent" {
-		return result, usageError("--driver currently supports only qbittorrent")
+	if *values.driver != downloader.DriverQBittorrent && *values.driver != downloader.DriverTransmission {
+		return result, usageError("--driver must be qbittorrent or transmission")
 	}
 	if *values.clientStyle != "posix" && *values.clientStyle != "windows" {
 		return result, usageError("--client-style must be posix or windows")
@@ -182,7 +184,7 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 	if err := storage.ValidatePathMappingConfig(*values.hostRoot, *values.clientRoot, windows); err != nil {
 		return result, usageError("%s path mapping is invalid: %v", command, err)
 	}
-	adapter, err := qbittorrent.New(*values.endpoint)
+	adapter, err := newExistingJobControlDriver(*values.driver, *values.endpoint)
 	if err != nil {
 		return result, usageError("%s downloader endpoint is invalid", command)
 	}
@@ -221,7 +223,7 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 		return result, err
 	}
 	authority, err := clientactivate.PrepareAuthority(verifiedFinal, verifiedAdoption, clientactivate.AuthorityOptions{
-		ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot,
+		Driver: *values.driver, ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot,
 		ClientWindows: windows, FileLimits: downloader.DefaultJobFileLedgerLimits(),
 	})
 	if err != nil {
@@ -229,6 +231,17 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 	}
 	return preparedClientActivate{output: *values.output, timeout: *values.timeout, targetRoot: *values.targetRoot,
 		authority: authority, adapter: adapter, username: *values.username}, nil
+}
+
+func newExistingJobControlDriver(name, endpoint string) (downloader.ExistingJobControlDriver, error) {
+	switch name {
+	case downloader.DriverQBittorrent:
+		return qbittorrent.New(endpoint)
+	case downloader.DriverTransmission:
+		return transmission.New(endpoint)
+	default:
+		return nil, fmt.Errorf("unsupported existing-job control driver %q", name)
+	}
 }
 
 func (a *app) clientActivatePlan(args []string) error {
@@ -519,9 +532,10 @@ func writeClientActivateHuman(out io.Writer, report clientactivate.Report) error
 		terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
 	fmt.Fprintln(w, "\nBLOCKERS")
 	writeClientActivateFindings(w, report.Blockers)
-	fmt.Fprintf(w, "\nPLAN\nID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nACTION\t%s\nPROTOCOL\t%s\nRECHECK ROUTE\t%s\nSTART ROUTE\t%s\nCLIENT CONFIG\t%s\nPATH MAPPING\t%s\nPATH SEMANTICS\t%s\nJOB ID\t%s\nFILE LAYOUT\t%s\n",
+	fmt.Fprintf(w, "\nPLAN\nID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nACTION\t%s\nDRIVER\t%s\nPROTOCOL\t%s\nRECHECK ROUTE\t%s\nSTART ROUTE\t%s\nCLIENT CONFIG\t%s\nPATH MAPPING\t%s\nPATH SEMANTICS\t%s\nJOB ID\t%s\nFILE LAYOUT\t%s\n",
 		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(materializeValueOr(report.Plan.ExpectedID, "not_requested")), report.Plan.Matches,
-		terminalSafe(materializeValueOr(report.Plan.Action, "not_observed")), terminalSafe(materializeValueOr(report.Plan.Control.Protocol, "not_observed")),
+		terminalSafe(materializeValueOr(report.Plan.Action, "not_observed")), terminalSafe(materializeValueOr(report.Plan.Driver, "not_observed")),
+		terminalSafe(materializeValueOr(report.Plan.Control.Protocol, "not_observed")),
 		terminalSafe(materializeValueOr(report.Plan.Control.RecheckRouteID, "not_observed")), terminalSafe(materializeValueOr(report.Plan.Control.StartRouteID, "not_observed")),
 		terminalSafe(materializeValueOr(report.Plan.ClientConfigID, "not_observed")), terminalSafe(materializeValueOr(report.Plan.PathMappingID, "not_observed")),
 		terminalSafe(materializeValueOr(report.Plan.ClientPathSemantics, "not_observed")), terminalSafe(materializeValueOr(report.Plan.JobID, "not_observed")),

@@ -359,7 +359,7 @@ func applyForgetControlReport(report *Report, pending *forgetInProgressError) {
 	report.Operation = OperationReport{ID: marker.OperationID.String(), Status: "forgetting", PhaseBefore: "retained_activation_completion", PhaseAfter: phase, Resumable: false}
 	plan := marker.RetentionIntent.Intent.Plan
 	report.Plan = PlanReport{ID: marker.PlanID, ExpectedID: report.Plan.ExpectedID, Matches: report.Plan.ExpectedID == "" || report.Plan.ExpectedID == marker.PlanID,
-		Action: plan.Action, ClientConfigID: plan.ClientConfigID, Control: plan.Control, PathMappingID: plan.PathMappingID,
+		Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID, Control: plan.Control, PathMappingID: plan.PathMappingID,
 		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
 		ExpectedContentPathRef: plan.ExpectedContentPathRef, ExpectedFileLayoutID: plan.ExpectedFileLayoutID, JobID: plan.JobID}
 	report.Final = FinalReport{Status: "historical_forget_basis_current_not_observed", Observation: historicalFinal(plan)}
@@ -382,7 +382,7 @@ func populateForgetAuthority(report *ForgetReport, marker ForgetIntent, markerID
 	}
 	plan := marker.RetentionIntent.Intent.Plan
 	report.Plan = PlanReport{ID: marker.PlanID, ExpectedID: report.Plan.ExpectedID, Matches: marker.PlanID == report.Plan.ExpectedID,
-		Action: plan.Action, ClientConfigID: plan.ClientConfigID, Control: plan.Control, PathMappingID: plan.PathMappingID,
+		Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID, Control: plan.Control, PathMappingID: plan.PathMappingID,
 		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
 		ExpectedContentPathRef: plan.ExpectedContentPathRef, ExpectedFileLayoutID: plan.ExpectedFileLayoutID, JobID: plan.JobID}
 	report.Target.ExpectedRootIdentity = marker.TargetRootIdentity

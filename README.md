@@ -135,10 +135,12 @@ capabilities at the edge, not assumptions in the core domain model.
   checks, exact final re-verification, and no automatic replay of an unknown
   request; Transmission is intentionally v1-only because its RPC ledger has no
   typed v2 identity;
-- explicit qBittorrent recheck and optional controlled start downstream of a
-  canonical stopped-adoption completion, with version-bound v4/v5 routes,
+- explicit qBittorrent or Transmission recheck and optional controlled start
+  downstream of a canonical same-driver stopped-adoption completion, with
+  version-bound qB v4/v5 routes and Transmission v5.3/v6 methods,
   durable per-request intent, exact typed job/per-file layout reobservation,
   current-final re-verification, and no automatic replay of unknown requests;
+  Transmission control remains v1-only;
 - zero-write source-retirement eligibility planning from a new complete live
   source proof, current exact materialized-final proof, and canonical terminal
   client activation journal, plus stable before/after reads of the exact live
@@ -758,10 +760,11 @@ makes no network request. Before deletion it copies the canonical intent,
 bounded attempt chain, completion, and their domain-separated IDs into a
 durable owner-private retention intent. It then removes only the selected
 operation's original markers and empty scratch directory and publishes a
-retention completion. For qBittorrent adoption, the resulting two-marker
+retention completion. For either built-in driver, the resulting two-marker
 tombstone remains usable by `client activate` only after a same-invocation
-bound read recreates opaque `VerifiedCompletion` authority. Transmission
-adoption deliberately does not grant the qBittorrent-only recheck/start port.
+bound read recreates opaque `VerifiedCompletion` authority. The activation
+driver must match the adoption driver; Transmission authority remains limited
+to a complete typed v1 hash.
 JSON or a copied public observation cannot do so. An intent-only crash state
 blocks ordinary resume and is recoverable only by repeating the same explicit
 prune selector. JSON kind is
@@ -784,6 +787,10 @@ repeat reports `absent_unattributed`, not historical success. JSON kind is
 
 Recheck that adopted job, then optionally start it only after a durable
 completion observation:
+
+The example uses qBittorrent. For a Transmission v1 adoption, use
+`--driver transmission`, the full RPC URL, and the Transmission credential;
+the plan binds that driver and cannot be replayed against the other adapter.
 
 ```bash
 # Review. Add --start-after-recheck to include the optional start transition
@@ -863,7 +870,13 @@ that starts and finishes between observations can therefore remain
 `--acknowledge-client-recheck` and `--acknowledge-repeat-recheck`. Start has the
 same non-replay rule and its own repeat acknowledgement. qBittorrent 4.x uses
 the reviewed `resume` route while 5.x uses `start`; an unknown major is
-unsupported rather than guessed. Completion remains a bracketed client claim
+unsupported rather than guessed. Transmission RPC 5.3 binds the legacy
+`torrent-verify`/`torrent-start` methods, while RPC 6 binds
+`torrent_verify`/`torrent_start`; both use a one-element full SHA-1 hash-string
+selector and never replay an expired CSRF request. See the official
+[current Transmission action specification](https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md#31-torrent-action-requests)
+and [Transmission 4.0.6 action specification](https://github.com/transmission/transmission/blob/4.0.6/docs/rpc-spec.md#31-torrent-action-requests).
+Completion remains a bracketed client claim
 plus a same-invocation exact final proof, not proof of a raw private variant or
 an atomic client/filesystem snapshot. Each invocation sends at most one
 effectful client POST. JSON kind is `client.activation`.

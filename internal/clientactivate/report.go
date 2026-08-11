@@ -44,6 +44,7 @@ type PlanReport struct {
 	ExpectedID             string                                  `json:"expected_id,omitempty"`
 	Matches                bool                                    `json:"matches"`
 	Action                 string                                  `json:"action"`
+	Driver                 string                                  `json:"driver"`
 	ClientConfigID         string                                  `json:"client_config_id"`
 	Control                downloader.ExistingJobControlDescriptor `json:"control"`
 	PathMappingID          string                                  `json:"path_mapping_id"`
@@ -134,7 +135,7 @@ func newReport(authority *PreparedAuthority, expectedID string) Report {
 			ActionReceipt: downloader.ExistingJobMutationReceipt{RequestsAttempted: -1, AutomaticRetries: -1, RedirectsFollowed: -1}},
 		Journal: JournalReport{Status: "not_created", RetentionState: "not_requested"}, Blockers: []Finding{}, Issues: []Finding{},
 		Warnings: []string{
-			"qBittorrent state, progress, and per-file completion remain untrusted bracketed client claims",
+			"downloader state, progress, and per-file completion remain untrusted bracketed client claims",
 			"a successful recheck observation does not reveal the raw private metafile variant",
 			"start can announce to trackers and transfer data; source retirement remains a separate explicit workflow",
 			"client and filesystem observations are same-invocation bracketed and non-atomic",
@@ -157,7 +158,7 @@ func (report *Report) applyPrepared(prepared *PreparedPlan) {
 	report.Operation.ID = prepared.operationID.String()
 	report.Plan = PlanReport{
 		ID: prepared.planID, ExpectedID: report.Plan.ExpectedID, Matches: report.Plan.ExpectedID == "" || report.Plan.ExpectedID == prepared.planID,
-		Action: plan.Action, ClientConfigID: plan.ClientConfigID, Control: plan.Control, PathMappingID: plan.PathMappingID,
+		Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID, Control: plan.Control, PathMappingID: plan.PathMappingID,
 		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
 		ExpectedContentPathRef: plan.ExpectedContentPathRef, ExpectedFileLayoutID: plan.ExpectedFileLayoutID, JobID: plan.JobID,
 	}

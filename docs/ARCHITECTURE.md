@@ -794,9 +794,10 @@ crash state is advanced only by prune; ordinary run/resume/status never crosses
 the deletion boundary. The complete tombstone is still read through the same
 bound target and operation identities. Only that same-invocation read creates
 `clientadopt.VerifiedCompletion`, so activation can consume the historical
-completion without treating public JSON as authority. Only qBittorrent
-adoption completion can feed the implemented qBittorrent recheck/start port;
-Transmission completion is deliberately rejected at that authority boundary.
+completion without treating public JSON as authority. qBittorrent and
+Transmission completion can feed only their matching built-in recheck/start
+port; Transmission requires an exact typed v1 identity and cannot authorize a
+v2 or hybrid activation.
 The tombstone does not claim that the client job or final is current.
 
 `client adopt forget` is the separately acknowledged irreversible boundary
@@ -836,8 +837,8 @@ explicit location change -> current per-file proof -> bracket result
 source-retirement eligibility proof -> separately acknowledged per-name journal
 ```
 
-The implemented qBittorrent activation and client-neutral retirement paths
-support explicit resume,
+The implemented qBittorrent/Transmission activation and client-neutral
+retirement paths support explicit resume,
 preserve no-overwrite/no-implicit-selection defaults, and never infer source
 retirement from materialization or stopped-job adoption. Location change and
 job removal remain unimplemented.
@@ -853,8 +854,8 @@ one fresh authenticated downloader mutation session. Public JSON from any of
 those workflows is not authority. The activation plan binds the materialize
 and adoption operation/plan IDs, exact metafile variant and typed infohashes,
 target/final identities, invocation-scoped mapping references, one opaque job
-reference, exact file-layout digest, qB protocol generation, and whether start
-is reviewed:
+reference, exact file-layout digest, driver-specific protocol generation, and
+whether start is reviewed:
 
 ```text
 current exact final + canonical stopped adoption + exact stopped client job
@@ -874,26 +875,35 @@ session with a one-shot control descriptor and `Recheck`/`Start` ports. The qB
 adapter reads the application version once: supported 4.x sessions bind start
 to `/api/v2/torrents/resume`, while supported 5.x sessions bind it to
 `/api/v2/torrents/start`; both bind recheck to
-`/api/v2/torrents/recheck`. Callers never provide a route. Login, descriptor,
-ledger, optional file ledger, and each POST are serial and exactly counted;
-HTTP/2, connection reuse, proxying, redirect, retry, and queue fan-out remain
+`/api/v2/torrents/recheck`. Transmission derives its descriptor from the
+already audited two-request RPC bootstrap: v5.3 binds `torrent-verify` and
+`torrent-start`, while v6 binds `torrent_verify` and `torrent_start`. Its
+selector is exactly one complete 40-hex v1 hash string; generic IDs, v2
+prefixes, hybrids, and caller-selected methods are rejected. Callers never
+provide a route. Open, descriptor, ledger, optional file ledger, and each POST
+are serial and exactly counted. HTTP/2, connection reuse, proxying, redirect,
+retry, and queue fan-out remain
 disabled. The opaque qB key is URL-form encoded only at the adapter boundary
-and never enters plans, journals, reports, or errors.
+and never enters plans, journals, reports, or errors. Transmission request IDs
+are retained only as bounded receipt metadata so the exact JSON request length
+can be independently reproduced.
 
 A `200` response proves only that one application-layer request returned. It
-does not prove that qB entered or completed checking. The strongest completion
-path first seals an observed `checkingUP|checkingDL` state, then on a later
-invocation observes a complete stopped job. A second accepted path begins from
-an incomplete stopped job and observes complete stopped state immediately
-after the same invocation's request. If a complete job checks too quickly to
+does not prove that the downloader entered or completed checking. The strongest
+completion
+path first seals an observed `checkingUP|checkingDL|checkingResumeData` state,
+then on a later invocation observes a complete stopped job. A second accepted
+path begins from an incomplete stopped job and observes complete stopped state
+immediately after the same invocation's request. If a complete job checks too quickly to
 expose either edge, the request remains unknown. Resume observes first and
 never repeats an unknown recheck or start unless its separate base and repeat
 acknowledgements are both present. A reviewed start is a later resume after
 the recheck-completion marker is durable, so one invocation sends at most one
 effectful client POST.
 
-For ordinary multi-file jobs, every observation includes one bounded qB file
-ledger. Manifest indices must be contiguous and exact; effective paths, sizes,
+For ordinary multi-file jobs, every observation includes one bounded
+driver-specific file ledger. Manifest indices must be contiguous and exact;
+effective paths, sizes,
 selection, progress, and completion are checked for every file against the
 same process-local final projection. Single-file jobs use the exact content
 path, total size, stopped/started state, and progress claim. In both cases the

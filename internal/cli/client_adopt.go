@@ -95,8 +95,8 @@ POST unless --acknowledge-repeat-add is explicit. A successful outcome remains
 pending client recheck; neither client can prove its stored private variant.
 
 Transmission adoption accepts only v1 metafiles because its audited RPC ledger
-exposes a full SHA-1 identity but no typed v2 identity. It does not enable the
-qBittorrent-only recheck/start workflow.
+exposes a full SHA-1 identity but no typed v2 identity. Its historical
+completion can enable only the matching v1 Transmission recheck/start port.
 
 Prune is a separate local-only deletion boundary. It copies one terminal
 canonical journal into an owner-private tombstone before deleting only that

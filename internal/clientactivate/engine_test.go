@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +28,7 @@ type activationFixture struct {
 	targetRoot        string
 	verifiedFinal     *materialize.VerifiedFinal
 	authority         *PreparedAuthority
+	driver            string
 	clientConfig      string
 	savePath          string
 	contentPath       string
@@ -91,6 +91,7 @@ func (*adoptionSession) Close() error              { return nil }
 
 type activationSession struct {
 	requests              int
+	descriptorRequests    int
 	descriptor            downloader.ExistingJobControlDescriptor
 	ledgers               []downloader.LedgerSnapshot
 	files                 []downloader.JobFileLedgerSnapshot
@@ -103,7 +104,7 @@ type activationSession struct {
 }
 
 func (session *activationSession) ReadExistingJobControlDescriptor(context.Context) (downloader.ExistingJobControlDescriptor, error) {
-	session.requests++
+	session.requests += session.descriptorRequests
 	return session.descriptor, nil
 }
 func (session *activationSession) ReadLedger(context.Context) (downloader.LedgerSnapshot, error) {
@@ -136,23 +137,32 @@ func (session *activationSession) Recheck(_ context.Context, request downloader.
 		session.requests++
 	}
 	session.recheckCalls++
-	return activationMutationReceipt(downloader.ControlEffectRecheck, request.JobKey, session.recheckErr), session.recheckErr
+	return activationMutationReceipt(downloader.ControlEffectRecheck, request.JobKey, session.descriptor, session.recheckErr), session.recheckErr
 }
 func (session *activationSession) Start(_ context.Context, request downloader.ExistingJobMutationRequest) (downloader.ExistingJobMutationReceipt, error) {
 	if !session.suppressActionRequest {
 		session.requests++
 	}
 	session.startCalls++
-	return activationMutationReceipt(downloader.ControlEffectStart, request.JobKey, session.startErr), session.startErr
+	return activationMutationReceipt(downloader.ControlEffectStart, request.JobKey, session.descriptor, session.startErr), session.startErr
 }
 func (session *activationSession) RequestsMade() int { return session.requests }
 func (*activationSession) Close() error              { return nil }
 
-func activationMutationReceipt(effect, key string, mutationErr error) downloader.ExistingJobMutationReceipt {
+func activationMutationReceipt(effect, key string, descriptor downloader.ExistingJobControlDescriptor, mutationErr error) downloader.ExistingJobMutationReceipt {
 	now := time.Now().UTC()
+	requestID := int64(0)
+	if descriptor.Driver == DriverTransmission {
+		requestID = 7
+	}
+	body, marshalErr := downloader.MarshalExistingJobMutationRequest(descriptor, effect, key, requestID)
 	receipt := downloader.ExistingJobMutationReceipt{Effect: effect, ObservedAtStart: now, ObservedAtEnd: now.Add(time.Millisecond),
 		Complete: mutationErr == nil, RequestsAttempted: 1, RequestBytesKnown: mutationErr == nil,
-		RequestBytes: int64(len(url.Values{"hashes": {key}}.Encode()))}
+		RequestBytes: int64(len(body)), RequestID: requestID}
+	if marshalErr != nil {
+		receipt.Complete = false
+		receipt.RequestBytesKnown = false
+	}
 	if mutationErr != nil {
 		receipt.StopReason = "transport_failed"
 	}
@@ -160,10 +170,18 @@ func activationMutationReceipt(effect, key string, mutationErr error) downloader
 }
 
 func newActivationSession(fixture activationFixture, ledgers ...downloader.LedgerSnapshot) *activationSession {
-	return &activationSession{requests: 1, descriptor: downloader.ExistingJobControlDescriptor{
-		Driver: DriverQBittorrent, Protocol: downloader.ControlProtocolQBittorrentV5,
-		RecheckRouteID: "qbittorrent.torrents.recheck.v1", StartRouteID: "qbittorrent.torrents.start.v1",
-	}, ledgers: ledgers}
+	policy, _ := downloader.DescribeExistingJobControlDriver(fixture.driver)
+	descriptor := downloader.ExistingJobControlDescriptor{Driver: fixture.driver}
+	if fixture.driver == DriverTransmission {
+		descriptor.Protocol = downloader.ControlProtocolTransmissionV6
+		descriptor.RecheckRouteID = "transmission.torrent.verify.v1"
+		descriptor.StartRouteID = "transmission.torrent.start.v1"
+	} else {
+		descriptor.Protocol = downloader.ControlProtocolQBittorrentV5
+		descriptor.RecheckRouteID = "qbittorrent.torrents.recheck.v1"
+		descriptor.StartRouteID = "qbittorrent.torrents.start.v1"
+	}
+	return &activationSession{requests: policy.OpenRequests, descriptorRequests: policy.DescriptorRequests, descriptor: descriptor, ledgers: ledgers}
 }
 
 type activationSource struct {
@@ -178,6 +196,13 @@ func makeActivationFixture(t *testing.T) activationFixture {
 	return makeActivationFixtureFrom(t, raw, []activationSource{{name: "renamed-source", content: content}})
 }
 
+func makeTransmissionActivationFixture(t *testing.T) activationFixture {
+	t.Helper()
+	content := []byte("Transmission client activation fixture")
+	raw := activationSingleV1Metafile("transmission-activate.bin", content)
+	return makeActivationFixtureFromModeAndDriver(t, raw, []activationSource{{name: "renamed-transmission-source", content: content}}, false, DriverTransmission)
+}
+
 func makeActivationFixtureWithRetainedAdoption(t *testing.T) activationFixture {
 	t.Helper()
 	content := []byte("client activation retained adoption fixture")
@@ -190,6 +215,10 @@ func makeActivationFixtureFrom(t *testing.T, raw []byte, sources []activationSou
 }
 
 func makeActivationFixtureFromMode(t *testing.T, raw []byte, sources []activationSource, retainAdoption bool) activationFixture {
+	return makeActivationFixtureFromModeAndDriver(t, raw, sources, retainAdoption, DriverQBittorrent)
+}
+
+func makeActivationFixtureFromModeAndDriver(t *testing.T, raw []byte, sources []activationSource, retainAdoption bool, driver string) activationFixture {
 	t.Helper()
 	ctx := context.Background()
 	meta, err := metafile.Parse(raw)
@@ -236,18 +265,22 @@ func makeActivationFixtureFromMode(t *testing.T, raw []byte, sources []activatio
 	}
 	savePath, _ := projection.SavePath()
 	contentPath, _ := projection.ContentPath()
-	adoptionPlan, err := clientadopt.BuildPlan(verifiedFinal, clientadopt.PlanOptions{ClientConfigID: clientConfig,
+	adoptionPlan, err := clientadopt.BuildPlan(verifiedFinal, clientadopt.PlanOptions{Driver: driver, ClientConfigID: clientConfig,
 		HostRoot: hostRoot, ClientRoot: "/downloads", ClientWindows: false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	opaque := "opaque-activation-job"
-	before := activationLedger(meta, nil, time.Now().UTC())
+	opaque, evidence := "opaque-activation-job", []string{"magnet_xt_btih_hex"}
+	if driver == DriverTransmission {
+		opaque, evidence = meta.InfoHashV1, []string{"transmission_hash_string_sha1"}
+	}
+	before := activationLedgerForDriver(driver, meta, nil, time.Now().UTC())
 	job := downloader.Torrent{Hash: opaque, InfoHashV1: meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: meta.TotalLength,
+		IdentityEvidence: evidence, IdentityIssues: []string{}, SizeBytes: meta.TotalLength,
 		State: "stoppedDL", Progress: 0.25, SavePath: savePath, ContentPath: contentPath}
-	after := activationLedger(meta, &job, before.ObservedAtEnd.Add(time.Millisecond))
-	adoption := &adoptionSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
+	after := activationLedgerForDriver(driver, meta, &job, before.ObservedAtEnd.Add(time.Millisecond))
+	addPolicy, _ := downloader.DescribeStoppedAddDriver(driver)
+	adoption := &adoptionSession{requests: addPolicy.OpenRequests, ledgers: []downloader.LedgerSnapshot{before, after}}
 	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "metastore"))
 	if err != nil {
 		t.Fatal(err)
@@ -278,12 +311,12 @@ func makeActivationFixtureFromMode(t *testing.T, raw []byte, sources []activatio
 	if err != nil {
 		t.Fatal(err)
 	}
-	authority, err := PrepareAuthority(verifiedFinal, verifiedAdoption, AuthorityOptions{ClientConfigID: clientConfig,
+	authority, err := PrepareAuthority(verifiedFinal, verifiedAdoption, AuthorityOptions{Driver: driver, ClientConfigID: clientConfig,
 		HostRoot: hostRoot, ClientRoot: "/downloads", ClientWindows: false, FileLimits: downloader.DefaultJobFileLedgerLimits()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return activationFixture{meta: meta, targetRoot: targetRoot, verifiedFinal: verifiedFinal, authority: authority,
+	return activationFixture{meta: meta, targetRoot: targetRoot, verifiedFinal: verifiedFinal, authority: authority, driver: driver,
 		clientConfig: clientConfig, savePath: savePath, contentPath: contentPath, opaqueKey: opaque,
 		adoptionOperation: adoptionPlan.OperationID(), adoptionPlanID: adoptionPlan.PlanID()}
 }
@@ -302,17 +335,25 @@ func TestPrepareAuthorityAcceptsBoundRetainedAdoptionCompletion(t *testing.T) {
 }
 
 func (fixture activationFixture) job(state string, progress float64) downloader.Torrent {
+	evidence := []string{"magnet_xt_btih_hex"}
+	if fixture.driver == DriverTransmission {
+		evidence = []string{"transmission_hash_string_sha1"}
+	}
 	return downloader.Torrent{Hash: fixture.opaqueKey, InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
+		IdentityEvidence: evidence, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
 		State: state, Progress: progress, SavePath: fixture.savePath, ContentPath: fixture.contentPath}
 }
 
 func activationLedger(meta *metafile.MetaInfo, job *downloader.Torrent, started time.Time) downloader.LedgerSnapshot {
+	return activationLedgerForDriver(DriverQBittorrent, meta, job, started)
+}
+
+func activationLedgerForDriver(driver string, meta *metafile.MetaInfo, job *downloader.Torrent, started time.Time) downloader.LedgerSnapshot {
 	jobs := []downloader.Torrent{}
 	if job != nil {
 		jobs = append(jobs, *job)
 	}
-	return downloader.LedgerSnapshot{Driver: DriverQBittorrent, ObservedAtStart: started, ObservedAtEnd: started.Add(time.Millisecond),
+	return downloader.LedgerSnapshot{Driver: driver, ObservedAtStart: started, ObservedAtEnd: started.Add(time.Millisecond),
 		Complete: true, Capabilities: downloader.LedgerCapabilities{TypedInfoHashes: true, ContentPath: true, JobFiles: true}, Jobs: jobs}
 }
 
@@ -390,6 +431,51 @@ func TestActivationRunObservesCheckingThenResumeCompletesAndStarts(t *testing.T)
 	if !errors.Is(err, context.Canceled) || cancelled.Outcome != OutcomeIncomplete || cancelled.Outcome == OutcomeIntegrityFailed ||
 		cancelled.Operation.Status != "inspection_incomplete" || cancelled.Operation.ID != operationID.String() {
 		t.Fatalf("cancelled status=%#v err=%v", cancelled, err)
+	}
+}
+
+func TestTransmissionActivationUsesExactV1ControlAndCompletesAcrossResume(t *testing.T) {
+	fixture := makeTransmissionActivationFixture(t)
+	now := time.Now().UTC()
+	stopped := fixture.job("stoppedDL", 0.25)
+	checking := fixture.job("checkingResumeData", 0.25)
+	complete := fixture.job("stoppedUP", 1)
+	started := fixture.job("queuedUP", 1)
+
+	previewSession := newActivationSession(fixture, activationLedgerForDriver(fixture.driver, fixture.meta, &stopped, now))
+	preview, err := Preview(context.Background(), fixture.authority, previewSession, true)
+	if err != nil || preview.Outcome != OutcomeReady || preview.Plan.Driver != DriverTransmission ||
+		preview.Plan.Control.Protocol != downloader.ControlProtocolTransmissionV6 ||
+		preview.Plan.Control.RecheckRouteID != "transmission.torrent.verify.v1" || preview.Client.RequestsMade != 3 {
+		t.Fatalf("preview=%#v requests=%d err=%v", preview, previewSession.RequestsMade(), err)
+	}
+
+	runSession := newActivationSession(fixture,
+		activationLedgerForDriver(fixture.driver, fixture.meta, &stopped, now.Add(time.Second)),
+		activationLedgerForDriver(fixture.driver, fixture.meta, &checking, now.Add(2*time.Second)))
+	run, err := Run(context.Background(), RunOptions{Authority: fixture.authority, ExpectedPlanID: preview.Plan.ID,
+		Session: runSession, StartAfterRecheck: true, AcknowledgeRecheck: true})
+	if err != nil || run.Outcome != OutcomeRecheckInProgress || runSession.RequestsMade() != 5 ||
+		runSession.recheckCalls != 1 || runSession.startCalls != 0 || run.Client.ActionReceipt.RequestID <= 0 ||
+		!run.Client.ActionReceipt.Complete || run.Client.ActionReceipt.Effect != downloader.ControlEffectRecheck ||
+		!run.Journal.RecheckStartedDurable || run.Operation.PhaseAfter != "recheck_in_progress" {
+		t.Fatalf("run=%#v requests=%d recheck=%d start=%d err=%v", run, runSession.RequestsMade(), runSession.recheckCalls, runSession.startCalls, err)
+	}
+
+	operationID, err := ParseOperationID(run.Operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeSession := newActivationSession(fixture,
+		activationLedgerForDriver(fixture.driver, fixture.meta, &complete, now.Add(3*time.Second)),
+		activationLedgerForDriver(fixture.driver, fixture.meta, &started, now.Add(4*time.Second)))
+	resumed, err := Resume(context.Background(), operationID, RunOptions{Authority: fixture.authority, ExpectedPlanID: preview.Plan.ID,
+		Session: resumeSession, StartAfterRecheck: true, AcknowledgeStart: true})
+	if err != nil || resumed.Outcome != OutcomeStartedClientClaim || resumeSession.RequestsMade() != 5 ||
+		resumeSession.recheckCalls != 0 || resumeSession.startCalls != 1 || resumed.Client.ActionReceipt.RequestID <= 0 ||
+		resumed.Client.ActionReceipt.Effect != downloader.ControlEffectStart || !resumed.Client.ActionReceipt.Complete ||
+		!resumed.Journal.RecheckCompletionDurable || !resumed.Journal.ActivationCompletionDurable || resumed.Operation.Resumable {
+		t.Fatalf("resume=%#v requests=%d recheck=%d start=%d err=%v", resumed, resumeSession.RequestsMade(), resumeSession.recheckCalls, resumeSession.startCalls, err)
 	}
 }
 

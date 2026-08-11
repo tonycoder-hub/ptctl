@@ -208,6 +208,98 @@ func TestClientActivatePlanRunResumeStatusAndPrivacy(t *testing.T) {
 	}
 }
 
+func TestTransmissionClientActivatePlanRunAndResume(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newTransmissionAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+
+	adoptionBase := transmissionClientAdoptBaseArgs(fixture, server.server.URL)
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, adoptionBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adoptionPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	adoptionRun := append([]string{"client", "adopt", "run"}, adoptionBase...)
+	adoptionRun = append(adoptionRun, "--expect-adoption-plan-id", adoptionPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(adoptionRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+	if adopted.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck || adopted.Data.Plan.Driver != "transmission" {
+		t.Fatalf("Transmission adoption did not complete: %s", out.String())
+	}
+
+	base := transmissionClientActivateBaseArgs(fixture, server.server.URL, adopted.Data.Operation.ID, adopted.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	planArgs := append([]string{"client", "activate", "plan"}, base...)
+	planArgs = append(planArgs, "--start-after-recheck")
+	if code := Run(planArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("activation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	planned := decodeClientActivateReport(t, out.Bytes())
+	if planned.Data.Outcome != clientactivate.OutcomeReady || planned.Data.Plan.Driver != "transmission" ||
+		planned.Data.Plan.Control.Protocol != "transmission_rpc_v6" || planned.Data.Plan.Control.RecheckRouteID != "transmission.torrent.verify.v1" ||
+		planned.Data.Plan.Control.StartRouteID != "transmission.torrent.start.v1" || planned.Data.Client.RequestsMade != 3 || planned.Data.WritesPerformed != 0 {
+		t.Fatalf("unexpected Transmission activation plan: %s", out.String())
+	}
+	assertClientActivatePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	runArgs := append([]string{"client", "activate", "run"}, base...)
+	runArgs = append(runArgs, "--start-after-recheck", "--expect-activation-plan-id", planned.Data.Plan.ID, "--acknowledge-client-recheck")
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("activation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	run := decodeClientActivateReport(t, out.Bytes())
+	if run.Data.Outcome != clientactivate.OutcomeRecheckInProgress || run.Data.Client.RequestsMade != 5 ||
+		run.Data.Client.JobState != "checkingResumeData" || run.Data.Client.ActionAttempted != "recheck" ||
+		!run.Data.Client.ActionReceipt.Complete || run.Data.Client.ActionReceipt.RequestID <= 0 ||
+		run.Data.Client.ActionReceipt.RequestsAttempted != 1 || !run.Data.Journal.RecheckStartedDurable {
+		t.Fatalf("unexpected Transmission activation run: %s", out.String())
+	}
+	assertClientActivatePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	server.setState(0, 1)
+	out.Reset()
+	errOut.Reset()
+	resumeArgs := append([]string{"client", "activate", "resume"}, base...)
+	resumeArgs = append(resumeArgs, "--start-after-recheck", "--expect-activation-plan-id", planned.Data.Plan.ID,
+		"--acknowledge-client-start", planned.Data.Operation.ID)
+	if code := Run(resumeArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("activation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	resumed := decodeClientActivateReport(t, out.Bytes())
+	if resumed.Data.Outcome != clientactivate.OutcomeStartedClientClaim || resumed.Data.Client.RequestsMade != 5 ||
+		resumed.Data.Client.JobState != "queuedUP" || resumed.Data.Client.ActionAttempted != "start" ||
+		!resumed.Data.Client.ActionReceipt.Complete || resumed.Data.Client.ActionReceipt.RequestID <= 0 ||
+		!resumed.Data.Journal.RecheckCompletionDurable || !resumed.Data.Journal.ActivationCompletionDurable || resumed.Data.Operation.Resumable {
+		t.Fatalf("unexpected Transmission activation resume: %s", out.String())
+	}
+	assertClientActivatePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	requestsBeforeStatus := server.handshake.Load() + server.session.Load() + server.ledger.Load() + server.add.Load() + server.verify.Load() + server.start.Load()
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"client", "activate", "status", "--target", fixture.materialize.targetRoot, "--output", "json", planned.Data.Operation.ID},
+		strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("activation status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeClientActivateReport(t, out.Bytes())
+	if status.Data.Outcome != clientactivate.OutcomeHistoricalStarted || status.Data.Client.RequestsMade != 0 ||
+		server.handshake.Load()+server.session.Load()+server.ledger.Load()+server.add.Load()+server.verify.Load()+server.start.Load() != requestsBeforeStatus {
+		t.Fatalf("unexpected Transmission activation status: %s", out.String())
+	}
+	if server.handshake.Load() != 5 || server.session.Load() != 5 || server.ledger.Load() != 8 ||
+		server.add.Load() != 1 || server.verify.Load() != 1 || server.start.Load() != 1 {
+		t.Fatalf("requests handshake=%d session=%d ledger=%d add=%d verify=%d start=%d", server.handshake.Load(), server.session.Load(),
+			server.ledger.Load(), server.add.Load(), server.verify.Load(), server.start.Load())
+	}
+}
+
 func decodeClientActivateRetentionReport(t *testing.T, raw []byte) clientActivateRetentionJSONEnvelope {
 	t.Helper()
 	var result clientActivateRetentionJSONEnvelope
@@ -366,6 +458,17 @@ func clientActivateBaseArgs(fixture clientAdoptCLIFixture, endpoint, adoptionOpe
 		"--client-root", clientAdoptRoot, "--client-style", "posix", "--driver", "qbittorrent",
 		"--url", endpoint, "--username", clientAdoptUser, "--password-stdin", "--timeout", "1m", "--output", "json",
 	}
+}
+
+func transmissionClientActivateBaseArgs(fixture clientAdoptCLIFixture, endpoint, adoptionOperation, adoptionPlanID string) []string {
+	result := clientActivateBaseArgs(fixture, endpoint, adoptionOperation, adoptionPlanID)
+	for index := range result {
+		if index > 0 && result[index-1] == "--driver" {
+			result[index] = "transmission"
+			break
+		}
+	}
+	return result
 }
 
 func decodeClientActivateReport(t *testing.T, raw []byte) clientActivateJSONEnvelope {

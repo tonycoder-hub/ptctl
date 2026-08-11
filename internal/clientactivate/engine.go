@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
@@ -127,7 +126,7 @@ func Preview(ctx context.Context, authority *PreparedAuthority, session download
 		report.finalize()
 		return report, err
 	}
-	descriptor, err := readControlDescriptor(ctx, session)
+	descriptor, err := readControlDescriptor(ctx, session, authority.driver)
 	if err != nil {
 		report.Client.RequestsMade = session.RequestsMade()
 		classifyFailure(&report, err)
@@ -175,7 +174,7 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		report.finalize()
 		return report, err
 	}
-	descriptor, err := readControlDescriptor(ctx, options.Session)
+	descriptor, err := readControlDescriptor(ctx, options.Session, options.Authority.driver)
 	if err != nil {
 		report.Client.RequestsMade = options.Session.RequestsMade()
 		classifyFailure(&report, err)
@@ -304,7 +303,7 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 			return report, err
 		}
 	}
-	descriptor, err := readControlDescriptor(ctx, options.Session)
+	descriptor, err := readControlDescriptor(ctx, options.Session, options.Authority.driver)
 	if err != nil {
 		report.Client.RequestsMade = options.Session.RequestsMade()
 		classifyFailure(&report, err)
@@ -520,7 +519,7 @@ func executeAction(ctx context.Context, prepared *PreparedPlan, handle *journalH
 	} else {
 		receipt, mutationErr = session.Recheck(ctx, request)
 	}
-	report.Client.ActionReceipt = safeActionReceipt(receipt, action, before.job.Hash)
+	report.Client.ActionReceipt = safeActionReceipt(receipt, action, before.job.Hash, prepared.plan.Control)
 	requestDelta := session.RequestsMade() - requestCountBefore
 	if requestDelta > 0 {
 		report.Client.ActionAttempted = action
@@ -543,7 +542,7 @@ func executeAction(ctx context.Context, prepared *PreparedPlan, handle *journalH
 		report.Operation.Status, report.Operation.Resumable = "active", true
 		return errors.Join(ErrRequestUnknown, mutationErr)
 	}
-	if mutationErr == nil && !validActionReceipt(receipt, action, before.job.Hash) {
+	if mutationErr == nil && !validActionReceipt(receipt, action, before.job.Hash, prepared.plan.Control) {
 		return fmt.Errorf("%w: downloader action receipt is contradictory", ErrIntegrity)
 	}
 	if err := ctx.Err(); err != nil {
@@ -836,7 +835,7 @@ func applyRetainedJournalReport(report *Report, state journalState) {
 }
 
 func validateAuthorityAgainstPlan(authority *PreparedAuthority, plan Plan) error {
-	if authority == nil || plan.Validate() != nil || authority.clientConfigID != plan.ClientConfigID ||
+	if authority == nil || plan.Validate() != nil || authority.driver != plan.Driver || authority.clientConfigID != plan.ClientConfigID ||
 		authority.final.OperationID != plan.MaterializeOperationID || authority.final.MaterializePlanID != plan.MaterializePlanID ||
 		authority.final.MetafileVariantID != plan.MetafileVariantID || authority.final.InfoHashV1 != plan.InfoHashV1 || authority.final.InfoHashV2 != plan.InfoHashV2 ||
 		authority.final.TargetRootIdentity != plan.TargetRootIdentity || authority.final.FinalObjectIdentity != plan.FinalObjectIdentity ||
@@ -864,28 +863,33 @@ func historicalAdoption(plan Plan) clientadopt.CompletionObservation {
 		Assurance: "historical_activation_intent_current_adoption_not_observed"}
 }
 
-func validActionReceipt(receipt downloader.ExistingJobMutationReceipt, action, jobKey string) bool {
+func validActionReceipt(receipt downloader.ExistingJobMutationReceipt, action, jobKey string, descriptor downloader.ExistingJobControlDescriptor) bool {
 	effect := downloader.ControlEffectRecheck
 	if action == AttemptActionStart {
 		effect = downloader.ControlEffectStart
 	}
-	expectedBytes := int64(len(url.Values{"hashes": {jobKey}}.Encode()))
+	body, err := downloader.MarshalExistingJobMutationRequest(descriptor, effect, jobKey, receipt.RequestID)
+	if err != nil {
+		return false
+	}
+	expectedBytes := int64(len(body))
 	return receipt.Effect == effect && receipt.Complete && receipt.RequestsAttempted == 1 && receipt.AutomaticRetries == 0 &&
 		receipt.RedirectsFollowed == 0 && receipt.RequestBytesKnown && receipt.RequestBytes == expectedBytes && receipt.StopReason == "" &&
 		!receipt.ObservedAtStart.IsZero() && !receipt.ObservedAtEnd.Before(receipt.ObservedAtStart)
 }
 
-func readControlDescriptor(ctx context.Context, session downloader.ExistingJobMutationSession) (downloader.ExistingJobControlDescriptor, error) {
-	if session == nil || session.RequestsMade() != 1 {
+func readControlDescriptor(ctx context.Context, session downloader.ExistingJobMutationSession, expectedDriver string) (downloader.ExistingJobControlDescriptor, error) {
+	policy, supported := downloader.DescribeExistingJobControlDriver(expectedDriver)
+	if session == nil || !supported || session.RequestsMade() != policy.OpenRequests {
 		return downloader.ExistingJobControlDescriptor{}, fmt.Errorf("%w: downloader control session is not fresh", ErrIntegrity)
 	}
 	before := session.RequestsMade()
 	descriptor, err := session.ReadExistingJobControlDescriptor(ctx)
 	after := session.RequestsMade()
-	if after-before < 0 || after-before > 1 || err == nil && after-before != 1 {
+	if after-before < 0 || after-before > policy.DescriptorRequests || err == nil && after-before != policy.DescriptorRequests {
 		return downloader.ExistingJobControlDescriptor{}, fmt.Errorf("%w: downloader control descriptor request count is contradictory", ErrIntegrity)
 	}
-	if err == nil && descriptor.Validate() != nil {
+	if err == nil && (descriptor.Validate() != nil || descriptor.Driver != expectedDriver) {
 		return downloader.ExistingJobControlDescriptor{}, fmt.Errorf("%w: downloader control descriptor is contradictory", ErrIntegrity)
 	}
 	return descriptor, err
@@ -917,12 +921,15 @@ func observeClientBounded(ctx context.Context, authority *PreparedAuthority, ses
 	return observed, err
 }
 
-func safeActionReceipt(value downloader.ExistingJobMutationReceipt, action, jobKey string) downloader.ExistingJobMutationReceipt {
+func safeActionReceipt(value downloader.ExistingJobMutationReceipt, action, jobKey string, descriptor downloader.ExistingJobControlDescriptor) downloader.ExistingJobMutationReceipt {
 	effect := downloader.ControlEffectRecheck
 	if action == AttemptActionStart {
 		effect = downloader.ControlEffectStart
 	}
 	result := downloader.ExistingJobMutationReceipt{Effect: effect, RequestsAttempted: -1, AutomaticRetries: -1, RedirectsFollowed: -1}
+	if descriptor.Driver == downloader.DriverTransmission {
+		result.RequestID = -1
+	}
 	if !value.ObservedAtStart.IsZero() && !value.ObservedAtEnd.Before(value.ObservedAtStart) {
 		result.ObservedAtStart, result.ObservedAtEnd = value.ObservedAtStart, value.ObservedAtEnd
 	}
@@ -938,9 +945,13 @@ func safeActionReceipt(value downloader.ExistingJobMutationReceipt, action, jobK
 	if value.RequestBytes >= 0 && value.RequestBytes <= 1024 {
 		result.RequestBytes, result.RequestBytesKnown = value.RequestBytes, value.RequestBytesKnown
 	}
-	result.Complete = validActionReceipt(value, action, jobKey)
+	if (descriptor.Driver == downloader.DriverQBittorrent && value.RequestID == 0) ||
+		(descriptor.Driver == downloader.DriverTransmission && value.RequestID > 0 && value.RequestID <= 1_000_000_000) {
+		result.RequestID = value.RequestID
+	}
+	result.Complete = validActionReceipt(value, action, jobKey, descriptor)
 	switch value.StopReason {
-	case "context_cancelled", "job_locator_invalid", "control_descriptor_unavailable", "action_invalid", "request_build_failed", "session_unavailable", "transport_failed", "response_read_failed", "http_rejected", "response_invalid":
+	case "context_cancelled", "job_locator_invalid", "control_descriptor_unavailable", "action_invalid", "request_build_failed", "session_unavailable", "transport_failed", "response_read_failed", "http_rejected", "response_invalid", "csrf_expired":
 		result.StopReason = value.StopReason
 	case "":
 	default:

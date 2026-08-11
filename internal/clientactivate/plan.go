@@ -10,6 +10,7 @@ import (
 )
 
 type AuthorityOptions struct {
+	Driver         string
 	ClientConfigID string
 	HostRoot       string
 	ClientRoot     string
@@ -27,6 +28,7 @@ type PreparedAuthority struct {
 	adoption         clientadopt.CompletionObservation
 	projection       materialize.FinalClientProjection
 	clientConfigID   string
+	driver           string
 	expectedJobID    string
 	windows          bool
 	fileLimits       downloader.JobFileLedgerLimits
@@ -45,8 +47,15 @@ func PrepareAuthority(final *materialize.VerifiedFinal, adoption *clientadopt.Ve
 	if final == nil || !final.Verified() || adoption == nil || !adoption.Verified() || !canonicalSHA256ID(options.ClientConfigID) {
 		return nil, fmt.Errorf("%w: final or adoption authority is unavailable", ErrPolicy)
 	}
-	if adoption.Plan().Driver != clientadopt.DriverQBittorrent {
-		return nil, fmt.Errorf("%w: existing-job recheck and start are currently available only for qBittorrent adoption", ErrPolicy)
+	adoptionPlan := adoption.Plan()
+	driver := options.Driver
+	if driver == "" {
+		driver = adoptionPlan.Driver
+	}
+	policy, supported := downloader.DescribeExistingJobControlDriver(driver)
+	identity := downloader.TypedIdentity{InfoHashV1: final.Observation().InfoHashV1, InfoHashV2: final.Observation().InfoHashV2}
+	if !supported || adoptionPlan.Driver != driver || !policy.SupportsIdentity(identity) {
+		return nil, fmt.Errorf("%w: adoption driver cannot provide the required existing-job control authority", ErrPolicy)
 	}
 	if err := options.FileLimits.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: client file-ledger limits are invalid", ErrPolicy)
@@ -69,7 +78,7 @@ func PrepareAuthority(final *materialize.VerifiedFinal, adoption *clientadopt.Ve
 	return &PreparedAuthority{
 		verifiedFinal: final, verifiedAdoption: adoption, final: finalObservation, adoption: adoptionObservation,
 		projection: projection, clientConfigID: options.ClientConfigID, expectedJobID: adoptionObservation.JobID,
-		windows: options.ClientWindows, fileLimits: options.FileLimits,
+		driver: driver, windows: options.ClientWindows, fileLimits: options.FileLimits,
 	}, nil
 }
 
@@ -79,7 +88,8 @@ func mustAdoptionOperation(value string) clientadopt.OperationID {
 }
 
 func BuildPlan(authority *PreparedAuthority, descriptor downloader.ExistingJobControlDescriptor, observed clientObservation, startAfterRecheck bool) (*PreparedPlan, error) {
-	if authority == nil || authority.verifiedFinal == nil || authority.verifiedAdoption == nil || descriptor.Validate() != nil {
+	if authority == nil || authority.verifiedFinal == nil || authority.verifiedAdoption == nil ||
+		descriptor.Validate() != nil || descriptor.Driver != authority.driver {
 		return nil, fmt.Errorf("%w: activation plan authority is unavailable", ErrPolicy)
 	}
 	if err := observed.validateForPlan(authority); err != nil {
@@ -91,7 +101,7 @@ func BuildPlan(authority *PreparedAuthority, descriptor downloader.ExistingJobCo
 	}
 	final, adoption, projection := authority.final, authority.adoption, authority.projection
 	plan := Plan{
-		Schema: PlanSchemaV1, Action: action, Driver: DriverQBittorrent, ClientConfigID: authority.clientConfigID,
+		Schema: PlanSchemaV1, Action: action, Driver: authority.driver, ClientConfigID: authority.clientConfigID,
 		Control: descriptor, PathMappingID: projection.PathMappingID, ClientPathSemantics: projection.PathSemantics,
 		ExpectedSavePathRef: projection.SavePathRef, ExpectedContentPathRef: projection.ContentPathRef,
 		ExpectedFileLayoutID: observed.fileLayoutID, JobID: observed.jobID,

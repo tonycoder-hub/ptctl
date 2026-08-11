@@ -82,6 +82,31 @@ func TestActivationJournalRoundTripIsReadOnlyAndCanonical(t *testing.T) {
 	}
 }
 
+func TestActivationPlanTransmissionPolicyIsV1OnlyAndDriverBound(t *testing.T) {
+	plan := testActivationPlan(t, t.TempDir())
+	plan.Driver = DriverTransmission
+	plan.Control = downloader.ExistingJobControlDescriptor{
+		Driver: DriverTransmission, Protocol: downloader.ControlProtocolTransmissionV6,
+		RecheckRouteID: "transmission.torrent.verify.v1", StartRouteID: "transmission.torrent.start.v1",
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("Transmission v1 activation plan rejected: %v", err)
+	}
+	plan.InfoHashV2 = strings.Repeat("e", 64)
+	if err := plan.Validate(); err == nil {
+		t.Fatal("Transmission hybrid activation plan was accepted")
+	}
+	plan.InfoHashV1 = ""
+	if err := plan.Validate(); err == nil {
+		t.Fatal("Transmission pure-v2 activation plan was accepted")
+	}
+	plan.InfoHashV1, plan.InfoHashV2 = strings.Repeat("8", 40), ""
+	plan.Control.Driver = DriverQBittorrent
+	if err := plan.Validate(); err == nil {
+		t.Fatal("cross-driver activation descriptor was accepted")
+	}
+}
+
 func TestActivationJournalAlreadyPresentRemovesMatchingPendingMarker(t *testing.T) {
 	root := t.TempDir()
 	plan := testActivationPlan(t, root)

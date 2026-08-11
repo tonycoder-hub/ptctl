@@ -23,7 +23,8 @@ const (
 	RecheckStartedSchemaV1        = "ptctl.client-recheck-started/v1"
 	RecheckCompleteSchemaV1       = "ptctl.client-recheck-complete/v1"
 	ActivationSchemaV1            = "ptctl.client-activation-complete/v1"
-	DriverQBittorrent             = "qbittorrent"
+	DriverQBittorrent             = downloader.DriverQBittorrent
+	DriverTransmission            = downloader.DriverTransmission
 	ActionRecheckOnly             = "recheck_only"
 	ActionRecheckThenStart        = "recheck_then_start"
 	AttemptActionRecheck          = "recheck"
@@ -69,7 +70,7 @@ type Plan struct {
 }
 
 func (plan Plan) Validate() error {
-	if plan.Schema != PlanSchemaV1 || plan.Driver != DriverQBittorrent ||
+	if plan.Schema != PlanSchemaV1 ||
 		(plan.Action != ActionRecheckOnly && plan.Action != ActionRecheckThenStart) ||
 		!canonicalSHA256ID(plan.ClientConfigID) || !canonicalSHA256ID(plan.PathMappingID) ||
 		!canonicalSHA256ID(plan.ExpectedSavePathRef) || !canonicalSHA256ID(plan.ExpectedContentPathRef) ||
@@ -82,9 +83,9 @@ func (plan Plan) Validate() error {
 		plan.Control.Validate() != nil {
 		return fmt.Errorf("%w: client activation plan is invalid", ErrPolicy)
 	}
-	if (plan.InfoHashV1 == "" && plan.InfoHashV2 == "") ||
-		(plan.InfoHashV1 != "" && !canonicalHex(plan.InfoHashV1, 40)) ||
-		(plan.InfoHashV2 != "" && !canonicalHex(plan.InfoHashV2, 64)) {
+	identity := downloader.TypedIdentity{InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2}
+	policy, supported := downloader.DescribeExistingJobControlDriver(plan.Driver)
+	if identity.Validate() != nil || !supported || !policy.SupportsIdentity(identity) || plan.Control.Driver != plan.Driver {
 		return fmt.Errorf("%w: client activation typed identity is invalid", ErrPolicy)
 	}
 	if identity, err := fsbind.ParseIdentity(plan.TargetRootIdentity); err != nil || identity.IsZero() {
@@ -361,7 +362,9 @@ func stoppedState(value string) bool {
 
 func completeStoppedState(value string) bool { return value == "pausedUP" || value == "stoppedUP" }
 
-func checkingState(value string) bool { return value == "checkingUP" || value == "checkingDL" }
+func checkingState(value string) bool {
+	return value == "checkingUP" || value == "checkingDL" || value == "checkingResumeData"
+}
 
 func startedState(value string) bool {
 	switch value {

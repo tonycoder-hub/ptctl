@@ -10,7 +10,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -212,10 +211,12 @@ func (s *readSession) mutateExistingJob(ctx context.Context, effect string, requ
 	} else if effect != downloader.ControlEffectRecheck {
 		return fail("action_invalid", fmt.Errorf("qBittorrent existing-job action is invalid"))
 	}
-	form := url.Values{"hashes": {request.JobKey}}
-	body := form.Encode()
+	body, err := downloader.MarshalExistingJobMutationRequest(descriptor, effect, request.JobKey, 0)
+	if err != nil {
+		return fail("request_build_failed", fmt.Errorf("build qBittorrent existing-job request failed"))
+	}
 	target := s.adapter.resolve(path)
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader(body))
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return fail("request_build_failed", fmt.Errorf("build qBittorrent existing-job request failed"))
 	}

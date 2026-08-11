@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -68,11 +69,17 @@ type transmissionAdoptServer struct {
 	meta   *metafile.MetaInfo
 	raw    []byte
 
+	mu       sync.Mutex
+	status   int
+	progress float64
+
 	added     atomic.Bool
 	handshake atomic.Int32
 	session   atomic.Int32
 	ledger    atomic.Int32
 	add       atomic.Int32
+	verify    atomic.Int32
+	start     atomic.Int32
 	testing   *testing.T
 }
 
@@ -479,9 +486,12 @@ func (server *transmissionAdoptServer) serveHTTP(writer http.ResponseWriter, req
 		server.ledger.Add(1)
 		jobs := []any{}
 		if server.added.Load() {
+			server.mu.Lock()
+			status, progress := server.status, server.progress
+			server.mu.Unlock()
 			jobs = append(jobs, map[string]any{
 				"hash_string": server.meta.InfoHashV1, "name": materializeFinalName,
-				"total_size": server.meta.TotalLength, "percent_complete": 0.0, "status": 0,
+				"total_size": server.meta.TotalLength, "percent_complete": progress, "status": status,
 				"download_dir": clientAdoptRoot, "downloaded_ever": int64(0), "uploaded_ever": int64(0),
 			})
 		}
@@ -508,10 +518,35 @@ func (server *transmissionAdoptServer) serveHTTP(writer http.ResponseWriter, req
 		server.writeResponse(writer, rpc, map[string]any{"torrent_added": map[string]any{
 			"id": 7, "name": materializeFinalName, "hash_string": server.meta.InfoHashV1,
 		}})
+	case "torrent_verify", "torrent_start":
+		var params struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.Unmarshal(rpc["params"], &params); err != nil || len(params.IDs) != 1 || params.IDs[0] != server.meta.InfoHashV1 {
+			server.testing.Errorf("Transmission activation did not use the exact v1 selector")
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		server.mu.Lock()
+		if method == "torrent_verify" {
+			server.verify.Add(1)
+			server.status = 1
+		} else {
+			server.start.Add(1)
+			server.status, server.progress = 5, 1
+		}
+		server.mu.Unlock()
+		server.writeResponse(writer, rpc, map[string]any{})
 	default:
 		server.testing.Errorf("unexpected Transmission adoption method %q", method)
 		writer.WriteHeader(http.StatusBadRequest)
 	}
+}
+
+func (server *transmissionAdoptServer) setState(status int, progress float64) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.status, server.progress = status, progress
 }
 
 func (server *transmissionAdoptServer) writeResponse(writer http.ResponseWriter, request map[string]json.RawMessage, result map[string]any) {

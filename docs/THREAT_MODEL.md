@@ -378,11 +378,12 @@ one-way client/path/job references and never includes host/client paths,
 endpoint, username, password, generic job key, magnet URI, tracker material,
 or raw metafile bytes.
 
-Client activation is a second, narrower qBittorrent-only existing-job mutation
-boundary. Transmission adoption does not grant this authority. Activation is
-unavailable without a same-invocation exact final authority and a canonical
-stopped-adoption completion from the same client configuration and path
-mapping. `run` requires `--acknowledge-client-recheck`; optional start requires
+Client activation is a second, narrower existing-job mutation boundary for the
+two built-in drivers. Activation is unavailable without a same-invocation
+exact final authority and a canonical stopped-adoption completion from the
+same driver, client configuration, and path mapping. Transmission requires a
+complete typed v1 identity; v2-only and hybrid Transmission activation fail
+closed. `run` requires `--acknowledge-client-recheck`; optional start requires
 `--start-after-recheck` in the reviewed plan, then a later `resume` with
 `--acknowledge-client-start`. Repeating an inconclusive request additionally
 requires the matching repeat acknowledgement. No acknowledgement grants pause,
@@ -502,21 +503,27 @@ raw host/client paths.
 
 The CLI validates artifact/materialize/adoption/mapping/endpoint selectors and
 inspects an explicit resume journal before password stdin. The activation plan
-also includes a fresh qB version descriptor and current exact job-layout
-digest, so a new run must read the credential and bounded client state before
+also includes a fresh driver-specific control descriptor and current exact
+job-layout digest, so a new run must read the credential and bounded client state before
 it can compare the reviewed activation plan ID. Any mismatch is still rejected
-before journal creation or mutation. The core requires a fresh session with
-exactly one login request, then counts exactly one descriptor GET, one ledger
-GET, an optional one-file-ledger GET for the unique job, and at most one
-explicitly selected POST per transition.
+before journal creation or mutation. The qB core requires one login request and
+one descriptor GET; Transmission requires its fixed two-request CSRF/version
+bootstrap and no separate descriptor request. Both then count one ledger GET,
+an optional one-file-ledger GET for the unique job, and at most one explicitly
+selected POST per transition.
 
 The qB control adapter accepts only known 4.x/5.x application generations and
-binds their different resume/start route internally. Effectful requests are
+binds their different resume/start route internally. The Transmission adapter
+accepts only the already audited RPC 5.3 or 6 protocol, binds the corresponding
+verify/start method names internally, and accepts only one full 40-hex v1 hash
+selector. It does not replay an effectful request after an expired CSRF token.
+Effectful requests are
 HTTP/1.1-only, proxy-free, no-keepalive, redirect-free, bounded, serial, and
-non-retried. The opaque job locator is used only as a URL-encoded `hashes` form
-value. Transport, HTTP, response, report, and journal errors never include that
-locator, response bodies/headers, endpoint, username, credential, magnet URI,
-or tracker material.
+non-retried. The opaque qB job locator is used only as a URL-encoded `hashes`
+form value; Transmission uses its exact typed v1 hash string as the RPC
+selector. Transport, HTTP, response, report, and journal errors never include
+either locator, response bodies/headers, endpoint, username, credential,
+magnet URI, or tracker material.
 
 A successful request receipt is not a recheck or start completion receipt.
 Recheck completion requires a durable checking observation followed by a
@@ -535,8 +542,8 @@ attempts per action and at most one pending scratch marker. Read-only status
 does not refresh directory durability and calls current client/final state
 unobserved. Even a successful terminal report means same-invocation bracketed,
 non-atomic exact filesystem proof plus bounded client claims; it does not prove
-that qB holds the private metafile variant, has the same inode open, or cannot
-change immediately after observation.
+that the downloader holds the private metafile variant, has the same inode
+open, or cannot change immediately after observation.
 
 The target root must support the fsbind root-identity, no-link/reparse,
 same-filesystem, and no-replace primitives. The plan-review root identity is

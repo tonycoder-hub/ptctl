@@ -35,8 +35,11 @@ func observeClient(ctx context.Context, authority *PreparedAuthority, session do
 	if err != nil {
 		return result, err
 	}
-	if ledger.Driver != DriverQBittorrent || !ledger.Capabilities.ContentPath {
-		return result, fmt.Errorf("%w: downloader ledger lacks the reviewed qBittorrent path capability", ErrIntegrity)
+	if ledger.Driver != authority.driver || !ledger.Capabilities.ContentPath {
+		return result, fmt.Errorf("%w: downloader ledger lacks the reviewed path capability", ErrIntegrity)
+	}
+	if err := downloader.ValidateLedgerDriverClaims(ledger); err != nil {
+		return result, fmt.Errorf("%w: downloader ledger claim provenance is invalid", ErrIntegrity)
 	}
 	assessment, err := downloader.AssessLedgerIdentity(ledger, downloader.TypedIdentity{
 		InfoHashV1: authority.final.InfoHashV1, InfoHashV2: authority.final.InfoHashV2,
@@ -124,7 +127,7 @@ type fileDigestRow struct {
 }
 
 func validateFileLayout(authority *PreparedAuthority, job downloader.Torrent, snapshot downloader.JobFileLedgerSnapshot) (string, string, bool, bool, error) {
-	if authority == nil || !snapshot.Complete || snapshot.Driver != DriverQBittorrent || snapshot.JobKey != job.Hash ||
+	if authority == nil || !snapshot.Complete || snapshot.Driver != authority.driver || snapshot.JobKey != job.Hash ||
 		snapshot.Limits != authority.fileLimits || snapshot.ObservedAtStart.IsZero() || snapshot.ObservedAtEnd.Before(snapshot.ObservedAtStart) ||
 		len(snapshot.Files) != authority.final.ManifestFiles || len(snapshot.Files) > snapshot.Limits.MaxFiles ||
 		snapshot.Used.FilesConsidered != len(snapshot.Files) || snapshot.Used.ResponseBytes <= 0 ||
