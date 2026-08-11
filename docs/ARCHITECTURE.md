@@ -45,7 +45,8 @@ internal/reconcile
 
 internal/site
     optional AuthChecker / AccountReader / TorrentSearcher /
-    BonusCatalogReader ports and a capability-gated effectful metafile port
+    BonusCatalogReader / BonusReviewReader ports and a capability-gated
+    effectful metafile port
         `-- tjupt
 
 internal/downloader
@@ -275,11 +276,34 @@ Capabilities are small and explicit:
 - `torrent.detail`
 - `torrent.metafile.read_effectful`
 - `bonus.catalog.read`
+- `bonus.offer.review`
 
 Site-specific form or action writes will eventually live under a namespaced
 action schema. They will not be forced into universal fields. The effectful
 metafile capability is instead a tracker-visible GET plus a private-store
 publication boundary; it grants no general site-write or detail-read authority.
+
+## Read-only bonus-offer review
+
+`site bonus review` is the first concrete `bonus.offer.review` port. It pins the
+built-in production origin, stable read route, canonical decimal option, fixed
+request/parser budgets, and cookie method before credential input. One fresh
+HTTP/1.1 GET observes the authenticated `mybonusapps.php` form. The adapter
+selects exactly one option, bounds forms, fields, tokens, and retained textual
+text, and rejects duplicate attributes/options, nested forms, unknown action
+routes, and malformed or ambiguous structure.
+
+The public DTO contains only the exact selector, retained site-defined text columns,
+balance, availability/input classifications, a normalized action route, and
+domain-separated form-shape/review hashes. Hidden values, raw HTML, request
+paths, and arbitrary diagnostics do not cross the adapter boundary. The review
+does not execute JavaScript or evaluate CSS-rendered visibility, so its
+normalized action route and retained text remain static HTML claims. The review
+hash excludes balance and time but includes every
+semantic field a later write would have to reproduce. It is a correlator, not a
+signature or capability.
+Opaque authority exists only in the reading invocation and JSON round trips
+cannot restore it. No form-submission port exists in this slice.
 
 ## Read-only torrent detail
 

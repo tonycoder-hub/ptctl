@@ -10,7 +10,7 @@ import (
 func TestParseAccountAndBonusCatalog(t *testing.T) {
 	body := []byte(`<!doctype html><html><head><title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title></head>
 	<body><div>当前魔力值：12,345.67</div><table>
-	<tr><td>上传量兑换</td><td>10 GiB</td><td>1000</td><td><form action="mybonusapps.php" method="post"><input name="option" value="1"><input type="submit" value="兑换"></form></td></tr>
+<tr><td>上传量兑换</td><td>10 GiB</td><td>1000</td><td><form action="mybonusapps.php" method="post"><input type="hidden" name="option" value="1"><input type="submit" value="兑换"></form></td></tr>
 	<tr><td>普通导航</td><td>不应进入目录</td></tr></table></body></html>`)
 	if got := parseUsername(body); got != "Alice" {
 		t.Fatalf("username = %q", got)
@@ -22,10 +22,23 @@ func TestParseAccountAndBonusCatalog(t *testing.T) {
 	if len(rows) != 1 || len(rows[0].Columns) < 3 {
 		t.Fatalf("unexpected rows: %#v", rows)
 	}
+	if rows[0].Selector != "1" {
+		t.Fatalf("bonus selector = %q", rows[0].Selector)
+	}
 	u, _ := url.Parse("https://www.tjupt.org/mybonusapps.php")
 	state, username := classifyBonusPage(u, body)
 	if state != domain.AuthenticationAuthenticated || username != "Alice" {
 		t.Fatalf("bonus classification state=%q username=%q", state, username)
+	}
+}
+
+func TestBonusCatalogSelectorHintRejectsAmbiguousControls(t *testing.T) {
+	body := []byte(`<table><tr><td>A</td><td>100</td><td><form action="mybonusapps.php" method="post">
+<input type="hidden" name="option" value="1"><input type="hidden" name="option" value="2"><input type="submit">
+</form></td></tr></table>`)
+	rows := parseBonusRows(body)
+	if len(rows) != 1 || rows[0].Selector != "" {
+		t.Fatalf("rows=%#v", rows)
 	}
 }
 

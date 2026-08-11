@@ -2,13 +2,14 @@
 
 TJUPT is the first experimental site implementation, not a special case
 embedded in the content core. It has not had a credentialed live smoke test in
-this repository. The adapter declares four ordinary read capabilities plus
-one explicitly effectful metafile capability:
+this repository. The adapter declares five ordinary read capabilities plus one
+explicitly effectful metafile capability:
 
 - session check;
 - torrent search;
 - bounded torrent-detail observation;
 - bonus catalog inspection;
+- exact-option, zero-write bonus-offer review;
 - acknowledged metafile fetch into the private store.
 
 Each command sends at most one bounded GET, uses the configured TJUPT HTTPS
@@ -41,6 +42,53 @@ these. Therefore `ptctl` returns catalog rows as site-defined columns. It does
 not pretend that every tracker has a universal `buy_vip` or `exchange_upload`
 operation, and the preview implements no purchase path.
 
+When the compatibility catalog parser sees exactly one canonical numeric
+hidden `option`, it includes that value as a selector hint. It never substitutes
+the displayed row number, and an absent/ambiguous selector remains unknown.
+The stricter review below always refetches and uniquely rebinds the option; it
+does not consume catalog JSON as authority.
+
+## Zero-write bonus-offer review
+
+The catalog preview is complemented by a stricter exact-option observation:
+
+```bash
+printf '%s' "$TJUPT_COOKIE" | ptctl site bonus review --cookie-stdin tjupt OPTION
+```
+
+Only the exact built-in production origin declares `bonus.offer.review`.
+Output mode, capability, cookie authentication, fixed response/parser budgets,
+and a canonical non-negative decimal option are validated before stdin is
+read. The command opens one fresh HTTP/1.1 session and sends one bounded GET to
+`mybonusapps.php`; it performs no POST, redirect, retry, compression, proxy,
+or second request.
+
+The bounded tokenizer requires authenticated page markers, a balance, exactly
+one form carrying the selected hidden `option`, at least two visible
+site-defined columns, and a recognized form structure. Duplicate options,
+duplicate attributes, nested forms, malformed selected-form structure,
+base-URL or submit-action overrides, unknown response types, and
+form/field/token/text budget overflow fail closed. The public projection
+classifies the submit control as available, disabled, or unknown and separately
+classifies additional user input. A form is considered structurally supported
+only for the production `mybonusapps.php` POST route; recognizing it still
+grants no submission authority. The tokenizer does not execute JavaScript, so
+the normalized route and retained text remain static HTML claims rather than
+browser-rendered proof. The `visible_text_bytes` usage counter refers to bounded
+non-markup tokenizer text; it does not assert CSS-rendered visibility.
+
+Hidden field values and names do not enter the report. Instead, control
+name/type order is reduced to a domain-separated one-way form-shape ID. The
+semantic review ID binds that shape, option, visible columns, action route,
+availability, and input mode, while deliberately excluding the changing
+balance and observation time. Both identifiers are review aids and stable
+correlators, not signatures or replay authority. The typed result has
+process-local authority only; JSON round trips lose it. A future exchange path
+must refetch the page, reproduce the reviewed semantics, use only the fresh
+opaque fields, and cross a separate acknowledgement, durable intent, uncertain
+outcome, and rate-limit design. This slice never submits a purchase or
+redemption form.
+
 ## Authentication
 
 The adapter does not automate login, bypass CAPTCHA/Cloudflare, or read browser
@@ -59,8 +107,8 @@ not be automatic.
 ## Fixtures
 
 Parser tests use synthetic HTML with fictitious users and values, including
-challenge, maintenance, empty-search, torrent-detail, and title-with-size
-cases. Captured TJUPT HTML is deliberately absent because it can contain
+challenge, maintenance, empty-search, torrent-detail, title-with-size, and
+bonus-form ambiguity/budget cases. Captured TJUPT HTML is deliberately absent because it can contain
 account information, CSRF tokens, or identifiers. Any future fixture must be
 generated or reviewed for secret canaries before commit.
 

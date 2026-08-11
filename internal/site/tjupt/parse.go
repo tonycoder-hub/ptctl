@@ -1,12 +1,17 @@
 package tjupt
 
 import (
+	"bytes"
+	"errors"
 	"html"
+	"io"
 	"math"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+
+	xhtml "golang.org/x/net/html"
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 )
@@ -107,12 +112,52 @@ func parseBonusRows(body []byte) []domain.BonusCatalogRow {
 		if len(cells) < 2 {
 			continue
 		}
-		rows = append(rows, domain.BonusCatalogRow{Columns: cells})
+		rows = append(rows, domain.BonusCatalogRow{Selector: bonusSelectorFromRow(raw), Columns: cells})
 		if len(rows) >= 100 {
 			break
 		}
 	}
 	return rows
+}
+
+func bonusSelectorFromRow(raw string) string {
+	tokenizer := xhtml.NewTokenizer(bytes.NewBufferString(raw))
+	selector := ""
+	count := 0
+	complete := false
+	for tokens := 0; tokens < 512; tokens++ {
+		tokenType := tokenizer.Next()
+		if tokenType == xhtml.ErrorToken {
+			if errors.Is(tokenizer.Err(), io.EOF) {
+				complete = true
+				break
+			}
+			return ""
+		}
+		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		if !strings.EqualFold(token.Data, "input") {
+			continue
+		}
+		attrs, err := strictBonusAttributes(token.Attr)
+		if err != nil || attrs["name"] != "option" {
+			if err != nil {
+				return ""
+			}
+			continue
+		}
+		count++
+		if strings.ToLower(attrs["type"]) != "hidden" || validateBonusSelector(attrs["value"]) != nil {
+			return ""
+		}
+		selector = attrs["value"]
+	}
+	if !complete || count != 1 {
+		return ""
+	}
+	return selector
 }
 
 func parseSearch(body []byte) []domain.TorrentSummary {

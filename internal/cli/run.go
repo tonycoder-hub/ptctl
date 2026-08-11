@@ -138,6 +138,7 @@ Usage:
   ptctl site search --cookie-stdin [--output table|json] SITE QUERY...
   ptctl site detail --cookie-stdin [--output table|json] SITE REMOTE_ID
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
+  ptctl site bonus review --cookie-stdin [--output table|json] SITE OPTION
   ptctl site metafile fetch --cookie-stdin --acknowledge-site-effect --metafile-store DIR [--output table|json] SITE REMOTE_ID
   ptctl site metafile binding list --metafile-store DIR [--output table|json]
   ptctl site metafile binding inspect --metafile-store DIR [--output table|json] RECORD_ID
@@ -255,6 +256,11 @@ func (a *app) site(args []string) error {
 		return a.siteRead(args[0], args[1:])
 	case "detail":
 		return a.siteDetail(args[1:])
+	case "bonus":
+		if len(args) >= 2 && args[1] == "review" {
+			return a.siteBonusReview(args[2:])
+		}
+		return usageError("site bonus requires review")
 	case "metafile":
 		if len(args) >= 2 {
 			switch args[1] {
@@ -2160,6 +2166,8 @@ func jsonKind(data any) string {
 		return "site.torrent.list"
 	case siteDetailReport:
 		return typed.kind
+	case siteBonusReviewReport:
+		return typed.kind
 	case domain.BonusCatalog:
 		return "site.bonus.catalog"
 	case *metafile.MetaInfo:
@@ -2279,9 +2287,13 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 		}
 	case "bonus-catalog":
 		catalog := data.(domain.BonusCatalog)
-		fmt.Fprintf(w, "BALANCE\t%s\n", terminalSafe(valueOrUnknown(catalog.Balance)))
+		fmt.Fprintf(w, "BALANCE\t%s\nOPTION\tOFFER\n", terminalSafe(valueOrUnknown(catalog.Balance)))
 		for index, row := range catalog.Rows {
-			fmt.Fprintf(w, "%d\t%s\n", index+1, terminalSafe(strings.Join(row.Columns, " | ")))
+			selector := row.Selector
+			if selector == "" {
+				selector = fmt.Sprintf("unknown-%d", index+1)
+			}
+			fmt.Fprintf(w, "%s\t%s\n", terminalSafe(selector), terminalSafe(strings.Join(row.Columns, " | ")))
 		}
 	}
 	if err := w.Flush(); err != nil {

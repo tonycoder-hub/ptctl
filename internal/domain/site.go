@@ -19,6 +19,7 @@ const (
 	CapabilityDetail      Capability = "torrent.detail"
 	CapabilityMetafile    Capability = "torrent.metafile.read_effectful"
 	CapabilityBonusRead   Capability = "bonus.catalog.read"
+	CapabilityBonusReview Capability = "bonus.offer.review"
 )
 
 type SiteDescriptor struct {
@@ -128,7 +129,8 @@ type Promotion struct {
 // BonusCatalogRow intentionally preserves site-defined columns. Bonus shop
 // semantics are not portable enough to force into a universal purchase model.
 type BonusCatalogRow struct {
-	Columns []string `json:"columns"`
+	Selector string   `json:"selector,omitempty"`
+	Columns  []string `json:"columns"`
 }
 
 type BonusCatalog struct {
@@ -136,4 +138,21 @@ type BonusCatalog struct {
 	Balance    string            `json:"balance,omitempty"`
 	Rows       []BonusCatalogRow `json:"rows"`
 	ObservedAt time.Time         `json:"observed_at"`
+}
+
+// BonusOfferReview is a bounded public projection of one site-defined bonus
+// form. It is a live site claim and a review aid only: ReviewID is not replay
+// authority and does not authorize a later form submission.
+type BonusOfferReview struct {
+	SiteID        string   `json:"site_id"`
+	Selector      string   `json:"selector"`
+	ReviewID      string   `json:"review_id"`
+	Balance       string   `json:"balance,omitempty"`
+	Columns       []string `json:"columns"`
+	Availability  string   `json:"availability"`
+	InputMode     string   `json:"input_mode"`
+	ActionMethod  string   `json:"action_method"`
+	ActionRouteID string   `json:"action_route_id"`
+	FormShapeID   string   `json:"form_shape_id"`
+	EvidenceBasis []string `json:"evidence_basis"`
 }

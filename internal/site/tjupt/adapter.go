@@ -48,7 +48,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 		domain.CapabilityBonusRead,
 	}
 	if a.baseURL == DefaultBaseURL {
-		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile)
+		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview)
 	}
 	return domain.SiteDescriptor{
 		ID:           "tjupt",

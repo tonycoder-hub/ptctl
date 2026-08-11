@@ -90,10 +90,11 @@ HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
 callers must not loop or parallelize site commands. There is no Cloudflare or
 CAPTCHA bypass.
 
-Ordinary status, search, bonus, and detail reads use the same fresh HTTP/1.1,
+Ordinary status, search, bonus catalog/review, and detail reads use the same fresh HTTP/1.1,
 no-reuse, no-redirect transport as the effectful fetch. The detail route sends
 only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
 parameter and never follows the download reference found in the page.
+Bonus review sends only the one GET and has no POST-capable transport surface.
 
 `site metafile fetch` is scoped to one validated remote ID and one GET. It does
 not perform a preceding detail lookup, follow a redirect, retry, or fan out to
@@ -145,6 +146,17 @@ challenge, redirect, wrong media type, missing authenticated markers, an
 unbounded/invalid heading, or no exact selected-ID action link fails closed.
 Only fixed metadata fields survive parsing; the result never becomes a
 metafile, content, or current-variant proof.
+
+Bonus-review HTML has the same 4 MiB default, 8 MiB hard body ceiling, and
+64 KiB header cap. Parsing additionally caps forms, controls, tokens, and
+retained tokenizer text. Duplicate attributes/options, nested forms, unknown
+actions, ambiguous selectors, invalid UTF-8, login/challenge pages, and parser
+N+1 all fail closed. Raw HTML, form URLs, and hidden values never enter the
+report. One-way form-shape and semantic review IDs remain correlatable and are
+not anonymity, signatures, or replay authority. The operation reports zero
+form submissions and exposes no POST method. JavaScript is not executed, so the
+normalized action route and retained text are explicitly only static HTML
+claims; CSS-rendered visibility is not evaluated.
 
 A persistent site binding is attempted only after complete artifact-import
 success. Its canonical record is capped at 256 KiB, rejects duplicate/unknown

@@ -121,10 +121,12 @@ capabilities at the edge, not assumptions in the core domain model.
   Unicode-normalization checks;
 - typed, capability-checked site ports instead of a monolithic driver;
 - an experimental TJUPT session check, torrent search, torrent-detail
-  observation, and bonus catalog parser
+  observation, bonus catalog parser, and exact-option zero-write bonus review
   through one bounded, same-origin HTTPS GET per invocation, with fail-closed
   page recognition, no redirect, and no retry; detail requests deliberately
-  omit NexusPHP's view-counting `hit` parameter and remain site claims only;
+  omit NexusPHP's view-counting `hit` parameter; bonus review records a bounded
+  form-shape digest and semantic review ID but never submits the form; both
+  remain site claims only;
 - an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
   bounded GET with no redirect or retry and publishing the strictly validated
   exact response only into an initialized private metafile store;
@@ -675,6 +677,7 @@ printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
 printf '%s' "$TJUPT_COOKIE" | ptctl site search --cookie-stdin tjupt "Ubuntu"
 printf '%s' "$TJUPT_COOKIE" | ptctl site detail --cookie-stdin tjupt REMOTE_ID
 printf '%s' "$TJUPT_COOKIE" | ptctl site bonus-catalog --cookie-stdin tjupt
+printf '%s' "$TJUPT_COOKIE" | ptctl site bonus review --cookie-stdin tjupt OPTION
 ```
 
 Each TJUPT command performs at most one bounded GET and never retries. Do not
@@ -683,6 +686,21 @@ only `details.php?id=REMOTE_ID`: it does not send `hit=1`, follow the download
 link, fetch the metafile, or persist an observation. Its display title, optional
 peer counts, and matching internal link are current site claims, not metafile
 identity or storage-content proof.
+
+`bonus-catalog` now exposes a bounded selector hint when its compatibility
+parser can identify one exact hidden numeric `option`; a missing selector is
+shown as unknown and a row number is never treated as authority. `site bonus
+review` selects that canonical decimal option from a fresh live
+`mybonusapps.php` page. It reports retained site-defined text columns, balance,
+current submit availability, whether extra user input is required, the
+allowlisted action route, and one-way form-shape/review IDs. Hidden field values,
+raw HTML, and form URLs are not emitted. The action route is a static HTML
+claim; the command does not execute JavaScript or browser rendering/runtime
+behavior. It
+performs zero writes and zero form submissions. Its JSON is deliberately
+non-authoritative; any future
+exchange implementation must fetch a fresh page, reproduce the reviewed
+semantics, and cross a separate acknowledgement and recovery boundary.
 
 Read downloader state (read-only commands support qBittorrent and
 Transmission):
