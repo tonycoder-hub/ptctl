@@ -19,6 +19,7 @@ type CompletionProofOptions struct {
 // canonical terminal activation journal read. It is historical client evidence
 // and never substitutes for a current materialized-final proof.
 type CompletionObservation struct {
+	Driver                 string `json:"driver"`
 	OperationID            string `json:"operation_id"`
 	PlanID                 string `json:"plan_id"`
 	TerminalMarkerID       string `json:"terminal_marker_id"`
@@ -137,7 +138,7 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 		observedAtStart, observedAtEnd = authority.activation.ObservedAtStart, authority.activation.ObservedAtEnd
 	}
 	return CompletionObservation{
-		OperationID: authority.operationID.String(), PlanID: authority.planID, TerminalMarkerID: markerID,
+		Driver: plan.Driver, OperationID: authority.operationID.String(), PlanID: authority.planID, TerminalMarkerID: markerID,
 		Action: plan.Action, TerminalPhase: phase, MetafileVariantID: plan.MetafileVariantID,
 		MaterializeOperationID: plan.MaterializeOperationID, MaterializePlanID: plan.MaterializePlanID,
 		ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID, JobID: plan.JobID,

@@ -36,6 +36,7 @@ type CurrentUseAuthority struct {
 // CurrentUseObservation contains only normalized, non-secret downloader
 // claims. Raw job keys and client paths remain process-local.
 type CurrentUseObservation struct {
+	Driver                 string                       `json:"driver"`
 	UseID                  string                       `json:"use_id"`
 	ActivationOperationID  string                       `json:"activation_operation_id"`
 	ActivationPlanID       string                       `json:"activation_plan_id"`
@@ -165,7 +166,7 @@ func VerifyCurrentUse(ctx context.Context, authority *CurrentUseAuthority, sessi
 		filesObserved = len(observed.files.Files)
 	}
 	public := CurrentUseObservation{
-		UseID: authority.useID, ActivationOperationID: completionObservation.OperationID,
+		Driver: plan.Driver, UseID: authority.useID, ActivationOperationID: completionObservation.OperationID,
 		ActivationPlanID: completionObservation.PlanID, TerminalMarkerID: completionObservation.TerminalMarkerID,
 		ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
 		JobID: observed.jobID, FileLayoutID: observed.fileLayoutID,
@@ -193,6 +194,7 @@ func (verified *VerifiedCurrentUse) Verified() bool {
 		!canonicalSHA256ID(verified.observation.TerminalMarkerID) || !canonicalSHA256ID(verified.observation.ClientConfigID) ||
 		!canonicalSHA256ID(verified.observation.PathMappingID) ||
 		!canonicalSHA256ID(verified.observation.FileLayoutID) || !canonicalSHA256ID(verified.observation.CompleteFileSnapshotID) ||
+		verified.observation.Driver != verified.authority.plan.Driver ||
 		verified.observation.JobProgress != 1 || !verified.observation.AllSelected || !verified.observation.AllComplete ||
 		verified.observation.RequestsMade <= 0 || verified.observation.FilesObserved <= 0 || verified.started.IsZero() ||
 		verified.ended.Before(verified.started) || verified.observation.Final.FinalObjectIdentity != verified.authority.plan.FinalObjectIdentity {
@@ -222,6 +224,7 @@ func (verified *VerifiedCurrentUse) StableWith(after *VerifiedCurrentUse) bool {
 	}
 	beforeObservation, afterObservation := verified.observation, after.observation
 	return verified.authority.useID == after.authority.useID && beforeObservation.UseID == afterObservation.UseID &&
+		beforeObservation.Driver == afterObservation.Driver &&
 		beforeObservation.JobID == afterObservation.JobID && beforeObservation.FileLayoutID == afterObservation.FileLayoutID &&
 		beforeObservation.CompleteFileSnapshotID == afterObservation.CompleteFileSnapshotID &&
 		beforeObservation.ActivationOperationID == afterObservation.ActivationOperationID &&

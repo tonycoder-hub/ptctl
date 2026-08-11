@@ -39,12 +39,13 @@ func TestCurrentUseRequiresStableCompleteExactJob(t *testing.T) {
 		activationLedger(fixture.meta, &complete, now.Add(time.Second)))
 	before, beforeObservation, err := VerifyCurrentUse(context.Background(), authority, session)
 	if err != nil || !before.Verified() || beforeObservation.UseID == "" || beforeObservation.RequestsMade != 1 ||
-		beforeObservation.JobID != completion.Plan().JobID || !beforeObservation.AllSelected || !beforeObservation.AllComplete {
+		beforeObservation.Driver != downloader.DriverQBittorrent || beforeObservation.JobID != completion.Plan().JobID ||
+		!beforeObservation.AllSelected || !beforeObservation.AllComplete {
 		t.Fatalf("before=%#v verified=%t err=%v", beforeObservation, before != nil && before.Verified(), err)
 	}
 	after, afterObservation, err := VerifyCurrentUse(context.Background(), authority, session)
 	if err != nil || !after.Verified() || !before.StableWith(after) || beforeObservation.UseID != afterObservation.UseID ||
-		session.RequestsMade() != 3 {
+		afterObservation.Driver != downloader.DriverQBittorrent || session.RequestsMade() != 3 {
 		t.Fatalf("after=%#v stable=%t requests=%d err=%v", afterObservation, before.StableWith(after), session.RequestsMade(), err)
 	}
 

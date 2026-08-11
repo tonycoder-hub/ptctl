@@ -1043,8 +1043,12 @@ materialized target/final identities, activation completion, live-use ID,
 source selection, limits, and for every source its parent/name, parent and file
 identity, size, timestamp observation, manifest index, and pseudonymous path
 reference. Absolute paths never enter the public execution DTO. The source
-parents are rebound through filesystem handles on resume; qBittorrent paths
-remain lexical claims and are never used for host I/O.
+parents are rebound through filesystem handles on resume; qBittorrent and
+Transmission paths remain lexical claims and are never used for host I/O.
+The driver is re-established from the terminal activation authority and is
+emitted in both the completion and current-use observations. Transmission
+requires an exact v1 identity throughout; v2-only and hybrid activations cannot
+authorize its retirement path.
 
 An absent name is accepted only when its durable attempt marker already
 exists. That crash window produces a recovered completion basis, not a claim

@@ -144,8 +144,9 @@ capabilities at the edge, not assumptions in the core domain model.
 - zero-write source-retirement eligibility planning from a new complete live
   source proof, current exact materialized-final proof, and canonical terminal
   client activation journal, plus stable before/after reads of the exact live
-  typed-infohash job and its effective paths from one qBittorrent session, with
-  explicit final-overlap/alias rejection and no deletion authority;
+  typed-infohash job and its effective paths from one qBittorrent or
+  Transmission session, with explicit final-overlap/alias rejection and no
+  deletion authority; Transmission remains v1-only;
 - separately acknowledged, journaled source-name retirement that reproduces
   the same live plan, binds exact source parents/names and identities, records
   durable per-name attempts/completions, supports explicit crash recovery, and
@@ -936,11 +937,14 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl seed retire plan \
 This command performs zero writes and always reports
 `deletion_authority: none`. It repeats complete live discovery in the explicit
 search roots, reads the canonical terminal activation marker selected by its
-reviewed action, and uses one authenticated read-only qBittorrent session to
-observe the exact typed-infohash job before and after local proof. Single-file
-planning makes one login plus two bounded job-ledger reads; ordinary multi-file
-planning adds two bounded file-ledger reads. It never retries or mutates the
-client. The exact published final and selected source bytes are reverified
+reviewed action, and uses one authenticated read-only qBittorrent or
+Transmission session to observe the exact typed-infohash job before and after
+local proof. qBittorrent single-file planning makes one login plus two bounded
+job-ledger reads; Transmission uses its fixed two-request CSRF/version
+bootstrap plus the same two reads. Ordinary multi-file planning adds two
+bounded file-ledger reads. It never retries or mutates the client. Transmission
+source retirement is v1-only because its audited ledger exposes no typed v2
+identity. The exact published final and selected source bytes are reverified
 inside that live-client bracket, and a selected source inside or aliasing the
 final is rejected. Default output
 contains one-way source-path references; raw source paths
@@ -952,6 +956,11 @@ historical; current job identity, state, and effective paths are established
 separately by the bounded live reads. Those values are still non-atomic client
 claims and do not prove a remote open inode. Serialized plan JSON is not
 execution authority. JSON kind is `content.source_retirement_plan`.
+
+The examples use qBittorrent. For a terminal Transmission v1 activation, use
+`--driver transmission`, the full RPC URL, and the Transmission credential;
+all materialize, activation, mapping, and source selectors must still reproduce
+the exact reviewed lineage.
 
 To cross the irreversible boundary, repeat every selector from the plan and
 provide both its full SHA-256 plan ID and the dedicated acknowledgement:
@@ -1045,13 +1054,16 @@ change, or client identity/layout change fails closed. Once every name is
 retired, the exact final is reverified and the same authenticated client
 session reobserves current use before the terminal marker is published.
 
-A normal single-file run makes one login and three bounded ledger reads (four
-HTTP requests total); ordinary multi-file runs add three bounded file-list
-reads (seven total). Active resume uses one login plus two proof observations,
-or three/five total requests for single/multi-file. There are no retries and no
-client mutations. `status` reads only one explicit private journal or retained
-tombstone and neither reads credentials nor contacts the client. Terminal resume also avoids
-credential I/O. No command removes a parent directory, the final, another name
+A normal qBittorrent single-file run makes one login and three bounded ledger
+reads (four HTTP requests total); Transmission makes its fixed two-request
+bootstrap plus those three reads (five total). Ordinary multi-file runs add
+three bounded file-list reads, for seven qBittorrent or eight Transmission
+requests. Active resume uses two proof observations after bootstrap: three/five
+qBittorrent or four/six Transmission requests for single/multi-file. There are
+no retries and no client mutations. `status` reads only one explicit private
+journal or retained tombstone and neither reads credentials nor contacts the
+client. Terminal resume also avoids credential I/O. No command removes a parent
+directory, the final, another name
 for a hardlinked inode, an empty/padding entry, or a downloader job, and no
 report claims reclaimed storage or rollback. Execution JSON kind is
 `content.source_retirement`.

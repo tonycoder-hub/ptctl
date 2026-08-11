@@ -106,6 +106,7 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 		len(report.Data.Plan.SourceFiles) != 1 || report.Data.Plan.SourceFiles[0].SourcePath != "" ||
 		!report.Data.Scan.Complete || !report.Data.Scan.VerificationComplete || report.Data.Scan.StopReasons == nil ||
 		report.Data.Blockers == nil || report.Data.Issues == nil || report.Data.Warnings == nil ||
+		report.Data.Activation.Driver != "qbittorrent" || report.Data.ClientUse.Before.Driver != "qbittorrent" ||
 		!report.Data.ClientUse.Stable || report.Data.ClientUse.RequestsMade != 3 ||
 		server.totalRequests()-requestsBeforeRetire != 3 {
 		t.Fatalf("unexpected retirement report: %s", out.String())
@@ -239,6 +240,97 @@ func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
 }
 
+func TestTransmissionSeedRetirePlanAndRunExactSourceDeletion(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newTransmissionAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+
+	adoptionBase := transmissionClientAdoptBaseArgs(fixture, server.server.URL)
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, adoptionBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adoptionPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	adoptionRun := append(append([]string{"client", "adopt", "run"}, adoptionBase...),
+		"--expect-adoption-plan-id", adoptionPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(adoptionRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+	if adopted.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck || adopted.Data.Plan.Driver != "transmission" {
+		t.Fatalf("Transmission adoption did not complete: %s", out.String())
+	}
+
+	activationBase := transmissionClientActivateBaseArgs(fixture, server.server.URL, adopted.Data.Operation.ID, adopted.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "activate", "plan"}, activationBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission activation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	activationPlan := decodeClientActivateReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	activationRun := append(append([]string{"client", "activate", "run"}, activationBase...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, "--acknowledge-client-recheck")
+	if code := Run(activationRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission activation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	server.setState(0, 1)
+	out.Reset()
+	errOut.Reset()
+	activationResume := append(append([]string{"client", "activate", "resume"}, activationBase...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, activationPlan.Data.Operation.ID)
+	if code := Run(activationResume, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission activation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	checked := decodeClientActivateReport(t, out.Bytes())
+	if checked.Data.Outcome != clientactivate.OutcomeCheckedStopped || !checked.Data.Journal.RecheckCompletionDurable {
+		t.Fatalf("Transmission activation did not complete recheck: %s", out.String())
+	}
+
+	planArgs := transmissionSourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	requestsBefore := transmissionSourceRetireRequests(server)
+	if code := Run(planArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("Transmission retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	plan := decodeSourceRetireReport(t, out.Bytes())
+	if plan.Data.Outcome != sourceretire.OutcomeEligible || plan.Data.WritesPerformed != 0 || plan.Data.DeletionPerformed ||
+		plan.Data.Activation.Driver != "transmission" || plan.Data.ClientUse.Before.Driver != "transmission" ||
+		plan.Data.ClientUse.After.Driver != "transmission" || !plan.Data.ClientUse.Stable || plan.Data.ClientUse.RequestsMade != 4 ||
+		transmissionSourceRetireRequests(server)-requestsBefore != 4 {
+		t.Fatalf("unexpected Transmission retirement plan: %s", out.String())
+	}
+	if _, err := os.Stat(fixture.materialize.sourcePath); err != nil {
+		t.Fatalf("read-only Transmission retirement plan changed source: %v", err)
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	runArgs := append([]string(nil), planArgs...)
+	runArgs[2] = "run"
+	runArgs = append(runArgs, "--expect-plan-id", plan.Data.Plan.ID, "--acknowledge-source-deletion")
+	out.Reset()
+	errOut.Reset()
+	requestsBefore = transmissionSourceRetireRequests(server)
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("Transmission retire run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	execution := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if execution.Data.Outcome != sourceretire.ExecutionOutcomeRetired || !execution.Data.DeletionPerformed ||
+		execution.Data.Writes.NamesRemoved != 1 || execution.Data.Operation.Resumable ||
+		execution.Data.ClientUse.Before.Driver != "transmission" || execution.Data.ClientUse.After.Driver != "transmission" ||
+		execution.Data.ClientUse.RequestsMade != 5 || transmissionSourceRetireRequests(server)-requestsBefore != 5 {
+		t.Fatalf("unexpected Transmission retirement execution: %s", out.String())
+	}
+	if _, err := os.Lstat(fixture.materialize.sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("Transmission-retired source remains: %v", err)
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+}
+
 func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	reader := &trackingReader{}
 	var out, errOut bytes.Buffer
@@ -253,8 +345,19 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	if code := Run([]string{"seed", "retire", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
 		!strings.Contains(out.String(), "deletion_authority") || !strings.Contains(out.String(), "zero writes") ||
 		!strings.Contains(out.String(), "two bounded job-ledger reads") || !strings.Contains(out.String(), "retains an exact tombstone") ||
+		!strings.Contains(out.String(), "qbittorrent|transmission") || !strings.Contains(out.String(), "Transmission") ||
 		!strings.Contains(out.String(), "not_inspected") || !strings.Contains(out.String(), "unattributed absence") {
 		t.Fatalf("help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "plan", "--torrent", "missing.torrent", "--search-root", "missing",
+		"--target", "missing", "--materialize-operation", "present", "--materialize-plan-id", "present",
+		"--activation-operation", "present", "--activation-plan-id", "present", "--host-root", "present",
+		"--client-root", "/present", "--driver", "unsupported", "--url", "https://example.invalid",
+		"--username", "present", "--password-stdin"}, reader, &out, &errOut); code != 2 || reader.read {
+		t.Fatalf("unsupported driver code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
 	}
 	out.Reset()
 	errOut.Reset()
@@ -540,6 +643,21 @@ func sourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOpe
 		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
 		"--driver", "qbittorrent", "--url", endpoint, "--username", clientAdoptUser, "--password-stdin",
 		"--timeout", "1m", "--output", "json"}
+}
+
+func transmissionSourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOperation, activationPlanID string) []string {
+	result := sourceRetireBaseArgs(fixture, endpoint, activationOperation, activationPlanID)
+	for index := range result {
+		if index > 0 && result[index-1] == "--driver" {
+			result[index] = "transmission"
+			break
+		}
+	}
+	return result
+}
+
+func transmissionSourceRetireRequests(server *transmissionAdoptServer) int32 {
+	return server.handshake.Load() + server.session.Load() + server.ledger.Load() + server.add.Load() + server.verify.Load() + server.start.Load()
 }
 
 func decodeSourceRetireReport(t *testing.T, raw []byte) sourceRetireJSONEnvelope {

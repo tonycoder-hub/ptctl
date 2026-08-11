@@ -54,7 +54,12 @@ type envelope struct {
 
 type readOnlyDownloaderDriver interface {
 	downloader.Driver
+	configuredLedgerDriver
+}
+
+type configuredLedgerDriver interface {
 	downloader.LedgerDriver
+	ClientConfigID(username string) (string, error)
 }
 
 func newReadOnlyDownloaderDriver(name, endpoint string) (readOnlyDownloaderDriver, error) {
@@ -173,7 +178,7 @@ Usage:
   ptctl seed materialize abandon --target PATH --acknowledge-abandon [--output table|json] OPERATION_ID
   ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [--output table|json] OPERATION_ID
   ptctl seed materialize forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
-  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
+  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
   ptctl seed retire run [same selectors] --expect-plan-id ID --acknowledge-source-deletion [--output table|json]
   ptctl seed retire resume [same selectors] --expect-plan-id ID --acknowledge-source-deletion [--output table|json] OPERATION_ID
   ptctl seed retire status --target PATH [--output table|json] [OPERATION_ID]

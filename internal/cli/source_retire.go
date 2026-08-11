@@ -14,7 +14,6 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
-	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
@@ -90,7 +89,7 @@ func (a *app) seedRetire(args []string) error {
 
 func (a *app) seedRetireHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [flags]
+  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [flags]
   ptctl seed retire run (same live selectors) --expect-plan-id ID --acknowledge-source-deletion [flags]
   ptctl seed retire resume (same local/live selectors) --expect-plan-id ID --acknowledge-source-deletion [flags] OPERATION_ID
   ptctl seed retire status --target PATH [--output table|json] [OPERATION_ID]
@@ -100,7 +99,7 @@ func (a *app) seedRetireHelp() {
 The plan command is read-only. It requires one complete live source discovery,
 a current exact materialized-final proof, one canonical terminal client
 activation journal, and stable before/after observations of the exact live
-qBittorrent job in one authenticated read session. It emits only an eligibility
+downloader job in one authenticated read session. It emits only an eligibility
 plan: deletion_authority is always none, it performs zero writes, no file or
 directory is removed, and serialized JSON is never accepted later as proof.
 
@@ -119,8 +118,10 @@ tombstone. It publishes a root-level recovery intent, removes the operation
 subtree, then removes that last intent. Afterward, a repeated call can report
 only unattributed absence; it cannot claim idempotent historical success.
 
-The live-client bracket performs one login plus two bounded job-ledger reads;
-multi-file torrents add at most two bounded file-ledger reads. There are no
+The live-client bracket performs one bounded authenticated session bootstrap
+plus two bounded job-ledger reads; multi-file torrents add at most two bounded
+file-ledger reads. qBittorrent uses one login request. Transmission uses its
+fixed two-request CSRF/version bootstrap and remains v1-only. There are no
 retries or client mutations. Client paths and state remain non-atomic lexical
 claims and do not prove a remote open inode.
 
@@ -147,9 +148,9 @@ func addSourceRetireFlags(fs *flag.FlagSet, planning bool) *sourceRetireFlags {
 	values.hostRoot = fs.String("host-root", "", "host namespace root containing the materialized target")
 	values.clientRoot = fs.String("client-root", "", "downloader-visible namespace root")
 	values.clientStyle = fs.String("client-style", "posix", "downloader path style: posix or windows")
-	values.driver = fs.String("driver", "qbittorrent", "downloader driver")
-	values.endpoint = fs.String("url", "", "qBittorrent Web API origin")
-	values.username = fs.String("username", "", "qBittorrent username")
+	values.driver = fs.String("driver", downloader.DriverQBittorrent, "downloader driver: qbittorrent or transmission")
+	values.endpoint = fs.String("url", "", "downloader API origin or Transmission RPC URL")
+	values.username = fs.String("username", "", "downloader username")
 	values.passwordStdin = fs.Bool("password-stdin", false, "read downloader password from stdin")
 	values.showAbsolute = &showAbsolute
 	values.allowNetwork = fs.Bool("allow-network", false, "allow explicit network/UNC source roots; never applies to target")
@@ -189,7 +190,7 @@ type preparedSourceRetire struct {
 	clientRoot           string
 	clientWindows        bool
 	clientConfigID       string
-	adapter              *qbittorrent.Adapter
+	adapter              configuredLedgerDriver
 	username             string
 	showAbsolute         bool
 	requireEligible      bool
@@ -207,8 +208,8 @@ func (values *sourceRetireFlags) validate(fs *flag.FlagSet, command string) (pre
 	if !*values.passwordStdin {
 		return result, usageError("%s requires --password-stdin", command)
 	}
-	if *values.driver != "qbittorrent" {
-		return result, usageError("--driver currently supports only qbittorrent")
+	if *values.driver != downloader.DriverQBittorrent && *values.driver != downloader.DriverTransmission {
+		return result, usageError("--driver must be qbittorrent or transmission")
 	}
 	if *values.clientStyle != "posix" && *values.clientStyle != "windows" {
 		return result, usageError("--client-style must be posix or windows")
@@ -241,7 +242,7 @@ func (values *sourceRetireFlags) validate(fs *flag.FlagSet, command string) (pre
 	if err := storage.ValidatePathMappingConfig(*values.hostRoot, *values.clientRoot, clientWindows); err != nil {
 		return result, usageError("%s path mapping is invalid: %v", command, err)
 	}
-	adapter, err := qbittorrent.New(*values.endpoint)
+	adapter, err := newReadOnlyDownloaderDriver(*values.driver, *values.endpoint)
 	if err != nil {
 		return result, usageError("%s downloader endpoint is invalid", command)
 	}
@@ -283,7 +284,7 @@ func (a *app) seedRetirePlan(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl seed retire plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --search-root PATH [--search-root PATH...] --target PATH --materialize-operation ID --materialize-plan-id ID --activation-operation ID --activation-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [flags]")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Zero writes and zero deletion. The result is review evidence only; no serialized plan is executable authority.")
 		fmt.Fprintln(fs.Output(), "")
@@ -504,16 +505,16 @@ func writeSourceRetireHuman(out io.Writer, report sourceretire.Report) error {
 		report.Scan.InventoryLimits.MaxEntries, report.Scan.InventoryUsed.CandidatesRetained,
 		report.Scan.InventoryLimits.MaxCandidates, report.Scan.MatchUsed.ProofWorkBytesCharged,
 		report.Scan.MatchLimits.MaxProofWorkBytes)
-	fmt.Fprintf(w, "\nCLIENT COMPLETION\nOPERATION\t%s\nPLAN\t%s\nPHASE\t%s\nMARKER\t%s\nOBSERVED START\t%s\nOBSERVED END\t%s\nASSURANCE\t%s\n",
-		terminalSafe(report.Activation.OperationID), terminalSafe(report.Activation.PlanID), terminalSafe(report.Activation.TerminalPhase),
+	fmt.Fprintf(w, "\nCLIENT COMPLETION\nDRIVER\t%s\nOPERATION\t%s\nPLAN\t%s\nPHASE\t%s\nMARKER\t%s\nOBSERVED START\t%s\nOBSERVED END\t%s\nASSURANCE\t%s\n",
+		terminalSafe(report.Activation.Driver), terminalSafe(report.Activation.OperationID), terminalSafe(report.Activation.PlanID), terminalSafe(report.Activation.TerminalPhase),
 		terminalSafe(report.Activation.TerminalMarkerID), terminalSafe(report.Activation.ObservedAtStart),
 		terminalSafe(report.Activation.ObservedAtEnd), terminalSafe(report.Activation.Assurance))
 	currentUseID := report.Plan.CurrentClientUseID
 	if currentUseID == "" {
 		currentUseID = report.ClientUse.Before.UseID
 	}
-	fmt.Fprintf(w, "\nCURRENT CLIENT USE\nSTATUS\t%s\nREQUESTS MADE\t%d\nSTABLE\t%t\nUSE ID\t%s\nBEFORE JOB\t%s\nBEFORE STATE\t%s\nBEFORE PROGRESS\t%.6f\nBEFORE SNAPSHOT\t%s\nBEFORE INTERVAL\t%s .. %s\nAFTER JOB\t%s\nAFTER STATE\t%s\nAFTER PROGRESS\t%.6f\nAFTER SNAPSHOT\t%s\nAFTER INTERVAL\t%s .. %s\nASSURANCE\t%s\n",
-		terminalSafe(report.ClientUse.Status), report.ClientUse.RequestsMade, report.ClientUse.Stable,
+	fmt.Fprintf(w, "\nCURRENT CLIENT USE\nDRIVER\t%s\nSTATUS\t%s\nREQUESTS MADE\t%d\nSTABLE\t%t\nUSE ID\t%s\nBEFORE JOB\t%s\nBEFORE STATE\t%s\nBEFORE PROGRESS\t%.6f\nBEFORE SNAPSHOT\t%s\nBEFORE INTERVAL\t%s .. %s\nAFTER JOB\t%s\nAFTER STATE\t%s\nAFTER PROGRESS\t%.6f\nAFTER SNAPSHOT\t%s\nAFTER INTERVAL\t%s .. %s\nASSURANCE\t%s\n",
+		terminalSafe(report.ClientUse.Before.Driver), terminalSafe(report.ClientUse.Status), report.ClientUse.RequestsMade, report.ClientUse.Stable,
 		terminalSafe(currentUseID), terminalSafe(report.ClientUse.Before.JobID),
 		terminalSafe(report.ClientUse.Before.JobState), report.ClientUse.Before.JobProgress,
 		terminalSafe(report.ClientUse.Before.CompleteFileSnapshotID),
