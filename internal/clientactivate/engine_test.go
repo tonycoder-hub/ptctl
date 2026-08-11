@@ -56,6 +56,7 @@ func (payload *memoryPayload) Open() (io.Reader, error) {
 type adoptionSession struct {
 	requests int
 	ledgers  []downloader.LedgerSnapshot
+	adds     int
 }
 
 func (session *adoptionSession) ReadLedger(context.Context) (downloader.LedgerSnapshot, error) {
@@ -74,6 +75,7 @@ func (*adoptionSession) ReadJobFiles(context.Context, string, downloader.JobFile
 }
 func (session *adoptionSession) AddStopped(_ context.Context, request downloader.AddStoppedRequest) (downloader.MutationReceipt, error) {
 	session.requests++
+	session.adds++
 	reader, err := request.Metafile.Open()
 	if err != nil {
 		return downloader.MutationReceipt{}, err
@@ -210,6 +212,14 @@ func makeActivationFixtureWithRetainedAdoption(t *testing.T) activationFixture {
 	return makeActivationFixtureFromMode(t, raw, []activationSource{{name: "renamed-retained-source", content: content}}, true)
 }
 
+func makeActivationFixtureWithObservedExistingAdoption(t *testing.T) activationFixture {
+	t.Helper()
+	content := []byte("client activation observed existing adoption fixture")
+	raw := activationSingleV1Metafile("activate-existing.bin", content)
+	return makeActivationFixtureFromModeDriverAndAdoption(t, raw,
+		[]activationSource{{name: "renamed-existing-source", content: content}}, false, DriverQBittorrent, true)
+}
+
 func makeActivationFixtureFrom(t *testing.T, raw []byte, sources []activationSource) activationFixture {
 	return makeActivationFixtureFromMode(t, raw, sources, false)
 }
@@ -219,6 +229,10 @@ func makeActivationFixtureFromMode(t *testing.T, raw []byte, sources []activatio
 }
 
 func makeActivationFixtureFromModeAndDriver(t *testing.T, raw []byte, sources []activationSource, retainAdoption bool, driver string) activationFixture {
+	return makeActivationFixtureFromModeDriverAndAdoption(t, raw, sources, retainAdoption, driver, false)
+}
+
+func makeActivationFixtureFromModeDriverAndAdoption(t *testing.T, raw []byte, sources []activationSource, retainAdoption bool, driver string, adoptExisting bool) activationFixture {
 	t.Helper()
 	ctx := context.Background()
 	meta, err := metafile.Parse(raw)
@@ -266,7 +280,7 @@ func makeActivationFixtureFromModeAndDriver(t *testing.T, raw []byte, sources []
 	savePath, _ := projection.SavePath()
 	contentPath, _ := projection.ContentPath()
 	adoptionPlan, err := clientadopt.BuildPlan(verifiedFinal, clientadopt.PlanOptions{Driver: driver, ClientConfigID: clientConfig,
-		HostRoot: hostRoot, ClientRoot: "/downloads", ClientWindows: false})
+		HostRoot: hostRoot, ClientRoot: "/downloads", ClientWindows: false, AdoptExistingStopped: adoptExisting})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,29 +288,42 @@ func makeActivationFixtureFromModeAndDriver(t *testing.T, raw []byte, sources []
 	if driver == DriverTransmission {
 		opaque, evidence = meta.InfoHashV1, []string{"transmission_hash_string_sha1"}
 	}
-	before := activationLedgerForDriver(driver, meta, nil, time.Now().UTC())
 	job := downloader.Torrent{Hash: opaque, InfoHashV1: meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
 		IdentityEvidence: evidence, IdentityIssues: []string{}, SizeBytes: meta.TotalLength,
 		State: "stoppedDL", Progress: 0.25, SavePath: savePath, ContentPath: contentPath}
+	beforeJob := (*downloader.Torrent)(nil)
+	if adoptExisting {
+		beforeJob = &job
+	}
+	before := activationLedgerForDriver(driver, meta, beforeJob, time.Now().UTC())
 	after := activationLedgerForDriver(driver, meta, &job, before.ObservedAtEnd.Add(time.Millisecond))
-	addPolicy, _ := downloader.DescribeStoppedAddDriver(driver)
-	adoption := &adoptionSession{requests: addPolicy.OpenRequests, ledgers: []downloader.LedgerSnapshot{before, after}}
-	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "metastore"))
-	if err != nil {
-		t.Fatal(err)
+	ledgerPolicy, _ := downloader.DescribeLedgerDriver(driver)
+	adoption := &adoptionSession{requests: ledgerPolicy.OpenRequests, ledgers: []downloader.LedgerSnapshot{before, after}}
+	runOptions := clientadopt.RunOptions{Prepared: adoptionPlan, ExpectedPlanID: adoptionPlan.PlanID(), Session: adoption}
+	if adoptExisting {
+		runOptions.AcknowledgeExistingStopped = true
+	} else {
+		store, _, initErr := metastore.Init(filepath.Join(t.TempDir(), "metastore"))
+		if initErr != nil {
+			t.Fatal(initErr)
+		}
+		_, artifact, _, importErr := store.Import(ctx, bytes.NewReader(raw), metastore.DefaultLimits())
+		if importErr != nil {
+			t.Fatal(importErr)
+		}
+		payload, payloadErr := store.LoadPayload(ctx, artifact.ID, metastore.DefaultLimits())
+		if payloadErr != nil {
+			t.Fatal(payloadErr)
+		}
+		runOptions.Metafile = payload
+		runOptions.AcknowledgeAdd = true
 	}
-	_, artifact, _, err := store.Import(ctx, bytes.NewReader(raw), metastore.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := store.LoadPayload(ctx, artifact.ID, metastore.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	adoptionReport, err := clientadopt.Run(ctx, clientadopt.RunOptions{Prepared: adoptionPlan, ExpectedPlanID: adoptionPlan.PlanID(),
-		Metafile: payload, Session: adoption, AcknowledgeAdd: true})
+	adoptionReport, err := clientadopt.Run(ctx, runOptions)
 	if err != nil {
 		t.Fatalf("adoption report=%#v err=%v", adoptionReport, err)
+	}
+	if adoptExisting && adoption.adds != 0 {
+		t.Fatalf("observation-only adoption submitted %d add requests", adoption.adds)
 	}
 	if retainAdoption {
 		retention, pruneErr := clientadopt.Prune(ctx, clientadopt.PruneOptions{TargetRoot: targetRoot,
@@ -331,6 +358,29 @@ func TestPrepareAuthorityAcceptsBoundRetainedAdoptionCompletion(t *testing.T) {
 	if err != nil || status.Operation.Status != "retained" || status.Journal.RetentionState != "complete" || !status.Journal.RetentionCompletionPresent ||
 		status.Plan.ID != fixture.adoptionPlanID {
 		t.Fatalf("retained adoption status=%#v err=%v", status, err)
+	}
+}
+
+func TestPrepareAuthorityAcceptsObservedExistingStoppedAdoptionCompletion(t *testing.T) {
+	fixture := makeActivationFixtureWithObservedExistingAdoption(t)
+	if fixture.authority == nil || fixture.authority.verifiedAdoption == nil || !fixture.authority.verifiedAdoption.Verified() {
+		t.Fatalf("observed existing-job adoption authority unavailable: %#v", fixture.authority)
+	}
+	observation := fixture.authority.verifiedAdoption.Observation()
+	if observation.Action != clientadopt.ActionAdoptExistingStopped || observation.JobID == "" ||
+		observation.Assurance != "same_invocation_bound_canonical_existing_stopped_adoption_completion_read_without_durability_refresh" {
+		t.Fatalf("observed existing-job adoption=%#v", observation)
+	}
+	job := fixture.job("stoppedDL", 0.25)
+	before := activationLedgerForDriver(fixture.driver, fixture.meta, &job, time.Now().UTC())
+	session := newActivationSession(fixture, before)
+	observed, err := observeClient(context.Background(), fixture.authority, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := BuildPlan(fixture.authority, session.descriptor, observed, false)
+	if err != nil || prepared == nil || prepared.plan.AdoptionCompletionID != observation.CompletionID {
+		t.Fatalf("activation plan=%#v err=%v", prepared, err)
 	}
 }
 

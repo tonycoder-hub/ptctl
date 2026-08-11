@@ -83,7 +83,7 @@ An optional explicit `--adoption-operation/--adoption-plan-id` pair is
 available only with materialized-final mode, the complete downloader group,
 one host/client mapping, automatic file-layout observation, and the fixed
 default file limits. Before credential input, a bound read of the canonical
-terminal stopped-add journal or sealed retention tombstone creates opaque
+terminal client-adoption journal or sealed retention tombstone creates opaque
 `clientadopt.VerifiedCompletion` authority. Its public completion is historical
 only. The same authority then validates the already-read reconciliation
 Before/After ledgers: both must contain one stable exact typed job with the
@@ -845,17 +845,25 @@ once its last marker is absent, unattributed absence is operational exit `1`.
 
 ## Exact stopped-job adoption
 
-`client adopt` is the first downloader-write slice. It is downstream of a
-committed copy-only materialize operation and deliberately stops before any
-client verification or transfer-state transition:
+`client adopt` is downstream of a committed copy-only materialize operation and
+deliberately stops before client verification or a transfer-state transition.
+Its reviewed plan selects exactly one of two actions:
 
 ```text
-exact stored metafile + current exact final + complete typed queue absence
-  -> durable target-root-local request intent
-  -> one built-in downloader add POST requesting stopped/paused state
-  -> complete typed queue observation of one exact stopped job
-  -> exact final reverify
-  -> durable adopted-pending-recheck marker
+default stopped add:
+  exact stored metafile + current exact final + complete typed queue absence
+    -> durable target-root-local request intent
+    -> one built-in downloader add POST requesting stopped/paused state
+    -> complete typed queue observation of one exact stopped job
+    -> exact final reverify
+    -> durable adopted-pending-recheck marker
+
+observation-only existing stopped job:
+  current exact final + complete typed observation of one exact stopped job
+    -> durable target-root-local observation intent
+    -> exact final reverify
+    -> later complete typed observation of the same opaque stopped job
+    -> durable existing-adopted-pending-recheck marker
 ```
 
 The process-local `materialize.VerifiedFinal` is the only bridge from a
@@ -867,8 +875,8 @@ identities and proof counts but no path. Its client projection uses one
 invocation-scoped host/client mapping; public plans contain only domain-separated
 path and mapping references.
 
-`downloader.MutationSession` extends the bounded ledger session with one
-`AddStopped` port. The exact raw payload is an opaque, one-shot
+For the default stopped-add action, `downloader.MutationSession` extends the
+bounded ledger session with one `AddStopped` port. The exact raw payload is an opaque, one-shot
 `MetafilePayload` loaded only from the bound private metastore object. The
 qBittorrent implementation reuses one authenticated session and streams one
 bounded multipart POST. The Transmission implementation uses its fixed
@@ -880,8 +888,8 @@ separately. Generic job hashes remain opaque locators. qBittorrent can establish
 typed v1 and v2 identity; Transmission adoption is restricted to v1 because
 its audited ledger exposes only the SHA-1 `hash_string` identity.
 
-Before a new operation, one complete ledger must prove absence. Any unavailable,
-invalid, partial, conflicting, or duplicate typed identity fails closed.
+Before a new stopped-add operation, one complete ledger must prove absence. Any
+unavailable, invalid, partial, conflicting, or duplicate typed identity fails closed.
 Hybrid identity requires both hash families on the same qBittorrent job and is
 therefore ineligible for Transmission adoption. Names, sizes, progress, and
 paths never select a job. After the POST, success requires one unique exact
@@ -892,6 +900,25 @@ response is rejected, and an unknown response cannot be attributed later
 merely because an exact job appears. This is still a client
 claim: the completion marker says `adopted_pending_client_recheck`, while the
 raw metafile variant remains unobservable to either downloader.
+
+The observation-only action uses only `downloader.LedgerSession`; it never asks
+the adapter for mutation capability and never constructs the one-shot metafile
+payload. The first complete snapshot must already contain one unique exact typed
+job with the reviewed size, stopped state, and lexical save/content paths. After
+the observation attempt is durable, the engine performs a fresh exact proof of
+the current materialized final, then reads a later complete snapshot from the
+same session. The second snapshot must retain the same opaque job key, stopped
+state, typed identity, size, and paths. Snapshot intervals must be ordered around
+the intervening proof. qBittorrent supports v1, v2, and hybrid identity;
+Transmission remains v1-only.
+
+This mode creates historical adoption lineage without claiming downloader
+causality. It cannot observe the original private metafile wrapper, a remote job
+generation, per-file effective paths, selection state, or whether the client has
+checked or read the bytes. The bracket is serial and non-atomic. The later
+activation workflow must still reobserve the exact current job and bounded
+per-file layout before it can authorize recheck or start. Public reports expose
+only opaque job/path references and cannot recreate completion authority.
 
 A completed adoption may be used only as an explicit lineage input when its
 exact job is no longer present. The caller supplies the full prior
@@ -914,11 +941,13 @@ process-local completion authority. The same rule applies to qBittorrent and
 v1-only Transmission adoption.
 
 The deterministic operation directory is reserved by the materialize layout
-validator and contains canonical no-clobber intent, bounded attempt, and
-completion markers. A request attempt is durable before the POST. If its result
-is unknown, resume performs a ledger read first and never repeats the POST
-unless both add and repeat acknowledgements are explicit. At most three
-explicit attempts are representable. An initialization crash is recoverable
+validator and contains canonical no-clobber intent, bounded adoption-attempt,
+and completion markers. A stopped-add request attempt is durable before the
+POST; an observation-only attempt durably records the first job observation
+before the intervening final proof. If an add result is unknown, resume performs
+a ledger read first and never repeats the POST unless both add and repeat
+acknowledgements are explicit. At most three explicit attempts are
+representable. An initialization crash is recoverable
 only when the operation namespace is exactly empty apart from its lock and
 optional empty scratch directory; unexpected objects remain integrity failures.
 `status` never contacts the client and cannot call an unobserved state ready.

@@ -90,6 +90,8 @@ func TestTransmissionAdoptionBridgeUsesItsExistingFourRequestBracket(t *testing.
 	operationID := OperationIDForPlan(planID)
 	completion := fixtureCompletion(t, fixture)
 	completion.OperationID, completion.PlanID = operationID, planID
+	attempt := fixtureAttempt(t, fixture)
+	attempt.OperationID, attempt.PlanID = operationID, planID
 	job := fixture.after.Jobs[0]
 	job.Hash = fixture.materialized.meta.InfoHashV1
 	job.IdentityEvidence = []string{"transmission_hash_string_sha1"}
@@ -99,7 +101,7 @@ func TestTransmissionAdoptionBridgeUsesItsExistingFourRequestBracket(t *testing.
 		t.Fatal(err)
 	}
 	verified := &VerifiedCompletion{authority: &verifiedCompletionAuthority{
-		plan: plan, planID: planID, operationID: operationID, completion: completion, completionID: completionID,
+		plan: plan, planID: planID, operationID: operationID, attempt: attempt, completion: completion, completionID: completionID,
 	}}
 	if !verified.Verified() {
 		t.Fatal("synthetic canonical Transmission completion was not verified")
@@ -130,4 +132,15 @@ func fixtureCompletion(t *testing.T, fixture terminalAdoptionFixture) Completion
 		t.Fatalf("completion fixture unavailable: %v", err)
 	}
 	return verified.authority.completion
+}
+
+func fixtureAttempt(t *testing.T, fixture terminalAdoptionFixture) Attempt {
+	t.Helper()
+	verified, _, err := VerifyCompletion(context.Background(), CompletionProofOptions{
+		TargetRoot: fixture.materialized.targetRoot, OperationID: fixture.prepared.OperationID(), ExpectedPlanID: fixture.prepared.PlanID(),
+	})
+	if err != nil || !verified.Verified() {
+		t.Fatalf("attempt fixture unavailable: %v", err)
+	}
+	return verified.authority.attempt
 }

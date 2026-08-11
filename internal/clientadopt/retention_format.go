@@ -78,7 +78,8 @@ func (marker RetentionIntent) Validate() error {
 		if encodeErr != nil || id != marker.AttemptIDs[index] || attempt.OperationID != marker.OperationID ||
 			attempt.PlanID != marker.PlanID || attempt.Sequence != index+1 ||
 			attempt.MetafileVariantID != marker.Intent.Plan.MetafileVariantID ||
-			attempt.MetafileBytes != marker.Intent.Plan.MetafileBytes {
+			attempt.MetafileBytes != marker.Intent.Plan.MetafileBytes ||
+			!attemptMatchesPlan(attempt, marker.Intent.Plan) {
 			return fmt.Errorf("%w: client adoption retention attempt chain is invalid", ErrIntegrity)
 		}
 		if index == 0 && attempt.PreviousAttemptID != "" {
@@ -91,7 +92,8 @@ func (marker RetentionIntent) Validate() error {
 	_, completionID, err := encodeCompletion(marker.Completion)
 	if err != nil || completionID != marker.CompletionID || marker.Completion.AttemptID != marker.AttemptIDs[len(marker.AttemptIDs)-1] ||
 		marker.Completion.ContentPathRef != marker.Intent.Plan.ExpectedContentPathRef ||
-		marker.Completion.FinalObjectIdentity != marker.Intent.Plan.FinalObjectIdentity {
+		marker.Completion.FinalObjectIdentity != marker.Intent.Plan.FinalObjectIdentity ||
+		!completionMatchesPlan(marker.Completion, marker.Intent.Plan, marker.Attempts[len(marker.Attempts)-1]) {
 		return fmt.Errorf("%w: client adoption retention completion link is invalid", ErrIntegrity)
 	}
 	return nil

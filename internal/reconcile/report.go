@@ -65,7 +65,7 @@ type BuildInput struct {
 }
 
 // ClientAdoptionCompletionProof is implemented only by a process-local read
-// of one canonical terminal stopped-adoption journal or retained tombstone.
+// of one canonical terminal client-adoption journal or retained tombstone.
 type ClientAdoptionCompletionProof interface {
 	ReconciliationAdoptionCompletion() (ClientAdoptionCompletion, bool)
 }
@@ -261,6 +261,7 @@ type ClientAdoptionLedger struct {
 
 type ClientAdoptionCompletion struct {
 	Driver                 string    `json:"driver"`
+	Action                 string    `json:"action"`
 	OperationID            string    `json:"operation_id"`
 	PlanID                 string    `json:"plan_id"`
 	CompletionID           string    `json:"completion_id"`
@@ -1139,12 +1140,12 @@ func assessClientAdoption(meta *metafile.MetaInfo, selection ClientAdoptionSelec
 		if ledger.Status == "selected_adoption_mismatch" {
 			blockers = append(blockers, ReportFinding{Code: "adoption.selection_mismatch", Message: "the selected terminal stopped adoption does not belong to the requested metafile, materialized final, client configuration, or path mapping"})
 		} else {
-			blockers = append(blockers, ReportFinding{Code: "adoption.completion_proof_unavailable", Message: "the explicit terminal stopped-adoption journal could not be verified in this invocation"})
+			blockers = append(blockers, ReportFinding{Code: "adoption.completion_proof_unavailable", Message: "the explicit terminal client-adoption journal could not be verified in this invocation"})
 		}
 		return ledger, blockers, warnings
 	}
 	if !selection.CompletionAttempted || selection.Completion == nil {
-		blockers = append(blockers, ReportFinding{Code: "adoption.completion_proof_unavailable", Message: "the explicit terminal stopped-adoption journal could not be verified in this invocation"})
+		blockers = append(blockers, ReportFinding{Code: "adoption.completion_proof_unavailable", Message: "the explicit terminal client-adoption journal could not be verified in this invocation"})
 		return ledger, blockers, warnings
 	}
 	completion, ok := selection.Completion.ReconciliationAdoptionCompletion()
@@ -1152,13 +1153,16 @@ func assessClientAdoption(meta *metafile.MetaInfo, selection ClientAdoptionSelec
 		if ledger.StopReason == "" {
 			ledger.StopReason = "adoption_completion_load_failed"
 		}
-		blockers = append(blockers, ReportFinding{Code: "adoption.completion_proof_unavailable", Message: "the terminal stopped-adoption capability is unavailable or invalid"})
+		blockers = append(blockers, ReportFinding{Code: "adoption.completion_proof_unavailable", Message: "the terminal client-adoption capability is unavailable or invalid"})
 		return ledger, blockers, warnings
 	}
 	ledger.Completion = &completion
 	ledger.ProcessLocalCompletionProof = true
 	ledger.Historical = true
-	warnings = append(warnings, "the terminal stopped-adoption record is historical evidence and does not by itself prove current downloader state")
+	warnings = append(warnings, "the terminal client-adoption record is historical evidence and does not by itself prove current downloader state")
+	if completion.Action == "adopt_existing_stopped" {
+		warnings = append(warnings, "the observation-only adoption did not submit or prove the downloader job's private metafile wrapper")
+	}
 
 	if meta == nil || materialized.Observation == nil || !materialized.ProcessLocalFinalProof ||
 		completion.MetafileVariantID != meta.MetafileVariantID || completion.MetafileBytes != meta.MetafileBytes ||
@@ -1685,9 +1689,16 @@ func validParentCleanupCurrentAbsence(value ParentCleanupCurrentAbsence) bool {
 }
 
 func validClientAdoptionCompletion(value ClientAdoptionCompletion) bool {
-	descriptor, ok := downloader.DescribeStoppedAddDriver(value.Driver)
 	identity := downloader.TypedIdentity{InfoHashV1: value.InfoHashV1, InfoHashV2: value.InfoHashV2}
-	if !ok || !descriptor.SupportsIdentity(identity) || !validAdoptionOperationForPlan(value.OperationID, value.PlanID) ||
+	identitySupported := false
+	switch value.Action {
+	case "add_stopped":
+		descriptor, ok := downloader.DescribeStoppedAddDriver(value.Driver)
+		identitySupported = ok && descriptor.SupportsIdentity(identity)
+	case "adopt_existing_stopped":
+		identitySupported = downloader.LedgerDriverSupportsIdentity(value.Driver, identity)
+	}
+	if !identitySupported || !validAdoptionOperationForPlan(value.OperationID, value.PlanID) ||
 		!validSHA256ID(value.CompletionID) || !validSHA256ID(value.MetafileVariantID) || value.MetafileBytes <= 0 || value.MetafileBytes > 32<<20 ||
 		!validSHA256ID(value.MaterializeOperationID) || !validPlanID(value.MaterializePlanID) ||
 		!validSHA256ID(value.ClientConfigID) || !validSHA256ID(value.PathMappingID) ||
@@ -1701,6 +1712,12 @@ func validClientAdoptionCompletion(value ClientAdoptionCompletion) bool {
 	}
 	if value.ClientPathSemantics != "posix_exact" && value.ClientPathSemantics != "windows_exact" {
 		return false
+	}
+	if value.Action == "adopt_existing_stopped" {
+		if value.RetainedTombstone {
+			return value.Assurance == "same_invocation_bound_canonical_existing_stopped_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation"
+		}
+		return value.Assurance == "same_invocation_bound_canonical_existing_stopped_adoption_completion_read_without_durability_refresh"
 	}
 	if value.RetainedTombstone {
 		return value.Assurance == "same_invocation_bound_canonical_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation"

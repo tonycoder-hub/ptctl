@@ -213,7 +213,7 @@ func TestClientAdoptionAssessmentBindsHistoricalCompletionToExistingBracket(t *t
 	meta := &metafile.MetaInfo{MetafileVariantID: digest, MetafileBytes: 64, InfoHashV1: strings.Repeat("d", 40),
 		Files: []metafile.File{{Length: 4}}}
 	completion := ClientAdoptionCompletion{
-		Driver: downloader.DriverQBittorrent, OperationID: adoptionOperation, PlanID: planID, CompletionID: other,
+		Driver: downloader.DriverQBittorrent, Action: "add_stopped", OperationID: adoptionOperation, PlanID: planID, CompletionID: other,
 		MetafileVariantID: digest, MetafileBytes: 64, InfoHashV1: meta.InfoHashV1,
 		MaterializeOperationID: other, MaterializePlanID: planID, ClientConfigID: digest, PathMappingID: other,
 		ClientPathSemantics: "posix_exact", ExpectedSavePathRef: digest, ExpectedContentPathRef: other,
@@ -241,6 +241,17 @@ func TestClientAdoptionAssessmentBindsHistoricalCompletionToExistingBracket(t *t
 	if ledger.Status != "historical_completion_current_job_bound" || !ledger.ProcessLocalCompletionProof ||
 		!ledger.ProcessLocalCurrentJobProof || ledger.Completion == nil || ledger.CurrentJob == nil || len(blockers) != 0 || len(warnings) < 2 {
 		t.Fatalf("ledger=%#v blockers=%#v warnings=%#v", ledger, blockers, warnings)
+	}
+	observedExisting := completion
+	observedExisting.Action = "adopt_existing_stopped"
+	observedExisting.Assurance = "same_invocation_bound_canonical_existing_stopped_adoption_completion_read_without_durability_refresh"
+	existingLedger, existingBlockers, existingWarnings := assessClientAdoption(meta, ClientAdoptionSelection{Requested: true, CompletionAttempted: true,
+		Completion: adoptionCompletionStub{value: observedExisting}, CurrentJob: adoptionCurrentJobStub{value: current}}, materialized,
+		ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, client, other)
+	if existingLedger.Status != "historical_completion_current_job_bound" || existingLedger.Completion == nil ||
+		existingLedger.Completion.Action != "adopt_existing_stopped" || len(existingBlockers) != 0 ||
+		!containsWarning(existingWarnings, "did not submit or prove") {
+		t.Fatalf("existing ledger=%#v blockers=%#v warnings=%#v", existingLedger, existingBlockers, existingWarnings)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
 		"exact_unique", "same_location", true, ledger.Status, true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "consistent" {
@@ -643,6 +654,15 @@ func validParentCleanupCompletionFixture(retirement SourceRetirementCompletion) 
 func containsFinding(values []ReportFinding, code string) bool {
 	for _, value := range values {
 		if value.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func containsWarning(values []string, fragment string) bool {
+	for _, value := range values {
+		if strings.Contains(value, fragment) {
 			return true
 		}
 	}

@@ -752,11 +752,12 @@ func TestReconcileReportBindsTerminalAdoptionAndActivationToExistingClientBracke
 	}
 	var human bytes.Buffer
 	if err := writeReconciliationHuman(&human, response.Data); err != nil ||
-		!strings.Contains(human.String(), "CLIENT ADOPTION (STOPPED ADD)") ||
+		!strings.Contains(human.String(), "CLIENT ADOPTION") ||
+		!strings.Contains(human.String(), "ACTION") || !strings.Contains(human.String(), "add_stopped") ||
 		!strings.Contains(human.String(), "PROCESS-LOCAL CURRENT-JOB BRIDGE  true") ||
 		!strings.Contains(human.String(), "CLIENT ACTIVATION") ||
 		!strings.Contains(human.String(), "PROCESS-LOCAL CURRENT-USE BRIDGE  true") ||
-		strings.Index(human.String(), "CLIENT ADOPTION (STOPPED ADD)") > strings.Index(human.String(), "LEDGERS") ||
+		strings.Index(human.String(), "CLIENT ADOPTION") > strings.Index(human.String(), "LEDGERS") ||
 		strings.Index(human.String(), "CLIENT ACTIVATION") > strings.Index(human.String(), "LEDGERS") {
 		t.Fatalf("adoption/activation table contract is unclear: err=%v\n%s", err, human.String())
 	}
@@ -1319,7 +1320,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--adoption-operation") || !strings.Contains(helpOut.String(), "terminal stopped-add journal or retained tombstone") || !strings.Contains(helpOut.String(), "job incarnation remains unobservable") || !strings.Contains(helpOut.String(), "--removal-operation") || !strings.Contains(helpOut.String(), "terminal keep-data removal") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "--parent-cleanup-operation") || !strings.Contains(helpOut.String(), "--parent-cleanup-search-root") || !strings.Contains(helpOut.String(), "parent-cleanup selectors") || !strings.Contains(helpOut.String(), "twice reobserve the exact removed parent names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--adoption-operation") || !strings.Contains(helpOut.String(), "terminal client-adoption journal or retained tombstone") || !strings.Contains(helpOut.String(), "observation-only existing-job adoption") || !strings.Contains(helpOut.String(), "job incarnation remains unobservable") || !strings.Contains(helpOut.String(), "--removal-operation") || !strings.Contains(helpOut.String(), "terminal keep-data removal") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "--parent-cleanup-operation") || !strings.Contains(helpOut.String(), "--parent-cleanup-search-root") || !strings.Contains(helpOut.String(), "parent-cleanup selectors") || !strings.Contains(helpOut.String(), "twice reobserve the exact removed parent names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -1334,7 +1335,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	siteBinding := strings.Index(text, "SITE BINDING")
 	liveSite := strings.Index(text, "LIVE SITE DETAIL")
 	materialized := strings.Index(text, "MATERIALIZED FINAL")
-	adoption := strings.Index(text, "CLIENT ADOPTION (STOPPED ADD)")
+	adoption := strings.Index(text, "CLIENT ADOPTION")
 	activation := strings.Index(text, "CLIENT ACTIVATION")
 	retirement := strings.Index(text, "SOURCE RETIREMENT")
 	parentCleanup := strings.Index(text, "PARENT CLEANUP")

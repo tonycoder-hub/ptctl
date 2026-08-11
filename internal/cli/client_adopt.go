@@ -38,11 +38,13 @@ type clientAdoptFlags struct {
 	endpoint               *string
 	username               *string
 	passwordStdin          *bool
+	adoptExistingStopped   *bool
 	priorAdoptionOperation *string
 	priorAdoptionPlanID    *string
 	timeout                *time.Duration
 	expectedAdoptionPlan   *string
 	acknowledgeAdd         *bool
+	acknowledgeExisting    *bool
 	acknowledgeReAdoption  *bool
 	repeatAdd              *bool
 }
@@ -81,16 +83,24 @@ func (a *app) clientAdopt(args []string) error {
 
 func (a *app) clientAdoptHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--prior-adoption-operation ID --prior-adoption-plan-id ID] [--output table|json]
-  ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--acknowledge-client-re-adoption] [--output table|json]
-  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add] [--acknowledge-repeat-add] [--acknowledge-client-re-adoption] [--output table|json] OPERATION_ID
+  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--adopt-existing-stopped | --prior-adoption-operation ID --prior-adoption-plan-id ID] [--output table|json]
+  ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID (--acknowledge-client-add [--acknowledge-client-re-adoption] | --adopt-existing-stopped --acknowledge-existing-stopped-adoption) [--output table|json]
+  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID ([--acknowledge-client-add --acknowledge-repeat-add] [--acknowledge-client-re-adoption] | --adopt-existing-stopped --acknowledge-existing-stopped-adoption) [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
   ptctl client adopt prune --target PATH --expect-adoption-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client adopt forget --target PATH --expect-adoption-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
-Version 1 only adds an absent exact typed-infohash job in stopped mode. It never
-changes an existing job, moves content, rechecks, resumes, deletes, or retires
-source data. Exact raw bytes must come from the private metafile store.
+Version 1 has two explicit actions. The default adds an absent exact
+typed-infohash job in stopped mode using exact raw bytes from the private
+metafile store. --adopt-existing-stopped instead records an observation-only
+lineage for one already-present exact stopped job at the verified final path.
+That mode performs two same-session ledger reads around a fresh exact-final
+verification and never constructs or submits the one-shot raw-metafile
+mutation payload.
+
+Neither action moves content, rechecks, resumes, deletes, or retires source
+data. Observation-only adoption does not mutate the downloader and cannot
+prove which private metafile wrapper originally created the existing job.
 
 After a terminal exact job disappears, an explicit prior operation/plan pair
 can authorize a new independent adoption lineage. The prior canonical
@@ -133,12 +143,14 @@ func addClientAdoptFlags(fs *flag.FlagSet, execution bool) *clientAdoptFlags {
 	values.endpoint = fs.String("url", "", "downloader API origin or Transmission RPC URL")
 	values.username = fs.String("username", "", "downloader username")
 	values.passwordStdin = fs.Bool("password-stdin", false, "read downloader password from stdin")
+	values.adoptExistingStopped = fs.Bool("adopt-existing-stopped", false, "observe and adopt one existing exact stopped job without submitting a metafile or mutating the downloader")
 	values.priorAdoptionOperation = fs.String("prior-adoption-operation", "", "explicit terminal prior adoption operation authorizing re-adoption; pair with --prior-adoption-plan-id")
 	values.priorAdoptionPlanID = fs.String("prior-adoption-plan-id", "", "reviewed prior adoption plan ID; pair with --prior-adoption-operation")
 	values.timeout = fs.Duration("timeout", clientAdoptDefaultTimeout, "shared final-proof and client wall-clock budget")
 	if execution {
 		values.expectedAdoptionPlan = fs.String("expect-adoption-plan-id", "", "reviewed 24-hex client adoption plan ID")
 		values.acknowledgeAdd = fs.Bool("acknowledge-client-add", false, "acknowledge one stopped downloader add request")
+		values.acknowledgeExisting = fs.Bool("acknowledge-existing-stopped-adoption", false, "acknowledge recording an observation-only lineage for one existing exact stopped job")
 		values.acknowledgeReAdoption = fs.Bool("acknowledge-client-re-adoption", false, "acknowledge a new stopped add lineage after the explicit prior terminal job disappeared")
 		values.repeatAdd = fs.Bool("acknowledge-repeat-add", false, "acknowledge repeating a prior request whose result remains unknown")
 	}
@@ -194,6 +206,9 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	if priorOperationSet != priorPlanSet || priorOperationSet && (*values.priorAdoptionOperation == "" || *values.priorAdoptionPlanID == "") {
 		return result, usageError("%s requires --prior-adoption-operation and --prior-adoption-plan-id together", command)
 	}
+	if *values.adoptExistingStopped && priorOperationSet {
+		return result, usageError("%s observation-only adoption cannot consume prior adoption-lineage selectors", command)
+	}
 	var priorCompletion *clientadopt.VerifiedCompletion
 	if priorOperationSet {
 		priorOperation, parseErr := clientadopt.ParseOperationID(*values.priorAdoptionOperation)
@@ -237,7 +252,7 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	}
 	prepared, err := clientadopt.BuildPlan(verified, clientadopt.PlanOptions{
 		Driver: *values.driver, ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot, ClientWindows: windows,
-		PriorCompletion: priorCompletion,
+		PriorCompletion: priorCompletion, AdoptExistingStopped: *values.adoptExistingStopped,
 	})
 	if err != nil {
 		return result, err
@@ -306,16 +321,22 @@ func (a *app) clientAdoptRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return usageError("client adopt run: %v", err)
 	}
-	if !validMaterializePlanID(*values.expectedAdoptionPlan) || !*values.acknowledgeAdd || *values.repeatAdd {
-		return usageError("client adopt run requires --expect-adoption-plan-id and --acknowledge-client-add; repeat acknowledgement is resume-only")
+	if !validMaterializePlanID(*values.expectedAdoptionPlan) || *values.repeatAdd {
+		return usageError("client adopt run requires --expect-adoption-plan-id; repeat acknowledgement is resume-only")
 	}
 	priorRequested := flagWasSet(fs, "prior-adoption-operation") || flagWasSet(fs, "prior-adoption-plan-id")
-	if priorRequested != *values.acknowledgeReAdoption {
+	if *values.adoptExistingStopped {
+		if !*values.acknowledgeExisting || *values.acknowledgeAdd || *values.acknowledgeReAdoption || priorRequested {
+			return usageError("client adopt run observation mode requires --adopt-existing-stopped and --acknowledge-existing-stopped-adoption, and forbids add/re-adoption flags")
+		}
+	} else if *values.acknowledgeExisting || !*values.acknowledgeAdd {
+		return usageError("client adopt run add mode requires --acknowledge-client-add and forbids --acknowledge-existing-stopped-adoption")
+	} else if priorRequested != *values.acknowledgeReAdoption {
 		return usageError("client adopt run requires --acknowledge-client-re-adoption exactly when prior adoption selectors are supplied")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *values.timeout)
 	defer cancel()
-	prepared, err := prepareClientAdopt(ctx, fs, values, "client adopt run", true, false)
+	prepared, err := prepareClientAdopt(ctx, fs, values, "client adopt run", !*values.adoptExistingStopped, false)
 	if err != nil {
 		return err
 	}
@@ -327,7 +348,12 @@ func (a *app) clientAdoptRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	session, err := prepared.adapter.OpenMutationSession(ctx, credential)
+	var session downloader.LedgerSession
+	if *values.adoptExistingStopped {
+		session, err = prepared.adapter.OpenReadSession(ctx, credential)
+	} else {
+		session, err = prepared.adapter.OpenMutationSession(ctx, credential)
+	}
 	if err != nil {
 		requests, _ := downloader.RequestsMadeFromError(err)
 		report := clientadopt.FailureReport(prepared.prepared, *values.expectedAdoptionPlan, "run", requests, err)
@@ -336,7 +362,8 @@ func (a *app) clientAdoptRun(args []string) error {
 	defer session.Close()
 	report, operationErr := clientadopt.Run(ctx, clientadopt.RunOptions{
 		Prepared: prepared.prepared, ExpectedPlanID: *values.expectedAdoptionPlan, Metafile: prepared.payload,
-		Session: session, AcknowledgeAdd: true, AcknowledgeReAdoption: *values.acknowledgeReAdoption,
+		Session: session, AcknowledgeAdd: *values.acknowledgeAdd, AcknowledgeExistingStopped: *values.acknowledgeExisting,
+		AcknowledgeReAdoption: *values.acknowledgeReAdoption,
 	})
 	return a.finishClientAdopt(prepared.output, report, operationErr)
 }
@@ -354,7 +381,13 @@ func (a *app) clientAdoptResume(args []string) error {
 		return usageError("--acknowledge-repeat-add also requires --acknowledge-client-add")
 	}
 	priorRequested := flagWasSet(fs, "prior-adoption-operation") || flagWasSet(fs, "prior-adoption-plan-id")
-	if priorRequested != *values.acknowledgeReAdoption {
+	if *values.adoptExistingStopped {
+		if !*values.acknowledgeExisting || *values.acknowledgeAdd || *values.repeatAdd || *values.acknowledgeReAdoption || priorRequested {
+			return usageError("client adopt resume observation mode requires --adopt-existing-stopped and --acknowledge-existing-stopped-adoption, and forbids add/repeat/re-adoption flags")
+		}
+	} else if *values.acknowledgeExisting {
+		return usageError("client adopt resume add mode forbids --acknowledge-existing-stopped-adoption")
+	} else if priorRequested != *values.acknowledgeReAdoption {
 		return usageError("client adopt resume requires --acknowledge-client-re-adoption exactly when prior adoption selectors are supplied")
 	}
 	operationID, err := clientadopt.ParseOperationID(fs.Arg(0))
@@ -363,7 +396,7 @@ func (a *app) clientAdoptResume(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *values.timeout)
 	defer cancel()
-	prepared, err := prepareClientAdopt(ctx, fs, values, "client adopt resume", true, true)
+	prepared, err := prepareClientAdopt(ctx, fs, values, "client adopt resume", !*values.adoptExistingStopped, true)
 	if err != nil {
 		return err
 	}
@@ -393,7 +426,8 @@ func (a *app) clientAdoptResume(args []string) error {
 		statusErr = fmt.Errorf("%w: explicit client adopt forget must complete historical evidence deletion", clientadopt.ErrPolicy)
 		return a.finishClientAdopt(prepared.output, status, statusErr)
 	}
-	if (initializationIncomplete || status.Journal.AttemptsRecorded == 0 && !status.Journal.CompletionDurable) && !*values.acknowledgeAdd {
+	if !*values.adoptExistingStopped &&
+		(initializationIncomplete || status.Journal.AttemptsRecorded == 0 && !status.Journal.CompletionDurable) && !*values.acknowledgeAdd {
 		statusErr = fmt.Errorf("%w: this operation has no add request intent; resume requires explicit downloader-add acknowledgement", clientadopt.ErrPolicy)
 		report := clientadopt.FailureReport(prepared.prepared, *values.expectedAdoptionPlan, "resume", 0, statusErr)
 		return a.finishClientAdopt(prepared.output, report, statusErr)
@@ -402,7 +436,12 @@ func (a *app) clientAdoptResume(args []string) error {
 	if err != nil {
 		return err
 	}
-	session, err := prepared.adapter.OpenMutationSession(ctx, credential)
+	var session downloader.LedgerSession
+	if *values.adoptExistingStopped {
+		session, err = prepared.adapter.OpenReadSession(ctx, credential)
+	} else {
+		session, err = prepared.adapter.OpenMutationSession(ctx, credential)
+	}
 	if err != nil {
 		requests, _ := downloader.RequestsMadeFromError(err)
 		report := clientadopt.FailureReport(prepared.prepared, *values.expectedAdoptionPlan, "resume", requests, err)
@@ -411,8 +450,9 @@ func (a *app) clientAdoptResume(args []string) error {
 	defer session.Close()
 	report, operationErr := clientadopt.Resume(ctx, operationID, clientadopt.RunOptions{
 		Prepared: prepared.prepared, ExpectedPlanID: *values.expectedAdoptionPlan, Metafile: prepared.payload,
-		Session: session, AcknowledgeAdd: *values.acknowledgeAdd, AcknowledgeReAdoption: *values.acknowledgeReAdoption,
-		RepeatAdd: *values.repeatAdd,
+		Session: session, AcknowledgeAdd: *values.acknowledgeAdd, AcknowledgeExistingStopped: *values.acknowledgeExisting,
+		AcknowledgeReAdoption: *values.acknowledgeReAdoption,
+		RepeatAdd:             *values.repeatAdd,
 	})
 	return a.finishClientAdopt(prepared.output, report, operationErr)
 }

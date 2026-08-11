@@ -8,12 +8,13 @@ import (
 )
 
 type PlanOptions struct {
-	Driver          string
-	ClientConfigID  string
-	HostRoot        string
-	ClientRoot      string
-	ClientWindows   bool
-	PriorCompletion *VerifiedCompletion
+	Driver               string
+	ClientConfigID       string
+	HostRoot             string
+	ClientRoot           string
+	ClientWindows        bool
+	AdoptExistingStopped bool
+	PriorCompletion      *VerifiedCompletion
 }
 
 // PreparedPlan retains the exact-final authority and raw projected client
@@ -47,8 +48,12 @@ func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*Prepa
 	if driver == "" {
 		driver = DriverQBittorrent
 	}
+	action := ActionAddStopped
+	if options.AdoptExistingStopped {
+		action = ActionAdoptExistingStopped
+	}
 	plan := Plan{
-		Schema: PlanSchemaV1, Action: ActionAddStopped, Driver: driver,
+		Schema: PlanSchemaV1, Action: action, Driver: driver,
 		ClientConfigID: options.ClientConfigID, PathMappingID: projection.PathMappingID,
 		ClientPathSemantics: projection.PathSemantics, ExpectedSavePathRef: projection.SavePathRef,
 		ExpectedContentPathRef: projection.ContentPathRef, MetafileVariantID: observation.MetafileVariantID,
@@ -58,6 +63,9 @@ func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*Prepa
 		MultiFile: observation.MultiFile, ManifestFiles: observation.ManifestFiles, ContentBytes: observation.ContentBytes,
 	}
 	if options.PriorCompletion != nil {
+		if options.AdoptExistingStopped {
+			return nil, fmt.Errorf("%w: observation-only adoption cannot consume prior adoption lineage", ErrPolicy)
+		}
 		if !options.PriorCompletion.Verified() {
 			return nil, fmt.Errorf("%w: prior adoption completion authority is invalid", ErrPolicy)
 		}
@@ -107,6 +115,17 @@ func (prepared *PreparedPlan) OperationID() OperationID {
 		return ""
 	}
 	return prepared.operation
+}
+
+func (prepared *PreparedPlan) Action() string {
+	if prepared == nil {
+		return ""
+	}
+	return prepared.plan.Action
+}
+
+func (prepared *PreparedPlan) ObservationOnly() bool {
+	return prepared != nil && prepared.plan.Action == ActionAdoptExistingStopped
 }
 
 func (prepared *PreparedPlan) typedIdentity() downloader.TypedIdentity {

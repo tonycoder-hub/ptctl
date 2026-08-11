@@ -9,7 +9,8 @@ domains and reconciles them around verifiable torrent metadata.
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
-> workflow, exact `client adopt run|resume|prune|forget` stopped-add operations,
+> workflow, reviewed `client adopt run|resume|prune|forget` stopped-add or
+> observation-only existing-stopped operations,
 > explicit `client activate run|resume|prune|forget` recheck/start operations,
 > acknowledged `client remove run|resume|prune|forget` exact-job removal that always
 > retains local data, acknowledged source-name retirement, and the separate
@@ -145,20 +146,20 @@ capabilities at the edge, not assumptions in the core domain model.
   zero-length files when an exact-layout observation binds their names and
   identities;
 - explicitly acknowledged exact qBittorrent or Transmission stopped-job
-  adoption downstream
-  of a current materialized-final proof, with typed queue-absence gating, a
-  durable request-intent journal, one non-retried add POST, after-ledger/path
-  checks, exact final re-verification, and no automatic replay of an unknown
-  request; an explicit prior terminal completion can authorize a separate new
-  stopped-add lineage only after another complete queue-absence observation
-  and a dedicated acknowledgement, while preserving the prior evidence;
-  Transmission is intentionally v1-only because its RPC ledger has no typed
-  v2 identity;
-- explicit read-only reconciliation of one canonical terminal stopped-add
+  adoption downstream of a current materialized-final proof: the default action
+  gates one non-retried stopped add on typed queue absence, while the separate
+  observation-only action records one already-present exact stopped job using
+  two same-session typed/path observations around exact final re-verification
+  and sends no client mutation; an explicit prior terminal completion can
+  authorize a separate new stopped-add lineage only after another complete
+  queue-absence observation and a dedicated acknowledgement, while preserving
+  the prior evidence; Transmission is intentionally v1-only because its RPC
+  ledger has no typed v2 identity;
+- explicit read-only reconciliation of one canonical terminal client-adoption
   journal or retained tombstone with the current exact typed job claim from
   the existing downloader bracket and the current exact materialized final;
   this adds no request, preserves five relations, and does not claim that the
-  current job is the same remote incarnation as the historically added job;
+  current job is the same remote incarnation as the historically adopted job;
 - explicit qBittorrent or Transmission recheck and optional controlled start
   downstream of a canonical same-driver stopped-adoption completion, with
   version-bound qB v4/v5 routes and Transmission v5.3/v6 methods,
@@ -701,7 +702,7 @@ printf '%s' "$TRANSMISSION_PASSWORD" | ptctl client list \
 ```
 
 Adopt one exact materialized layout into qBittorrent or Transmission without
-starting it:
+starting it. The default action adds an absent stopped job:
 
 ```bash
 # First review the deterministic adoption plan. MATERIALIZE_PLAN_ID is the
@@ -739,14 +740,45 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt run \
   --output json
 ```
 
+If the exact job already exists in stopped state at the reviewed final path,
+select the distinct observation-only action in both plan and run:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt plan \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin \
+  --adopt-existing-stopped \
+  --output json
+
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt run \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin \
+  --adopt-existing-stopped \
+  --expect-adoption-plan-id ADOPTION_PLAN_ID \
+  --acknowledge-existing-stopped-adoption \
+  --output json
+```
+
 For Transmission, use `--driver transmission`, its full RPC URL (for example
 `https://seedbox.example/transmission/rpc`), and the Transmission credential.
 Only v1 metafiles are eligible: Transmission's audited `hash_string` claim is
 a complete SHA-1/v1 identity, but the RPC does not expose a typed v2 hash.
 
-Version 1 is intentionally a one-way, stopped-add handoff. It requires the
-exact raw metafile from the owner-only metafile store, a current exact proof of
-the committed (or retained) materialized final, and a complete typed-infohash
+The default action is intentionally a one-way, stopped-add handoff. It requires
+the exact raw metafile from the owner-only metafile store, a current exact proof
+of the committed (or retained) materialized final, and a complete typed-infohash
 queue observation proving that the target job is absent. It then publishes a
 private target-root-local request intent before exactly one add POST. The POST
 submits the exact stored bytes with the reviewed save path and requests a
@@ -763,6 +795,22 @@ lexical save/content paths, a second exact verification of the materialized
 final, and a durable completion marker. Its outcome is
 `adopted_pending_client_recheck`, not “seeding verified”. Neither client proves
 the raw private variant it stored, and no client recheck is performed.
+
+Observation-only adoption is a separate plan action and acknowledgement. It
+requires one already-present unique exact typed-infohash job with the reviewed
+size, stopped state, and exact lexical save/content paths. In one read session,
+ptctl records a first complete job-ledger observation, freshly re-verifies the
+exact materialized final, then records a later complete observation of the same
+opaque job and state. qBittorrent therefore uses one login plus two ledger
+reads; Transmission uses its fixed two-request handshake plus two ledger reads.
+The action sends no add/recheck/start/move request, does not load the one-shot
+raw-metafile submission payload, and cannot observe which private metafile
+wrapper originally created the job. Its outcome is
+`existing_stopped_job_adopted_pending_client_recheck`. The bracket is serial
+and non-atomic; it does not prove a downloader job incarnation or that the
+client has checked the bytes. Adoption checks only the job-level size and
+lexical paths. The separate activation workflow performs the bounded per-file
+layout observations before it can recheck or start a multi-file job.
 
 If that exact terminal job later disappears, ptctl does not silently reuse the
 old operation or choose a latest completion. A new `plan`, `run`, or `resume`
@@ -1436,8 +1484,9 @@ downloader before/after reads enclose both. A damaged final is reported before
 the command returns integrity exit `3`. `--source`, live search roots, a stored
 profile selector, and this materialized-final selector are mutually exclusive.
 
-To require stopped-add attribution, add the explicit adoption operation and
-its reviewed plan ID to materialized-final reconciliation:
+To require client-adoption attribution, add the explicit adoption operation and
+its reviewed plan ID to materialized-final reconciliation. The terminal record
+retains whether that lineage came from stopped add or observation-only adoption:
 
 ```bash
 printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \

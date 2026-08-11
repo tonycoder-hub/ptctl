@@ -110,6 +110,39 @@ func TestPruneRetainsExactCompletionAuthorityAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPruneRetainsExistingStoppedObservationAuthority(t *testing.T) {
+	ctx := context.Background()
+	materialized := makeMaterializedFixture(t, ctx)
+	prepared := prepareExistingFixturePlan(t, materialized, DriverQBittorrent)
+	savePath, _ := prepared.savePath()
+	contentPath, _ := prepared.contentPath()
+	job := &downloader.Torrent{
+		Hash: "retained-existing-job", InfoHashV1: materialized.meta.InfoHashV1,
+		IdentityStatus: downloader.IdentityStatusValid, IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{},
+		SizeBytes: materialized.meta.TotalLength, State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}
+	before := ledgerSnapshot(materialized.meta, job, time.Now().UTC())
+	after := ledgerSnapshot(materialized.meta, job, before.ObservedAtEnd.Add(time.Millisecond))
+	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
+	report, err := Run(ctx, RunOptions{Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: session,
+		AcknowledgeExistingStopped: true})
+	if err != nil || report.Outcome != OutcomeExistingAdoptedPendingRecheck || session.adds != 0 {
+		t.Fatalf("observation-only adoption=%#v adds=%d err=%v", report, session.adds, err)
+	}
+	pruned, err := Prune(ctx, PruneOptions{TargetRoot: materialized.targetRoot, OperationID: prepared.OperationID(),
+		ExpectedPlanID: prepared.PlanID(), Acknowledge: true, Limits: DefaultRetentionLimits()})
+	if err != nil || pruned.Outcome != RetentionOutcomePruned || !pruned.Markers.ExactTombstone {
+		t.Fatalf("retained observation-only adoption=%#v err=%v", pruned, err)
+	}
+	verified, observation, err := VerifyCompletion(ctx, CompletionProofOptions{TargetRoot: materialized.targetRoot,
+		OperationID: prepared.OperationID(), ExpectedPlanID: prepared.PlanID()})
+	if err != nil || verified == nil || !verified.Verified() || observation.Action != ActionAdoptExistingStopped ||
+		!observation.RetainedTombstone ||
+		observation.Assurance != "same_invocation_bound_canonical_existing_stopped_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation" {
+		t.Fatalf("retained observation authority=%#v observation=%#v err=%v", verified, observation, err)
+	}
+}
+
 func TestPruneCrashBoundariesRequireExplicitRecovery(t *testing.T) {
 	for _, phase := range []string{"intent_published", "legacy_state_removed"} {
 		t.Run(phase, func(t *testing.T) {

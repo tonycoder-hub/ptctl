@@ -166,6 +166,115 @@ func TestClientAdoptPlanRunStatusAndPrivacy(t *testing.T) {
 	}
 }
 
+func TestClientAdoptExistingStoppedIsObservationOnlyAndActivatable(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newClientAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+	server.added.Store(true)
+	base := append(clientAdoptBaseArgs(fixture, server.server.URL), "--adopt-existing-stopped")
+
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("observation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	planned := decodeClientAdoptReport(t, out.Bytes())
+	if planned.Data.Outcome != clientadopt.OutcomeReady || planned.Data.Plan.Action != clientadopt.ActionAdoptExistingStopped ||
+		planned.Data.Client.BeforeIdentity != "exact_unique" || planned.Data.Client.RequestsMade != 2 ||
+		planned.Data.Client.Status != "existing_unique_exact_stopped_job_ready_for_observation_only_adoption" {
+		t.Fatalf("unexpected observation plan: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	runArgs := append([]string{"client", "adopt", "run"}, base...)
+	runArgs = append(runArgs, "--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-existing-stopped-adoption")
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("observation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+	if adopted.Data.Outcome != clientadopt.OutcomeExistingAdoptedPendingRecheck ||
+		adopted.Data.Plan.Action != clientadopt.ActionAdoptExistingStopped || adopted.Data.Client.AddAttempted ||
+		adopted.Data.Client.AddReceipt.RequestsAttempted != 0 || adopted.Data.Client.BeforeIdentity != "exact_unique" ||
+		adopted.Data.Client.AfterIdentity != "exact_unique" || adopted.Data.Client.RequestsMade != 3 ||
+		adopted.Data.Client.VariantRelation != "existing_job_private_variant_unobservable" ||
+		adopted.Data.Client.Assurance != "two_complete_typed_job_and_path_observations_bracketing_same_invocation_exact_final_reverification_non_atomic_without_client_mutation" ||
+		!adopted.Data.Journal.CompletionDurable || clientAdoptHasEffect(adopted.Data, "submit_exact_metafile_stopped") {
+		t.Fatalf("unexpected observation-only adoption: %s", out.String())
+	}
+	if server.login.Load() != 2 || server.ledger.Load() != 3 || server.add.Load() != 0 {
+		t.Fatalf("observation-only requests login=%d ledger=%d add=%d", server.login.Load(), server.ledger.Load(), server.add.Load())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	resumeArgs := append([]string{"client", "adopt", "resume"}, base...)
+	resumeArgs = append(resumeArgs, "--expect-adoption-plan-id", planned.Data.Plan.ID,
+		"--acknowledge-existing-stopped-adoption", planned.Data.Operation.ID)
+	if code := Run(resumeArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("observation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	resumed := decodeClientAdoptReport(t, out.Bytes())
+	if resumed.Data.Outcome != clientadopt.OutcomeAlreadyAdopted || resumed.Data.Client.AddAttempted ||
+		resumed.Data.Client.RequestsMade != 2 || server.add.Load() != 0 ||
+		resumed.Data.Client.Assurance != "current_single_ledger_observation_plus_historical_existing_job_bracket_record_non_atomic" {
+		t.Fatalf("unexpected observation resume: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	requests := server.login.Load() + server.ledger.Load() + server.add.Load()
+	for _, extra := range [][]string{
+		{"--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-client-add"},
+		{"--expect-adoption-plan-id", planned.Data.Plan.ID},
+		{"--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-existing-stopped-adoption",
+			"--prior-adoption-operation", planned.Data.Operation.ID, "--prior-adoption-plan-id", planned.Data.Plan.ID},
+	} {
+		reader := &trackingReader{}
+		out.Reset()
+		errOut.Reset()
+		bad := append([]string{"client", "adopt", "run"}, base...)
+		bad = append(bad, extra...)
+		if code := Run(bad, reader, &out, &errOut); code != 2 || reader.read ||
+			server.login.Load()+server.ledger.Load()+server.add.Load() != requests {
+			t.Fatalf("bad observation flags=%v code=%d read=%t stdout=%q stderr=%q", extra, code, reader.read, out.String(), errOut.String())
+		}
+	}
+}
+
+func TestTransmissionExistingStoppedAdoptionUsesOnlyLedgerRPC(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newTransmissionAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+	server.added.Store(true)
+	base := append(transmissionClientAdoptBaseArgs(fixture, server.server.URL), "--adopt-existing-stopped")
+
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission observation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	planned := decodeClientAdoptReport(t, out.Bytes())
+	if planned.Data.Outcome != clientadopt.OutcomeReady || planned.Data.Client.RequestsMade != 3 ||
+		planned.Data.Plan.Action != clientadopt.ActionAdoptExistingStopped {
+		t.Fatalf("unexpected Transmission observation plan: %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	runArgs := append([]string{"client", "adopt", "run"}, base...)
+	runArgs = append(runArgs, "--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-existing-stopped-adoption")
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission observation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+	if adopted.Data.Outcome != clientadopt.OutcomeExistingAdoptedPendingRecheck ||
+		adopted.Data.Client.RequestsMade != 4 || adopted.Data.Client.AddAttempted || server.add.Load() != 0 ||
+		server.handshake.Load() != 2 || server.session.Load() != 2 || server.ledger.Load() != 3 ||
+		server.verify.Load() != 0 || server.start.Load() != 0 {
+		t.Fatalf("unexpected Transmission observation adoption: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+}
+
 func TestClientReAdoptionPreservesPriorCompletionAndRequiresFreshAbsence(t *testing.T) {
 	fixture := newClientAdoptCLIFixture(t)
 	server := newClientAdoptServer(t, fixture.meta, fixture.raw)
@@ -821,6 +930,15 @@ func decodeClientAdoptReport(t *testing.T, raw []byte) clientAdoptJSONEnvelope {
 		t.Fatalf("unexpected client adoption envelope: %s", raw)
 	}
 	return result
+}
+
+func clientAdoptHasEffect(report clientadopt.Report, effect string) bool {
+	for _, observed := range report.Effect {
+		if observed == effect {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeClientAdoptRetentionReport(t *testing.T, raw []byte) clientAdoptRetentionJSONEnvelope {

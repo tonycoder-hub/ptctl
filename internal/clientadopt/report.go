@@ -10,15 +10,16 @@ import (
 type Outcome string
 
 const (
-	OutcomeReady                 Outcome = "ready"
-	OutcomeAdoptedPendingRecheck Outcome = "adopted_pending_client_recheck"
-	OutcomeAlreadyAdopted        Outcome = "already_adopted_pending_client_recheck"
-	OutcomeHistoricalAdopted     Outcome = "historical_adoption_recorded"
-	OutcomeRequestUnknown        Outcome = "request_result_unknown"
-	OutcomeForgetting            Outcome = "forgetting"
-	OutcomeBlocked               Outcome = "blocked"
-	OutcomeIncomplete            Outcome = "incomplete"
-	OutcomeIntegrityFailed       Outcome = "integrity_failed"
+	OutcomeReady                         Outcome = "ready"
+	OutcomeAdoptedPendingRecheck         Outcome = "adopted_pending_client_recheck"
+	OutcomeExistingAdoptedPendingRecheck Outcome = "existing_stopped_job_adopted_pending_client_recheck"
+	OutcomeAlreadyAdopted                Outcome = "already_adopted_pending_client_recheck"
+	OutcomeHistoricalAdopted             Outcome = "historical_adoption_recorded"
+	OutcomeRequestUnknown                Outcome = "request_result_unknown"
+	OutcomeForgetting                    Outcome = "forgetting"
+	OutcomeBlocked                       Outcome = "blocked"
+	OutcomeIncomplete                    Outcome = "incomplete"
+	OutcomeIntegrityFailed               Outcome = "integrity_failed"
 )
 
 type Finding struct {
@@ -151,6 +152,14 @@ func newReport(prepared *PreparedPlan, expectedID string) Report {
 			"adoption stops before client recheck; source retirement remains a separate explicit workflow",
 			"client and filesystem observations are bracketed and non-atomic",
 		},
+	}
+	if prepared != nil && prepared.plan.Action == ActionAdoptExistingStopped {
+		report.Warnings = []string{
+			"observation-only adoption does not submit or observe the downloader's private metafile variant",
+			"the existing downloader job is not mutated; adoption records only bracketed typed identity, stopped state, path claims, and exact final proof",
+			"adoption stops before client recheck; source retirement remains a separate explicit workflow",
+			"client and filesystem observations are bracketed and non-atomic",
+		}
 	}
 	if prepared != nil && prepared.prior != nil {
 		report.Effect = append(report.Effect, "read_private_prior_client_adoption_completion")

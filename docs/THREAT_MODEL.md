@@ -412,9 +412,10 @@ tombstone is a separate `forget` operation requiring the same explicit full
 selectors plus `--acknowledge-historical-evidence-deletion`; it cannot select
 latest/by-age state or touch content.
 
-Client adoption has a separate downloader-write boundary. `plan` performs one
-complete typed ledger observation but writes nothing. `run` requires
-`--acknowledge-client-add`; a repeat after an unknown result additionally
+Client adoption has a separate authority boundary with two explicit plan
+actions. The default action is a downloader-write boundary: `plan` performs one
+complete typed ledger observation but writes nothing, `run` requires
+`--acknowledge-client-add`, and a repeat after an unknown result additionally
 requires `--acknowledge-repeat-add`. Before password stdin or network access,
 the CLI validates the exact private-store artifact selector, committed or
 retained materialize selector, current target-root/final proof, host/client
@@ -425,6 +426,25 @@ built-in qBittorrent or Transmission adapter in stopped mode, plus the small
 private target-root-local journal. It does not
 authorize changing an existing job, rechecking, starting, pausing, moving,
 removing, deleting, or retiring content.
+
+`--adopt-existing-stopped` is a distinct observation-only action and cannot be
+combined with add/repeat/re-adoption selectors. Its run/resume boundary requires
+`--acknowledge-existing-stopped-adoption`, but that acknowledgement authorizes
+only the small private journal. The adapter is opened through the read-ledger
+port; no raw submission payload is constructed and no add, recheck, start,
+pause, move, or removal request is sent. All action/selector/acknowledgement
+validation still occurs before password stdin, network access, or journal I/O.
+
+The first complete same-session ledger must show one unique exact typed job with
+the reviewed size, stopped state, and lexical save/content paths. After this
+observation is durably recorded, ptctl freshly re-verifies the exact current
+materialized final and then takes a later complete ledger snapshot. The second
+snapshot must retain the same opaque job key, state, typed identity, size, and
+paths, and its observation interval must follow the first. This serial bracket
+is non-atomic. It does not prove a remote job generation, which private metafile
+wrapper created the job, per-file layout, client content checking, or current
+use. qBittorrent can supply typed v1/v2/hybrid identity; Transmission can supply
+only v1. Multi-file per-file claims remain a separate activation precondition.
 
 Re-adoption after a terminal job disappears is a second explicit lineage, not
 an implicit retry or a rewrite of history. The full prior operation and plan
@@ -444,9 +464,9 @@ hash, name, size, path, progress, or state never selects identity; unavailable,
 invalid, partial, conflicting, or duplicate typed rows make absence
 unprovable. qBittorrent may prove typed v1/v2 identity from allowlisted magnet
 evidence. Transmission may prove only v1 identity from its complete
-`hash_string`; pure-v2 and hybrid adoption are rejected before credentials,
-network access, or journal writes. The canonical request intent is durable
-before the POST. qBittorrent uses one login request; Transmission uses a fixed
+`hash_string`; pure-v2 and hybrid Transmission adoption are rejected before
+credentials, network access, or journal writes. The canonical request intent is
+durable before the POST. qBittorrent uses one login request; Transmission uses a fixed
 two-request CSRF/version handshake. The effectful add is then one HTTP/1.1-only,
 fresh/no-keepalive, proxy-free, redirect-free, bounded, serial, non-retried
 request. A lost response is initially unknown even if the body may have reached
@@ -489,17 +509,19 @@ client jobs, content, and source names are outside authority. Once the last
 marker is durably absent, later absence is unattributed. Deleting storage cannot
 revoke an opaque process-local completion capability issued before forgetting.
 
-After the POST, a terminal marker requires one unique exact typed job, stopped
-state, reviewed size and exact lexical save/content paths, plus a second exact
-final verification. These are bracketed, non-atomic observations. They neither
+After a stopped-add POST, a terminal marker requires one unique exact typed job,
+stopped state, reviewed size and exact lexical save/content paths, plus a second
+exact final verification. These are bracketed, non-atomic observations. They neither
 prove that the selected downloader stored the submitted private variant nor
 that it has checked or is reading the materialized bytes. The public report
 uses only
 one-way client/path/job references and never includes host/client paths,
 endpoint, username, password, generic job key, magnet URI, tracker material,
-or raw metafile bytes.
+or raw metafile bytes. Observation-only completion uses the same privacy model
+and produces a separate action-tagged lineage; it cannot be replayed as evidence
+that ptctl submitted the private metafile or caused creation of the job.
 
-Read-only reconciliation can select one full stopped-adoption operation ID and
+Read-only reconciliation can select one full client-adoption operation ID and
 reviewed plan ID, but never enumerates or chooses history. The live terminal
 journal or exact retention tombstone is verified before downloader credential
 input or network access. Its opaque process-local completion authority is

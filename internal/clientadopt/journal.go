@@ -476,7 +476,8 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 		}
 		attempt, id, err := decodeAttempt(bytes.NewReader(raw))
 		if err != nil || attempt.OperationID != state.Intent.OperationID || attempt.PlanID != state.Intent.PlanID || attempt.Sequence != sequence ||
-			attempt.MetafileVariantID != state.Intent.Plan.MetafileVariantID || attempt.MetafileBytes != state.Intent.Plan.MetafileBytes {
+			attempt.MetafileVariantID != state.Intent.Plan.MetafileVariantID || attempt.MetafileBytes != state.Intent.Plan.MetafileBytes ||
+			!attemptMatchesPlan(attempt, state.Intent.Plan) {
 			return state, fmt.Errorf("%w: adoption attempt disagrees with the intent", ErrIntegrity)
 		}
 		if sequence > 1 && attempt.PreviousAttemptID != state.AttemptIDs[len(state.AttemptIDs)-1].String() {
@@ -488,7 +489,7 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 	}
 	if regular[completionFileName] {
 		if len(state.Attempts) == 0 {
-			return state, fmt.Errorf("%w: adoption completion has no request intent", ErrIntegrity)
+			return state, fmt.Errorf("%w: adoption completion has no preceding adoption observation", ErrIntegrity)
 		}
 		raw, err := handle.readNamedBytes(ctx, []string{completionFileName})
 		if err != nil {
@@ -497,7 +498,8 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 		completion, id, err := decodeCompletion(bytes.NewReader(raw))
 		if err != nil || completion.OperationID != state.Intent.OperationID || completion.PlanID != state.Intent.PlanID ||
 			completion.AttemptID != state.AttemptIDs[len(state.AttemptIDs)-1] || completion.ContentPathRef != state.Intent.Plan.ExpectedContentPathRef ||
-			completion.FinalObjectIdentity != state.Intent.Plan.FinalObjectIdentity {
+			completion.FinalObjectIdentity != state.Intent.Plan.FinalObjectIdentity ||
+			!completionMatchesPlan(completion, state.Intent.Plan, state.Attempts[len(state.Attempts)-1]) {
 			return state, fmt.Errorf("%w: adoption completion disagrees with the intent", ErrIntegrity)
 		}
 		state.Completion, state.CompletionID = &completion, id
@@ -589,7 +591,8 @@ func (handle *journalHandle) recoverPending(ctx context.Context, name string) (m
 	case isAttemptFileName(destination):
 		attempt, parsedID, decodeErr := decodeAttempt(bytes.NewReader(raw))
 		if decodeErr != nil || attempt.OperationID != handle.state.Intent.OperationID || attempt.PlanID != handle.state.Intent.PlanID ||
-			attempt.Sequence != len(handle.state.Attempts)+1 || destination != attemptFileName(attempt.Sequence) {
+			attempt.Sequence != len(handle.state.Attempts)+1 || destination != attemptFileName(attempt.Sequence) ||
+			!attemptMatchesPlan(attempt, handle.state.Intent.Plan) {
 			return markerWriteReceipt{}, fmt.Errorf("%w: pending adoption attempt is invalid", ErrIntegrity)
 		}
 		if attempt.Sequence > 1 && attempt.PreviousAttemptID != handle.state.AttemptIDs[len(handle.state.AttemptIDs)-1].String() {
@@ -599,7 +602,8 @@ func (handle *journalHandle) recoverPending(ctx context.Context, name string) (m
 	case destination == completionFileName:
 		completion, parsedID, decodeErr := decodeCompletion(bytes.NewReader(raw))
 		if decodeErr != nil || len(handle.state.AttemptIDs) == 0 || completion.AttemptID != handle.state.AttemptIDs[len(handle.state.AttemptIDs)-1] ||
-			completion.OperationID != handle.state.Intent.OperationID || completion.PlanID != handle.state.Intent.PlanID {
+			completion.OperationID != handle.state.Intent.OperationID || completion.PlanID != handle.state.Intent.PlanID ||
+			!completionMatchesPlan(completion, handle.state.Intent.Plan, handle.state.Attempts[len(handle.state.Attempts)-1]) {
 			return markerWriteReceipt{}, fmt.Errorf("%w: pending adoption completion is invalid", ErrIntegrity)
 		}
 		id = parsedID
@@ -609,10 +613,10 @@ func (handle *journalHandle) recoverPending(ctx context.Context, name string) (m
 	return handle.writeMarker(ctx, destination, raw, id)
 }
 
-func (handle *journalHandle) appendAttempt(ctx context.Context, assessment downloaderAssessment) (markerWriteReceipt, error) {
+func (handle *journalHandle) appendAttempt(ctx context.Context, assessment downloaderAssessment, job *downloader.Torrent) (markerWriteReceipt, error) {
 	sequence := len(handle.state.Attempts) + 1
 	if sequence > maximumAttempts {
-		return markerWriteReceipt{}, fmt.Errorf("%w: maximum explicit add attempts reached", ErrPolicy)
+		return markerWriteReceipt{}, fmt.Errorf("%w: maximum explicit adoption attempts reached", ErrPolicy)
 	}
 	previous := ""
 	if sequence > 1 {
@@ -624,6 +628,18 @@ func (handle *journalHandle) appendAttempt(ctx context.Context, assessment downl
 		ObservedAtStart: assessment.started, ObservedAtEnd: assessment.ended,
 		BeforeStatus: string(assessment.status), MetafileVariantID: handle.state.Intent.Plan.MetafileVariantID,
 		MetafileBytes: handle.state.Intent.Plan.MetafileBytes,
+	}
+	if handle.state.Intent.Plan.Action == ActionAdoptExistingStopped {
+		if job == nil {
+			return markerWriteReceipt{}, fmt.Errorf("%w: existing-job adoption observation is unavailable", ErrIntegrity)
+		}
+		attempt.BeforeJobID = jobID(job.Hash)
+		attempt.BeforeJobState = job.State
+		attempt.BeforeContentPathRef = handle.state.Intent.Plan.ExpectedContentPathRef
+		attempt.ObservationBasis = "same_invocation_first_existing_stopped_job_observation"
+	}
+	if !attemptMatchesPlan(attempt, handle.state.Intent.Plan) {
+		return markerWriteReceipt{}, fmt.Errorf("%w: adoption observation differs from the reviewed action", ErrIntegrity)
 	}
 	raw, id, err := encodeAttempt(attempt)
 	if err != nil {
@@ -639,6 +655,10 @@ func (handle *journalHandle) appendAttempt(ctx context.Context, assessment downl
 }
 
 func (handle *journalHandle) appendCompletion(ctx context.Context, completion Completion) (markerWriteReceipt, error) {
+	if handle == nil || len(handle.state.Attempts) == 0 ||
+		!completionMatchesPlan(completion, handle.state.Intent.Plan, handle.state.Attempts[len(handle.state.Attempts)-1]) {
+		return markerWriteReceipt{}, fmt.Errorf("%w: adoption completion differs from its reviewed observation", ErrIntegrity)
+	}
 	raw, id, err := encodeCompletion(completion)
 	if err != nil {
 		return markerWriteReceipt{}, err

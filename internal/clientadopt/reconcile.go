@@ -24,7 +24,7 @@ func (verified *VerifiedCompletion) ReconciliationAdoptionCompletion() (reconcil
 		return reconcile.ClientAdoptionCompletion{}, false
 	}
 	return reconcile.ClientAdoptionCompletion{
-		Driver: observation.Driver, OperationID: observation.OperationID, PlanID: observation.PlanID,
+		Driver: observation.Driver, Action: observation.Action, OperationID: observation.OperationID, PlanID: observation.PlanID,
 		CompletionID: observation.CompletionID, MetafileVariantID: observation.MetafileVariantID,
 		MetafileBytes: observation.MetafileBytes, InfoHashV1: observation.InfoHashV1, InfoHashV2: observation.InfoHashV2,
 		MaterializeOperationID: observation.MaterializeOperationID, MaterializePlanID: observation.MaterializePlanID,
@@ -39,7 +39,7 @@ func (verified *VerifiedCompletion) ReconciliationAdoptionCompletion() (reconcil
 	}, true
 }
 
-// ReconcileAdoptedCurrentJob binds a historical stopped-add completion to the
+// ReconcileAdoptedCurrentJob binds a historical stopped-job adoption completion to the
 // exact typed job claim in the caller's already-observed reconciliation
 // bracket. It performs no network or filesystem operation. Downloader APIs do
 // not expose a stable incarnation/generation, so success never claims that a

@@ -1,8 +1,9 @@
 // Package clientadopt coordinates one exact, already-materialized layout with
-// a downloader. Version 1 only adds an absent built-in downloader job in
-// stopped mode. An optional explicit prior-completion lineage permits a new
-// operation after that exact job disappears; it never changes an existing job,
-// rechecks, moves, deletes, or retires data.
+// a downloader. One action adds an absent built-in downloader job in stopped
+// mode. A second, observation-only action adopts one already-existing stopped
+// job only after two exact typed/path observations bracket another exact final
+// verification. Neither action changes an existing job, rechecks, moves,
+// deletes, or retires data.
 package clientadopt
 
 import (
@@ -19,13 +20,14 @@ import (
 )
 
 const (
-	PlanSchemaV1       = "ptctl.client-adopt-plan/v1"
-	IntentSchemaV1     = "ptctl.client-adopt-intent/v1"
-	AttemptSchemaV1    = "ptctl.client-adopt-attempt/v1"
-	CompletionSchemaV1 = "ptctl.client-adopt-completion/v1"
-	ActionAddStopped   = "add_stopped"
-	DriverQBittorrent  = "qbittorrent"
-	DriverTransmission = "transmission"
+	PlanSchemaV1               = "ptctl.client-adopt-plan/v1"
+	IntentSchemaV1             = "ptctl.client-adopt-intent/v1"
+	AttemptSchemaV1            = "ptctl.client-adopt-attempt/v1"
+	CompletionSchemaV1         = "ptctl.client-adopt-completion/v1"
+	ActionAddStopped           = "add_stopped"
+	ActionAdoptExistingStopped = "adopt_existing_stopped"
+	DriverQBittorrent          = "qbittorrent"
+	DriverTransmission         = "transmission"
 
 	operationDirectoryPrefix = materialize.ClientAdoptOperationDirectoryPrefix
 	maximumAttempts          = 3
@@ -66,7 +68,7 @@ type Plan struct {
 }
 
 func (plan Plan) Validate() error {
-	if plan.Schema != PlanSchemaV1 || plan.Action != ActionAddStopped ||
+	if plan.Schema != PlanSchemaV1 || (plan.Action != ActionAddStopped && plan.Action != ActionAdoptExistingStopped) ||
 		!canonicalSHA256ID(plan.ClientConfigID) || !canonicalSHA256ID(plan.PathMappingID) ||
 		!canonicalSHA256ID(plan.ExpectedSavePathRef) || !canonicalSHA256ID(plan.ExpectedContentPathRef) ||
 		!canonicalSHA256ID(plan.MetafileVariantID) || plan.MetafileBytes <= 0 || plan.MetafileBytes > 32<<20 ||
@@ -81,9 +83,15 @@ func (plan Plan) Validate() error {
 	if err := (downloader.TypedIdentity{InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2}).Validate(); err != nil {
 		return fmt.Errorf("%w: adoption typed identity is invalid", ErrPolicy)
 	}
-	descriptor, ok := downloader.DescribeStoppedAddDriver(plan.Driver)
-	if !ok || !descriptor.SupportsIdentity(downloader.TypedIdentity{InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2}) {
+	typedIdentity := downloader.TypedIdentity{InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2}
+	if !downloader.LedgerDriverSupportsIdentity(plan.Driver, typedIdentity) {
 		return fmt.Errorf("%w: adoption driver cannot prove the required typed identity", ErrPolicy)
+	}
+	if plan.Action == ActionAddStopped {
+		descriptor, ok := downloader.DescribeStoppedAddDriver(plan.Driver)
+		if !ok || !descriptor.SupportsIdentity(typedIdentity) {
+			return fmt.Errorf("%w: adoption driver cannot submit the required typed identity", ErrPolicy)
+		}
 	}
 	if _, err := materialize.ParseOperationID(plan.MaterializeOperationID); err != nil {
 		return fmt.Errorf("%w: materialize operation ID is invalid", ErrPolicy)
@@ -102,6 +110,9 @@ func (plan Plan) Validate() error {
 	}
 	if priorFields != 0 && priorFields != 3 {
 		return fmt.Errorf("%w: prior adoption lineage is incomplete", ErrPolicy)
+	}
+	if plan.Action != ActionAddStopped && priorFields != 0 {
+		return fmt.Errorf("%w: observation-only adoption cannot consume prior adoption lineage", ErrPolicy)
 	}
 	if priorFields == 3 {
 		priorOperation, err := ParseOperationID(plan.PriorAdoptionOperationID)
@@ -160,21 +171,25 @@ func (intent Intent) Validate() error {
 }
 
 type Attempt struct {
-	Schema            string      `json:"schema"`
-	OperationID       OperationID `json:"operation_id"`
-	Sequence          int         `json:"sequence"`
-	PreviousAttemptID string      `json:"previous_attempt_id,omitempty"`
-	PlanID            string      `json:"plan_id"`
-	ObservedAtStart   time.Time   `json:"observed_at_start"`
-	ObservedAtEnd     time.Time   `json:"observed_at_end"`
-	BeforeStatus      string      `json:"before_status"`
-	MetafileVariantID string      `json:"metafile_variant_id"`
-	MetafileBytes     int64       `json:"metafile_bytes"`
+	Schema               string      `json:"schema"`
+	OperationID          OperationID `json:"operation_id"`
+	Sequence             int         `json:"sequence"`
+	PreviousAttemptID    string      `json:"previous_attempt_id,omitempty"`
+	PlanID               string      `json:"plan_id"`
+	ObservedAtStart      time.Time   `json:"observed_at_start"`
+	ObservedAtEnd        time.Time   `json:"observed_at_end"`
+	BeforeStatus         string      `json:"before_status"`
+	BeforeJobID          string      `json:"before_job_id,omitempty"`
+	BeforeJobState       string      `json:"before_job_state,omitempty"`
+	BeforeContentPathRef string      `json:"before_content_path_ref,omitempty"`
+	ObservationBasis     string      `json:"observation_basis,omitempty"`
+	MetafileVariantID    string      `json:"metafile_variant_id"`
+	MetafileBytes        int64       `json:"metafile_bytes"`
 }
 
 func (attempt Attempt) Validate() error {
 	if attempt.Schema != AttemptSchemaV1 || attempt.Sequence <= 0 || attempt.Sequence > maximumAttempts ||
-		!canonicalPlanID(attempt.PlanID) || attempt.BeforeStatus != string(downloader.LedgerIdentityAbsent) ||
+		!canonicalPlanID(attempt.PlanID) ||
 		!canonicalSHA256ID(attempt.MetafileVariantID) || attempt.MetafileBytes <= 0 ||
 		attempt.ObservedAtStart.IsZero() || attempt.ObservedAtEnd.Before(attempt.ObservedAtStart) {
 		return fmt.Errorf("%w: adoption attempt is invalid", ErrIntegrity)
@@ -189,6 +204,20 @@ func (attempt Attempt) Validate() error {
 		if _, err := parseMarkerID(attempt.PreviousAttemptID); err != nil {
 			return fmt.Errorf("%w: adoption attempt predecessor is invalid", ErrIntegrity)
 		}
+	}
+	switch attempt.BeforeStatus {
+	case string(downloader.LedgerIdentityAbsent):
+		if attempt.BeforeJobID != "" || attempt.BeforeJobState != "" || attempt.BeforeContentPathRef != "" || attempt.ObservationBasis != "" {
+			return fmt.Errorf("%w: absent adoption attempt contains existing-job evidence", ErrIntegrity)
+		}
+	case string(downloader.LedgerIdentityExactUnique):
+		if !canonicalSHA256ID(attempt.BeforeJobID) || !stoppedState(attempt.BeforeJobState) ||
+			!canonicalSHA256ID(attempt.BeforeContentPathRef) ||
+			attempt.ObservationBasis != "same_invocation_first_existing_stopped_job_observation" {
+			return fmt.Errorf("%w: existing-job adoption observation is invalid", ErrIntegrity)
+		}
+	default:
+		return fmt.Errorf("%w: adoption attempt identity status is invalid", ErrIntegrity)
 	}
 	return nil
 }
@@ -208,9 +237,11 @@ type Completion struct {
 }
 
 func (completion Completion) Validate() error {
+	validBasis := completion.FinalVerificationBasis == "same_invocation_post_add_exact_reverification" ||
+		completion.FinalVerificationBasis == "same_invocation_existing_stopped_job_bracket_and_exact_reverification"
 	if completion.Schema != CompletionSchemaV1 || !canonicalPlanID(completion.PlanID) ||
 		!canonicalSHA256ID(completion.JobID) || !canonicalSHA256ID(completion.ContentPathRef) ||
-		completion.FinalObjectIdentity == "" || completion.FinalVerificationBasis != "same_invocation_post_add_exact_reverification" ||
+		completion.FinalObjectIdentity == "" || !validBasis ||
 		completion.ObservedAtStart.IsZero() || completion.ObservedAtEnd.Before(completion.ObservedAtStart) || !stoppedState(completion.JobState) {
 		return fmt.Errorf("%w: adoption completion is invalid", ErrIntegrity)
 	}
@@ -278,6 +309,37 @@ func stoppedState(value string) bool {
 	switch value {
 	case "pausedUP", "pausedDL", "stoppedUP", "stoppedDL":
 		return true
+	default:
+		return false
+	}
+}
+
+func attemptMatchesPlan(attempt Attempt, plan Plan) bool {
+	if attempt.Validate() != nil || plan.Validate() != nil {
+		return false
+	}
+	switch plan.Action {
+	case ActionAddStopped:
+		return attempt.BeforeStatus == string(downloader.LedgerIdentityAbsent)
+	case ActionAdoptExistingStopped:
+		return attempt.BeforeStatus == string(downloader.LedgerIdentityExactUnique) &&
+			attempt.BeforeContentPathRef == plan.ExpectedContentPathRef
+	default:
+		return false
+	}
+}
+
+func completionMatchesPlan(completion Completion, plan Plan, attempt Attempt) bool {
+	if completion.Validate() != nil || !attemptMatchesPlan(attempt, plan) {
+		return false
+	}
+	switch plan.Action {
+	case ActionAddStopped:
+		return completion.FinalVerificationBasis == "same_invocation_post_add_exact_reverification"
+	case ActionAdoptExistingStopped:
+		return completion.FinalVerificationBasis == "same_invocation_existing_stopped_job_bracket_and_exact_reverification" &&
+			completion.JobID == attempt.BeforeJobID && completion.JobState == attempt.BeforeJobState &&
+			completion.ContentPathRef == attempt.BeforeContentPathRef
 	default:
 		return false
 	}

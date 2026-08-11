@@ -71,3 +71,22 @@ func TestAssessLedgerIdentityRejectsContradictoryOrIncompleteSnapshots(t *testin
 		}
 	}
 }
+
+func TestLedgerDriverSupportsIdentityFamilies(t *testing.T) {
+	v1 := TypedIdentity{InfoHashV1: strings.Repeat("1", 40)}
+	v2 := TypedIdentity{InfoHashV2: strings.Repeat("a", 64)}
+	hybrid := TypedIdentity{InfoHashV1: v1.InfoHashV1, InfoHashV2: v2.InfoHashV2}
+	if !LedgerDriverSupportsIdentity(DriverQBittorrent, v1) ||
+		!LedgerDriverSupportsIdentity(DriverQBittorrent, v2) ||
+		!LedgerDriverSupportsIdentity(DriverQBittorrent, hybrid) {
+		t.Fatal("qBittorrent ledger should support v1, v2, and hybrid typed identity")
+	}
+	if !LedgerDriverSupportsIdentity(DriverTransmission, v1) ||
+		LedgerDriverSupportsIdentity(DriverTransmission, v2) ||
+		LedgerDriverSupportsIdentity(DriverTransmission, hybrid) {
+		t.Fatal("Transmission ledger should support only complete v1 typed identity")
+	}
+	if LedgerDriverSupportsIdentity("unknown", v1) || LedgerDriverSupportsIdentity(DriverQBittorrent, TypedIdentity{}) {
+		t.Fatal("unknown drivers and invalid identities must fail closed")
+	}
+}

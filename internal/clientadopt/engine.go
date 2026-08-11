@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
@@ -15,13 +16,14 @@ import (
 )
 
 type RunOptions struct {
-	Prepared              *PreparedPlan
-	ExpectedPlanID        string
-	Metafile              *metastore.ArtifactPayload
-	Session               downloader.MutationSession
-	AcknowledgeAdd        bool
-	AcknowledgeReAdoption bool
-	RepeatAdd             bool
+	Prepared                   *PreparedPlan
+	ExpectedPlanID             string
+	Metafile                   *metastore.ArtifactPayload
+	Session                    downloader.LedgerSession
+	AcknowledgeAdd             bool
+	AcknowledgeExistingStopped bool
+	AcknowledgeReAdoption      bool
+	RepeatAdd                  bool
 }
 
 type StatusOptions struct {
@@ -32,7 +34,10 @@ type StatusOptions struct {
 func FailureReport(prepared *PreparedPlan, expectedPlanID, operation string, requestsMade int, err error) Report {
 	report := newReport(prepared, expectedPlanID)
 	if operation == "run" || operation == "resume" {
-		report.Effect = append(report.Effect, "write_private_client_adoption_journal", "submit_exact_metafile_stopped")
+		report.Effect = append(report.Effect, "write_private_client_adoption_journal")
+		if prepared != nil && prepared.plan.Action == ActionAddStopped {
+			report.Effect = append(report.Effect, "submit_exact_metafile_stopped")
+		}
 	}
 	if operation == "resume" || operation == "status" {
 		report.Effect = append(report.Effect, "read_private_client_adoption_journal")
@@ -73,6 +78,26 @@ func Preview(ctx context.Context, prepared *PreparedPlan, session downloader.Led
 		report.finalize()
 		return report, err
 	}
+	if prepared.plan.Action == ActionAdoptExistingStopped {
+		if assessment.status != downloader.LedgerIdentityExactUnique {
+			err = requireExactIdentity(&report, assessment)
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+		job, jobErr := validateObservedJob(prepared, assessment.result.ExactJob)
+		if jobErr != nil {
+			classifyFailure(&report, jobErr)
+			report.finalize()
+			return report, jobErr
+		}
+		applyObservedJob(&report, prepared, job)
+		report.Outcome = OutcomeReady
+		report.Client.Status = "existing_unique_exact_stopped_job_ready_for_observation_only_adoption"
+		report.Client.Assurance = "single_complete_typed_job_and_path_observation_plus_current_exact_final_non_atomic"
+		report.finalize()
+		return report, nil
+	}
 	if assessment.status != downloader.LedgerIdentityAbsent {
 		err = identityGateError(&report, assessment, true)
 		classifyFailure(&report, err)
@@ -92,8 +117,12 @@ func PreflightRun(ctx context.Context, prepared *PreparedPlan, expectedPlanID st
 	if err := validatePrepared(prepared, expectedPlanID, payload); err != nil {
 		return err
 	}
-	if err := validateMetafilePayload(prepared, payload); err != nil {
-		return err
+	if prepared.plan.Action == ActionAddStopped {
+		if err := validateMetafilePayload(prepared, payload); err != nil {
+			return err
+		}
+	} else if payload != nil {
+		return fmt.Errorf("%w: observation-only adoption must not receive a private metafile payload", ErrPolicy)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -123,20 +152,31 @@ func PreflightRun(ctx context.Context, prepared *PreparedPlan, expectedPlanID st
 
 func Run(ctx context.Context, options RunOptions) (Report, error) {
 	report := newReport(options.Prepared, options.ExpectedPlanID)
-	report.Effect = append(report.Effect, "write_private_client_adoption_journal", "submit_exact_metafile_stopped")
+	report.Effect = append(report.Effect, "write_private_client_adoption_journal")
+	if options.Prepared != nil && options.Prepared.plan.Action == ActionAddStopped {
+		report.Effect = append(report.Effect, "submit_exact_metafile_stopped")
+	}
 	if err := validatePrepared(options.Prepared, options.ExpectedPlanID, options.Metafile); err != nil {
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
 	}
-	if err := validateMetafilePayload(options.Prepared, options.Metafile); err != nil {
-		classifyFailure(&report, err)
-		report.finalize()
-		return report, err
-	}
-	if !options.AcknowledgeAdd {
-		err := fmt.Errorf("%w: explicit downloader-add acknowledgement is required", ErrPolicy)
-		report.addBlocker("acknowledgement.client_add_required", "client adoption requires explicit acknowledgement of the stopped add request")
+	if options.Prepared.plan.Action == ActionAddStopped {
+		if err := validateMetafilePayload(options.Prepared, options.Metafile); err != nil {
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+		if !options.AcknowledgeAdd || options.AcknowledgeExistingStopped {
+			err := fmt.Errorf("%w: explicit downloader-add acknowledgement is required", ErrPolicy)
+			report.addBlocker("acknowledgement.client_add_required", "stopped-add adoption requires its exact acknowledgement and no observation-only acknowledgement")
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+	} else if options.Metafile != nil || options.AcknowledgeAdd || options.RepeatAdd || options.AcknowledgeReAdoption || !options.AcknowledgeExistingStopped {
+		err := fmt.Errorf("%w: explicit observation-only existing-job adoption acknowledgement is required", ErrPolicy)
+		report.addBlocker("acknowledgement.existing_stopped_adoption_required", "observation-only adoption requires its dedicated acknowledgement and cannot use add or re-adoption authority")
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
@@ -169,11 +209,25 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		report.finalize()
 		return report, err
 	}
-	if assessment.status != downloader.LedgerIdentityAbsent {
-		err = identityGateError(&report, assessment, true)
-		classifyFailure(&report, err)
-		report.finalize()
-		return report, err
+	if options.Prepared.plan.Action == ActionAddStopped {
+		if assessment.status != downloader.LedgerIdentityAbsent {
+			err = identityGateError(&report, assessment, true)
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+	} else {
+		if assessment.status != downloader.LedgerIdentityExactUnique {
+			err = requireExactIdentity(&report, assessment)
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+		if _, err = validateObservedJob(options.Prepared, assessment.result.ExactJob); err != nil {
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
 	}
 	targetRoot, _ := options.Prepared.targetRoot()
 	handle, creation, err := createJournal(ctx, targetRoot, options.Prepared.plan, options.Prepared.planID)
@@ -203,13 +257,33 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 	report.Operation.PhaseAfter = "intent_recorded"
 	report.Operation.Resumable = true
 	report.Journal = journalReport(handle.state)
+	if options.Prepared.plan.Action == ActionAdoptExistingStopped {
+		return executeExistingObservation(ctx, options, handle, assessment, report)
+	}
 	return executeAdd(ctx, options, handle, assessment, report)
 }
 
 func Resume(ctx context.Context, operationID OperationID, options RunOptions) (Report, error) {
 	report := newReport(options.Prepared, options.ExpectedPlanID)
 	report.Effect = append(report.Effect, "read_private_client_adoption_journal", "write_private_client_adoption_journal")
+	if options.Prepared != nil && options.Prepared.plan.Action == ActionAddStopped {
+		report.Effect = append(report.Effect, "submit_exact_metafile_stopped")
+	}
 	if err := validatePrepared(options.Prepared, options.ExpectedPlanID, options.Metafile); err != nil {
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	if options.Prepared.plan.Action == ActionAddStopped {
+		if options.AcknowledgeExistingStopped {
+			err := fmt.Errorf("%w: stopped-add resume cannot use observation-only acknowledgement", ErrPolicy)
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+	} else if options.Metafile != nil || options.AcknowledgeAdd || options.RepeatAdd || options.AcknowledgeReAdoption || !options.AcknowledgeExistingStopped {
+		err := fmt.Errorf("%w: observation-only resume requires its dedicated acknowledgement and no add authority", ErrPolicy)
+		report.addBlocker("acknowledgement.existing_stopped_adoption_required", "observation-only adoption resume requires its dedicated acknowledgement and cannot repeat an add")
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
@@ -298,14 +372,32 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 			report.finalize()
 			return report, jobErr
 		}
-		applyObservedJob(&report, job)
+		applyObservedJob(&report, options.Prepared, job)
 		report.Outcome = OutcomeAlreadyAdopted
 		report.Operation.Status = "terminal"
 		report.Operation.PhaseAfter = "adopted_pending_client_recheck"
 		report.Operation.Resumable = false
-		report.Client.Assurance = "current_single_ledger_observation_plus_historical_exact_submission_record_non_atomic"
+		if options.Prepared.plan.Action == ActionAdoptExistingStopped {
+			report.Client.Assurance = "current_single_ledger_observation_plus_historical_existing_job_bracket_record_non_atomic"
+		} else {
+			report.Client.Assurance = "current_single_ledger_observation_plus_historical_exact_submission_record_non_atomic"
+		}
 		report.finalize()
 		return report, nil
+	}
+	if options.Prepared.plan.Action == ActionAdoptExistingStopped {
+		if assessment.status != downloader.LedgerIdentityExactUnique {
+			err = requireExactIdentity(&report, assessment)
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+		if _, err = validateObservedJob(options.Prepared, assessment.result.ExactJob); err != nil {
+			classifyFailure(&report, err)
+			report.finalize()
+			return report, err
+		}
+		return executeExistingObservation(ctx, options, handle, assessment, report)
 	}
 	if assessment.status == downloader.LedgerIdentityExactUnique {
 		if len(handle.state.Attempts) == 0 {
@@ -324,7 +416,9 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 			report.finalize()
 			return report, ErrRequestUnknown
 		}
-		return finalizeObserved(ctx, options, handle, assessment, report)
+		return finalizeObserved(ctx, options, handle, assessment, assessment.started, nil,
+			"same_invocation_post_add_exact_reverification",
+			"submitted_exact_variant_plus_current_typed_job_and_path_claim_plus_post_add_exact_final_reverification_non_atomic", report)
 	}
 	if assessment.status != downloader.LedgerIdentityAbsent {
 		err = identityGateError(&report, assessment, false)
@@ -412,15 +506,30 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 		report.Outcome = OutcomeHistoricalAdopted
 		report.Operation.Status = "terminal"
 		report.Operation.Resumable = false
-		report.Client.Status = "historical_adoption_recorded_current_client_not_observed"
+		if plan.Action == ActionAdoptExistingStopped {
+			report.Client.Status = "historical_existing_stopped_adoption_recorded_current_client_not_observed"
+		} else {
+			report.Client.Status = "historical_adoption_recorded_current_client_not_observed"
+		}
 	case len(handle.state.Attempts) > 0:
-		report.Outcome = OutcomeRequestUnknown
-		report.Client.Status = "historical_request_intent_current_client_not_observed"
-		report.addBlocker("client.current_state_not_observed", "status is read-only and cannot determine whether the journaled add request executed")
+		if plan.Action == ActionAdoptExistingStopped {
+			report.Outcome = OutcomeIncomplete
+			report.Client.Status = "historical_existing_job_observation_current_client_not_observed"
+			report.addBlocker("client.current_state_not_observed", "status is read-only and cannot complete the second existing-job observation or current final proof")
+		} else {
+			report.Outcome = OutcomeRequestUnknown
+			report.Client.Status = "historical_request_intent_current_client_not_observed"
+			report.addBlocker("client.current_state_not_observed", "status is read-only and cannot determine whether the journaled add request executed")
+		}
 	default:
 		report.Outcome = OutcomeIncomplete
-		report.Client.Status = "historical_intent_no_add_request_current_client_not_observed"
-		report.addBlocker("client.current_state_not_observed", "status is read-only and cannot prove that the exact typed identity is currently absent")
+		if plan.Action == ActionAdoptExistingStopped {
+			report.Client.Status = "historical_intent_no_existing_job_observation"
+			report.addBlocker("client.current_state_not_observed", "status is read-only and cannot prove that one exact stopped job currently matches the final")
+		} else {
+			report.Client.Status = "historical_intent_no_add_request_current_client_not_observed"
+			report.addBlocker("client.current_state_not_observed", "status is read-only and cannot prove that the exact typed identity is currently absent")
+		}
 	}
 	report.finalize()
 	return report, nil
@@ -432,7 +541,14 @@ func executeAdd(ctx context.Context, options RunOptions, handle *journalHandle, 
 		report.finalize()
 		return report, err
 	}
-	receipt, err := handle.appendAttempt(ctx, before)
+	mutationSession, ok := options.Session.(downloader.MutationSession)
+	if !ok {
+		err := fmt.Errorf("%w: stopped-add mutation authority is unavailable", ErrPolicy)
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	receipt, err := handle.appendAttempt(ctx, before, nil)
 	report.recordMarker(receipt)
 	report.Journal = journalReport(handle.state)
 	report.Operation.PhaseAfter = "request_intent_recorded"
@@ -449,7 +565,7 @@ func executeAdd(ctx context.Context, options RunOptions, handle *journalHandle, 
 		return report, err
 	}
 	requestsBefore := options.Session.RequestsMade()
-	mutation, mutationErr := options.Session.AddStopped(ctx, downloader.AddStoppedRequest{
+	mutation, mutationErr := mutationSession.AddStopped(ctx, downloader.AddStoppedRequest{
 		Metafile: options.Metafile, SavePath: savePath, Identity: options.Prepared.typedIdentity(),
 	})
 	requestsAfter := options.Session.RequestsMade()
@@ -525,10 +641,80 @@ func executeAdd(ctx context.Context, options RunOptions, handle *journalHandle, 
 	if mutationErr != nil {
 		report.addIssue("client.add_response_unconfirmed", "the add response failed, but a unique exact stopped job was observed afterward")
 	}
-	return finalizeObserved(ctx, options, handle, after, report)
+	return finalizeObserved(ctx, options, handle, after, after.started, nil,
+		"same_invocation_post_add_exact_reverification",
+		"submitted_exact_variant_plus_current_typed_job_and_path_claim_plus_post_add_exact_final_reverification_non_atomic", report)
 }
 
-func finalizeObserved(ctx context.Context, options RunOptions, handle *journalHandle, assessment downloaderAssessment, report Report) (Report, error) {
+func executeExistingObservation(ctx context.Context, options RunOptions, handle *journalHandle, before downloaderAssessment, report Report) (Report, error) {
+	first, err := validateObservedJob(options.Prepared, before.result.ExactJob)
+	if err != nil {
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	receipt, err := handle.appendAttempt(ctx, before, &first)
+	report.recordMarker(receipt)
+	report.Journal = journalReport(handle.state)
+	report.Operation.PhaseAfter = "existing_job_observation_recorded"
+	if err != nil {
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	observation, err := reverifyObservedFinal(ctx, options, &report)
+	if err != nil {
+		classifyFailure(&report, err)
+		report.Operation.PhaseAfter = "existing_job_bracket_final_reverification_failed"
+		report.finalize()
+		return report, err
+	}
+	after, readErr := readIdentityLedger(ctx, options.Session, options.Prepared)
+	report.Client.RequestsMade = options.Session.RequestsMade()
+	applyAfterAssessment(&report, after)
+	if readErr != nil {
+		classifyFailure(&report, readErr)
+		report.Operation.PhaseAfter = "existing_job_bracket_incomplete"
+		report.finalize()
+		return report, readErr
+	}
+	if after.started.Before(before.ended) {
+		err = fmt.Errorf("%w: existing stopped job observations are not temporally ordered", ErrPolicy)
+		report.addBlocker("client.existing_job_timeline_invalid", "the second observation does not follow the first observation and intervening exact-final verification")
+		classifyFailure(&report, err)
+		report.Operation.PhaseAfter = "existing_job_bracket_unstable"
+		report.finalize()
+		return report, err
+	}
+	if after.status != downloader.LedgerIdentityExactUnique {
+		err = requireExactIdentity(&report, after)
+		classifyFailure(&report, err)
+		report.Operation.PhaseAfter = "existing_job_bracket_unstable"
+		report.finalize()
+		return report, err
+	}
+	second, err := validateObservedJob(options.Prepared, after.result.ExactJob)
+	if err != nil {
+		classifyFailure(&report, err)
+		report.Operation.PhaseAfter = "existing_job_bracket_unstable"
+		report.finalize()
+		return report, err
+	}
+	if jobID(first.Hash) != jobID(second.Hash) || first.State != second.State {
+		err = fmt.Errorf("%w: existing stopped job identity changed across the adoption bracket", ErrPolicy)
+		report.addBlocker("client.existing_job_changed", "the exact stopped job changed between the two observation-only adoption snapshots")
+		classifyFailure(&report, err)
+		report.Operation.PhaseAfter = "existing_job_bracket_unstable"
+		report.finalize()
+		return report, err
+	}
+	return finalizeObserved(ctx, options, handle, after, before.started, &observation,
+		"same_invocation_existing_stopped_job_bracket_and_exact_reverification",
+		"two_complete_typed_job_and_path_observations_bracketing_same_invocation_exact_final_reverification_non_atomic_without_client_mutation", report)
+}
+
+func finalizeObserved(ctx context.Context, options RunOptions, handle *journalHandle, assessment downloaderAssessment, observedStart time.Time,
+	verifiedObservation *materialize.FinalObservation, verificationBasis, assurance string, report Report) (Report, error) {
 	job, err := validateObservedJob(options.Prepared, assessment.result.ExactJob)
 	if err != nil {
 		classifyFailure(&report, err)
@@ -536,29 +722,25 @@ func finalizeObserved(ctx context.Context, options RunOptions, handle *journalHa
 		report.finalize()
 		return report, err
 	}
-	applyObservedJob(&report, job)
-	verified, observation, err := options.Prepared.verified.Reverify(ctx)
-	if err != nil {
-		classifyFailure(&report, err)
-		report.Operation.PhaseAfter = "client_observed_final_reverification_failed"
-		report.finalize()
-		return report, err
+	applyObservedJob(&report, options.Prepared, job)
+	var observation materialize.FinalObservation
+	if verifiedObservation == nil {
+		observation, err = reverifyObservedFinal(ctx, options, &report)
+		if err != nil {
+			classifyFailure(&report, err)
+			report.Operation.PhaseAfter = "client_observed_final_reverification_failed"
+			report.finalize()
+			return report, err
+		}
+	} else {
+		observation = *verifiedObservation
 	}
-	if verified == nil || observation.MetafileVariantID != options.Prepared.plan.MetafileVariantID ||
-		observation.TargetRootIdentity != options.Prepared.plan.TargetRootIdentity || observation.FinalObjectIdentity != options.Prepared.plan.FinalObjectIdentity ||
-		observation.OperationID != options.Prepared.plan.MaterializeOperationID || observation.MaterializePlanID != options.Prepared.plan.MaterializePlanID {
-		err = fmt.Errorf("%w: post-add materialized final differs from the reviewed plan", ErrIntegrity)
-		classifyFailure(&report, err)
-		report.finalize()
-		return report, err
-	}
-	report.Final.PostAction = &observation
 	lastAttempt := handle.state.AttemptIDs[len(handle.state.AttemptIDs)-1]
 	completion := Completion{
 		Schema: CompletionSchemaV1, OperationID: handle.state.Intent.OperationID, PlanID: handle.state.Intent.PlanID,
-		AttemptID: lastAttempt, ObservedAtStart: assessment.started, ObservedAtEnd: assessment.ended,
+		AttemptID: lastAttempt, ObservedAtStart: observedStart, ObservedAtEnd: assessment.ended,
 		JobID: jobID(job.Hash), JobState: job.State, ContentPathRef: options.Prepared.plan.ExpectedContentPathRef,
-		FinalObjectIdentity: observation.FinalObjectIdentity, FinalVerificationBasis: "same_invocation_post_add_exact_reverification",
+		FinalObjectIdentity: observation.FinalObjectIdentity, FinalVerificationBasis: verificationBasis,
 	}
 	receipt, err := handle.appendCompletion(ctx, completion)
 	report.recordMarker(receipt)
@@ -569,14 +751,37 @@ func finalizeObserved(ctx context.Context, options RunOptions, handle *journalHa
 		report.finalize()
 		return report, err
 	}
-	report.Outcome = OutcomeAdoptedPendingRecheck
+	if options.Prepared.plan.Action == ActionAdoptExistingStopped {
+		report.Outcome = OutcomeExistingAdoptedPendingRecheck
+	} else {
+		report.Outcome = OutcomeAdoptedPendingRecheck
+	}
 	report.Operation.Status = "terminal"
 	report.Operation.PhaseAfter = "adopted_pending_client_recheck"
 	report.Operation.Resumable = false
 	report.Client.Status = "unique_exact_stopped_job_observed"
-	report.Client.Assurance = "submitted_exact_variant_plus_current_typed_job_and_path_claim_plus_post_add_exact_final_reverification_non_atomic"
+	report.Client.Assurance = assurance
 	report.finalize()
 	return report, nil
+}
+
+func reverifyObservedFinal(ctx context.Context, options RunOptions, report *Report) (materialize.FinalObservation, error) {
+	if options.Prepared == nil || options.Prepared.verified == nil {
+		return materialize.FinalObservation{}, fmt.Errorf("%w: materialized final authority is unavailable", ErrPolicy)
+	}
+	verified, observation, err := options.Prepared.verified.Reverify(ctx)
+	if err != nil {
+		return materialize.FinalObservation{}, err
+	}
+	if verified == nil || observation.MetafileVariantID != options.Prepared.plan.MetafileVariantID ||
+		observation.TargetRootIdentity != options.Prepared.plan.TargetRootIdentity || observation.FinalObjectIdentity != options.Prepared.plan.FinalObjectIdentity ||
+		observation.OperationID != options.Prepared.plan.MaterializeOperationID || observation.MaterializePlanID != options.Prepared.plan.MaterializePlanID {
+		return materialize.FinalObservation{}, fmt.Errorf("%w: materialized final differs from the reviewed plan", ErrIntegrity)
+	}
+	if report != nil {
+		report.Final.PostAction = &observation
+	}
+	return observation, nil
 }
 
 func readIdentityLedger(ctx context.Context, session downloader.LedgerSession, prepared *PreparedPlan) (downloaderAssessment, error) {
@@ -608,7 +813,7 @@ func validateFreshLedgerSession(session downloader.LedgerSession, prepared *Prep
 	if session == nil || prepared == nil {
 		return fmt.Errorf("%w: downloader ledger session is unavailable", ErrPolicy)
 	}
-	descriptor, ok := downloader.DescribeStoppedAddDriver(prepared.plan.Driver)
+	descriptor, ok := downloader.DescribeLedgerDriver(prepared.plan.Driver)
 	if !ok || session.RequestsMade() != descriptor.OpenRequests {
 		return fmt.Errorf("%w: downloader session opening request count is invalid", ErrIntegrity)
 	}
@@ -651,12 +856,16 @@ func applyAfterAssessment(report *Report, assessment downloaderAssessment) {
 	report.Client.JobsExaminedAfter = assessment.result.JobsExamined
 }
 
-func applyObservedJob(report *Report, job downloader.Torrent) {
+func applyObservedJob(report *Report, prepared *PreparedPlan, job downloader.Torrent) {
 	report.Client.AfterIdentity = string(downloader.LedgerIdentityExactUnique)
 	report.Client.JobID = jobID(job.Hash)
 	report.Client.JobState = job.State
 	report.Client.ContentPathRef = report.Plan.ExpectedContentPathRef
-	report.Client.VariantRelation = "submitted_exact_variant_client_storage_unobservable"
+	if prepared != nil && prepared.plan.Action == ActionAdoptExistingStopped {
+		report.Client.VariantRelation = "existing_job_private_variant_unobservable"
+	} else {
+		report.Client.VariantRelation = "submitted_exact_variant_client_storage_unobservable"
+	}
 }
 
 func identityGateError(report *Report, assessment downloaderAssessment, before bool) error {
@@ -666,7 +875,7 @@ func identityGateError(report *Report, assessment downloaderAssessment, before b
 	}
 	switch assessment.status {
 	case downloader.LedgerIdentityExactUnique:
-		report.addBlocker("client.exact_job_exists", "an exact typed-infohash job already exists; v1 never mutates existing jobs")
+		report.addBlocker("client.exact_job_exists", "an exact typed-infohash job already exists; stopped-add adoption never mutates existing jobs")
 		report.Client.Status = "exact_job_exists"
 		return fmt.Errorf("%w: exact downloader job already exists", ErrPolicy)
 	case downloader.LedgerIdentityAmbiguous:
@@ -721,6 +930,9 @@ func validatePrepared(prepared *PreparedPlan, expectedPlanID string, payload *me
 			observation.CompletionID != prepared.plan.PriorAdoptionCompletionID {
 			return fmt.Errorf("%w: prepared prior adoption authority differs from the reviewed lineage", ErrIntegrity)
 		}
+	}
+	if prepared.plan.Action == ActionAdoptExistingStopped && payload != nil {
+		return fmt.Errorf("%w: observation-only adoption cannot consume raw metafile payload authority", ErrPolicy)
 	}
 	if payload != nil {
 		return validateMetafilePayload(prepared, payload)
@@ -828,6 +1040,9 @@ func phaseForState(state journalState) string {
 	case state.Completion != nil:
 		return "adopted_pending_client_recheck"
 	case len(state.Attempts) > 0:
+		if state.Intent.Plan.Action == ActionAdoptExistingStopped {
+			return "existing_job_observation_incomplete"
+		}
 		return "request_result_unknown"
 	case state.IntentID != "":
 		return "intent_recorded"

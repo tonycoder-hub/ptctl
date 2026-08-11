@@ -124,6 +124,25 @@ func DescribeLedgerDriver(driver string) (LedgerEvidenceDescriptor, bool) {
 	}
 }
 
+// LedgerDriverSupportsIdentity reports whether one audited read ledger can
+// expose every typed identity family required by identity. It grants no
+// mutation authority. In particular, Transmission exposes only its complete
+// SHA-1/v1 hash string, while qBittorrent can expose v1, v2, and hybrid magnet
+// identities through the normalized ledger.
+func LedgerDriverSupportsIdentity(driver string, identity TypedIdentity) bool {
+	if identity.Validate() != nil {
+		return false
+	}
+	switch driver {
+	case DriverQBittorrent:
+		return true
+	case DriverTransmission:
+		return identity.InfoHashV1 != "" && identity.InfoHashV2 == ""
+	default:
+		return false
+	}
+}
+
 // LedgerSnapshot is one bounded observation of downloader jobs. Observation
 // timestamps bracket the complete request and parse, rather than pretending
 // that all jobs were sampled atomically.

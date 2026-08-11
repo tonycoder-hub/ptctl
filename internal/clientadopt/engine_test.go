@@ -175,6 +175,142 @@ func TestRunAdoptsAbsentJobStoppedAndRecordsTerminalJournal(t *testing.T) {
 	}
 }
 
+func TestRunAdoptsExistingStoppedJobWithoutDownloaderMutation(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	prepared := prepareExistingFixturePlan(t, fixture, DriverQBittorrent)
+	savePath, _ := prepared.savePath()
+	contentPath, _ := prepared.contentPath()
+	job := &downloader.Torrent{
+		Hash: "existing-opaque-job", InfoHashV1: fixture.meta.InfoHashV1,
+		IdentityStatus: downloader.IdentityStatusValid, IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{},
+		SizeBytes: fixture.meta.TotalLength, State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}
+	before := ledgerSnapshot(fixture.meta, job, time.Now().UTC())
+	after := ledgerSnapshot(fixture.meta, job, before.ObservedAtEnd.Add(time.Millisecond))
+	previewSession := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before}}
+	preview, err := Preview(ctx, prepared, previewSession)
+	if err != nil || preview.Outcome != OutcomeReady || preview.Client.Status != "existing_unique_exact_stopped_job_ready_for_observation_only_adoption" ||
+		previewSession.requests != 2 || previewSession.adds != 0 {
+		t.Fatalf("preview=%#v requests=%d adds=%d err=%v", preview, previewSession.requests, previewSession.adds, err)
+	}
+	if err := PreflightRun(ctx, prepared, prepared.PlanID(), nil); err != nil {
+		t.Fatal(err)
+	}
+	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
+	report, err := Run(ctx, RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: session, AcknowledgeExistingStopped: true,
+	})
+	if err != nil || report.Outcome != OutcomeExistingAdoptedPendingRecheck || report.Plan.Action != ActionAdoptExistingStopped ||
+		report.Client.AddAttempted || report.Client.VariantRelation != "existing_job_private_variant_unobservable" ||
+		report.Client.Assurance != "two_complete_typed_job_and_path_observations_bracketing_same_invocation_exact_final_reverification_non_atomic_without_client_mutation" ||
+		!report.Journal.CompletionDurable || report.Journal.AttemptsRecorded != 1 || session.requests != 3 || session.adds != 0 ||
+		containsEffect(report.Effect, "submit_exact_metafile_stopped") {
+		t.Fatalf("report=%#v requests=%d adds=%d err=%v", report, session.requests, session.adds, err)
+	}
+	verified, observation, err := VerifyCompletion(ctx, CompletionProofOptions{
+		TargetRoot: fixture.targetRoot, OperationID: prepared.OperationID(), ExpectedPlanID: prepared.PlanID(),
+	})
+	if err != nil || !verified.Verified() || observation.Action != ActionAdoptExistingStopped ||
+		observation.Assurance != "same_invocation_bound_canonical_existing_stopped_adoption_completion_read_without_durability_refresh" {
+		t.Fatalf("verified=%#v observation=%#v err=%v", verified, observation, err)
+	}
+	status, err := Status(ctx, StatusOptions{TargetRoot: fixture.targetRoot, OperationID: prepared.OperationID()})
+	if err != nil || status.Outcome != OutcomeHistoricalAdopted ||
+		status.Client.Status != "historical_existing_stopped_adoption_recorded_current_client_not_observed" {
+		t.Fatalf("status=%#v err=%v", status, err)
+	}
+	current := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{after}}
+	repeated, err := Resume(ctx, prepared.OperationID(), RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: current, AcknowledgeExistingStopped: true,
+	})
+	if err != nil || repeated.Outcome != OutcomeAlreadyAdopted || current.requests != 2 || current.adds != 0 ||
+		repeated.Client.Assurance != "current_single_ledger_observation_plus_historical_existing_job_bracket_record_non_atomic" {
+		t.Fatalf("resume=%#v requests=%d adds=%d err=%v", repeated, current.requests, current.adds, err)
+	}
+}
+
+func TestExistingStoppedAdoptionRequiresJobBeforeJournalWrite(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	prepared := prepareExistingFixturePlan(t, fixture, DriverQBittorrent)
+	absent := ledgerSnapshot(fixture.meta, nil, time.Now().UTC())
+	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{absent}}
+	report, err := Run(ctx, RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: session, AcknowledgeExistingStopped: true,
+	})
+	if !errors.Is(err, ErrPolicy) || report.Outcome != OutcomeBlocked || report.WritesPerformed != 0 ||
+		report.Operation.Status != "not_created" || session.adds != 0 || !findingCode(report.Blockers, "client.exact_job_absent") {
+		t.Fatalf("report=%#v requests=%d adds=%d err=%v", report, session.requests, session.adds, err)
+	}
+	operationName, nameErr := operationDirectoryName(prepared.OperationID())
+	if nameErr != nil {
+		t.Fatal(nameErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(fixture.targetRoot, operationName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("observation-only absence created operation state: %v", statErr)
+	}
+}
+
+func TestExistingStoppedAdoptionFailsClosedWhenBracketChanges(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	prepared := prepareExistingFixturePlan(t, fixture, DriverQBittorrent)
+	savePath, _ := prepared.savePath()
+	contentPath, _ := prepared.contentPath()
+	first := &downloader.Torrent{
+		Hash: "first-existing-job", InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
+		State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}
+	second := *first
+	second.Hash = "replacement-existing-job"
+	before := ledgerSnapshot(fixture.meta, first, time.Now().UTC())
+	after := ledgerSnapshot(fixture.meta, &second, before.ObservedAtEnd.Add(time.Millisecond))
+	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
+	report, err := Run(ctx, RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: session, AcknowledgeExistingStopped: true,
+	})
+	if !errors.Is(err, ErrPolicy) || report.Outcome != OutcomeBlocked || report.Journal.CompletionDurable ||
+		!report.Operation.Resumable || report.Operation.PhaseAfter != "existing_job_bracket_unstable" || session.adds != 0 ||
+		!findingCode(report.Blockers, "client.existing_job_changed") {
+		t.Fatalf("report=%#v requests=%d adds=%d err=%v", report, session.requests, session.adds, err)
+	}
+	recoveryAfter := ledgerSnapshot(fixture.meta, first, before.ObservedAtEnd.Add(time.Millisecond))
+	resumeSession := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, recoveryAfter}}
+	resumed, resumeErr := Resume(ctx, prepared.OperationID(), RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: resumeSession, AcknowledgeExistingStopped: true,
+	})
+	if resumeErr != nil || resumed.Outcome != OutcomeExistingAdoptedPendingRecheck || resumed.Journal.AttemptsRecorded != 2 ||
+		!resumed.Journal.CompletionDurable || resumeSession.adds != 0 {
+		t.Fatalf("resumed=%#v requests=%d adds=%d err=%v", resumed, resumeSession.requests, resumeSession.adds, resumeErr)
+	}
+}
+
+func TestExistingStoppedAdoptionRejectsNonMonotonicLedgerTimeline(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	prepared := prepareExistingFixturePlan(t, fixture, DriverQBittorrent)
+	savePath, _ := prepared.savePath()
+	contentPath, _ := prepared.contentPath()
+	job := &downloader.Torrent{
+		Hash: "existing-opaque-job", InfoHashV1: fixture.meta.InfoHashV1,
+		IdentityStatus: downloader.IdentityStatusValid, IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{},
+		SizeBytes: fixture.meta.TotalLength, State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}
+	before := ledgerSnapshot(fixture.meta, job, time.Now().UTC())
+	after := ledgerSnapshot(fixture.meta, job, before.ObservedAtStart.Add(-time.Second))
+	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
+	report, err := Run(ctx, RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: session, AcknowledgeExistingStopped: true,
+	})
+	if !errors.Is(err, ErrPolicy) || report.Outcome != OutcomeBlocked || report.Journal.CompletionDurable ||
+		!report.Operation.Resumable || report.Operation.PhaseAfter != "existing_job_bracket_unstable" || session.adds != 0 ||
+		!findingCode(report.Blockers, "client.existing_job_timeline_invalid") {
+		t.Fatalf("report=%#v requests=%d adds=%d err=%v", report, session.requests, session.adds, err)
+	}
+}
+
 func TestReAdoptionRequiresExplicitPriorCompletionAbsenceAndAcknowledgement(t *testing.T) {
 	ctx := context.Background()
 	fixture := makeMaterializedFixture(t, ctx)
@@ -673,6 +809,26 @@ func prepareTransmissionFixturePlan(t *testing.T, fixture materializedFixture) *
 	return prepared
 }
 
+func prepareExistingFixturePlan(t *testing.T, fixture materializedFixture, driver string) *PreparedPlan {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(fixture.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configByte := "e"
+	if driver == DriverTransmission {
+		configByte = "f"
+	}
+	prepared, err := BuildPlan(fixture.verified, PlanOptions{
+		Driver: driver, ClientConfigID: "sha256:" + strings.Repeat(configByte, 64),
+		HostRoot: root, ClientRoot: "/downloads", ClientWindows: false, AdoptExistingStopped: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared
+}
+
 func ledgerSnapshot(meta *metafile.MetaInfo, job *downloader.Torrent, started time.Time) downloader.LedgerSnapshot {
 	return ledgerSnapshotForDriver(meta, downloader.DriverQBittorrent, job, started)
 }
@@ -691,6 +847,15 @@ func ledgerSnapshotForDriver(meta *metafile.MetaInfo, driver string, job *downlo
 func findingCode(findings []Finding, code string) bool {
 	for _, finding := range findings {
 		if finding.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEffect(effects []string, wanted string) bool {
+	for _, effect := range effects {
+		if effect == wanted {
 			return true
 		}
 	}

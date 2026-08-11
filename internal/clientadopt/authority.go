@@ -14,6 +14,7 @@ type CompletionProofOptions struct {
 
 type CompletionObservation struct {
 	Driver                 string `json:"driver"`
+	Action                 string `json:"action"`
 	OperationID            string `json:"operation_id"`
 	PlanID                 string `json:"plan_id"`
 	CompletionID           string `json:"completion_id"`
@@ -53,6 +54,7 @@ type verifiedCompletionAuthority struct {
 	plan         Plan
 	planID       string
 	operationID  OperationID
+	attempt      Attempt
 	completion   Completion
 	completionID MarkerID
 	retained     bool
@@ -72,7 +74,7 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 	}
 	defer handle.Close()
 	state := handle.state
-	if state.Pending != "" || state.Completion == nil || state.CompletionID == "" ||
+	if state.Pending != "" || state.Completion == nil || state.CompletionID == "" || len(state.Attempts) == 0 ||
 		state.Retained && !state.RetentionComplete ||
 		state.Intent.PlanID != options.ExpectedPlanID || state.Intent.OperationID != options.OperationID ||
 		state.Completion.PlanID != options.ExpectedPlanID || state.Completion.OperationID != options.OperationID {
@@ -80,6 +82,7 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 	}
 	authority := &verifiedCompletionAuthority{
 		plan: state.Intent.Plan, planID: state.Intent.PlanID, operationID: state.Intent.OperationID,
+		attempt:    state.Attempts[len(state.Attempts)-1],
 		completion: *state.Completion, completionID: state.CompletionID, retained: state.Retained,
 	}
 	verified := &VerifiedCompletion{authority: authority}
@@ -94,8 +97,12 @@ func (verified *VerifiedCompletion) Verified() bool {
 	plan, completion := authority.plan, authority.completion
 	if plan.Validate() != nil || completion.Validate() != nil || authority.completionID == "" ||
 		!canonicalPlanID(authority.planID) || OperationIDForPlan(authority.planID) != authority.operationID ||
+		authority.attempt.OperationID != authority.operationID || authority.attempt.PlanID != authority.planID ||
 		completion.OperationID != authority.operationID || completion.PlanID != authority.planID ||
 		completion.ContentPathRef != plan.ExpectedContentPathRef || completion.FinalObjectIdentity != plan.FinalObjectIdentity {
+		return false
+	}
+	if !completionMatchesPlan(completion, plan, authority.attempt) {
 		return false
 	}
 	if computed, err := PlanID(plan); err != nil || computed != authority.planID {
@@ -114,7 +121,7 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 	authority := verified.authority
 	plan, completion := authority.plan, authority.completion
 	return CompletionObservation{
-		Driver: plan.Driver, OperationID: authority.operationID.String(), PlanID: authority.planID, CompletionID: authority.completionID.String(),
+		Driver: plan.Driver, Action: plan.Action, OperationID: authority.operationID.String(), PlanID: authority.planID, CompletionID: authority.completionID.String(),
 		MetafileVariantID: plan.MetafileVariantID, MetafileBytes: plan.MetafileBytes,
 		InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2,
 		MaterializeOperationID: plan.MaterializeOperationID, MaterializePlanID: plan.MaterializePlanID,
@@ -130,6 +137,12 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 }
 
 func completionAssurance(authority *verifiedCompletionAuthority) string {
+	if authority != nil && authority.plan.Action == ActionAdoptExistingStopped && authority.retained {
+		return "same_invocation_bound_canonical_existing_stopped_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation"
+	}
+	if authority != nil && authority.plan.Action == ActionAdoptExistingStopped {
+		return "same_invocation_bound_canonical_existing_stopped_adoption_completion_read_without_durability_refresh"
+	}
 	if authority != nil && authority.retained {
 		return "same_invocation_bound_canonical_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation"
 	}
