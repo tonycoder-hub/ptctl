@@ -15,6 +15,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
+	"github.com/tonycoder-hub/ptctl/internal/clientremove"
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
@@ -167,6 +168,10 @@ Usage:
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
   ptctl client activate prune --target PATH --expect-activation-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client activate forget --target PATH --expect-activation-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
+  ptctl client remove plan [activation/final/mapping/client selectors] [--output table|json]
+  ptctl client remove run [same selectors] --expect-removal-plan-id ID --acknowledge-client-removal [--output table|json]
+  ptctl client remove resume [same selectors] --expect-removal-plan-id ID [--acknowledge-client-removal --acknowledge-repeat-removal] [--output table|json] OPERATION_ID
+  ptctl client remove status --target PATH --expect-removal-plan-id ID [--output table|json] OPERATION_ID
 
   ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
@@ -197,6 +202,7 @@ Safety defaults:
   * Seed retire plan performs fresh proof reads only and grants no deletion authority. Run/resume require a separate exact plan ID and deletion acknowledgement, journal every explicit name, and never remove directories, aliases, padding, empty files, or final content. Prune has its own acknowledgement and deletes only one terminal operation's private journal while retaining a tombstone; forget has a third acknowledgement and deletes only that exact tombstone plus its last recovery marker.
   * Client adoption only adds an absent exact-infohash qBittorrent or Transmission job in stopped mode. Transmission is v1-only; a matching built-in driver can feed the separate reviewed recheck/start workflow. Adoption journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
   * Client activation only rechecks or starts the reviewed exact existing job, with at most one non-retried mutation per invocation. Its separately acknowledged local prune deletes only one terminal private journal after sealing an exact tombstone and never reads a credential or contacts the client.
+  * Client removal targets one reviewed typed-identity job, explicitly keeps local data, journals intent before one non-retried request, and requires exact queue absence plus final filesystem re-verification before completion.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
 `)
@@ -255,8 +261,11 @@ func (a *app) client(args []string) error {
 	if len(args) > 0 && args[0] == "activate" {
 		return a.clientActivate(args[1:])
 	}
+	if len(args) > 0 && args[0] == "remove" {
+		return a.clientRemove(args[1:])
+	}
 	if len(args) == 0 || (args[0] != "status" && args[0] != "list") {
-		return usageError("client requires status, list, adopt, or activate")
+		return usageError("client requires status, list, adopt, activate, or remove")
 	}
 	command := args[0]
 	fs := newFlagSet("client " + command)
@@ -1583,6 +1592,8 @@ func jsonKind(data any) string {
 		return "client.activation.retention"
 	case clientactivate.ForgetReport:
 		return "client.activation.forget"
+	case clientremove.Report:
+		return "client.removal"
 	case sourceretire.Report:
 		return "content.source_retirement_plan"
 	case sourceretire.ExecutionReport:

@@ -9,8 +9,10 @@ domains and reconciles them around verifiable torrent metadata.
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
-> workflow, exact `client adopt run|resume|prune|forget` stopped-add operations, and
-> explicit `client activate run|resume|prune|forget` recheck/start operations. The
+> workflow, exact `client adopt run|resume|prune|forget` stopped-add operations,
+> explicit `client activate run|resume|prune|forget` recheck/start operations,
+> and acknowledged `client remove run|resume` exact-job removal that always
+> retains local data. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
@@ -144,6 +146,11 @@ capabilities at the edge, not assumptions in the core domain model.
   durable per-request intent, exact typed job/per-file layout reobservation,
   current-final re-verification, and no automatic replay of unknown requests;
   Transmission control remains v1-only;
+- explicitly reviewed qBittorrent or Transmission removal of one current exact
+  typed-identity job while retaining all local data, with a durable request
+  intent, no fan-out or automatic retry, complete queue-absence observation,
+  and another exact materialized-final verification before completion;
+  Transmission remains v1-only;
 - zero-write source-retirement eligibility planning from a new complete live
   source proof, current exact materialized-final proof, and canonical terminal
   client activation journal, plus stable before/after reads of the exact live
@@ -163,8 +170,8 @@ capabilities at the edge, not assumptions in the core domain model.
   human-readable tables.
 
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
-index alone, background refresh/watchers, downloader pause/location/removal or
-broader existing-job mutation,
+index alone, background refresh/watchers, downloader pause/location or broader
+existing-job mutation, client-removal journal pruning/forgetting,
 attributed/empty-file client-layout reconciliation,
 reflink/hardlink or cross-filesystem materialization, automatic execution of
 serialized plan reports, source-parent/staging cleanup or rollback,
@@ -937,6 +944,62 @@ there is intentionally no idempotence evidence: a repeated call reports
 `client.activation.forget`. Deleting durable evidence cannot revoke an opaque
 `VerifiedCompletion` capability that was already issued in another live call.
 
+Remove that exact current downloader job while deliberately retaining the
+materialized files:
+
+```bash
+# Review only. The plan binds the current activation, exact typed job and file
+# layout, client mapping/configuration, materialized final, and protocol route.
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client remove plan \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin --output json
+
+# Execute exactly the reviewed keep-data removal.
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client remove run \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin \
+  --expect-removal-plan-id REMOVAL_PLAN_ID \
+  --acknowledge-client-removal --output json
+
+ptctl client remove status --target "D:\PT" \
+  --expect-removal-plan-id REMOVAL_PLAN_ID \
+  sha256:REMOVAL_OPERATION_DIGEST
+```
+
+The removal port has no delete-data option. qBittorrent receives exactly one
+`hashes` value with `deleteFiles=false`; Transmission receives exactly one full
+v1 hash with `delete-local-data=false` (RPC 5.3) or
+`delete_local_data=false` (RPC 6). See the official
+[qBittorrent WebUI API](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#delete-torrents)
+and [Transmission RPC specification](https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md#31-torrent-action-requests).
+HTTP/2, connection reuse, redirects, proxy use, fan-out, and automatic replay
+are disabled. A successful response is kept separate from proof: completion
+requires a later complete typed ledger to show the exact job absent and then a
+fresh exact verification of the materialized final. If the request result is
+unknown, resume checks absence first and attributes no causality; repeating a
+still-present removal requires both `--acknowledge-client-removal` and
+`--acknowledge-repeat-removal`. Local-only `status` reports historical marker
+state and never claims that the queue or files are currently unchanged. JSON
+kind is `client.removal`. If source-name retirement is desired, complete that
+separate live-client proof and acknowledged transition first; removal never
+infers or authorizes source retirement.
+
 Review which current source file names are eligible for a separately
 acknowledged retirement operation:
 
@@ -1190,6 +1253,7 @@ paths remain remote, non-atomic lexical claims and are never opened on the host.
 Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
 `ptctl storage profile`, `ptctl storage index`, `ptctl seed discover --help`,
 `ptctl seed materialize --help`, `ptctl client activate --help`,
+`ptctl client remove --help`,
 `ptctl seed retire --help`, or
 `ptctl reconcile report --help` for the
 complete surface.
@@ -1235,6 +1299,15 @@ removal returns `1`, invalid usage or a missing acknowledgement returns `2`,
 marker/journal/namespace integrity failure returns `3`, and an explicit
 selector, terminal-state, filesystem, or bounded-inventory policy blocker
 returns `4`. It never reads downloader credentials or contacts the client.
+
+Client removal is also report-first. `ready`, `removed_keep_data`,
+`removed_causality_unproven`, local-only `historical_removal_complete`, and a
+freshly reverified `already_complete` return `0`; operational interruption returns `1`; invalid usage or a missing
+acknowledgement returns `2`; journal, current-use, or final-content integrity
+failure returns `3`; and a policy blocker, unknown request result, incomplete
+initialization, or missing explicit operation returns `4`. The report records
+private journal writes and the one mutation request separately. A `200`
+response never by itself produces a completed outcome.
 
 For the metafile store, exit `0` includes idempotent `already_initialized` and
 `already_present` outcomes. Missing/uninitialized stores, absent objects, I/O

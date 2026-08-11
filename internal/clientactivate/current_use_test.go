@@ -2,8 +2,10 @@ package clientactivate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +45,17 @@ func TestCurrentUseRequiresStableCompleteExactJob(t *testing.T) {
 		!beforeObservation.AllSelected || !beforeObservation.AllComplete {
 		t.Fatalf("before=%#v verified=%t err=%v", beforeObservation, before != nil && before.Verified(), err)
 	}
+	request, ok := before.RemovalRequest()
+	if !ok || request.JobKey != fixture.opaqueKey {
+		t.Fatalf("removal request authority missing: %#v ok=%t", request, ok)
+	}
+	serialized, err := json.Marshal(struct {
+		Verified    *VerifiedCurrentUse   `json:"verified"`
+		Observation CurrentUseObservation `json:"observation"`
+	}{Verified: before, Observation: beforeObservation})
+	if err != nil || strings.Contains(string(serialized), fixture.opaqueKey) {
+		t.Fatalf("current-use JSON leaked opaque key: %s err=%v", serialized, err)
+	}
 	after, afterObservation, err := VerifyCurrentUse(context.Background(), authority, session)
 	if err != nil || !after.Verified() || !before.StableWith(after) || beforeObservation.UseID != afterObservation.UseID ||
 		afterObservation.Driver != downloader.DriverQBittorrent || session.RequestsMade() != 3 {
@@ -60,6 +73,41 @@ func TestCurrentUseRequiresStableCompleteExactJob(t *testing.T) {
 	second, _, err := VerifyCurrentUse(context.Background(), authority, changedSession)
 	if err != nil || first.StableWith(second) {
 		t.Fatalf("state-changing bracket was stable: first=%#v second=%#v err=%v", first.Observation(), second.Observation(), err)
+	}
+}
+
+func TestCurrentUseProvesSameSessionTypedAbsenceWithoutCausality(t *testing.T) {
+	fixture := makeActivationFixture(t)
+	completion := completeRecheckOnlyForCurrentUse(t, fixture)
+	hostRoot, err := filepath.EvalSymlinks(fixture.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := PrepareCurrentUse(fixture.verifiedFinal, completion, CurrentUseOptions{
+		ClientConfigID: fixture.clientConfig, HostRoot: hostRoot, ClientRoot: "/downloads",
+		FileLimits: downloader.DefaultJobFileLedgerLimits(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	complete := fixture.job("stoppedUP", 1)
+	session := newActivationSession(fixture,
+		activationLedger(fixture.meta, &complete, now),
+		activationLedger(fixture.meta, nil, now.Add(time.Second)))
+	before, _, err := VerifyCurrentUse(context.Background(), authority, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absence, observation, err := VerifyCurrentJobAbsent(context.Background(), before, session)
+	if err != nil || !absence.Verified() || observation.Status != "exact_typed_job_absent" || observation.RequestsMade != 1 ||
+		observation.JobID != before.Observation().JobID || observation.Final != before.Observation().Final || session.RequestsMade() != 3 {
+		t.Fatalf("absence=%#v verified=%t requests=%d err=%v", observation, absence != nil && absence.Verified(), session.RequestsMade(), err)
+	}
+	other := newActivationSession(fixture, activationLedger(fixture.meta, nil, now.Add(2*time.Second)))
+	if _, _, err := VerifyCurrentJobAbsent(context.Background(), before, other); !errors.Is(err, ErrPolicy) || other.RequestsMade() != 1 {
+		// Constructor bookkeeping counts as one synthetic open request; no ledger read is allowed.
+		t.Fatalf("cross-session absence was accepted: requests=%d err=%v", other.RequestsMade(), err)
 	}
 }
 

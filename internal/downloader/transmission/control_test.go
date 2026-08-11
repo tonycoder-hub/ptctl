@@ -206,7 +206,8 @@ func newControlFixture(t *testing.T, modern bool, outcome string) (*httptest.Ser
 			}
 			return
 		}
-		validMethod := method == "torrent-verify" || method == "torrent-start" || method == "torrent_verify" || method == "torrent_start"
+		validMethod := method == "torrent-verify" || method == "torrent-start" || method == "torrent_verify" || method == "torrent_start" ||
+			method == "torrent-remove" || method == "torrent_remove"
 		if !validMethod {
 			t.Errorf("unexpected control method %q", method)
 			writer.WriteHeader(http.StatusBadRequest)

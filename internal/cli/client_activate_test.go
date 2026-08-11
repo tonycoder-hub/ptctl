@@ -45,12 +45,15 @@ type clientActivateServer struct {
 	progress float64
 	added    bool
 
-	login   atomic.Int32
-	version atomic.Int32
-	ledger  atomic.Int32
-	recheck atomic.Int32
-	start   atomic.Int32
-	add     atomic.Int32
+	login      atomic.Int32
+	version    atomic.Int32
+	ledger     atomic.Int32
+	recheck    atomic.Int32
+	start      atomic.Int32
+	add        atomic.Int32
+	remove     atomic.Int32
+	removeMode string
+	removeHook func()
 }
 
 func TestClientActivatePlanRunResumeStatusAndPrivacy(t *testing.T) {
@@ -361,7 +364,19 @@ func (server *clientActivateServer) currentState() (string, float64) {
 }
 
 func (server *clientActivateServer) totalRequests() int32 {
-	return server.login.Load() + server.version.Load() + server.ledger.Load() + server.add.Load() + server.recheck.Load() + server.start.Load()
+	return server.login.Load() + server.version.Load() + server.ledger.Load() + server.add.Load() + server.recheck.Load() + server.start.Load() + server.remove.Load()
+}
+
+func (server *clientActivateServer) setRemoveMode(mode string) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.removeMode = mode
+}
+
+func (server *clientActivateServer) setRemoveHook(hook func()) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.removeHook = hook
 }
 
 func (server *clientActivateServer) serveHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -434,6 +449,34 @@ func (server *clientActivateServer) serveHTTP(writer http.ResponseWriter, reques
 		server.start.Add(1)
 		server.validateAction(writer, request)
 		server.setState("uploading", 1)
+	case "/api/v2/torrents/delete":
+		server.remove.Add(1)
+		if request.Method != http.MethodPost || request.ParseForm() != nil || len(request.PostForm) != 2 ||
+			request.PostForm.Get("hashes") != clientAdoptJobKey || request.PostForm.Get("deleteFiles") != "false" {
+			server.t.Errorf("invalid keep-data removal request: %#v", request.PostForm)
+			http.Error(writer, "invalid", http.StatusBadRequest)
+			return
+		}
+		server.mu.Lock()
+		mode := server.removeMode
+		hook := server.removeHook
+		if mode != "unknown_keep_job" && mode != "accepted_keep_job" {
+			server.added = false
+		}
+		server.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		if mode == "unknown_keep_job" || mode == "unknown_job_removed" {
+			connection, _, err := writer.(http.Hijacker).Hijack()
+			if err != nil {
+				server.t.Errorf("hijack removal response: %v", err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		_, _ = writer.Write([]byte("Ok."))
 	default:
 		http.NotFound(writer, request)
 	}

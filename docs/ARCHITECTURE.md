@@ -860,8 +860,9 @@ source-retirement eligibility proof -> separately acknowledged per-name journal
 The implemented qBittorrent/Transmission activation and client-neutral
 retirement paths support explicit resume,
 preserve no-overwrite/no-implicit-selection defaults, and never infer source
-retirement from materialization or stopped-job adoption. Location change and
-job removal remain unimplemented.
+retirement from materialization or stopped-job adoption. Location change
+remains unimplemented; exact keep-data job removal is a separate downstream
+slice described below.
 Reflink may eventually be safer than hardlink because a client repair through
 a shared inode can corrupt a media library, but the implemented filesystem
 strategy remains copy only.
@@ -987,6 +988,67 @@ read-only and does not reassert marker durability. The final removal deliberatel
 destroys the evidence needed for idempotent attribution, so a later call cannot
 claim historical success. It never opens a downloader session, reads a
 credential, mutates content, retires sources, or selects another operation.
+
+## Exact downloader-job removal while keeping data
+
+`client remove` consumes a current `materialize.VerifiedFinal`, one canonical
+terminal activation completion, and one fresh exact current-use observation in
+the same authenticated downloader session. Its reviewed plan binds the driver
+and client-configuration ID, driver-owned removal descriptor, activation and
+materialize lineage, exact typed identity, opaque job reference digest,
+complete file-layout snapshot, path mapping, target/final identities, and fixed
+file-ledger limits. The raw downloader job locator remains process-local:
+
+```text
+current exact final + terminal activation + exact complete current-use claim
+  -> reviewed remove_job_keep_data plan
+  -> durable owner-private request-attempt marker
+  -> one non-retried remove-keep-data request
+  -> durable normalized response receipt
+  -> complete typed ledger proves exact job absent
+  -> exact materialized-final re-verification
+  -> durable completion marker
+```
+
+`downloader.ExistingJobRemovalSession` is narrower than the general control
+port. It can read bounded ledgers and one code-owned removal descriptor, then
+attempt exactly one removal. It cannot add, recheck, start, pause, move, select
+multiple jobs, or request local-data deletion. qBittorrent v4/v5 both use
+`/api/v2/torrents/delete` with one URL-form-encoded `hashes` value and
+`deleteFiles=false`. Transmission v5.3 uses `torrent-remove` with one full v1
+hash and `delete-local-data=false`; v6 uses `torrent_remove` and
+`delete_local_data=false`. Transmission v2-only and hybrid identity remain
+unsupported. The routes and parameter names follow the official
+[qBittorrent WebUI API 5.0](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#delete-torrents),
+[qBittorrent WebUI API 4.1](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-4.1%29#delete-torrents),
+[current Transmission RPC specification](https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md#31-torrent-action-requests),
+and [Transmission 4.0.6 RPC specification](https://github.com/transmission/transmission/blob/4.0.6/docs/rpc-spec.md#31-torrent-action-requests).
+
+The request path is HTTP/1.1-only, proxy-free, redirect-free, no-keepalive,
+bounded, serial, and non-retried. Intent is durable before the mutation. A
+complete application response remains only one evidence axis; it cannot prove
+queue absence or retained bytes. Completion separately requires a complete
+typed ledger in the same session to show zero exact jobs, followed by the
+ordinary exact final verifier. If the response is lost but those two proofs
+succeed, the terminal basis is explicitly causality-unproven. If the exact job
+remains, resume will not issue another request without both the base removal and
+repeat-removal acknowledgements. At most three explicit attempt records are
+representable.
+
+The deterministic `.ptctl-client-remove-<digest>` directory is bound to the
+same target-root identity as the materialized final. It contains canonical,
+size-bounded intent, attempt, response, and completion markers plus an exact
+empty scratch namespace; each marker is staged privately and published
+no-clobber. Read-only status accepts one operation ID and reviewed plan ID,
+makes no downloader request or durability refresh, and labels completion,
+queue absence, and final verification as historical only. A fresh completed
+resume must prove current absence and reverify the final again. Public JSON can
+retain IDs and receipts but cannot recover the opaque job locator or any
+process-local proof capability. Source retirement still requires a currently
+present exact client job, so that independent workflow must complete before
+removal when both transitions are desired; neither action authorizes the other.
+This first removal slice has no list/latest selector and no prune/forget
+transition; resume and status require the full deterministic operation ID.
 
 ## Source-retirement review and execution
 

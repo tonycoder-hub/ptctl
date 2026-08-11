@@ -37,6 +37,14 @@ const (
 	// is being irreversibly forgotten.
 	ClientActivateForgetMarkerPrefix = ".ptctl-client-activate-forget-"
 	clientActivateForgetMarkerPrefix = ClientActivateForgetMarkerPrefix
+	// ClientRemoveOperationDirectoryPrefix is reserved for an explicitly
+	// reviewed downloader job removal that always keeps local data.
+	ClientRemoveOperationDirectoryPrefix = ".ptctl-client-remove-"
+	clientRemoveDirectoryPrefix          = ClientRemoveOperationDirectoryPrefix
+	// ClientRemoveForgetMarkerPrefix reserves future root-level recovery state
+	// for irreversible removal-journal retention cleanup.
+	ClientRemoveForgetMarkerPrefix = ".ptctl-client-remove-forget-"
+	clientRemoveForgetMarkerPrefix = ClientRemoveForgetMarkerPrefix
 	// SourceRetireOperationDirectoryPrefix is reserved for the separately
 	// acknowledged, journaled removal of source names after client activation.
 	SourceRetireOperationDirectoryPrefix = ".ptctl-source-retire-"
@@ -58,7 +66,7 @@ const (
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientAdoptForgetMarkerPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
+	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientAdoptForgetMarkerPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, clientRemoveDirectoryPrefix, clientRemoveForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {

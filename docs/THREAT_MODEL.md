@@ -435,6 +435,38 @@ as unattributed rather than idempotently successful. This storage transition
 cannot revoke an opaque process-local completion capability already issued to a
 concurrent caller before forgetting began.
 
+Client removal is an independent existing-job mutation boundary. `plan` writes
+nothing; `run` requires `--acknowledge-client-removal`, and repeating a request
+whose result may be unknown additionally requires
+`--acknowledge-repeat-removal`. The plan is built only from a current exact
+materialized-final authority, a canonical terminal activation completion, one
+fresh complete typed job/file-layout observation, the explicit mapping and
+client configuration, and a code-owned driver removal descriptor. The raw job
+locator stays inside that authenticated session. Name, size, path, progress,
+generic hashes, public JSON, and historical completion alone cannot select a
+job or authorize removal.
+
+The generic port has no data-deletion flag. qBittorrent is fixed to one
+`hashes` selector and `deleteFiles=false`; Transmission is fixed to one full v1
+hash and its version-appropriate `delete-local-data=false` or
+`delete_local_data=false`. The adapter rejects qBittorrent's all-job and
+multi-hash selectors and rejects incomplete Transmission identities. It uses a
+fresh HTTP/1.1-only, proxy-free, redirect-free, no-keepalive session and never
+automatically retries a mutation or expired CSRF challenge. The canonical
+request intent is durable before the one request.
+
+A successful HTTP response is not proof that the reviewed job is absent or
+that files were retained. Completion requires a separate complete typed queue
+observation with zero exact matches, followed by another exact verification of
+the materialized final. A lost response plus both later proofs is reported as
+causality-unproven. If the exact job remains, resume observes first and cannot
+repeat without both acknowledgements. These client and filesystem observations
+are bracketed and non-atomic; they do not prove continuous state after return.
+Read-only status opens only one explicit owner-private journal and labels all
+queue/final evidence historical. It never reads a password, contacts the
+client, or refreshes durability. Reports exclude endpoint, username, password,
+host/client paths, magnet/tracker material, and the opaque job locator.
+
 Source-retirement planning is a separate read-only boundary. It accepts a
 downloader password only from stdin but accepts no mutation acknowledgement and
 always reports zero writes, zero deletion, and `deletion_authority: none`. Eligibility requires a
@@ -735,8 +767,9 @@ remote storage.
 
 `metafile store init`, `metafile store import`, `storage profile create`,
 `storage index refresh`, the artifact/binding phases of `site metafile fetch`,
-acknowledged materialize operations, and acknowledged exact stopped-job
-adoption/activation are the explicit write exceptions.
+acknowledged materialize operations, acknowledged exact stopped-job
+adoption/activation, and acknowledged exact keep-data client removal are the
+explicit write exceptions.
 Store/index/fetch reported write
 count covers logical publication of an accepted store marker or immutable
 object, not private temporary or uninitialized staging entries. It is nonzero
@@ -744,13 +777,17 @@ when that accepted state became visible, including a possible count of `1` for
 `published_durability_unconfirmed`. Materialize instead separately counts
 operation subtrees/directories, journal objects/events, scratch/staged objects,
 publication attempts, logical publications, ambiguous writes, and bytes. Store
-inspect and every non-materialize/non-adoption/non-activation artifact consumer
+inspect and every non-materialize/non-adoption/non-activation/non-removal artifact consumer
 remain zero-write. Adoption separately counts its operation/control directories,
 temporary marker bytes, no-clobber marker publications/removals, uncertain
 writes, login/ledger/add requests, and add receipt.
 Activation uses the same private-write accounting shape but separately reports
 descriptor/ledger/file-ledger reads, recheck/start attempt markers, exactly
 attempted client actions, completion markers, and unknown request results.
+Removal separately reports owner-private intent/attempt/response/completion
+marker writes, temporary cleanup, the one mutation attempt, complete typed
+absence, and the post-removal final proof. Unknown request outcome never becomes
+an automatic retry.
 
 The B1 site metafile fetch crosses two independent boundaries. The tracker may
 record its passkey-bearing GET, so the command requires an explicit
@@ -804,9 +841,10 @@ synthetic metafiles; real tracker artifacts are forbidden.
   exact explicit pruning and each tombstone family has a separately
   acknowledged forget transition; no operation is selected automatically by
   policy);
+- explicit pruning/forgetting for completed client-removal journals;
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
-- downloader pause/location/removal transitions and client-side
+- downloader pause/location transitions and client-side
   private-variant observability;
 - source-parent directory cleanup, block-reclamation accounting, and explicit
   retirement of unselected aliases; journaled retirement intentionally removes
@@ -827,10 +865,13 @@ ptctl will not infer those guarantees from an HTTP 200 response.
 
 No broader deletion or downloader mutation beyond exact private operation-state
 pruning and explicitly selected tombstone forgetting, acknowledged source-name
-retirement, exact stopped-add, and reviewed recheck/start slices,
+retirement, exact stopped-add, reviewed recheck/start, and exact keep-data
+job-removal slices,
 tracker write, or broader content strategy should be added until the relevant
 gap has a testable control and a failure-recovery story. The private metafile
 store grants no authority over seeded content, a materialize acknowledgement
 grants no authority outside its explicit copy-only target-root-local operation,
 and a client-add acknowledgement grants no authority over an existing job or
-source retirement.
+source retirement. A client-removal acknowledgement grants authority over only
+the reviewed exact queue entry and never over its local data, another job, or
+the materialized final.
