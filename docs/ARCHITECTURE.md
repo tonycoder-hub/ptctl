@@ -79,6 +79,27 @@ second afterward only when the first completed. The outer job observations and
 successful inner file observations form a serial bracket, not an atomic
 transaction.
 
+An optional explicit `--adoption-operation/--adoption-plan-id` pair is
+available only with materialized-final mode, the complete downloader group,
+one host/client mapping, automatic file-layout observation, and the fixed
+default file limits. Before credential input, a bound read of the canonical
+terminal stopped-add journal or sealed retention tombstone creates opaque
+`clientadopt.VerifiedCompletion` authority. Its public completion is historical
+only. The same authority then validates the already-read reconciliation
+Before/After ledgers: both must contain one stable exact typed job with the
+reviewed opaque job reference, size, and lexical save/content references, and
+the request count and observation interval must match the enclosing bracket.
+This adds no downloader request. The separate `client_adoption` ledger records
+completion proof and current-job bridge proof without changing the five
+relations or upgrading their evidence. Downloader job incarnation/generation
+is not observable, so a remove-and-readd cycle cannot be excluded. A requested
+adoption that remains unbound prevents overall consistency; a positive
+selector/configuration/final disagreement conflicts. Public JSON cannot
+recreate either process-local authority. When activation is selected in the
+same invocation, its adoption operation, plan, and completion IDs must match
+the explicit adoption lineage. Adoption and keep-data removal selectors are
+mutually exclusive because their current presence predicates conflict.
+
 An optional explicit `--activation-operation/--activation-plan-id` pair is
 available only with materialized-final mode, the complete downloader group, and
 one host/client mapping. The terminal activation journal is read before any

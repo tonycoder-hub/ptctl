@@ -147,6 +147,11 @@ capabilities at the edge, not assumptions in the core domain model.
   and a dedicated acknowledgement, while preserving the prior evidence;
   Transmission is intentionally v1-only because its RPC ledger has no typed
   v2 identity;
+- explicit read-only reconciliation of one canonical terminal stopped-add
+  journal or retained tombstone with the current exact typed job claim from
+  the existing downloader bracket and the current exact materialized final;
+  this adds no request, preserves five relations, and does not claim that the
+  current job is the same remote incarnation as the historically added job;
 - explicit qBittorrent or Transmission recheck and optional controlled start
   downstream of a canonical same-driver stopped-adoption completion, with
   version-bound qB v4/v5 routes and Transmission v5.3/v6 methods,
@@ -1296,6 +1301,44 @@ local observations are sequential and bracketed non-atomic, and optional
 downloader before/after reads enclose both. A damaged final is reported before
 the command returns integrity exit `3`. `--source`, live search roots, a stored
 profile selector, and this materialized-final selector are mutually exclusive.
+
+To require stopped-add attribution, add the explicit adoption operation and
+its reviewed plan ID to materialized-final reconciliation:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
+  --metafile-store .ptctl-private \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\Seed" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --adoption-operation sha256:ADOPTION_OPERATION_DIGEST \
+  --adoption-plan-id ADOPTION_PLAN_ID \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --host-root 'D:\Seed' \
+  --client-root /downloads \
+  --client-style posix \
+  --output json
+```
+
+Both adoption flags are required together, along with the complete
+materialized-final, downloader, and path-mapping selectors,
+`client-file-layout=auto`, and the default bounded file limits. Before stdin or
+network access, ptctl reads the selected live terminal journal or retained
+tombstone and checks its metafile, materialize, driver, client-configuration,
+and mapping lineage. The `client_adoption` ledger keeps that historical
+completion separate from a process-local bridge to the current exact typed
+job claim in the already existing Before/After bracket. No additional request
+is sent. Historical adoption cannot upgrade infohash, local content, or path
+evidence, and downloader APIs expose no generation with which to exclude a
+remove-and-readd incarnation. Public JSON cannot recreate either authority.
+When activation is also selected, its embedded adoption operation, plan, and
+completion IDs must match this explicit lineage. Adoption and keep-data
+removal reconciliation are mutually exclusive because one requires current
+exact presence and the other current exact absence.
 
 To require attribution to one canonical terminal client-activation journal,
 add its explicit reviewed selectors to materialized-final reconciliation:

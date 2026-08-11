@@ -477,6 +477,23 @@ one-way client/path/job references and never includes host/client paths,
 endpoint, username, password, generic job key, magnet URI, tracker material,
 or raw metafile bytes.
 
+Read-only reconciliation can select one full stopped-adoption operation ID and
+reviewed plan ID, but never enumerates or chooses history. The live terminal
+journal or exact retention tombstone is verified before downloader credential
+input or network access. Its opaque process-local completion authority is
+historical and cannot prove current queue state. Without another request, it
+may inspect only the reconciliation command's existing complete Before/After
+ledger bracket and bind the historical job reference, typed identity, size,
+lexical save/content references, exact final identity, request count, and time
+ordering to one current stable exact job claim. This does not prove that the
+current remote object is the same incarnation: neither audited downloader API
+provides an immutable generation identifier. It also cannot upgrade the
+independent raw-metafile, typed-infohash, storage-content, or path relations.
+Serialized DTOs lose both completion and current-job authority. Explicit
+adoption plus activation must share operation/plan/completion lineage;
+adoption plus keep-data removal is rejected because exact current presence and
+exact current absence cannot both hold in the same bracket.
+
 Client activation is a second, narrower existing-job mutation boundary for the
 two built-in drivers. Activation is unavailable without a same-invocation
 exact final authority and a canonical stopped-adoption completion from the

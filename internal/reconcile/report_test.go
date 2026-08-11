@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -167,6 +169,97 @@ func TestClientActivationRequestFailsClosedAndSanitizesUntrustedStopReason(t *te
 	}
 }
 
+func TestClientAdoptionRequestFailsClosedAndSanitizesUntrustedStopReason(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	const canary = "ADOPTION-STOP-SECRET-CANARY"
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ClientAdoption: ClientAdoptionSelection{Requested: true, StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "incomplete" || report.Ledgers.Adoption.Status != "incomplete" ||
+		report.Ledgers.Adoption.StopReason != "adoption_completion_load_failed" ||
+		report.Ledgers.Adoption.ProcessLocalCompletionProof || report.Ledgers.Adoption.ProcessLocalCurrentJobProof ||
+		strings.Contains(string(raw), canary) {
+		t.Fatalf("unsafe adoption failure report: %s", raw)
+	}
+
+	unexpected, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		ClientAdoption: ClientAdoptionSelection{StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unexpected.Outcome != "incomplete" || unexpected.Ledgers.Adoption.StopReason != "adoption_unexpected_activity" ||
+		!containsFinding(unexpected.Blockers, "adoption.input_inconsistent") {
+		t.Fatalf("unexpected adoption activity was ignored: %#v", unexpected)
+	}
+}
+
+func TestClientAdoptionAssessmentBindsHistoricalCompletionToExistingBracket(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	other := "sha256:" + strings.Repeat("b", 64)
+	planID := strings.Repeat("c", 24)
+	operationDigest := sha256.Sum256([]byte("ptctl-client-adopt-operation-v1\x00" + planID))
+	adoptionOperation := "sha256:" + hex.EncodeToString(operationDigest[:])
+	now := time.Now().UTC()
+	meta := &metafile.MetaInfo{MetafileVariantID: digest, MetafileBytes: 64, InfoHashV1: strings.Repeat("d", 40),
+		Files: []metafile.File{{Length: 4}}}
+	completion := ClientAdoptionCompletion{
+		Driver: downloader.DriverQBittorrent, OperationID: adoptionOperation, PlanID: planID, CompletionID: other,
+		MetafileVariantID: digest, MetafileBytes: 64, InfoHashV1: meta.InfoHashV1,
+		MaterializeOperationID: other, MaterializePlanID: planID, ClientConfigID: digest, PathMappingID: other,
+		ClientPathSemantics: "posix_exact", ExpectedSavePathRef: digest, ExpectedContentPathRef: other,
+		JobID: digest, TerminalJobState: "stoppedUP", TargetRootIdentity: "fsbind-v1:" + strings.Repeat("e", 64),
+		FinalObjectIdentity: "fsbind-v1:" + strings.Repeat("f", 64), ManifestFiles: 1, ContentBytes: 4,
+		ObservedAtStart: now, ObservedAtEnd: now.Add(time.Second),
+		Assurance: "same_invocation_bound_canonical_adoption_completion_read_without_durability_refresh",
+	}
+	materialized := MaterializedFinalLedger{Status: "verified_current_final_source", ProcessLocalFinalProof: true,
+		Observation: &materialize.FinalObservation{OperationID: other, MaterializePlanID: planID,
+			MetafileVariantID: digest, MetafileBytes: 64, InfoHashV1: meta.InfoHashV1,
+			TargetRootIdentity: completion.TargetRootIdentity, FinalObjectIdentity: completion.FinalObjectIdentity,
+			ManifestFiles: 1, ContentBytes: 4}}
+	before := downloader.LedgerSnapshot{ObservedAtStart: now.Add(2 * time.Second)}
+	after := downloader.LedgerSnapshot{ObservedAtEnd: now.Add(3 * time.Second)}
+	job := downloader.Torrent{}
+	client := clientAssessment{ledger: DownloaderLedger{Status: "observed_stable"}, relation: Relation{Status: "exact_unique"}, job: &job}
+	current := ClientAdoptionCurrentJob{Driver: downloader.DriverQBittorrent, JobID: digest, JobState: "stoppedUP",
+		SavePathRef: digest, ContentPathRef: other, ObservedAtStart: before.ObservedAtStart, ObservedAtEnd: after.ObservedAtEnd,
+		RequestsMade: 3, JobsExaminedBefore: 1, JobsExaminedAfter: 1, FinalObjectIdentity: completion.FinalObjectIdentity,
+		Assurance: "same_invocation_existing_reconciliation_bracket_bound_to_canonical_stopped_adoption_and_exact_final_with_current_typed_job_claim_non_atomic_without_job_incarnation_proof"}
+	ledger, blockers, warnings := assessClientAdoption(meta, ClientAdoptionSelection{Requested: true, CompletionAttempted: true,
+		Completion: adoptionCompletionStub{value: completion}, CurrentJob: adoptionCurrentJobStub{value: current}}, materialized,
+		ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, client, other)
+	if ledger.Status != "historical_completion_current_job_bound" || !ledger.ProcessLocalCompletionProof ||
+		!ledger.ProcessLocalCurrentJobProof || ledger.Completion == nil || ledger.CurrentJob == nil || len(blockers) != 0 || len(warnings) < 2 {
+		t.Fatalf("ledger=%#v blockers=%#v warnings=%#v", ledger, blockers, warnings)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, ledger.Status, true, "not_requested", false, "not_requested", false, "not_requested", false); got != "consistent" {
+		t.Fatalf("bound adoption did not preserve ordinary consistent lattice: %q", got)
+	}
+}
+
+type adoptionCompletionStub struct{ value ClientAdoptionCompletion }
+
+func (stub adoptionCompletionStub) ReconciliationAdoptionCompletion() (ClientAdoptionCompletion, bool) {
+	return stub.value, true
+}
+
+type adoptionCurrentJobStub struct{ value ClientAdoptionCurrentJob }
+
+func (stub adoptionCurrentJobStub) ReconcileAdoptedCurrentJob(ClientBracket) (ClientAdoptionCurrentJob, bool) {
+	return stub.value, true
+}
+
 func TestClientRemovalRequestFailsClosedAndSanitizesUntrustedStopReason(t *testing.T) {
 	meta, discovery, source, _ := reconciledSingleFile(t)
 	const canary = "REMOVAL-STOP-SECRET-CANARY"
@@ -245,7 +338,7 @@ func TestClientRemovalAssessmentRequiresAttributedHistoryAndMatchingCurrentAbsen
 	}
 
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"absent", "not_comparable", true, "historical_completion_current_job_absent", true,
+		"absent", "not_comparable", true, "not_requested", false, "historical_completion_current_job_absent", true,
 		"historical_keep_data_removal_current_job_absent", true, "not_requested", false); got != "consistent" {
 		t.Fatalf("terminal removal current absence did not close the expected lattice: %q", got)
 	}
@@ -541,25 +634,33 @@ func TestOverallConflictOutranksAmbiguityAcrossAxes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
+			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
 				t.Fatalf("positive contradiction was hidden by ambiguity: got %q", got)
 			}
 		})
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "selected_activation_mismatch", true, "not_requested", false, "not_requested", false); got != "conflict" {
+		"exact_unique", "same_location", true, "not_requested", false, "selected_activation_mismatch", true, "not_requested", false, "not_requested", false); got != "conflict" {
 		t.Fatalf("activation mismatch did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false); got != "incomplete" {
+		"exact_unique", "same_location", true, "selected_adoption_mismatch", true, "not_requested", false, "not_requested", false, "not_requested", false); got != "conflict" {
+		t.Fatalf("adoption mismatch did not gate the lattice: %q", got)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false, "not_requested", false); got != "incomplete" {
+		t.Fatalf("unbound requested adoption did not make the report incomplete: %q", got)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_unbound", true, "not_requested", false, "not_requested", false); got != "incomplete" {
 		t.Fatalf("unbound requested activation did not make the report incomplete: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "historical_completion_current_job_bound", true, "not_requested", false, "source_name_reappeared", true); got != "conflict" {
+		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_bound", true, "not_requested", false, "source_name_reappeared", true); got != "conflict" {
 		t.Fatalf("reappeared retired source name did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "historical_completion_current_job_bound", true,
+		"exact_unique", "same_location", true, "not_requested", false, "historical_completion_current_job_bound", true,
 		"not_requested", false, "historical_completion_current_absence_unobserved", true); got != "incomplete" {
 		t.Fatalf("unobserved requested retirement absence did not make the report incomplete: %q", got)
 	}

@@ -3,6 +3,7 @@ package clientadopt
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 type CompletionProofOptions struct {
@@ -17,6 +18,11 @@ type CompletionObservation struct {
 	PlanID                 string `json:"plan_id"`
 	CompletionID           string `json:"completion_id"`
 	MetafileVariantID      string `json:"metafile_variant_id"`
+	MetafileBytes          int64  `json:"metafile_bytes"`
+	InfoHashV1             string `json:"info_hash_v1,omitempty"`
+	InfoHashV2             string `json:"info_hash_v2,omitempty"`
+	MaterializeOperationID string `json:"materialize_operation_id"`
+	MaterializePlanID      string `json:"materialize_plan_id"`
 	ClientConfigID         string `json:"client_config_id"`
 	PathMappingID          string `json:"path_mapping_id"`
 	ClientPathSemantics    string `json:"client_path_semantics"`
@@ -24,7 +30,14 @@ type CompletionObservation struct {
 	ExpectedContentPathRef string `json:"expected_content_path_ref"`
 	JobID                  string `json:"job_id"`
 	JobState               string `json:"job_state"`
+	TargetRootIdentity     string `json:"target_root_identity"`
 	FinalObjectIdentity    string `json:"final_object_identity"`
+	MultiFile              bool   `json:"multi_file"`
+	ManifestFiles          int    `json:"manifest_files"`
+	ContentBytes           int64  `json:"content_bytes"`
+	ObservedAtStart        string `json:"observed_at_start"`
+	ObservedAtEnd          string `json:"observed_at_end"`
+	RetainedTombstone      bool   `json:"retained_tombstone"`
 	Assurance              string `json:"assurance"`
 }
 
@@ -46,7 +59,8 @@ type verifiedCompletionAuthority struct {
 }
 
 func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*VerifiedCompletion, CompletionObservation, error) {
-	if options.TargetRoot == "" || !canonicalPlanID(options.ExpectedPlanID) {
+	if options.TargetRoot == "" || !canonicalPlanID(options.ExpectedPlanID) ||
+		OperationIDForPlan(options.ExpectedPlanID) != options.OperationID {
 		return nil, CompletionObservation{}, fmt.Errorf("%w: adoption completion selector is invalid", ErrPolicy)
 	}
 	if _, err := ParseOperationID(options.OperationID.String()); err != nil {
@@ -73,8 +87,24 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 }
 
 func (verified *VerifiedCompletion) Verified() bool {
-	return verified != nil && verified.authority != nil && verified.authority.plan.Validate() == nil &&
-		verified.authority.completion.Validate() == nil && verified.authority.completionID != ""
+	if verified == nil || verified.authority == nil {
+		return false
+	}
+	authority := verified.authority
+	plan, completion := authority.plan, authority.completion
+	if plan.Validate() != nil || completion.Validate() != nil || authority.completionID == "" ||
+		!canonicalPlanID(authority.planID) || OperationIDForPlan(authority.planID) != authority.operationID ||
+		completion.OperationID != authority.operationID || completion.PlanID != authority.planID ||
+		completion.ContentPathRef != plan.ExpectedContentPathRef || completion.FinalObjectIdentity != plan.FinalObjectIdentity {
+		return false
+	}
+	if computed, err := PlanID(plan); err != nil || computed != authority.planID {
+		return false
+	}
+	if _, computed, err := encodeCompletion(completion); err != nil || computed != authority.completionID {
+		return false
+	}
+	return true
 }
 
 func (verified *VerifiedCompletion) Observation() CompletionObservation {
@@ -85,11 +115,17 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 	plan, completion := authority.plan, authority.completion
 	return CompletionObservation{
 		Driver: plan.Driver, OperationID: authority.operationID.String(), PlanID: authority.planID, CompletionID: authority.completionID.String(),
-		MetafileVariantID: plan.MetafileVariantID, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
+		MetafileVariantID: plan.MetafileVariantID, MetafileBytes: plan.MetafileBytes,
+		InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2,
+		MaterializeOperationID: plan.MaterializeOperationID, MaterializePlanID: plan.MaterializePlanID,
+		ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
 		ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
 		ExpectedContentPathRef: plan.ExpectedContentPathRef, JobID: completion.JobID, JobState: completion.JobState,
-		FinalObjectIdentity: completion.FinalObjectIdentity,
-		Assurance:           completionAssurance(authority),
+		TargetRootIdentity: plan.TargetRootIdentity, FinalObjectIdentity: completion.FinalObjectIdentity,
+		MultiFile: plan.MultiFile, ManifestFiles: plan.ManifestFiles, ContentBytes: plan.ContentBytes,
+		ObservedAtStart:   completion.ObservedAtStart.UTC().Format(time.RFC3339Nano),
+		ObservedAtEnd:     completion.ObservedAtEnd.UTC().Format(time.RFC3339Nano),
+		RetainedTombstone: authority.retained, Assurance: completionAssurance(authority),
 	}
 }
 

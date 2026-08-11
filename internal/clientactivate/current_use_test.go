@@ -232,7 +232,10 @@ func TestReconciliationCurrentUseBindsExistingBracketWithoutAnotherRequest(t *te
 			}
 			view, ok := authority.ReconcileCurrentUse(bracket)
 			completionView, completionOK := completion.ReconciliationCompletion()
+			completionPlan := completion.Plan()
 			if !ok || !completionOK || view.JobID != completionView.JobID || view.FileLayoutID != completion.Plan().ExpectedFileLayoutID ||
+				completionView.AdoptionOperationID != completionPlan.AdoptionOperationID ||
+				completionView.AdoptionPlanID != completionPlan.AdoptionPlanID || completionView.AdoptionCompletionID != completionPlan.AdoptionCompletionID ||
 				view.ObservedAtStart != before.ObservedAtStart || view.ObservedAtEnd != after.ObservedAtEnd || view.JobProgress != 1 {
 				t.Fatalf("completion=%#v current=%#v completionOK=%t currentOK=%t", completionView, view, completionOK, ok)
 			}

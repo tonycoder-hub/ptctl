@@ -15,6 +15,7 @@ func (verified *VerifiedCompletion) ReconciliationCompletion() (reconcile.Client
 		return reconcile.ClientActivationCompletion{}, false
 	}
 	observation := verified.Observation()
+	plan := verified.Plan()
 	started, startErr := time.Parse(time.RFC3339Nano, observation.ObservedAtStart)
 	ended, endErr := time.Parse(time.RFC3339Nano, observation.ObservedAtEnd)
 	if startErr != nil || endErr != nil || started.IsZero() || ended.Before(started) {
@@ -25,7 +26,9 @@ func (verified *VerifiedCompletion) ReconciliationCompletion() (reconcile.Client
 		TerminalMarkerID: observation.TerminalMarkerID, Action: observation.Action, TerminalPhase: observation.TerminalPhase,
 		TerminalJobState: observation.JobState, MetafileVariantID: observation.MetafileVariantID,
 		MaterializeOperationID: observation.MaterializeOperationID, MaterializePlanID: observation.MaterializePlanID,
-		ClientConfigID: observation.ClientConfigID, PathMappingID: observation.PathMappingID, JobID: observation.JobID,
+		AdoptionOperationID: plan.AdoptionOperationID, AdoptionPlanID: plan.AdoptionPlanID,
+		AdoptionCompletionID: plan.AdoptionCompletionID,
+		ClientConfigID:       observation.ClientConfigID, PathMappingID: observation.PathMappingID, JobID: observation.JobID,
 		FinalObjectIdentity: observation.FinalObjectIdentity, ObservedAtStart: started, ObservedAtEnd: ended,
 		Assurance: observation.Assurance,
 	}, true

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
+	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/clientremove"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
@@ -658,7 +659,7 @@ func TestReconcileReportExplicitMaterializedFinalBridgesCurrentProofAndRejectsTa
 	assertJSONStringsExclude(t, out.Bytes(), fixture.targetRoot, fixture.sourceRoot, fixture.sourcePath, fixture.finalPath, fixture.torrentPath)
 }
 
-func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExtraRequests(t *testing.T) {
+func TestReconcileReportBindsTerminalAdoptionAndActivationToExistingClientBracketWithoutExtraRequests(t *testing.T) {
 	fixture := newClientAdoptCLIFixture(t)
 	server := newClientActivateServer(t, fixture.meta, fixture.raw)
 	defer server.server.Close()
@@ -710,6 +711,7 @@ func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExt
 		"reconcile", "report", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
 		"--target", fixture.materialize.targetRoot, "--materialize-operation", fixture.operation,
 		"--materialize-plan-id", fixture.materialize.planID,
+		"--adoption-operation", adopted.Data.Operation.ID, "--adoption-plan-id", adopted.Data.Plan.ID,
 		"--activation-operation", completed.Data.Operation.ID, "--activation-plan-id", completed.Data.Plan.ID,
 		"--driver", "qbittorrent", "--url", server.server.URL, "--username", clientAdoptUser, "--password-stdin",
 		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
@@ -722,7 +724,7 @@ func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExt
 		t.Fatalf("reconcile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	if delta := server.totalRequests() - requestsBefore; delta != 3 {
-		t.Fatalf("activation reconciliation made %d requests; wanted one login plus the existing two-read bracket", delta)
+		t.Fatalf("adoption/activation reconciliation made %d requests; wanted one login plus the existing two-read bracket", delta)
 	}
 	var response struct {
 		Data reconcile.Report `json:"data"`
@@ -731,24 +733,94 @@ func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExt
 		t.Fatal(err)
 	}
 	activation := response.Data.Ledgers.Activation
-	if response.Data.Outcome != "consistent" || !response.Data.Scope.ClientActivationRequested ||
+	adoption := response.Data.Ledgers.Adoption
+	if response.Data.Outcome != "consistent" || !response.Data.Scope.ClientAdoptionRequested || !response.Data.Scope.ClientActivationRequested ||
+		adoption.Status != "historical_completion_current_job_bound" || !adoption.Historical ||
+		!adoption.ProcessLocalCompletionProof || !adoption.ProcessLocalCurrentJobProof ||
+		adoption.Completion == nil || adoption.CurrentJob == nil ||
+		adoption.Completion.OperationID != adopted.Data.Operation.ID || adoption.CurrentJob.JobID != adoption.Completion.JobID ||
 		activation.Status != "historical_completion_current_job_bound" || !activation.Historical ||
 		!activation.ProcessLocalCompletionProof || !activation.ProcessLocalCurrentUseProof ||
 		activation.Completion == nil || activation.CurrentUse == nil ||
 		activation.Completion.OperationID != completed.Data.Operation.ID || activation.CurrentUse.JobID != activation.Completion.JobID ||
+		activation.Completion.AdoptionOperationID != adoption.Completion.OperationID ||
+		activation.Completion.AdoptionPlanID != adoption.Completion.PlanID ||
+		activation.Completion.AdoptionCompletionID != adoption.Completion.CompletionID ||
+		!strings.Contains(response.Data.Assurance, "canonical_historical_stopped_adoption_bound_to_current_exact_job_claim") ||
 		!strings.Contains(response.Data.Assurance, "canonical_historical_client_activation_bound_to_current_exact_job") || len(response.Data.Relations) != 5 {
-		t.Fatalf("activation axis was not kept separate and bound: %s", out.String())
+		t.Fatalf("adoption/activation axes were not kept separate and bound: %s", out.String())
 	}
 	var human bytes.Buffer
 	if err := writeReconciliationHuman(&human, response.Data); err != nil ||
+		!strings.Contains(human.String(), "CLIENT ADOPTION (STOPPED ADD)") ||
+		!strings.Contains(human.String(), "PROCESS-LOCAL CURRENT-JOB BRIDGE  true") ||
 		!strings.Contains(human.String(), "CLIENT ACTIVATION") ||
 		!strings.Contains(human.String(), "PROCESS-LOCAL CURRENT-USE BRIDGE  true") ||
+		strings.Index(human.String(), "CLIENT ADOPTION (STOPPED ADD)") > strings.Index(human.String(), "LEDGERS") ||
 		strings.Index(human.String(), "CLIENT ACTIVATION") > strings.Index(human.String(), "LEDGERS") {
-		t.Fatalf("activation table contract is unclear: err=%v\n%s", err, human.String())
+		t.Fatalf("adoption/activation table contract is unclear: err=%v\n%s", err, human.String())
 	}
 	assertJSONStringsExclude(t, out.Bytes(), fixture.materialize.targetRoot, fixture.materialize.sourceRoot,
 		fixture.materialize.sourcePath, fixture.materialize.finalPath, fixture.storeRoot, server.server.URL,
 		clientAdoptUser, clientAdoptPassword, clientAdoptJobKey, clientAdoptRoot)
+
+	out.Reset()
+	errOut.Reset()
+	pruneArgs := []string{"client", "adopt", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-adoption-plan-id", adopted.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", adopted.Data.Operation.ID}
+	if code := Run(pruneArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("adoption prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	requestsBefore = server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(reconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retained adoption reconcile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("retained adoption reconciliation made %d requests; wanted the unchanged existing bracket", delta)
+	}
+	response = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "consistent" || response.Data.Ledgers.Adoption.Completion == nil ||
+		!response.Data.Ledgers.Adoption.Completion.RetainedTombstone ||
+		response.Data.Ledgers.Adoption.Status != "historical_completion_current_job_bound" ||
+		!response.Data.Ledgers.Adoption.ProcessLocalCurrentJobProof {
+		t.Fatalf("retained adoption did not preserve bounded historical authority: %s", out.String())
+	}
+
+	missingAdoptionPlan := strings.Repeat("e", 24)
+	missingAdoptionArgs := append([]string(nil), reconcileArgs...)
+	for index := range missingAdoptionArgs {
+		if index > 0 && missingAdoptionArgs[index-1] == "--adoption-plan-id" {
+			missingAdoptionArgs[index] = missingAdoptionPlan
+		}
+		if index > 0 && missingAdoptionArgs[index-1] == "--adoption-operation" {
+			missingAdoptionArgs[index] = clientadopt.OperationIDForPlan(missingAdoptionPlan).String()
+		}
+	}
+	requestsBefore = server.totalRequests()
+	reader := &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(missingAdoptionArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("missing adoption selector code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("missing adoption selector contacted the downloader")
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "incomplete" || response.Data.Ledgers.Adoption.Status != "incomplete" ||
+		response.Data.Ledgers.Adoption.StopReason != "adoption_completion_load_failed" ||
+		response.Data.Ledgers.Adoption.ProcessLocalCompletionProof || response.Data.Ledgers.Adoption.ProcessLocalCurrentJobProof {
+		t.Fatalf("missing adoption selector was not a report-first incomplete gate: %s", out.String())
+	}
 
 	wrongPlan := strings.Repeat("f", 24)
 	badArgs := append([]string(nil), reconcileArgs...)
@@ -758,7 +830,7 @@ func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExt
 		}
 	}
 	requestsBefore = server.totalRequests()
-	reader := &trackingReader{}
+	reader = &trackingReader{}
 	out.Reset()
 	errOut.Reset()
 	if code := Run(badArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
@@ -1097,6 +1169,8 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	clientGroup := []string{"--driver", "qbittorrent", "--url", "https://seedbox.invalid", "--username", "alice", "--password-stdin"}
 	validMaterializeOperation := "sha256:" + strings.Repeat("a", 64)
 	validMaterializePlan := strings.Repeat("b", 24)
+	validAdoptionPlan := strings.Repeat("a", 24)
+	validAdoptionOperation := clientadopt.OperationIDForPlan(validAdoptionPlan).String()
 	validActivationPlan := strings.Repeat("c", 24)
 	validActivationOperation := clientactivate.OperationIDForPlan(validActivationPlan).String()
 	validRemovalPlan := strings.Repeat("e", 24)
@@ -1139,6 +1213,12 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", "NOT-A-PLAN"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--max-states", "1"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--adoption-operation", validAdoptionOperation}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--adoption-operation", "bad", "--adoption-plan-id", validAdoptionPlan, "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--adoption-operation", validAdoptionOperation, "--adoption-plan-id", "BAD", "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--adoption-operation", validAdoptionOperation, "--adoption-plan-id", validAdoptionPlan, "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--adoption-operation", validAdoptionOperation, "--adoption-plan-id", validAdoptionPlan}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--adoption-operation", validAdoptionOperation, "--adoption-plan-id", validAdoptionPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", "bad", "--activation-plan-id", validActivationPlan}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", "BAD"}, clientGroup...),
@@ -1150,6 +1230,7 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", "bad", "--removal-plan-id", validRemovalPlan, "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation, "--removal-plan-id", "BAD", "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation, "--removal-plan-id", validRemovalPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--adoption-operation", validAdoptionOperation, "--adoption-plan-id", validAdoptionPlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--removal-operation", validRemovalOperation, "--removal-plan-id", validRemovalPlan, "--host-root", searchRoot, "--client-root", "/downloads"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String()}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", "bad", "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", "BAD", "--retirement-search-root", searchRoot}, clientGroup...),
@@ -1214,7 +1295,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--removal-operation") || !strings.Contains(helpOut.String(), "terminal keep-data removal") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--adoption-operation") || !strings.Contains(helpOut.String(), "terminal stopped-add journal or retained tombstone") || !strings.Contains(helpOut.String(), "job incarnation remains unobservable") || !strings.Contains(helpOut.String(), "--removal-operation") || !strings.Contains(helpOut.String(), "terminal keep-data removal") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -1229,6 +1310,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	siteBinding := strings.Index(text, "SITE BINDING")
 	liveSite := strings.Index(text, "LIVE SITE DETAIL")
 	materialized := strings.Index(text, "MATERIALIZED FINAL")
+	adoption := strings.Index(text, "CLIENT ADOPTION (STOPPED ADD)")
 	activation := strings.Index(text, "CLIENT ACTIVATION")
 	retirement := strings.Index(text, "SOURCE RETIREMENT")
 	ledgers := strings.Index(text, "LEDGERS")
@@ -1238,7 +1320,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	scan := strings.Index(text, "STORAGE SCAN")
 	matches := strings.Index(text, "VERIFIED STORAGE MATCHES")
 	bindings := strings.Index(text, "VERIFIED STORAGE BINDINGS (BOUNDED)")
-	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || materialized <= liveSite || activation <= materialized || retirement <= activation || ledgers <= retirement || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
+	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || materialized <= liveSite || adoption <= materialized || activation <= adoption || retirement <= activation || ledgers <= retirement || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
 		t.Fatalf("unclear reconciliation human order: %q", text)
 	}
 }
