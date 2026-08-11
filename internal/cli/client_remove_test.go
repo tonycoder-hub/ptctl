@@ -18,6 +18,18 @@ type clientRemoveJSONEnvelope struct {
 	Data   clientremove.Report `json:"data"`
 }
 
+type clientRemoveRetentionJSONEnvelope struct {
+	Schema string                       `json:"schema"`
+	Kind   string                       `json:"kind"`
+	Data   clientremove.RetentionReport `json:"data"`
+}
+
+type clientRemoveForgetJSONEnvelope struct {
+	Schema string                    `json:"schema"`
+	Kind   string                    `json:"kind"`
+	Data   clientremove.ForgetReport `json:"data"`
+}
+
 type clientRemoveCLIFixture struct {
 	materialized clientAdoptCLIFixture
 	server       *clientActivateServer
@@ -188,6 +200,60 @@ func TestClientRemoveAcceptedResponseCannotHideFinalContentDamage(t *testing.T) 
 	assertClientRemovePrivate(t, mustJSON(t, report), fixture)
 }
 
+func TestClientRemovePruneAndForgetAreCredentialFreeLocalTransitions(t *testing.T) {
+	fixture := prepareClientRemoveCLIFixture(t)
+	base := clientRemoveBaseArgs(fixture)
+	planned := runClientRemoveJSON(t, append([]string{"client", "remove", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	runArgs := append([]string{"client", "remove", "run"}, base...)
+	runArgs = append(runArgs, "--expect-removal-plan-id", planned.Data.Plan.ID, "--acknowledge-client-removal")
+	removed := runClientRemoveJSON(t, runArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	requests := fixture.server.totalRequests()
+
+	pruneArgs := []string{"client", "remove", "prune", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-removal-plan-id", planned.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", removed.Data.Operation.ID}
+	reader := &trackingReader{}
+	prunedRaw := runClientRemoveRaw(t, pruneArgs, reader, 0)
+	var pruned clientRemoveRetentionJSONEnvelope
+	if err := json.Unmarshal(prunedRaw, &pruned); err != nil {
+		t.Fatal(err)
+	}
+	if reader.read || fixture.server.totalRequests() != requests || pruned.Kind != "client.removal.retention" ||
+		pruned.Data.Outcome != clientremove.RetentionOutcomePruned || !pruned.Data.Markers.ExactTombstone ||
+		pruned.Data.Proof.AttemptsRecorded != 1 || pruned.Data.Proof.ResponsesRecorded != 1 {
+		t.Fatalf("pruned=%#v read=%t requests=%d/%d", pruned.Data, reader.read, fixture.server.totalRequests(), requests)
+	}
+	assertClientRemovePrivate(t, prunedRaw, fixture)
+
+	statusArgs := []string{"client", "remove", "status", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-removal-plan-id", planned.Data.Plan.ID, "--output", "json", removed.Data.Operation.ID}
+	status := runClientRemoveJSON(t, statusArgs, &trackingReader{}, 0)
+	if status.Data.Outcome != clientremove.OutcomeHistoricalRetained || !status.Data.Retention.CompletionDurable || status.Data.Operation.Resumable {
+		t.Fatalf("retained status=%#v", status.Data)
+	}
+	resumeArgs := append([]string{"client", "remove", "resume"}, base...)
+	resumeArgs = append(resumeArgs, "--expect-removal-plan-id", planned.Data.Plan.ID, removed.Data.Operation.ID)
+	reader = &trackingReader{}
+	blocked := runClientRemoveJSON(t, resumeArgs, reader, 4)
+	if reader.read || fixture.server.totalRequests() != requests || blocked.Data.Operation.Status != "retained" {
+		t.Fatalf("retained resume read=%t requests=%d/%d report=%#v", reader.read, fixture.server.totalRequests(), requests, blocked.Data)
+	}
+
+	forgetArgs := []string{"client", "remove", "forget", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-removal-plan-id", planned.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json", removed.Data.Operation.ID}
+	reader = &trackingReader{}
+	forgottenRaw := runClientRemoveRaw(t, forgetArgs, reader, 0)
+	var forgotten clientRemoveForgetJSONEnvelope
+	if err := json.Unmarshal(forgottenRaw, &forgotten); err != nil {
+		t.Fatal(err)
+	}
+	if reader.read || fixture.server.totalRequests() != requests || forgotten.Kind != "client.removal.forget" ||
+		forgotten.Data.Outcome != clientremove.ForgetOutcomeForgotten || !forgotten.Data.Authority.TargetHistoricalEvidenceErased ||
+		forgotten.Data.Authority.ExactTombstoneEvidenceAvailable {
+		t.Fatalf("forgotten=%#v read=%t requests=%d/%d", forgotten.Data, reader.read, fixture.server.totalRequests(), requests)
+	}
+	assertClientRemovePrivate(t, forgottenRaw, fixture)
+}
+
 func TestClientRemoveBadUsageDoesNotReadPassword(t *testing.T) {
 	planID := strings.Repeat("a", 24)
 	operation := clientremove.OperationIDForPlan(planID).String()
@@ -195,6 +261,8 @@ func TestClientRemoveBadUsageDoesNotReadPassword(t *testing.T) {
 		{"client", "remove", "run", "--password-stdin", "--expect-removal-plan-id", planID, "--acknowledge-client-removal"},
 		{"client", "remove", "resume", "--password-stdin", "--expect-removal-plan-id", planID, "--acknowledge-repeat-removal", operation},
 		{"client", "remove", "status", "--target", `C:\not-opened`, "--expect-removal-plan-id", strings.Repeat("b", 24), operation},
+		{"client", "remove", "prune", "--target", `C:\not-opened`, "--expect-removal-plan-id", planID, operation},
+		{"client", "remove", "forget", "--target", `C:\not-opened`, "--expect-removal-plan-id", planID, operation},
 	} {
 		reader := &trackingReader{}
 		var out, errOut bytes.Buffer
@@ -202,6 +270,15 @@ func TestClientRemoveBadUsageDoesNotReadPassword(t *testing.T) {
 			t.Fatalf("args=%v code=%d read=%t stdout=%q stderr=%q", args, code, reader.read, out.String(), errOut.String())
 		}
 	}
+}
+
+func runClientRemoveRaw(t *testing.T, args []string, stdin ioReader, expectedCode int) []byte {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	if code := Run(args, stdin, &out, &errOut); code != expectedCode {
+		t.Fatalf("command=%v code=%d want=%d stdout=%q stderr=%q", args[:3], code, expectedCode, out.String(), errOut.String())
+	}
+	return append([]byte(nil), out.Bytes()...)
 }
 
 func prepareClientRemoveCLIFixture(t *testing.T) clientRemoveCLIFixture {

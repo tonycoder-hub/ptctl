@@ -21,6 +21,7 @@ const (
 	OutcomeIntegrityFailed     = "integrity_failed"
 	OutcomeAlreadyComplete     = "already_complete"
 	OutcomeHistoricalComplete  = "historical_removal_complete"
+	OutcomeHistoricalRetained  = "historical_removal_retained"
 )
 
 type PlanReport struct {
@@ -35,10 +36,17 @@ type ClientSessionReport struct {
 }
 
 type OperationReport struct {
-	ID        string `json:"id,omitempty"`
-	Status    string `json:"status"`
-	Phase     string `json:"phase"`
-	Resumable bool   `json:"resumable"`
+	ID          string `json:"id,omitempty"`
+	Status      string `json:"status"`
+	Phase       string `json:"phase,omitempty"`
+	PhaseBefore string `json:"phase_before,omitempty"`
+	PhaseAfter  string `json:"phase_after,omitempty"`
+	Resumable   bool   `json:"resumable"`
+}
+
+type Finding struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type WriteReport struct {
@@ -71,6 +79,15 @@ type AssuranceReport struct {
 	Atomicity                string `json:"atomicity"`
 }
 
+type JournalRetentionReport struct {
+	State                      string `json:"state"`
+	IntentMarkerID             string `json:"intent_marker_id,omitempty"`
+	CompletionMarkerID         string `json:"completion_marker_id,omitempty"`
+	IntentDurable              bool   `json:"intent_durable"`
+	CompletionDurable          bool   `json:"completion_durable"`
+	HistoricalTerminalEvidence bool   `json:"historical_terminal_evidence"`
+}
+
 type Report struct {
 	Outcome   string                               `json:"outcome"`
 	Effect    string                               `json:"effect"`
@@ -83,6 +100,7 @@ type Report struct {
 	Absence   AbsenceReport                        `json:"absence"`
 	Final     materialize.FinalObservation         `json:"materialized_final"`
 	Assurance AssuranceReport                      `json:"assurance"`
+	Retention JournalRetentionReport               `json:"retention"`
 	Blockers  []string                             `json:"blockers"`
 	Warnings  []string                             `json:"warnings"`
 }
@@ -91,6 +109,7 @@ func newReport(prepared *PreparedPlan) Report {
 	report := Report{
 		Outcome: OutcomeBlocked, Effect: "none", Operation: OperationReport{Status: "not_created", Phase: "planned"},
 		Mutation: MutationReport{Status: "not_attempted"}, Absence: AbsenceReport{Status: "not_observed"},
+		Retention: JournalRetentionReport{State: "not_requested"},
 		Assurance: AssuranceReport{
 			DeleteLocalDataRequested: false, RequestRetryPolicy: "single_effectful_request_no_automatic_retry",
 			QueueEvidence: "not_observed", FilesystemEvidence: "not_reverified_after_removal",

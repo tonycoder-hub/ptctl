@@ -172,6 +172,8 @@ Usage:
   ptctl client remove run [same selectors] --expect-removal-plan-id ID --acknowledge-client-removal [--output table|json]
   ptctl client remove resume [same selectors] --expect-removal-plan-id ID [--acknowledge-client-removal --acknowledge-repeat-removal] [--output table|json] OPERATION_ID
   ptctl client remove status --target PATH --expect-removal-plan-id ID [--output table|json] OPERATION_ID
+  ptctl client remove prune --target PATH --expect-removal-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl client remove forget --target PATH --expect-removal-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
   ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
@@ -1594,6 +1596,10 @@ func jsonKind(data any) string {
 		return "client.activation.forget"
 	case clientremove.Report:
 		return "client.removal"
+	case clientremove.RetentionReport:
+		return "client.removal.retention"
+	case clientremove.ForgetReport:
+		return "client.removal.forget"
 	case sourceretire.Report:
 		return "content.source_retirement_plan"
 	case sourceretire.ExecutionReport:

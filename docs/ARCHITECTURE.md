@@ -1047,8 +1047,24 @@ retain IDs and receipts but cannot recover the opaque job locator or any
 process-local proof capability. Source retirement still requires a currently
 present exact client job, so that independent workflow must complete before
 removal when both transitions are desired; neither action authorizes the other.
-This first removal slice has no list/latest selector and no prune/forget
-transition; resume and status require the full deterministic operation ID.
+Removal retention is a separate local transition selected by the full
+deterministic operation ID and reviewed removal plan ID. Its canonical intent
+copies the terminal journal's intent, ordered attempts, sparse per-attempt
+responses, completion, and every domain-separated marker ID. The retention
+intent is durably published and rebound before the original intent, attempt,
+response, completion, and empty scratch objects are removed. An exact
+retention-complete marker closes the transition. Read-only status can report
+this historical tombstone, but it cannot recreate a current downloader or
+filesystem proof and ordinary run/resume cannot cross the prune boundary.
+
+`client remove forget` is the final historical-evidence boundary. A canonical
+root-level recovery intent is published no-clobber before the retained markers
+or operation subtree are touched, and it is removed only after their durable
+absence is rechecked. Partial deletion is recoverable only through the same
+explicit selector. Once the last marker is gone, success attribution is
+intentionally unavailable. Neither retention transition has a list/latest
+selector, a downloader credential, network authority, content-write authority,
+or cross-operation deletion authority.
 
 ## Source-retirement review and execution
 

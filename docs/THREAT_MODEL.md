@@ -467,6 +467,31 @@ queue/final evidence historical. It never reads a password, contacts the
 client, or refreshes durability. Reports exclude endpoint, username, password,
 host/client paths, magnet/tracker material, and the opaque job locator.
 
+Removal pruning is a distinct, local-only deletion authority requiring one
+full operation ID, its reviewed plan ID, and
+`--acknowledge-operation-state-deletion`. Before any original marker is
+removed, it seals the exact terminal intent, bounded attempts, sparse response
+records, completion, and all marker links into a canonical private retention
+intent. Only a durable, rebound intent authorizes exact per-name deletion and
+an exact namespace audit; a retention completion marker closes the tombstone.
+Unexpected objects, missing links, altered response evidence, nonterminal
+state, selector mismatch, or budget exhaustion fail closed. A crash can be
+advanced only by repeating the same prune selector. Prune never opens a client
+session, reads stdin credentials, writes content, or chooses an operation by
+age/latest.
+
+Removal tombstone forgetting has a third acknowledgement and publishes a
+deterministic owner-private root recovery marker before touching the retained
+markers. The marker binds the exact tombstone, plan, operation-root identity,
+and target-root identity. The implementation removes the retained completion,
+retained intent, empty retention directory, and exact lock-only operation
+subtree, confirms durable absence, then removes the root marker last. Partial
+states remain recoverable through that marker and block ordinary run, resume,
+and prune before credentials or network access. After final deletion, later
+absence is deliberately unattributed. Forget cannot remove content, client
+jobs, source names, another operation, unexpected objects, or copies exported
+outside the selected root.
+
 Source-retirement planning is a separate read-only boundary. It accepts a
 downloader password only from stdin but accepts no mutation acknowledgement and
 always reports zero writes, zero deletion, and `deletion_authority: none`. Eligibility requires a

@@ -11,7 +11,7 @@ domains and reconciles them around verifiable torrent metadata.
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
 > workflow, exact `client adopt run|resume|prune|forget` stopped-add operations,
 > explicit `client activate run|resume|prune|forget` recheck/start operations,
-> and acknowledged `client remove run|resume` exact-job removal that always
+> and acknowledged `client remove run|resume|prune|forget` exact-job removal that always
 > retains local data. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
@@ -980,6 +980,19 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client remove run \
 ptctl client remove status --target "D:\PT" \
   --expect-removal-plan-id REMOVAL_PLAN_ID \
   sha256:REMOVAL_OPERATION_DIGEST
+
+# Compact only this terminal operation's private request journal. No password
+# or downloader connection is used.
+ptctl client remove prune --target "D:\PT" \
+  --expect-removal-plan-id REMOVAL_PLAN_ID \
+  --acknowledge-operation-state-deletion \
+  sha256:REMOVAL_OPERATION_DIGEST
+
+# Irreversibly erase only that compact historical tombstone.
+ptctl client remove forget --target "D:\PT" \
+  --expect-removal-plan-id REMOVAL_PLAN_ID \
+  --acknowledge-historical-evidence-deletion \
+  sha256:REMOVAL_OPERATION_DIGEST
 ```
 
 The removal port has no delete-data option. qBittorrent receives exactly one
@@ -999,6 +1012,25 @@ state and never claims that the queue or files are currently unchanged. JSON
 kind is `client.removal`. If source-name retirement is desired, complete that
 separate live-client proof and acknowledged transition first; removal never
 infers or authorizes source retirement.
+
+Removal pruning is a separate local deletion authority. It copies the exact
+terminal intent, bounded attempt chain, sparse response chain, completion, and
+their marker IDs into a canonical owner-private retention intent. Only after
+that intent is durable and rebound may it delete the original request markers
+and empty scratch directory; an exact tombstone completion is published last.
+Crashes after either boundary are advanced only by the same full operation and
+reviewed plan selectors. Ordinary `run`/`resume` stop at this boundary, while
+read-only `status` labels the proof as historical and makes no client request.
+JSON kind is `client.removal.retention`.
+
+Removal `forget` has its own irreversible acknowledgement. It first publishes
+a deterministic owner-private root recovery marker containing the exact
+tombstone, then removes only the selected retention markers and empty operation
+subtree, confirms their durable absence, and removes the recovery marker last.
+After that final deletion a repeat can report only `absent_unattributed`, not
+`already_forgotten`. It never reads a downloader credential, contacts a client,
+deletes content, or selects another operation. JSON kind is
+`client.removal.forget`.
 
 Review which current source file names are eligible for a separately
 acknowledged retirement operation:

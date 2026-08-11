@@ -57,7 +57,17 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		if err != nil && journalRecoveryMayHaveChangedState(recovery) {
 			report.Operation.Status, report.Operation.Phase, report.Operation.Resumable = "initialization_incomplete", "intent_not_durable", true
 		}
-		if err == nil && (handle.state.Intent.PlanID != options.Prepared.planID || handle.state.Completion != nil || len(handle.state.Attempts) != 0) {
+		if err == nil && handle.state.Retained {
+			applyRetainedJournalReport(&report, handle.state)
+			report.Plan.ExpectedID = options.ExpectedPlanID
+			report.Plan.Matches = handle.state.Intent.PlanID == options.ExpectedPlanID
+			report.applyCreation(creation)
+			report.applyRecovery(recovery)
+			_ = handle.Close()
+			handle = nil
+			err = fmt.Errorf("%w: client removal operation was pruned; only its retention lifecycle may advance", ErrPolicy)
+			report.Blockers = append(report.Blockers, "client_removal.prune_boundary")
+		} else if err == nil && (handle.state.Intent.PlanID != options.Prepared.planID || handle.state.Completion != nil || len(handle.state.Attempts) != 0) {
 			advanced := reportFromJournal(handle.state)
 			advanced.Plan.ExpectedID = options.ExpectedPlanID
 			advanced.Plan.Matches = handle.state.Intent.PlanID == options.ExpectedPlanID
