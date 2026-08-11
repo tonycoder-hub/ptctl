@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -37,7 +38,7 @@ func (set *boundSourceSet) close() {
 	set.sessions = nil
 }
 
-func normalizeExecutionRoots(ctx context.Context, input []string) ([]string, string, error) {
+func normalizeExecutionRoots(ctx context.Context, input []string, allowNetwork bool) ([]string, string, error) {
 	if len(input) == 0 || len(input) > hardExecutionMaxSearchRoots {
 		return nil, "", fmt.Errorf("%w: source search-root count is invalid", ErrExecutionPolicy)
 	}
@@ -57,12 +58,18 @@ func normalizeExecutionRoots(ctx context.Context, input []string) ([]string, str
 		if err != nil {
 			return nil, "", fmt.Errorf("%w: source search-root scope is invalid", ErrExecutionPolicy)
 		}
+		if executionNetworkPath(absolute) && !allowNetwork {
+			return nil, "", fmt.Errorf("%w: network source search root requires explicit permission", ErrExecutionPolicy)
+		}
 		resolved, err := filepath.EvalSymlinks(absolute)
 		if err != nil {
 			return nil, "", err
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
+		}
+		if executionNetworkPath(resolved) && !allowNetwork {
+			return nil, "", fmt.Errorf("%w: resolved network source search root requires explicit permission", ErrExecutionPolicy)
 		}
 		info, err := os.Lstat(resolved)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -88,6 +95,10 @@ func normalizeExecutionRoots(ctx context.Context, input []string) ([]string, str
 	}
 	id, err := searchScopeID(roots)
 	return roots, id, err
+}
+
+func executionNetworkPath(path string) bool {
+	return runtime.GOOS == "windows" && strings.HasPrefix(filepath.VolumeName(path), `\\`)
 }
 
 func bindRunSources(ctx context.Context, meta *metafile.MetaInfo, discovery *seed.DiscoveryResult, final *materialize.VerifiedFinal, plan Plan, roots []string) (*boundSourceSet, []IntentFile, error) {

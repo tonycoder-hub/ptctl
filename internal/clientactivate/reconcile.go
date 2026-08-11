@@ -112,7 +112,8 @@ func (authority *CurrentUseAuthority) ReconcileCurrentUse(bracket reconcile.Clie
 	}
 	return reconcile.ClientActivationCurrentUse{
 		Driver: authority.plan.Driver, UseID: useID, JobID: before.jobID, FileLayoutID: before.fileLayoutID,
-		JobState: before.job.State, JobProgress: before.job.Progress,
+		CompleteSnapshotID: before.completeSnapshotID,
+		JobState:           before.job.State, JobProgress: before.job.Progress,
 		ObservedAtStart: beforeLedger.ObservedAtStart, ObservedAtEnd: afterLedger.ObservedAtEnd,
 		FinalObjectIdentity: authority.plan.FinalObjectIdentity,
 		Assurance:           "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_activation_and_exact_final_non_atomic",

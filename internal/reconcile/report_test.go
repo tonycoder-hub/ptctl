@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,6 +163,93 @@ func TestClientActivationRequestFailsClosedAndSanitizesUntrustedStopReason(t *te
 	if unexpected.Outcome != "incomplete" || unexpected.Ledgers.Activation.StopReason != "activation_unexpected_activity" ||
 		!containsFinding(unexpected.Blockers, "activation.input_inconsistent") {
 		t.Fatalf("unexpected activation activity was ignored: %#v", unexpected)
+	}
+}
+
+func TestSourceRetirementRequestFailsClosedAndSanitizesUntrustedStopReason(t *testing.T) {
+	meta, discovery, source, _ := reconciledSingleFile(t)
+	const canary = "RETIREMENT-STOP-SECRET-CANARY"
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		SourceRetirement: SourceRetirementSelection{Requested: true, StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "incomplete" || report.Ledgers.Retirement.Status != "incomplete" ||
+		report.Ledgers.Retirement.StopReason != "retirement_completion_load_failed" ||
+		report.Ledgers.Retirement.ProcessLocalCompletionProof || report.Ledgers.Retirement.ProcessLocalAbsenceProof ||
+		strings.Contains(string(raw), canary) || slices.Contains(report.Effect, "read_source_retirement_operation_state") ||
+		slices.Contains(report.Effect, "read_retired_source_name_absence") {
+		t.Fatalf("unsafe source-retirement failure report: %s", raw)
+	}
+
+	attempted, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		Client: ClientBracket{Requested: true, StopReason: "client_snapshot_incomplete"},
+		SourceRetirement: SourceRetirementSelection{
+			Requested: true, CompletionAttempted: true, AbsenceAttempted: true, StopReason: canary,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(attempted.Effect, "read_source_retirement_operation_state") ||
+		!slices.Contains(attempted.Effect, "read_retired_source_name_absence") || slices.Contains(attempted.Effect, "read_downloader_state") {
+		t.Fatalf("report effects did not distinguish attempted local reads from a skipped client gate: %#v", attempted.Effect)
+	}
+
+	unexpected, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		SourceRetirement: SourceRetirementSelection{StopReason: canary},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unexpected.Outcome != "incomplete" || unexpected.Ledgers.Retirement.StopReason != "retirement_unexpected_activity" ||
+		!containsFinding(unexpected.Blockers, "retirement.input_inconsistent") {
+		t.Fatalf("unexpected source-retirement activity was ignored: %#v", unexpected)
+	}
+
+	selectedElsewhere, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		SourceRetirement: SourceRetirementSelection{
+			Requested: true, CompletionAttempted: true, Completion: retirementCompletionStub{value: validRetirementCompletionFixture()},
+			StopReason: "retirement_completion_selector_mismatch",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectedElsewhere.Outcome != "conflict" || selectedElsewhere.Ledgers.Retirement.Status != "selected_retirement_mismatch" ||
+		!selectedElsewhere.Ledgers.Retirement.ProcessLocalCompletionProof || !selectedElsewhere.Ledgers.Retirement.Historical ||
+		!containsFinding(selectedElsewhere.Blockers, "retirement.selection_mismatch") {
+		t.Fatalf("verified retirement from another lineage was not preserved as a conflict: %#v", selectedElsewhere)
+	}
+}
+
+type retirementCompletionStub struct {
+	value SourceRetirementCompletion
+}
+
+func (stub retirementCompletionStub) ReconciliationRetirementCompletion() (SourceRetirementCompletion, bool) {
+	return stub.value, true
+}
+
+func validRetirementCompletionFixture() SourceRetirementCompletion {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	return SourceRetirementCompletion{
+		OperationID: digest, PlanID: digest, IntentID: digest, CompletionID: digest, SearchScopeID: digest,
+		MetafileVariantID: digest, MaterializeOperationID: digest, MaterializePlanID: strings.Repeat("b", 24),
+		ActivationOperationID: digest, ActivationPlanID: strings.Repeat("c", 24), ClientCompletionID: digest,
+		CurrentClientUseID: digest, SourceSelectionID: digest, TargetRootIdentity: "fsbind-v1:" + strings.Repeat("d", 64),
+		FinalObjectIdentity: "fsbind-v1:" + strings.Repeat("e", 64), ClientSnapshotID: digest,
+		FilesRetired: 1, BytesRetired: 1,
+		Assurance: "same_invocation_bound_canonical_terminal_source_retirement_journal_read_without_current_absence_inference",
 	}
 }
 
@@ -362,18 +450,27 @@ func TestOverallConflictOutranksAmbiguityAcrossAxes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false); got != "conflict" {
+			if got := overallOutcome("not_requested", false, "not_requested", false, test.storageStatus, true, test.clientStatus, test.pathStatus, true, "not_requested", false, "not_requested", false); got != "conflict" {
 				t.Fatalf("positive contradiction was hidden by ambiguity: got %q", got)
 			}
 		})
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "selected_activation_mismatch", true); got != "conflict" {
+		"exact_unique", "same_location", true, "selected_activation_mismatch", true, "not_requested", false); got != "conflict" {
 		t.Fatalf("activation mismatch did not gate the lattice: %q", got)
 	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
-		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true); got != "incomplete" {
+		"exact_unique", "same_location", true, "historical_completion_current_job_unbound", true, "not_requested", false); got != "incomplete" {
 		t.Fatalf("unbound requested activation did not make the report incomplete: %q", got)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, "historical_completion_current_job_bound", true, "source_name_reappeared", true); got != "conflict" {
+		t.Fatalf("reappeared retired source name did not gate the lattice: %q", got)
+	}
+	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
+		"exact_unique", "same_location", true, "historical_completion_current_job_bound", true,
+		"historical_completion_current_absence_unobserved", true); got != "incomplete" {
+		t.Fatalf("unobserved requested retirement absence did not make the report incomplete: %q", got)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestRunRetiresOneExactSourceAndStatusIsHistorical(t *testing.T) {
 	if err != nil || preview.Outcome != OutcomeEligible {
 		t.Fatalf("preview=%#v err=%v", preview, err)
 	}
-	roots, scopeID, err := normalizeExecutionRoots(context.Background(), []string{fixture.sourceRoot})
+	roots, scopeID, err := normalizeExecutionRoots(context.Background(), []string{fixture.sourceRoot}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +103,15 @@ func TestRunRetiresOneExactSourceAndStatusIsHistorical(t *testing.T) {
 		SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
 	if err == nil || !errors.Is(err, ErrExecutionIntegrity) || resumed.Outcome != ExecutionOutcomeIntegrity || resumed.WritesPerformed != 0 {
 		t.Fatalf("terminal resume after final mutation=%#v err=%v", resumed, err)
+	}
+}
+
+func TestNormalizeExecutionRootsRejectsUnacknowledgedWindowsNetworkPathBeforeAccess(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows UNC policy")
+	}
+	if _, _, err := normalizeExecutionRoots(context.Background(), []string{`\\PTCTL-NETWORK-CANARY\share`}, false); !errors.Is(err, ErrExecutionPolicy) {
+		t.Fatalf("unacknowledged UNC root was not rejected locally: %v", err)
 	}
 }
 
@@ -181,7 +191,7 @@ func TestExecutionPreflightIncludesRecoveredDeletionMarker(t *testing.T) {
 	if err != nil || preview.Outcome != OutcomeEligible {
 		t.Fatalf("preview=%#v err=%v", preview, err)
 	}
-	roots, scopeID, err := normalizeExecutionRoots(context.Background(), []string{fixture.sourceRoot})
+	roots, scopeID, err := normalizeExecutionRoots(context.Background(), []string{fixture.sourceRoot}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +408,7 @@ func mustExecutionIdentity(t *testing.T, value string) fsbind.Identity {
 
 func createAttemptedRetirement(t *testing.T, fixture retireFixture, plan Plan, remove bool) OperationID {
 	t.Helper()
-	roots, scopeID, err := normalizeExecutionRoots(context.Background(), []string{fixture.sourceRoot})
+	roots, scopeID, err := normalizeExecutionRoots(context.Background(), []string{fixture.sourceRoot}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +483,7 @@ func TestExecutionRootScopeRejectsDuplicateAndNestedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, roots := range [][]string{{root, filepath.Join(root, ".")}, {root, nested}} {
-		if _, _, err := normalizeExecutionRoots(context.Background(), roots); !errors.Is(err, ErrExecutionPolicy) {
+		if _, _, err := normalizeExecutionRoots(context.Background(), roots, false); !errors.Is(err, ErrExecutionPolicy) {
 			t.Fatalf("overlapping roots accepted: %#v err=%v", roots, err)
 		}
 	}
@@ -487,7 +497,7 @@ func TestExecutionPreCancelledRootWorkDoesNotTouchFilesystem(t *testing.T) {
 	if invalidErr != nil || invalid.Outcome != ExecutionOutcomeBlocked || !hasFinding(invalid.Blockers, "selector.invalid") {
 		t.Fatalf("invalid status selector=%#v err=%v", invalid, invalidErr)
 	}
-	if _, _, err := normalizeExecutionRoots(ctx, []string{missing}); !errors.Is(err, context.Canceled) {
+	if _, _, err := normalizeExecutionRoots(ctx, []string{missing}, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("pre-cancelled root normalization = %v", err)
 	}
 	operation, err := ParseOperationID("sha256:" + string(bytes.Repeat([]byte{'a'}, 64)))

@@ -95,6 +95,26 @@ consistency; a positive selector/configuration/final mismatch is a conflict.
 Public JSON retains only normalized IDs, times, states, and assurances and
 cannot recreate either process-local capability.
 
+An optional explicit source-retirement selector extends that same invocation
+with `--retirement-operation`, its reviewed SHA-256 plan ID, and the exact
+original source-root scope. The canonical terminal retirement journal is read
+before credential input and must agree with the metafile, materialize, and
+activation lineage. Its process-local `VerifiedCompletion` remains historical
+only. When the live journal is still present, `VerifiedCurrentAbsence` rebinds
+every recorded parent under the explicit scope and observes each exact retired
+name absent in two passes, with parent bindings checked between passes. It
+does not hash content, infer storage uniqueness, or send a downloader request.
+A Windows UNC/network source scope additionally requires the dedicated
+`--retirement-allow-network` permission before either the lexical or resolved
+root is touched; it never authorizes a network materialized target.
+A retained tombstone has intentionally discarded names and parents and cannot
+recreate this authority. Reappeared names are positive current conflicts;
+unavailable scope, parent, or tombstone authority is incomplete. The report
+adds a separate `source_retirement` ledger while preserving exactly the five
+existing relations. Historical retirement, current name absence, current
+typed client use, and current exact final proof remain sequential non-atomic
+axes, and serialized DTOs cannot recreate either retirement capability.
+
 The metafile input is exactly one of an ordinary `--torrent FILE` or the paired
 `--metafile-store DIR --metafile-variant ID` selector. A stored object is
 bounded, re-hashed, and parsed before reconciliation begins. The selection does

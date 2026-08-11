@@ -176,6 +176,7 @@ func (intent ExecutionIntent) Validate() error {
 	}
 	seenPaths := make(map[string]struct{}, len(intent.Files))
 	seenManifest := make(map[int]struct{}, len(intent.Files))
+	parentIdentities := make(map[string]string)
 	var pathBytes, contentBytes int64
 	for index, file := range intent.Files {
 		parent, parentErr := fsbind.ParseIdentity(file.ParentIdentity)
@@ -194,6 +195,10 @@ func (intent ExecutionIntent) Validate() error {
 		if _, exists := seenManifest[file.ManifestIndex]; exists {
 			return fmt.Errorf("%w: source retirement intent manifest index is duplicated", ErrExecutionIntegrity)
 		}
+		if expected, exists := parentIdentities[file.ParentPath]; exists && expected != file.ParentIdentity {
+			return fmt.Errorf("%w: source retirement intent parent identity is inconsistent", ErrExecutionIntegrity)
+		}
+		parentIdentities[file.ParentPath] = file.ParentIdentity
 		seenPaths[file.SourcePathRef], seenManifest[file.ManifestIndex] = struct{}{}, struct{}{}
 		pathBytes += int64(len(file.ParentPath) + 1 + len(file.Name))
 		contentBytes += file.SizeBytes
@@ -367,6 +372,7 @@ type RunOptions struct {
 	Review         BuildOptions
 	ExpectedPlanID string
 	SearchRoots    []string
+	AllowNetwork   bool
 	Acknowledge    bool
 	Limits         ExecutionLimits
 }
@@ -381,6 +387,7 @@ type ResumeOptions struct {
 	OperationID    OperationID
 	ExpectedPlanID string
 	SearchRoots    []string
+	AllowNetwork   bool
 	Acknowledge    bool
 	Limits         ExecutionLimits
 }

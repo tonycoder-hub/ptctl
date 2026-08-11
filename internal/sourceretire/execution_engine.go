@@ -50,7 +50,7 @@ func Run(ctx context.Context, options RunOptions) (ExecutionReport, error) {
 	if review.execution == nil || review.execution.clientBefore == nil || !review.execution.clientBefore.Verified() || review.execution.currentUse == nil {
 		return executionIntegrity(&report, "the live source-retirement review did not retain process-local execution authority")
 	}
-	roots, scopeID, err := normalizeExecutionRoots(ctx, options.SearchRoots)
+	roots, scopeID, err := normalizeExecutionRoots(ctx, options.SearchRoots, options.AllowNetwork)
 	if err != nil {
 		return mapExecutionError(&report, err, "source search-root scope could not be bound")
 	}
@@ -149,7 +149,7 @@ func Resume(ctx context.Context, options ResumeOptions) (ExecutionReport, error)
 	if journal.state.Intent.PlanID != options.ExpectedPlanID {
 		return executionBlocked(&report, "plan.id_mismatch", "the expected plan ID does not select this source retirement operation")
 	}
-	roots, scopeID, err := normalizeExecutionRoots(ctx, options.SearchRoots)
+	roots, scopeID, err := normalizeExecutionRoots(ctx, options.SearchRoots, options.AllowNetwork)
 	if err != nil || scopeID != journal.state.Intent.SearchScopeID {
 		return executionBlocked(&report, "source.scope_mismatch", "the explicit source search-root scope does not match the durable intent")
 	}

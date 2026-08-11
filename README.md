@@ -173,6 +173,11 @@ capabilities at the edge, not assumptions in the core domain model.
   into an exact historical tombstone, followed only on explicit request by
   recoverable, identity-bound deletion of that tombstone and its final
   attribution marker;
+- explicit read-only reconciliation of one terminal source-retirement lineage,
+  keeping historical completion, a same-invocation two-pass observation of the
+  exact retired names currently absent, current downloader use, and current
+  materialized-final content proof separate; pruned tombstones remain
+  historical only and a reappeared retired name is a current conflict;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -1322,6 +1327,52 @@ storage-content, or lexical-path evidence. Missing or unbound requested history
 is incomplete, a positive selector/configuration/final disagreement is a
 conflict, and journal corruption retains integrity exit `3` after the report.
 Serialized output cannot recreate either process-local authority.
+
+To require source-retirement attribution as well, add one explicit terminal
+retirement operation, its reviewed SHA-256 plan ID, and the original source
+root scope:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
+  --metafile-store .ptctl-private \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\Seed" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --retirement-operation sha256:RETIREMENT_OPERATION_DIGEST \
+  --retirement-plan-id sha256:RETIREMENT_PLAN_DIGEST \
+  --retirement-search-root "D:\Originals" \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --host-root 'D:\Seed' \
+  --client-root /downloads \
+  --client-style posix \
+  --output json
+```
+
+All three retirement flags are required, and `--retirement-search-root` may be
+repeated only to reproduce the exact reviewed source scope. Before reading the
+password or contacting the downloader, the command reads the canonical
+terminal retirement journal, checks its metafile/materialize/activation
+lineage, rebinds each original source parent inside that explicit scope, and
+observes every retired name absent twice. The existing downloader bracket is
+then reused without another client request. The `source_retirement` ledger
+reports historical completion and current-absence proof independently from
+the activation, downloader, and storage ledgers; it does not add a sixth
+relation or upgrade any of the five existing relations. A reappeared retired
+name is a current `conflict` and stops before credential input. A pruned
+tombstone has deliberately discarded path authority, so it can show historical
+completion only and makes requested reconciliation `incomplete`. Corrupt
+journal or tombstone state retains report-first integrity exit `3`. Reports
+never emit the original source paths. Windows UNC/network source roots are
+rejected before access unless `--retirement-allow-network` is explicit; this
+permission never applies to the materialized target. Even a consistent result
+is a sequence of identity-bound, bracketed non-atomic observations, not a
+promise that a name cannot reappear after the command returns.
 
 The [qBittorrent WebUI API torrent-list fields](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-list)
 are treated as untrusted client claims. Its generic `hash` remains an opaque

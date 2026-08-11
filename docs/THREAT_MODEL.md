@@ -245,6 +245,33 @@ history that remains unbound prevents consistency; two independently valid but
 disagreeing selectors/configurations are reported as conflict rather than
 journal corruption.
 
+Explicit source-retirement reconciliation is another credential-free gate.
+It accepts only one full operation ID, its derived reviewed SHA-256 plan ID,
+and the original explicit source-root scope. Before password input or any
+downloader request, the bound terminal journal must agree with the requested
+metafile, materialize operation/final identity, and terminal activation. A live
+journal retains private parent/name authority; each recorded parent is rebound
+by identity inside the exact scope, each retired name is observed absent twice,
+and the parent bindings are rechecked between observations. A present name is
+reported as current conflict without reading credentials. An unavailable or
+changed root/parent is incomplete rather than treated as absence. Symlink,
+reparse, cross-filesystem, or unsafe-object results cannot satisfy the check,
+and no recorded client path is ever passed to a host filesystem API.
+Windows UNC/network source roots require the separate
+`--retirement-allow-network` acknowledgement before either the supplied or
+resolved root is accessed; it grants no authority over the local target.
+
+Pruning deliberately destroys the journal's path authority. Its retained
+tombstone can establish historical completion but can never be used to infer a
+current negative filesystem fact; requested reconciliation therefore remains
+incomplete. Public completion and absence DTOs contain only bounded IDs,
+counts, and times, omit source paths, and lose their process-local authority on
+serialization. The successful absence observation is still two-pass,
+identity-bound, and bracketed non-atomic: a cooperating or malicious writer can
+recreate a name after the last observation. It is not a filesystem snapshot,
+negative uniqueness proof, or guarantee that storage was reclaimed. This axis
+reuses the existing client bracket and adds no downloader request or mutation.
+
 ### Filesystem escape, races, and corruption
 
 Search roots must be explicit, non-overlapping directories. Inventory does not

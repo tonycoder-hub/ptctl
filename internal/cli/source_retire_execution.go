@@ -85,7 +85,8 @@ func (a *app) seedRetireRun(args []string) error {
 	}
 	review := sourceretire.BuildOptions{Meta: local.meta, Discovery: local.discovery, Final: local.final, Activation: local.activation, ShowAbsolutePaths: false}
 	runOptions := sourceretire.RunOptions{Review: review, ExpectedPlanID: *expected,
-		SearchRoots: append([]string(nil), prepared.discovery.SearchRoots...), Acknowledge: true, Limits: sourceretire.DefaultExecutionLimits()}
+		SearchRoots: append([]string(nil), prepared.discovery.SearchRoots...), AllowNetwork: prepared.discovery.AllowNetwork,
+		Acknowledge: true, Limits: sourceretire.DefaultExecutionLimits()}
 	if !sourceRetireNeedsClientSession(local.meta, *local.discovery, local.final) {
 		report, operationErr := sourceretire.Run(ctx, runOptions)
 		return a.finishSourceRetireExecution(prepared.output, report, operationErr)
@@ -160,7 +161,8 @@ func (a *app) seedRetireResume(args []string) error {
 	}
 	resume := sourceretire.ResumeOptions{Meta: local.meta, Final: local.final, Activation: local.activation, ClientUse: local.currentUse,
 		TargetRoot: prepared.targetRoot, OperationID: operation, ExpectedPlanID: *expected,
-		SearchRoots: append([]string(nil), prepared.discovery.SearchRoots...), Acknowledge: true, Limits: sourceretire.DefaultExecutionLimits()}
+		SearchRoots: append([]string(nil), prepared.discovery.SearchRoots...), AllowNetwork: prepared.discovery.AllowNetwork,
+		Acknowledge: true, Limits: sourceretire.DefaultExecutionLimits()}
 	// This local, zero-write pass proves the explicit journal, search-root scope,
 	// final, activation, and remaining source names before credential I/O.
 	preflight, preflightErr := sourceretire.Resume(ctx, resume)

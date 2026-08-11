@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/reconcile"
 	"github.com/tonycoder-hub/ptctl/internal/site"
+	"github.com/tonycoder-hub/ptctl/internal/sourceretire"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
@@ -796,6 +798,152 @@ func TestReconcileReportBindsTerminalActivationToExistingClientBracketWithoutExt
 		response.Data.Ledgers.Activation.StopReason != "activation_completion_selector_mismatch" {
 		t.Fatalf("positive activation/config mismatch was not a conflict: %s", out.String())
 	}
+
+	retirementPlanArgs := sourceRetireBaseArgs(fixture, server.server.URL, completed.Data.Operation.ID, completed.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(retirementPlanArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retirement plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retirementPlan := decodeSourceRetireReport(t, out.Bytes())
+	retirementRunArgs := append([]string(nil), retirementPlanArgs...)
+	retirementRunArgs[2] = "run"
+	retirementRunArgs = append(retirementRunArgs, "--expect-plan-id", retirementPlan.Data.Plan.ID, "--acknowledge-source-deletion")
+	out.Reset()
+	errOut.Reset()
+	if code := Run(retirementRunArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retirement run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retired := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if retired.Data.Outcome != sourceretire.ExecutionOutcomeRetired || retired.Data.Operation.Resumable || !retired.Data.DeletionPerformed {
+		t.Fatalf("source retirement did not reach a terminal deletion: %s", out.String())
+	}
+	if _, statErr := os.Lstat(fixture.materialize.sourcePath); !os.IsNotExist(statErr) {
+		t.Fatalf("retired source name remains: %v", statErr)
+	}
+	// The complete file snapshot is stable across ordinary stopped-to-seeding
+	// state transitions; retirement attribution must not bind transient state.
+	server.setState("uploading", 1)
+
+	retirementReconcileArgs := append([]string(nil), reconcileArgs...)
+	retirementReconcileArgs = append(retirementReconcileArgs,
+		"--retirement-operation", retired.Data.Operation.ID,
+		"--retirement-plan-id", retirementPlan.Data.Plan.ID,
+		"--retirement-search-root", fixture.materialize.sourceRoot,
+	)
+	requestsBefore = server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(retirementReconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retirement reconciliation code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("retirement reconciliation made %d requests; wanted the unchanged login plus two-read client bracket", delta)
+	}
+	response = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	retirement := response.Data.Ledgers.Retirement
+	if response.Data.Outcome != "consistent" || !response.Data.Scope.SourceRetirementRequested ||
+		retirement.Status != "historical_completion_current_absence_observed" || !retirement.Historical ||
+		!retirement.ProcessLocalCompletionProof || !retirement.ProcessLocalAbsenceProof ||
+		response.Data.Ledgers.Activation.CurrentUse == nil || response.Data.Ledgers.Activation.CurrentUse.JobState != "uploading" ||
+		retirement.Completion == nil || retirement.CurrentAbsence == nil ||
+		retirement.Completion.OperationID != retired.Data.Operation.ID || retirement.Completion.RetainedTombstone ||
+		retirement.CurrentAbsence.OperationID != retirement.Completion.OperationID ||
+		retirement.CurrentAbsence.FilesChecked != retirement.Completion.FilesRetired ||
+		!strings.Contains(response.Data.Assurance, "canonical_historical_source_retirement_with_current_bound_name_absence") ||
+		len(response.Data.Relations) != 5 || !slices.Contains(response.Data.Effect, "read_source_retirement_operation_state") ||
+		!slices.Contains(response.Data.Effect, "read_retired_source_name_absence") {
+		t.Fatalf("retirement axis was not kept separate and currently rebound: %s", out.String())
+	}
+	human.Reset()
+	if err := writeReconciliationHuman(&human, response.Data); err != nil ||
+		!strings.Contains(human.String(), "SOURCE RETIREMENT") ||
+		!strings.Contains(human.String(), "PROCESS-LOCAL CURRENT-ABSENCE PROOF  true") ||
+		strings.Index(human.String(), "SOURCE RETIREMENT") > strings.Index(human.String(), "LEDGERS") {
+		t.Fatalf("retirement table contract is unclear: err=%v\n%s", err, human.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.materialize.targetRoot, fixture.materialize.sourceRoot,
+		fixture.materialize.sourcePath, fixture.materialize.finalPath, fixture.storeRoot, server.server.URL,
+		clientAdoptUser, clientAdoptPassword, clientAdoptJobKey, clientAdoptRoot)
+
+	if writeErr := os.WriteFile(fixture.materialize.sourcePath, fixture.materialize.content, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(retirementReconcileArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("reappeared source code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("reappeared retired source contacted the downloader")
+	}
+	response = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	retirement = response.Data.Ledgers.Retirement
+	if response.Data.Outcome != "conflict" || retirement.Status != "source_name_reappeared" ||
+		retirement.StopReason != "retirement_source_name_reappeared" || !retirement.ProcessLocalCompletionProof ||
+		retirement.ProcessLocalAbsenceProof || retirement.CurrentAbsence != nil ||
+		!hasReportFindingCLI(response.Data.Blockers, "retirement.source_name_reappeared") ||
+		!slices.Contains(response.Data.Effect, "read_source_retirement_operation_state") ||
+		!slices.Contains(response.Data.Effect, "read_retired_source_name_absence") ||
+		slices.Contains(response.Data.Effect, "read_downloader_state") {
+		t.Fatalf("reappeared retired name was not a current conflict: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.materialize.targetRoot, fixture.materialize.sourceRoot,
+		fixture.materialize.sourcePath, fixture.materialize.finalPath, fixture.storeRoot, server.server.URL,
+		clientAdoptUser, clientAdoptPassword, clientAdoptJobKey, clientAdoptRoot)
+
+	if removeErr := os.Remove(fixture.materialize.sourcePath); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{
+		"seed", "retire", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-plan-id", retirementPlan.Data.Plan.ID, "--acknowledge-operation-state-deletion",
+		"--output", "json", retired.Data.Operation.ID,
+	}, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retirement prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(retirementReconcileArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("retained retirement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("retained retirement tombstone contacted the downloader")
+	}
+	response = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	retirement = response.Data.Ledgers.Retirement
+	if response.Data.Outcome != "incomplete" || retirement.Status != "historical_completion_current_absence_unobserved" ||
+		retirement.StopReason != "retirement_current_absence_unavailable" || !retirement.ProcessLocalCompletionProof ||
+		retirement.ProcessLocalAbsenceProof || retirement.Completion == nil || !retirement.Completion.RetainedTombstone ||
+		retirement.CurrentAbsence != nil || !hasReportFindingCLI(response.Data.Blockers, "retirement.current_absence_unavailable") ||
+		!slices.Contains(response.Data.Effect, "read_source_retirement_operation_state") ||
+		slices.Contains(response.Data.Effect, "read_retired_source_name_absence") || slices.Contains(response.Data.Effect, "read_downloader_state") {
+		t.Fatalf("retained tombstone recreated current path authority: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.materialize.targetRoot, fixture.materialize.sourceRoot,
+		fixture.materialize.sourcePath, fixture.materialize.finalPath, fixture.storeRoot, server.server.URL,
+		clientAdoptUser, clientAdoptPassword, clientAdoptJobKey, clientAdoptRoot)
 }
 
 func TestReconcileReportExactSourceFailureIsStructuredAndPathPrivate(t *testing.T) {
@@ -826,6 +974,11 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	validMaterializePlan := strings.Repeat("b", 24)
 	validActivationPlan := strings.Repeat("c", 24)
 	validActivationOperation := clientactivate.OperationIDForPlan(validActivationPlan).String()
+	validRetirementPlan := "sha256:" + strings.Repeat("d", 64)
+	validRetirementOperation, err := sourceretire.OperationIDForPlanID(validRetirementPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tooManyRoots := []string{"reconcile", "report", "--torrent", torrentPath}
 	for index := 0; index <= storage.DefaultInventoryLimits().MaxRoots; index++ {
 		tooManyRoots = append(tooManyRoots, "--search-root", searchRoot)
@@ -866,6 +1019,13 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--host-root", searchRoot, "--client-root", "/downloads", "--max-client-files", "2"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String()}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", "bad", "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", "BAD", "--retirement-search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--retirement-allow-network"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--target", searchRoot, "--materialize-operation", validMaterializeOperation, "--materialize-plan-id", validMaterializePlan, "--activation-operation", validActivationOperation, "--activation-plan-id", validActivationPlan, "--retirement-operation", validRetirementOperation.String(), "--retirement-plan-id", validRetirementPlan, "--retirement-search-root", searchRoot, "--host-root", searchRoot, "--client-root", "/downloads", "--client-file-layout", "off"}, clientGroup...),
 		append([]string{"reconcile", "report", "--torrent", missingTorrent, "--search-root", searchRoot}, clientGroup...),
 		tooManyRoots,
 	}
@@ -922,7 +1082,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "--materialize-operation") || !strings.Contains(helpOut.String(), "--retirement-operation") || !strings.Contains(helpOut.String(), "--retirement-search-root") || !strings.Contains(helpOut.String(), "retirement-allow-network") || !strings.Contains(helpOut.String(), "twice reobserve its exact retired names absent") || !strings.Contains(helpOut.String(), "sequential non-atomic observations") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -937,6 +1097,8 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	siteBinding := strings.Index(text, "SITE BINDING")
 	liveSite := strings.Index(text, "LIVE SITE DETAIL")
 	materialized := strings.Index(text, "MATERIALIZED FINAL")
+	activation := strings.Index(text, "CLIENT ACTIVATION")
+	retirement := strings.Index(text, "SOURCE RETIREMENT")
 	ledgers := strings.Index(text, "LEDGERS")
 	fileLayout := strings.Index(text, "CLIENT FILE LAYOUT (BOUNDED)")
 	fileFindings := strings.Index(text, "CLIENT FILE FINDINGS (BOUNDED)")
@@ -944,7 +1106,7 @@ func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	scan := strings.Index(text, "STORAGE SCAN")
 	matches := strings.Index(text, "VERIFIED STORAGE MATCHES")
 	bindings := strings.Index(text, "VERIFIED STORAGE BINDINGS (BOUNDED)")
-	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || materialized <= liveSite || ledgers <= materialized || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
+	if blockers < 0 || relations <= blockers || siteBinding <= relations || liveSite <= siteBinding || materialized <= liveSite || activation <= materialized || retirement <= activation || ledgers <= retirement || fileLayout <= ledgers || fileFindings <= fileLayout || downloaderMatches <= fileFindings || scan <= downloaderMatches || matches <= scan || bindings <= matches || !strings.Contains(text, "METAFILE VARIANT NOTE") || !strings.Contains(text, "PATH NOTE") || !strings.Contains(text, "lexical only") || !strings.Contains(text, "CONTENT PATH") || !strings.Contains(text, "BEFORE FILES CONSIDERED") {
 		t.Fatalf("unclear reconciliation human order: %q", text)
 	}
 }

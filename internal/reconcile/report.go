@@ -56,6 +56,7 @@ type BuildInput struct {
 	SiteDetail        SiteDetailSelection
 	MaterializedFinal MaterializedFinalSelection
 	ClientActivation  ClientActivationSelection
+	SourceRetirement  SourceRetirementSelection
 	PathMapping       *PathMappingOptions
 	ShowAbsolutePaths bool
 }
@@ -79,6 +80,29 @@ type ClientActivationSelection struct {
 	Completion ClientActivationCompletionProof
 	CurrentUse ClientActivationCurrentUseProof
 	StopReason string
+}
+
+// SourceRetirementCompletionProof is implemented only by a process-local read
+// of one canonical terminal retirement journal or retained tombstone. The
+// public view is historical and cannot establish current namespace absence.
+type SourceRetirementCompletionProof interface {
+	ReconciliationRetirementCompletion() (SourceRetirementCompletion, bool)
+}
+
+// SourceRetirementAbsenceProof is process-local authority for a bounded
+// current observation of the exact retired names under their original bound
+// parents. It performs no downloader request.
+type SourceRetirementAbsenceProof interface {
+	ReconcileCurrentRetiredNameAbsence() (SourceRetirementCurrentAbsence, bool)
+}
+
+type SourceRetirementSelection struct {
+	Requested           bool
+	CompletionAttempted bool
+	AbsenceAttempted    bool
+	Completion          SourceRetirementCompletionProof
+	CurrentAbsence      SourceRetirementAbsenceProof
+	StopReason          string
 }
 
 // MaterializedFinalSelection is an explicit same-invocation read of one
@@ -139,6 +163,7 @@ type ReportScope struct {
 	ClientFileLayoutMode       string `json:"client_file_layout_mode"`
 	MaterializedFinalRequested bool   `json:"materialized_final_requested"`
 	ClientActivationRequested  bool   `json:"client_activation_requested"`
+	SourceRetirementRequested  bool   `json:"source_retirement_requested"`
 	AbsolutePathsShown         bool   `json:"absolute_paths_shown"`
 }
 
@@ -148,6 +173,54 @@ type ReportLedgers struct {
 	Storage    StorageLedger          `json:"storage"`
 	Downloader DownloaderLedger       `json:"downloader"`
 	Activation ClientActivationLedger `json:"client_activation"`
+	Retirement SourceRetirementLedger `json:"source_retirement"`
+}
+
+type SourceRetirementLedger struct {
+	Status                      string                          `json:"status"`
+	Completion                  *SourceRetirementCompletion     `json:"completion,omitempty"`
+	CurrentAbsence              *SourceRetirementCurrentAbsence `json:"current_absence,omitempty"`
+	ProcessLocalCompletionProof bool                            `json:"process_local_completion_proof"`
+	ProcessLocalAbsenceProof    bool                            `json:"process_local_absence_proof"`
+	Historical                  bool                            `json:"historical"`
+	StopReason                  string                          `json:"stop_reason,omitempty"`
+}
+
+type SourceRetirementCompletion struct {
+	OperationID            string `json:"operation_id"`
+	PlanID                 string `json:"plan_id"`
+	IntentID               string `json:"intent_id"`
+	CompletionID           string `json:"completion_id"`
+	SearchScopeID          string `json:"search_scope_id"`
+	MetafileVariantID      string `json:"metafile_variant_id"`
+	MaterializeOperationID string `json:"materialize_operation_id"`
+	MaterializePlanID      string `json:"materialize_plan_id"`
+	ActivationOperationID  string `json:"activation_operation_id"`
+	ActivationPlanID       string `json:"activation_plan_id"`
+	ClientCompletionID     string `json:"client_completion_id"`
+	CurrentClientUseID     string `json:"current_client_use_id"`
+	SourceSelectionID      string `json:"source_selection_id"`
+	TargetRootIdentity     string `json:"target_root_identity"`
+	FinalObjectIdentity    string `json:"final_object_identity"`
+	ClientSnapshotID       string `json:"client_snapshot_id"`
+	FilesRetired           int    `json:"files_retired"`
+	BytesRetired           int64  `json:"bytes_retired"`
+	RetainedTombstone      bool   `json:"retained_tombstone"`
+	Assurance              string `json:"assurance"`
+}
+
+type SourceRetirementCurrentAbsence struct {
+	OperationID              string    `json:"operation_id"`
+	PlanID                   string    `json:"plan_id"`
+	CompletionID             string    `json:"completion_id"`
+	AbsenceID                string    `json:"absence_id"`
+	SearchScopeID            string    `json:"search_scope_id"`
+	FilesChecked             int       `json:"files_checked"`
+	BytesRetired             int64     `json:"bytes_retired"`
+	ParentDirectoriesChecked int       `json:"parent_directories_checked"`
+	ObservedAtStart          time.Time `json:"observed_at_start"`
+	ObservedAtEnd            time.Time `json:"observed_at_end"`
+	Assurance                string    `json:"assurance"`
 }
 
 type ClientActivationLedger struct {
@@ -185,6 +258,7 @@ type ClientActivationCurrentUse struct {
 	UseID               string    `json:"use_id"`
 	JobID               string    `json:"job_id"`
 	FileLayoutID        string    `json:"file_layout_id"`
+	CompleteSnapshotID  string    `json:"complete_file_snapshot_id"`
 	JobState            string    `json:"job_state"`
 	JobProgress         float64   `json:"job_progress"`
 	ObservedAtStart     time.Time `json:"observed_at_start"`
@@ -359,13 +433,14 @@ func Build(input BuildInput) (Report, error) {
 			ClientFileLayoutMode:       fileLayoutMode,
 			MaterializedFinalRequested: input.MaterializedFinal.Requested,
 			ClientActivationRequested:  input.ClientActivation.Requested,
+			SourceRetirementRequested:  input.SourceRetirement.Requested,
 			AbsolutePathsShown:         input.ShowAbsolutePaths,
 		},
 		Relations: []Relation{},
 		Blockers:  []ReportFinding{},
 		Warnings:  []string{},
 	}
-	if input.Client.Requested {
+	if input.Client.RequestsMade > 0 || input.Client.Before != nil || input.Client.After != nil || input.Client.FileAttempted {
 		report.Effect = append(report.Effect, "read_downloader_state")
 	}
 	if input.MaterializedFinal.Requested {
@@ -374,7 +449,13 @@ func Build(input BuildInput) (Report, error) {
 	if input.ClientActivation.Requested {
 		report.Effect = append(report.Effect, "read_client_activation_operation_state")
 	}
-	if input.SiteDetail.Requested {
+	if input.SourceRetirement.CompletionAttempted {
+		report.Effect = append(report.Effect, "read_source_retirement_operation_state")
+	}
+	if input.SourceRetirement.AbsenceAttempted {
+		report.Effect = append(report.Effect, "read_retired_source_name_absence")
+	}
+	if input.SiteDetail.RequestsMade > 0 || input.SiteDetail.Observed != nil || input.SiteDetail.Receipt.Used.RequestsAttempted > 0 {
 		report.Effect = append(report.Effect, site.TorrentDetailReadEffect)
 	}
 	if input.Client.FileAttempted {
@@ -608,6 +689,12 @@ func Build(input BuildInput) (Report, error) {
 	report.Ledgers.Activation = activationLedger
 	report.Blockers = append(report.Blockers, activationBlockers...)
 	report.Warnings = append(report.Warnings, activationWarnings...)
+	retirementLedger, retirementBlockers, retirementWarnings := assessSourceRetirement(
+		meta, input.SourceRetirement, materializedLedger, activationLedger,
+	)
+	report.Ledgers.Retirement = retirementLedger
+	report.Blockers = append(report.Blockers, retirementBlockers...)
+	report.Warnings = append(report.Warnings, retirementWarnings...)
 	report.Relations = []Relation{siteRelation, variantRelation, client.relation, storageRelation, pathRelation}
 
 	for _, code := range client.relation.BlockerCodes {
@@ -621,7 +708,8 @@ func Build(input BuildInput) (Report, error) {
 	}
 	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, siteDetailLedger.Status, input.SiteDetail.Requested,
 		storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested,
-		activationLedger.Status, input.ClientActivation.Requested || activationLedger.Status != "not_requested")
+		activationLedger.Status, input.ClientActivation.Requested || activationLedger.Status != "not_requested",
+		retirementLedger.Status, input.SourceRetirement.Requested || retirementLedger.Status != "not_requested")
 	if report.Outcome == "consistent" {
 		report.Assurance = "local_content_proof_and_bracketed_typed_client_identity_with_lexical_path_agreement"
 		if meta.MultiFile {
@@ -638,6 +726,9 @@ func Build(input BuildInput) (Report, error) {
 		}
 		if activationLedger.Status == "historical_completion_current_job_bound" {
 			report.Assurance += "_plus_canonical_historical_client_activation_bound_to_current_exact_job"
+		}
+		if retirementLedger.Status == "historical_completion_current_absence_observed" {
+			report.Assurance += "_plus_canonical_historical_source_retirement_with_current_bound_name_absence"
 		}
 	}
 	report.Blockers = stableFindings(report.Blockers)
@@ -823,6 +914,146 @@ func assessClientActivation(meta *metafile.MetaInfo, selection ClientActivationS
 	return ledger, blockers, warnings
 }
 
+func assessSourceRetirement(meta *metafile.MetaInfo, selection SourceRetirementSelection, materialized MaterializedFinalLedger,
+	activation ClientActivationLedger) (SourceRetirementLedger, []ReportFinding, []string) {
+	ledger := SourceRetirementLedger{Status: "not_requested"}
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	hasActivity := selection.CompletionAttempted || selection.AbsenceAttempted || selection.Completion != nil || selection.CurrentAbsence != nil || selection.StopReason != ""
+	if !selection.Requested {
+		if !hasActivity {
+			return ledger, blockers, warnings
+		}
+		ledger.Status = "incomplete"
+		ledger.StopReason = "retirement_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "retirement.input_inconsistent", Message: "source-retirement proof values were supplied without an explicit retirement request"})
+		return ledger, blockers, warnings
+	}
+
+	ledger.Status = "incomplete"
+	ledger.StopReason = safeSourceRetirementStopReason(selection.StopReason)
+	if selection.AbsenceAttempted && !selection.CompletionAttempted || selection.Completion != nil && !selection.CompletionAttempted ||
+		selection.CurrentAbsence != nil && !selection.AbsenceAttempted {
+		ledger.StopReason = "retirement_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "retirement.input_inconsistent", Message: "source-retirement proof activity is internally inconsistent"})
+		return ledger, blockers, warnings
+	}
+	if ledger.StopReason == "retirement_completion_integrity_failed" {
+		ledger.Status = "integrity_failed"
+	}
+	if ledger.StopReason == "retirement_completion_selector_mismatch" {
+		ledger.Status = "selected_retirement_mismatch"
+	}
+	if selection.Completion == nil {
+		blockers = append(blockers, ReportFinding{Code: "retirement.completion_proof_unavailable", Message: "the explicit terminal source-retirement journal could not be verified in this invocation"})
+		return ledger, blockers, warnings
+	}
+	completion, ok := selection.Completion.ReconciliationRetirementCompletion()
+	if !ok || !validSourceRetirementCompletion(completion) {
+		ledger.Status = "incomplete"
+		if ledger.StopReason == "" {
+			ledger.StopReason = "retirement_completion_load_failed"
+		}
+		blockers = append(blockers, ReportFinding{Code: "retirement.completion_proof_unavailable", Message: "the terminal source-retirement capability is unavailable or invalid"})
+		return ledger, blockers, warnings
+	}
+	ledger.Completion = &completion
+	ledger.ProcessLocalCompletionProof = true
+	ledger.Historical = true
+	warnings = append(warnings, "the terminal source-retirement record is historical evidence and does not by itself prove that a retired name remains absent now")
+
+	if meta == nil || materialized.Observation == nil || !materialized.ProcessLocalFinalProof ||
+		activation.Completion == nil || !activation.ProcessLocalCompletionProof ||
+		completion.MetafileVariantID != meta.MetafileVariantID ||
+		completion.MaterializeOperationID != materialized.Observation.OperationID ||
+		completion.MaterializePlanID != materialized.Observation.MaterializePlanID ||
+		completion.TargetRootIdentity != materialized.Observation.TargetRootIdentity ||
+		completion.FinalObjectIdentity != materialized.Observation.FinalObjectIdentity ||
+		completion.ActivationOperationID != activation.Completion.OperationID ||
+		completion.ActivationPlanID != activation.Completion.PlanID ||
+		completion.ClientCompletionID != activation.Completion.TerminalMarkerID {
+		ledger.Status = "selected_retirement_mismatch"
+		ledger.StopReason = "retirement_completion_selector_mismatch"
+		blockers = append(blockers, ReportFinding{Code: "retirement.selection_mismatch", Message: "the selected terminal source retirement does not belong to the requested metafile, materialized final, or activation lineage"})
+		return ledger, blockers, warnings
+	}
+
+	ledger.Status = "historical_completion_current_absence_unobserved"
+	if ledger.StopReason == "retirement_source_name_reappeared" {
+		ledger.Status = "source_name_reappeared"
+		blockers = append(blockers, ReportFinding{Code: "retirement.source_name_reappeared", Message: "at least one explicitly retired source name is present again in the bound original namespace"})
+		return ledger, blockers, warnings
+	}
+	if completion.RetainedTombstone {
+		ledger.StopReason = "retirement_current_absence_unavailable"
+		blockers = append(blockers, ReportFinding{Code: "retirement.current_absence_unavailable", Message: "the retained retirement tombstone no longer contains authority to reobserve the original source names"})
+		return ledger, blockers, warnings
+	}
+	if selection.StopReason != "" || selection.CurrentAbsence == nil || materialized.Status != "verified_current_final_source" ||
+		activation.Status != "historical_completion_current_job_bound" || activation.CurrentUse == nil || !activation.ProcessLocalCurrentUseProof ||
+		completion.CurrentClientUseID != activation.CurrentUse.UseID || completion.ClientSnapshotID != activation.CurrentUse.CompleteSnapshotID {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "retirement_current_absence_unavailable"
+		}
+		blockers = append(blockers, ReportFinding{Code: "retirement.current_absence_unavailable", Message: "the historical source retirement could not be combined with current bound-name absence, final, and downloader-use proof"})
+		return ledger, blockers, warnings
+	}
+	absence, ok := selection.CurrentAbsence.ReconcileCurrentRetiredNameAbsence()
+	if !ok || !validSourceRetirementCurrentAbsence(absence) || absence.OperationID != completion.OperationID ||
+		absence.PlanID != completion.PlanID || absence.CompletionID != completion.CompletionID ||
+		absence.SearchScopeID != completion.SearchScopeID || absence.FilesChecked != completion.FilesRetired ||
+		absence.BytesRetired != completion.BytesRetired {
+		ledger.StopReason = "retirement_current_absence_unavailable"
+		blockers = append(blockers, ReportFinding{Code: "retirement.current_absence_unavailable", Message: "the process-local retired-name absence proof does not match this terminal retirement"})
+		return ledger, blockers, warnings
+	}
+	ledger.Status = "historical_completion_current_absence_observed"
+	ledger.CurrentAbsence = &absence
+	ledger.ProcessLocalAbsenceProof = true
+	ledger.StopReason = ""
+	warnings = append(warnings, "retirement completion, current source-name absence, current downloader use, and local content proof are separate sequential non-atomic observations")
+	return ledger, blockers, warnings
+}
+
+func validSourceRetirementCompletion(value SourceRetirementCompletion) bool {
+	if !validSHA256ID(value.OperationID) || !validSHA256ID(value.PlanID) || !validSHA256ID(value.IntentID) ||
+		!validSHA256ID(value.CompletionID) || !validSHA256ID(value.SearchScopeID) || !validSHA256ID(value.MetafileVariantID) ||
+		!validSHA256ID(value.MaterializeOperationID) || !validPlanID(value.MaterializePlanID) ||
+		!validSHA256ID(value.ActivationOperationID) || !validPlanID(value.ActivationPlanID) ||
+		!validSHA256ID(value.ClientCompletionID) || !validSHA256ID(value.CurrentClientUseID) ||
+		!validSHA256ID(value.SourceSelectionID) || !validSHA256ID(value.ClientSnapshotID) ||
+		value.TargetRootIdentity == "" || len(value.TargetRootIdentity) > 512 || value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 ||
+		value.FilesRetired <= 0 || value.FilesRetired > 49_999 || value.BytesRetired <= 0 || value.BytesRetired > 1<<50 {
+		return false
+	}
+	if value.RetainedTombstone {
+		return value.Assurance == "same_invocation_bound_canonical_source_retirement_retention_tombstone_read_without_current_absence_inference"
+	}
+	return value.Assurance == "same_invocation_bound_canonical_terminal_source_retirement_journal_read_without_current_absence_inference"
+}
+
+func validSourceRetirementCurrentAbsence(value SourceRetirementCurrentAbsence) bool {
+	return validSHA256ID(value.OperationID) && validSHA256ID(value.PlanID) && validSHA256ID(value.CompletionID) &&
+		validSHA256ID(value.AbsenceID) && validSHA256ID(value.SearchScopeID) && value.FilesChecked > 0 && value.FilesChecked <= 49_999 &&
+		value.BytesRetired > 0 && value.BytesRetired <= 1<<50 && value.ParentDirectoriesChecked > 0 &&
+		value.ParentDirectoriesChecked <= value.FilesChecked && !value.ObservedAtStart.IsZero() &&
+		!value.ObservedAtEnd.Before(value.ObservedAtStart) &&
+		value.Assurance == "same_invocation_two_pass_identity_bound_retired_name_absence_bracketed_non_atomic"
+}
+
+func safeSourceRetirementStopReason(value string) string {
+	switch value {
+	case "retirement_context_cancelled", "retirement_completion_integrity_failed", "retirement_completion_load_failed",
+		"retirement_completion_selector_mismatch", "retirement_current_absence_unavailable", "retirement_source_name_reappeared",
+		"retirement_prerequisite_unavailable", "retirement_unexpected_activity":
+		return value
+	case "":
+		return ""
+	default:
+		return "retirement_completion_load_failed"
+	}
+}
+
 func validClientActivationCompletion(value ClientActivationCompletion) bool {
 	if _, ok := downloader.DescribeLedgerDriver(value.Driver); !ok || !validSHA256ID(value.OperationID) || !validPlanID(value.PlanID) ||
 		!validSHA256ID(value.TerminalMarkerID) || !validSHA256ID(value.MetafileVariantID) || !validSHA256ID(value.MaterializeOperationID) ||
@@ -848,7 +1079,8 @@ func validClientActivationCompletion(value ClientActivationCompletion) bool {
 
 func validClientActivationCurrentUse(value ClientActivationCurrentUse) bool {
 	if _, ok := downloader.DescribeLedgerDriver(value.Driver); !ok || !validSHA256ID(value.UseID) || !validSHA256ID(value.JobID) ||
-		!validSHA256ID(value.FileLayoutID) || value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 ||
+		!validSHA256ID(value.FileLayoutID) || !validSHA256ID(value.CompleteSnapshotID) ||
+		value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 ||
 		value.JobProgress != 1 || value.ObservedAtStart.IsZero() || value.ObservedAtEnd.Before(value.ObservedAtStart) ||
 		safeClientState(value.JobState) != value.JobState {
 		return false
@@ -1484,13 +1716,16 @@ func boundedSiteDetailBytes(value, maximum int64) int64 {
 }
 
 func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStatus string, siteDetailRequested bool, storageStatus string, processProof bool,
-	clientStatus, pathStatus string, clientRequested bool, activationStatus string, activationRequested bool) string {
+	clientStatus, pathStatus string, clientRequested bool, activationStatus string, activationRequested bool,
+	retirementStatus string, retirementRequested bool) string {
 	if (siteBindingRequested && siteStatus == "integrity_failed") || storageStatus == "integrity_failed" ||
-		(activationRequested && activationStatus == "integrity_failed") {
+		(activationRequested && activationStatus == "integrity_failed") ||
+		(retirementRequested && retirementStatus == "integrity_failed") {
 		return "integrity_failed"
 	}
 	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") ||
 		(activationRequested && activationStatus == "selected_activation_mismatch") ||
+		(retirementRequested && (retirementStatus == "selected_retirement_mismatch" || retirementStatus == "source_name_reappeared")) ||
 		clientStatus == "conflict" || pathStatus == "client_size_conflict" || pathStatus == "client_file_layout_conflict" {
 		return "conflict"
 	}
@@ -1500,6 +1735,7 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") ||
 		(siteDetailRequested && siteDetailStatus != "observed_current_ref") ||
 		(activationRequested && activationStatus != "historical_completion_current_job_bound") ||
+		(retirementRequested && retirementStatus != "historical_completion_current_absence_observed") ||
 		storageStatus == "incomplete" || (verifiedStorageOutcome(storageStatus) && !processProof) ||
 		(clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
 		return "incomplete"
