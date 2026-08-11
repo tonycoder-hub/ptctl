@@ -607,7 +607,7 @@ modeled safely.
 narrower than downloader coordination and has six explicit controls:
 
 ```text
-run     selector + live roots OR explicit stored match + target + reviewed plan ID + write ack
+run     selector + exact root OR live roots OR explicit stored match + target + reviewed plan ID + write ack
 resume  selector + target + reviewed plan ID + write ack + optional source selector + operation ID
 status  target + optional explicit operation ID
 abandon target + abandon ack + explicit operation ID
@@ -616,18 +616,21 @@ forget  target + reviewed plan ID + historical-evidence-deletion ack + explicit 
 ```
 
 Both plan surfaces remain `layout_only`, `effect:none`, and
-`ready_to_apply:false`. `run` accepts only the 24-hex plan ID reviewed from
-`seed discover --target` with the same metafile selector and target. Live mode
-also repeats the same search roots and requires `verified_unique`. Indexed mode
-requires one explicit profile, descriptor record, and source-match ID; it
+`ready_to_apply:false`. `run --source` accepts the 24-hex `exact_root` ID from
+`seed plan` with the same metafile, exact source, and target. It does not trust
+the serialized plan: the writing invocation reopens and exactly verifies the
+root, rebuilds the plan from the new process-local authority, and compares the
+fresh ID before creating private state. Live discovery mode accepts the ID
+from `seed discover --target`, repeats the same search roots, and requires
+`verified_unique`. Indexed mode requires one explicit profile, descriptor
+record, and source-match ID; it
 returns `verified_selected`, reopens every chosen locator, and reruns exact
 content proof without claiming current uniqueness. Its domain-separated
-selection scope is part of the plan ID. The standalone `seed plan` uses
-`exact_root` source semantics and its ID is not a materialize execution
-selector. `run` does not deserialize either plan/discovery JSON or treat a
-historical report as proof. Under one timeout it reproduces the chosen source
-mode, consumes only the same-invocation opaque `VerifiedSource`, and rebuilds
-the copy-only plan. A mismatch blocks before a journal is created. Each source
+selection scope is part of the plan ID. `run` does not deserialize either
+plan/discovery JSON or treat a historical report as proof. Under one timeout
+it reproduces the chosen source mode, consumes only the same-invocation opaque
+`VerifiedSource`, and rebuilds the copy-only plan. A mismatch blocks before a
+journal is created. Each source
 copy is identity/precondition bracketed against that same-call authority; the
 complete staged layout is then exactly verified before publication.
 
@@ -663,10 +666,11 @@ confirmations, staged/final publication attempts, bytes, and ambiguous writes
 are not collapsed into the outcome.
 
 `resume` first replays the explicit journal. Only `journaled`, `stage_created`,
-and `file_staged` phases may read supplied live roots or the same explicit
-stored selection and require fresh same-mode source authority. Later phases
-ignore supplied source selectors and reverify staged or final bytes; a durable
-journal is recovery evidence, never source-content authority.
+and `file_staged` phases may reverify the explicit exact root, read supplied
+live roots, or reopen the same explicit stored selection; each requires fresh
+same-mode source authority and the original plan ID. Later phases ignore
+supplied source selectors and reverify staged or final bytes; a durable journal
+is recovery evidence, never source-content authority.
 Committed recovery rechecks the final namespace and content and returns
 `already_committed`. No command enumerates and silently selects an operation.
 

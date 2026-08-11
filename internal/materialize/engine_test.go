@@ -60,6 +60,245 @@ func TestRunMaterializesSingleFileWithDoubleExactVerification(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsReviewedExactRootPlanAndReverifiesBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("exact-root materialize")
+	meta := materializeSingleV1Meta(t, "final.bin", content)
+	sourceRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "renamed-source.bin")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := t.TempDir()
+	preflightMaterializeFilesystem(t, targetRoot)
+	plan, err := seed.BuildMaterializePlan(ctx, meta, sourcePath, targetRoot, StrategyCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.SourceMode != "exact_root" || plan.SourceRoot != filepath.Clean(sourcePath) {
+		t.Fatalf("unexpected exact-root plan: %#v", plan)
+	}
+	report, err := Run(ctx, RunOptions{
+		Meta: meta, ExactSourceRoot: sourcePath, TargetRoot: targetRoot,
+		ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+	})
+	if err != nil || report.Outcome != OutcomeMaterializedVerified || !report.Plan.Matches ||
+		report.Source.Mode != "exact_root" || report.Source.Outcome != "verified_exact_root" ||
+		!report.Source.ContentVerified || !report.Source.PreconditionsRechecked {
+		t.Fatalf("exact-root materialize failed: %#v %v", report, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(targetRoot, "final.bin"))
+	if err != nil || !bytes.Equal(raw, content) {
+		t.Fatalf("exact-root final differs: %q %v", raw, err)
+	}
+}
+
+func TestExactRootMaterializesV1V2AndHybridMultiFileLayouts(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		meta func(*testing.T) *metafile.MetaInfo
+	}{
+		{name: "v1", meta: materializeMultiV1Meta},
+		{name: "v2", meta: materializeMultiV2Meta},
+		{name: "hybrid", meta: materializeMultiHybridMeta},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			meta := test.meta(t)
+			contentA := []byte("abc")
+			if test.name == "hybrid" {
+				contentA = bytes.Repeat([]byte{'a'}, 16384)
+			}
+			contentB := []byte("def")
+			sourceRoot := t.TempDir()
+			if err := os.WriteFile(filepath.Join(sourceRoot, "a"), contentA, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sourceRoot, "b"), contentB, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			targetRoot := t.TempDir()
+			preflightMaterializeFilesystem(t, targetRoot)
+			plan, err := seed.BuildMaterializePlan(ctx, meta, sourceRoot, targetRoot, StrategyCopy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := Run(ctx, RunOptions{
+				Meta: meta, ExactSourceRoot: sourceRoot, TargetRoot: targetRoot,
+				ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+			})
+			if err != nil || report.Outcome != OutcomeMaterializedVerified || report.Source.Mode != "exact_root" ||
+				!report.Target.StageContentVerified || !report.Target.FinalContentVerified {
+				t.Fatalf("exact-root %s materialize failed: %#v %v", test.name, report, err)
+			}
+			for name, want := range map[string][]byte{"a": contentA, "b": contentB} {
+				raw, readErr := os.ReadFile(filepath.Join(targetRoot, "bundle", name))
+				if readErr != nil || !bytes.Equal(raw, want) {
+					t.Fatalf("exact-root %s final %s differs: %q %v", test.name, name, raw, readErr)
+				}
+			}
+		})
+	}
+}
+
+func TestExactRootResumeRebuildsReviewedPlan(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("exact-root resume")
+	meta := materializeSingleV1Meta(t, "final.bin", content)
+	sourceRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "source.bin")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := t.TempDir()
+	preflightMaterializeFilesystem(t, targetRoot)
+	plan, err := seed.BuildMaterializePlan(ctx, meta, sourcePath, targetRoot, StrategyCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("stop exact-root staging")
+	transitionHook = func(phase Phase) error {
+		if phase == PhaseStageCreated {
+			return crash
+		}
+		return nil
+	}
+	t.Cleanup(func() { transitionHook = nil })
+	interrupted, runErr := Run(ctx, RunOptions{
+		Meta: meta, ExactSourceRoot: sourcePath, TargetRoot: targetRoot,
+		ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+	})
+	transitionHook = nil
+	if !errors.Is(runErr, crash) || interrupted.Operation.PhaseAfter != string(PhaseStageCreated) {
+		t.Fatalf("exact-root run did not stop at the recovery boundary: %#v %v", interrupted, runErr)
+	}
+	operationID, err := ParseOperationID(interrupted.Operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := Resume(ctx, ResumeOptions{
+		Meta: meta, ExactSourceRoot: sourcePath, TargetRoot: targetRoot, OperationID: operationID,
+		ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+	})
+	if err != nil || resumed.Outcome != OutcomeMaterializedVerified || resumed.Source.Mode != "exact_root" ||
+		resumed.Source.Outcome != "verified_exact_root" || !resumed.Target.FinalContentVerified {
+		t.Fatalf("exact-root resume failed: %#v %v", resumed, err)
+	}
+}
+
+func TestExactRootPlanChangeAndSelectorConflictAreZeroWrite(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("exact-root policy")
+	meta := materializeSingleV1Meta(t, "final.bin", content)
+	searchRoot := t.TempDir()
+	sourcePath := filepath.Join(searchRoot, "source.bin")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		conflict bool
+		mutate   bool
+	}{
+		{name: "source changed", mutate: true},
+		{name: "selector conflict", conflict: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			targetRoot := t.TempDir()
+			preflightMaterializeFilesystem(t, targetRoot)
+			plan, err := seed.BuildMaterializePlan(ctx, meta, sourcePath, targetRoot, StrategyCopy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var discovery *seed.DiscoveryResult
+			if test.conflict {
+				observed := discoverForMaterialize(t, ctx, meta, searchRoot, targetRoot)
+				discovery = &observed
+			}
+			if test.mutate {
+				if err := os.WriteFile(sourcePath, bytes.Repeat([]byte{'x'}, len(content)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = os.WriteFile(sourcePath, content, 0o600) }()
+			}
+			before, err := os.ReadDir(targetRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, runErr := Run(ctx, RunOptions{
+				Meta: meta, Discovery: discovery, ExactSourceRoot: sourcePath, TargetRoot: targetRoot,
+				ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+			})
+			if runErr == nil || report.Outcome != OutcomeBlocked || report.WritesPerformed != 0 || report.Source.Mode != "exact_root" {
+				t.Fatalf("unsafe exact-root input was not blocked before writes: %#v %v", report, runErr)
+			}
+			after, err := os.ReadDir(targetRoot)
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("unsafe exact-root input changed target namespace: before=%d after=%d err=%v", len(before), len(after), err)
+			}
+		})
+	}
+}
+
+func TestExactRootPreCanceledRunIsInterruptedAndZeroWrite(t *testing.T) {
+	content := []byte("exact-root canceled")
+	meta := materializeSingleV1Meta(t, "final.bin", content)
+	sourceRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "source.bin")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := t.TempDir()
+	preflightMaterializeFilesystem(t, targetRoot)
+	plan, err := seed.BuildMaterializePlan(context.Background(), meta, sourcePath, targetRoot, StrategyCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	report, runErr := Run(ctx, RunOptions{
+		Meta: meta, ExactSourceRoot: sourcePath, TargetRoot: targetRoot,
+		ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+	})
+	if !errors.Is(runErr, context.Canceled) || report.Outcome != OutcomeInterrupted || report.WritesPerformed != 0 ||
+		report.Source.Mode != "exact_root" || report.Source.Outcome != "unverified" {
+		t.Fatalf("pre-canceled exact-root run was mislabeled: %#v %v", report, runErr)
+	}
+	entries, err := os.ReadDir(targetRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("pre-canceled exact-root run changed target: entries=%d err=%v", len(entries), err)
+	}
+}
+
+func TestExactRootTargetConflictPreservesVerifiedSourceAttribution(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("exact-root target conflict")
+	meta := materializeSingleV1Meta(t, "final.bin", content)
+	sourceRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "source.bin")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := t.TempDir()
+	preflightMaterializeFilesystem(t, targetRoot)
+	plan, err := seed.BuildMaterializePlan(ctx, meta, sourcePath, targetRoot, StrategyCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetRoot, "final.bin"), []byte("preexisting"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, runErr := Run(ctx, RunOptions{
+		Meta: meta, ExactSourceRoot: sourcePath, TargetRoot: targetRoot,
+		ExpectedPlanID: plan.ID, Limits: DefaultLimits(),
+	})
+	if runErr == nil || report.Outcome != OutcomeBlocked || report.WritesPerformed != 0 ||
+		report.Source.Outcome != "verified_exact_root" || !report.Source.ContentVerified ||
+		len(report.Blockers) == 0 || report.Blockers[0].Code != "plan.rebuild_failed" {
+		t.Fatalf("target conflict erased source proof attribution: %#v %v", report, runErr)
+	}
+}
+
 func TestIndexedExplicitSourceAuthorityResumesEarlyMaterialize(t *testing.T) {
 	ctx := context.Background()
 	content := []byte("indexed-resume-authority")

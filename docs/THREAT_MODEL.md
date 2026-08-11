@@ -768,14 +768,17 @@ compared exactly rather than assuming case-insensitive semantics for a
 particular directory or remote filesystem.
 
 Layout-plan output remains zero-write and explicitly reports `layout_only`,
-`effect:none`, and `ready_to_apply:false`. Materialize accepts only a reviewed
-`seed discover --target` plan ID from the same selector/search-root/target
-shape, never the standalone `seed plan` ID and never serialized plan/discovery
-JSON as proof. `run` repeats live discovery and exact verification in the
-writing invocation; early `resume` phases require the same fresh process-local
-authority. The implemented mutation is copy-only and no-clobber. There is still
-no move, source rewrite, source delete, overwrite, or automatic plan-execution
-command.
+`effect:none`, and `ready_to_apply:false`. Materialize accepts either an
+`exact_root` plan ID from `seed plan --source` with the same metafile/source/
+target shape, or a reviewed `seed discover --target` ID from the same
+discovery selector. It never accepts serialized plan/discovery JSON as proof.
+Exact-root run reopens and hashes that root again; discovery run repeats live
+discovery or the explicit indexed selection. Early `resume` phases require the
+same fresh source mode and process-local authority. A plan-ID match therefore
+selects reviewed intent but never substitutes for current content proof. The
+implemented mutation is copy-only and no-clobber. There is still no move,
+source rewrite, source delete, overwrite, or automatic serialized-plan
+execution command.
 
 ### Read side effects and remote storage
 
@@ -866,7 +869,6 @@ synthetic metafiles; real tracker artifacts are forbidden.
   exact explicit pruning and each tombstone family has a separately
   acknowledged forget transition; no operation is selected automatically by
   policy);
-- explicit pruning/forgetting for completed client-removal journals;
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location transitions and client-side

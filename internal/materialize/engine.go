@@ -15,20 +15,22 @@ import (
 )
 
 type RunOptions struct {
-	Meta           *metafile.MetaInfo
-	Discovery      *seed.DiscoveryResult
-	TargetRoot     string
-	ExpectedPlanID string
-	Limits         Limits
+	Meta            *metafile.MetaInfo
+	Discovery       *seed.DiscoveryResult
+	ExactSourceRoot string
+	TargetRoot      string
+	ExpectedPlanID  string
+	Limits          Limits
 }
 
 type ResumeOptions struct {
-	Meta           *metafile.MetaInfo
-	Discovery      *seed.DiscoveryResult
-	TargetRoot     string
-	OperationID    OperationID
-	ExpectedPlanID string
-	Limits         Limits
+	Meta            *metafile.MetaInfo
+	Discovery       *seed.DiscoveryResult
+	ExactSourceRoot string
+	TargetRoot      string
+	OperationID     OperationID
+	ExpectedPlanID  string
+	Limits          Limits
 }
 
 type copyReceipt struct {
@@ -101,22 +103,31 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		report.addBlocker("manifest.unsupported_layout", "the metafile layout is outside materialize v1")
 		return report, err
 	}
-	var source *metafile.VerifiedSource
-	if options.Discovery != nil {
-		source, _ = options.Discovery.VerifiedSource(options.Meta)
-	}
-	if source == nil || !source.Matches(options.Meta) || !source.Result().Verified {
-		report.Outcome = OutcomeBlocked
-		report.addBlocker("source.process_authority_missing", "same-invocation verified source authority is required")
-		return report, fmt.Errorf("%w: verified source authority is unavailable", ErrPolicy)
-	}
-	setVerifiedDiscoverySourceReport(&report, options.Discovery, options.Meta)
-	plan, err := options.Discovery.BuildMaterializePlan(ctx, options.Meta, options.TargetRoot, StrategyCopy)
+	source, plan, sourceReport, sourceVerified, err := prepareMaterializeSource(ctx, options.Meta, options.Discovery, options.ExactSourceRoot, options.TargetRoot)
 	if err != nil {
+		if sourceVerified {
+			report.Source = sourceReport
+		} else {
+			setRequestedSourceFailureReport(&report, options.Discovery, options.Meta, options.ExactSourceRoot)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			report.Outcome = OutcomeInterrupted
+			report.addIssue("operation.interrupted", "source verification or plan rebuilding was interrupted", nil)
+			return report, err
+		}
 		report.Outcome = OutcomeBlocked
-		report.addBlocker("plan.rebuild_failed", "the read-only layout plan could not be rebuilt")
+		if sourceVerified {
+			report.addBlocker("plan.rebuild_failed", "the verified source could not reproduce the reviewed layout plan")
+		} else if options.Discovery != nil && options.ExactSourceRoot != "" {
+			report.addBlocker("source.selector_conflict", "exact-root and discovery source authorities are mutually exclusive")
+		} else if options.Discovery == nil && options.ExactSourceRoot == "" {
+			report.addBlocker("source.process_authority_missing", "same-invocation verified source authority is required")
+		} else {
+			report.addBlocker("source.verification_failed", "the selected source could not reproduce the reviewed exact plan")
+		}
 		return report, err
 	}
+	report.Source = sourceReport
 	report.Plan.ObservedID = plan.ID
 	report.Plan.Matches = plan.ID == options.ExpectedPlanID
 	if !report.Plan.Matches {
@@ -373,19 +384,32 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 	}
 	var source *metafile.VerifiedSource
 	if handle.state.Phase == PhaseJournaled || handle.state.Phase == PhaseStageCreated || handle.state.Phase == PhaseFileStaged {
-		if options.Discovery != nil {
-			source, _ = options.Discovery.VerifiedSource(options.Meta)
-		}
-		if source == nil {
+		var plan seed.Plan
+		var sourceReport SourceReport
+		var sourceVerified bool
+		source, plan, sourceReport, sourceVerified, err = prepareMaterializeSource(ctx, options.Meta, options.Discovery, options.ExactSourceRoot, targetRoot)
+		if err != nil {
+			if sourceVerified {
+				report.Source = sourceReport
+			} else {
+				setRequestedSourceFailureReport(&report, options.Discovery, options.Meta, options.ExactSourceRoot)
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				report.Outcome = OutcomeInterrupted
+				report.addIssue("operation.interrupted", "source verification or plan rebuilding was interrupted", nil)
+				return report, err
+			}
 			report.Outcome = OutcomeBlocked
-			report.addBlocker("source.process_authority_missing", "resume before stage verification requires fresh verified source authority from the reviewed source mode")
-			return report, fmt.Errorf("%w: fresh verified source authority is unavailable", ErrPolicy)
-		}
-		plan, planErr := options.Discovery.BuildMaterializePlan(ctx, options.Meta, targetRoot, StrategyCopy)
-		if planErr != nil {
-			report.Outcome = OutcomeBlocked
-			report.addBlocker("plan.rebuild_failed", "the live resume plan could not be rebuilt")
-			return report, planErr
+			if sourceVerified {
+				report.addBlocker("plan.rebuild_failed", "the verified source could not reproduce the operation's reviewed layout plan")
+			} else if options.Discovery != nil && options.ExactSourceRoot != "" {
+				report.addBlocker("source.selector_conflict", "exact-root and discovery source authorities are mutually exclusive")
+			} else if options.Discovery == nil && options.ExactSourceRoot == "" {
+				report.addBlocker("source.process_authority_missing", "resume before stage verification requires fresh verified source authority from the reviewed source mode")
+			} else {
+				report.addBlocker("source.verification_failed", "the selected source could not reproduce the operation's reviewed exact plan")
+			}
+			return report, err
 		}
 		report.Plan.ObservedID = plan.ID
 		report.Plan.Matches = plan.ID == handle.intent.PlanID
@@ -394,7 +418,7 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 			report.addBlocker("plan.id_mismatch", "the fresh source plan differs from the operation intent")
 			return report, fmt.Errorf("%w: fresh plan differs from operation intent", ErrPolicy)
 		}
-		setVerifiedDiscoverySourceReport(&report, options.Discovery, options.Meta)
+		report.Source = sourceReport
 	} else {
 		report.Source = SourceReport{Mode: "not_required_after_staging", Outcome: "not_requested"}
 	}
@@ -412,27 +436,72 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 	return report, nil
 }
 
-func setVerifiedDiscoverySourceReport(report *Report, discovery *seed.DiscoveryResult, meta *metafile.MetaInfo) {
-	if report == nil || discovery == nil {
+func prepareMaterializeSource(ctx context.Context, meta *metafile.MetaInfo, discovery *seed.DiscoveryResult, exactSourceRoot, targetRoot string) (*metafile.VerifiedSource, seed.Plan, SourceReport, bool, error) {
+	if discovery != nil && exactSourceRoot != "" {
+		return nil, seed.Plan{}, SourceReport{}, false, fmt.Errorf("%w: source selectors are mutually exclusive", ErrPolicy)
+	}
+	if exactSourceRoot != "" {
+		plan, source, err := seed.BuildMaterializePlanWithExactSource(ctx, meta, exactSourceRoot, targetRoot, StrategyCopy)
+		report := SourceReport{
+			Mode: "exact_root", Outcome: "verified_exact_root",
+			PreconditionsRechecked: true, ContentVerified: true,
+		}
+		if err != nil {
+			return source, seed.Plan{}, report, source != nil && source.Matches(meta) && source.Result().Verified, err
+		}
+		if source == nil || !source.Matches(meta) || !source.Result().Verified {
+			return nil, seed.Plan{}, SourceReport{}, false, fmt.Errorf("%w: exact-root source authority is unavailable", ErrPolicy)
+		}
+		return source, plan, report, true, nil
+	}
+	if discovery == nil {
+		return nil, seed.Plan{}, SourceReport{}, false, fmt.Errorf("%w: verified source authority is unavailable", ErrPolicy)
+	}
+	source, ok := discovery.VerifiedSource(meta)
+	if !ok || source == nil || !source.Result().Verified {
+		return nil, seed.Plan{}, SourceReport{}, false, fmt.Errorf("%w: verified discovery source authority is unavailable", ErrPolicy)
+	}
+	report := SourceReport{}
+	mode, _ := discovery.VerifiedSourceMode(meta)
+	switch mode {
+	case "indexed_explicit":
+		report = SourceReport{Mode: "indexed_explicit_live_reverification", Outcome: "verified_selected", PreconditionsRechecked: true, ContentVerified: true}
+	case "live_unique":
+		report = SourceReport{Mode: "live_discovery", Outcome: "verified_unique", PreconditionsRechecked: true, ContentVerified: true}
+	default:
+		return nil, seed.Plan{}, SourceReport{}, false, fmt.Errorf("%w: verified discovery source mode is unavailable", ErrPolicy)
+	}
+	plan, err := discovery.BuildMaterializePlan(ctx, meta, targetRoot, StrategyCopy)
+	if err != nil {
+		return source, seed.Plan{}, report, true, err
+	}
+	return source, plan, report, true, nil
+}
+
+func setRequestedSourceFailureReport(report *Report, discovery *seed.DiscoveryResult, meta *metafile.MetaInfo, exactSourceRoot string) {
+	if report == nil {
+		return
+	}
+	if exactSourceRoot != "" {
+		report.Source = SourceReport{Mode: "exact_root", Outcome: "unverified"}
+		return
+	}
+	if discovery == nil {
+		report.Source = SourceReport{Mode: "not_requested", Outcome: "unavailable"}
 		return
 	}
 	mode, ok := discovery.VerifiedSourceMode(meta)
 	if !ok {
+		report.Source = SourceReport{Mode: "discovery", Outcome: "unavailable"}
 		return
 	}
 	switch mode {
 	case "indexed_explicit":
-		report.Source = SourceReport{
-			Mode: "indexed_explicit_live_reverification", Outcome: "verified_selected",
-			PreconditionsRechecked: true, ContentVerified: true,
-		}
+		report.Source = SourceReport{Mode: "indexed_explicit_live_reverification", Outcome: "incomplete"}
 	case "live_unique":
-		report.Source = SourceReport{
-			Mode: "live_discovery", Outcome: "verified_unique",
-			PreconditionsRechecked: true, ContentVerified: true,
-		}
+		report.Source = SourceReport{Mode: "live_discovery", Outcome: "incomplete"}
 	default:
-		report.Source = SourceReport{Mode: "unknown", Outcome: "unavailable"}
+		report.Source = SourceReport{Mode: "discovery", Outcome: "unavailable"}
 	}
 }
 

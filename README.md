@@ -98,7 +98,8 @@ capabilities at the edge, not assumptions in the core domain model.
 - read-only storage probing and explicit host-to-client path mapping;
 - zero-write, `layout_only` plans for v1, v2, and hybrid metafiles, bound to a
   detected-stable verification observation with apply-time re-verification
-  requirements;
+  requirements; an `exact_root` plan ID can select the later acknowledged
+  `--source` write while serialized plan fields themselves remain non-authority;
 - acknowledged, copy-only `seed materialize run|resume` with a private
   target-root-local journal, same-filesystem staging, exact stage/final proof,
   no-clobber publication, fixed hard limits, explicit operation-ID recovery,
@@ -171,7 +172,7 @@ capabilities at the edge, not assumptions in the core domain model.
 
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
 index alone, background refresh/watchers, downloader pause/location or broader
-existing-job mutation, client-removal journal pruning/forgetting,
+existing-job mutation,
 attributed/empty-file client-layout reconciliation,
 reflink/hardlink or cross-filesystem materialization, automatic execution of
 serialized plan reports, source-parent/staging cleanup or rollback,
@@ -451,11 +452,25 @@ ptctl seed plan \
 
 The standalone `seed plan` result remains a zero-write review artifact:
 `effect` is `none`, readiness is `layout_only`, and `ready_to_apply` is false.
-Its `exact_root` plan ID is not an execution selector. To review a layout for
-materialize, use `seed discover --target` with the intended metafile and source
-selector plus target (as in the preceding discovery examples), retain that
-discovery plan's 24-hex ID, then acknowledge the journal, staging, and target
-writes:
+Its serialized fields are not source authority, but its `exact_root` 24-hex
+plan ID can select a later `seed materialize run --source` with the same
+metafile, exact source, and target. The writing invocation reopens and hashes
+the source again before creating any journal:
+
+```bash
+ptctl seed materialize run \
+  --torrent release.torrent \
+  --source "D:\Media\Release" \
+  --target "D:\PT" \
+  --expect-plan-id 0123456789abcdef01234567 \
+  --acknowledge-filesystem-write \
+  --output json
+```
+
+For scattered or indexed sources, review `seed discover --target` with the
+intended metafile, source selector, and target (as in the preceding discovery
+examples), retain that discovery plan's 24-hex ID, then acknowledge the
+journal, staging, and target writes:
 
 ```bash
 ptctl seed materialize run \
@@ -469,20 +484,22 @@ ptctl seed materialize run \
 ```
 
 `run` does not consume plan or discovery JSON as proof. In the same invocation
-it either repeats bounded live discovery with that same
-selector/search-root/target shape and requires one uniquely verified source,
-or repeats the exact stored-profile/descriptor/match selection and reopens and
-cryptographically verifies that chosen source map. It rebuilds the copy-only
-plan from process-local proof and compares the fresh ID before creating a
-journal. Stored selection never claims current uniqueness and requires all four
+it either exactly verifies the explicit `--source`, repeats bounded live
+discovery with the same selector/search-root/target shape and requires one
+uniquely verified source, or repeats the exact
+stored-profile/descriptor/match selection and reopens and cryptographically
+verifies that chosen source map. It rebuilds the copy-only plan from
+process-local proof and compares the fresh ID before creating a journal.
+Stored selection never claims current uniqueness and requires all four
 flags `--state-store`, `--storage-profile`, `--snapshot-record`, and
 `--select-source-match` on both preview and early-phase run/resume.
 It then uses a private target-root-local
 journal and same-filesystem staging, exactly verifies staged and final bytes,
 and publishes the top-level layout without clobber. The materialize limits are
 fixed by the installed version; only the existing discovery limits are CLI
-flags. Network/UNC source roots still require `--allow-network`; a target root
-must be a supported local filesystem.
+flags. Network/UNC `--search-root` values still require `--allow-network`; an
+explicit `--source` may itself be remote and therefore remains an intentional
+read-side-effect boundary. A target root must be a supported local filesystem.
 
 Every report hands back a full opaque operation ID as soon as one is durably
 recoverable. Recovery always selects that ID explicitly:
@@ -533,12 +550,12 @@ ptctl seed materialize run \
 ```
 
 `status` without an ID performs a bounded name-only listing whose entries are
-`not_inspected`; it never chooses a latest operation. `resume` reads fresh live
-roots or repeats the explicit stored selection only for `journaled`,
-`stage_created`, or `file_staged` phases. Omitting source authority in one of
-those phases returns a blocked report; after stage verification, supplied
-source selectors are not read because staged/final bytes are the recovery
-authority. `abandon` is allowed only before publication intent. It
+`not_inspected`; it never chooses a latest operation. `resume` re-verifies an
+explicit exact root, reads fresh live roots, or repeats the explicit stored
+selection only for `journaled`, `stage_created`, or `file_staged` phases.
+Omitting source authority in one of those phases returns a blocked report;
+after stage verification, supplied source selectors are not read because
+staged/final bytes are the recovery authority. `abandon` is allowed only before publication intent. It
 appends one terminal journal event and deliberately retains staging and scratch
 bytes: it is not cleanup, rollback, or deletion.
 

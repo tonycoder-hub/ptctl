@@ -58,19 +58,36 @@ var ErrSourceIntegrity = errors.New("source content failed exact torrent verific
 // verification required by the metafile and produces a plan, but never creates
 // directories, links, or files.
 func BuildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, sourceRoot, targetRoot, strategy string) (Plan, error) {
+	plan, _, err := BuildMaterializePlanWithExactSource(ctx, meta, sourceRoot, targetRoot, strategy)
+	return plan, err
+}
+
+// BuildMaterializePlanWithExactSource verifies one caller-selected exact
+// source root and returns both the read-only plan and the process-local source
+// authority created by that same proof. The authority is intentionally not
+// serializable: a later materialize invocation must call this function again
+// and reproduce the reviewed plan ID before it may write anything. If source
+// proof succeeds but target-plan construction fails, the verified authority is
+// returned with the error so an auditing caller can attribute the failure to
+// planning without treating the absent plan as usable.
+func BuildMaterializePlanWithExactSource(ctx context.Context, meta *metafile.MetaInfo, sourceRoot, targetRoot, strategy string) (Plan, *metafile.VerifiedSource, error) {
 	verified, err := metafile.VerifyContentSource(ctx, meta, sourceRoot)
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, nil, err
 	}
 	if !verified.Result().Verified {
-		return Plan{}, ErrSourceIntegrity
+		return Plan{}, nil, ErrSourceIntegrity
 	}
 	sourceRoot, err = filepath.Abs(sourceRoot)
 	if err != nil {
-		return Plan{}, fmt.Errorf("resolve source root: %w", err)
+		return Plan{}, verified, fmt.Errorf("resolve source root: %w", err)
 	}
 	sourceRoot = filepath.Clean(sourceRoot)
-	return buildMaterializePlan(ctx, meta, verified, "exact_root", "", sourceRoot, targetRoot, strategy)
+	plan, err := buildMaterializePlan(ctx, meta, verified, "exact_root", "", sourceRoot, targetRoot, strategy)
+	if err != nil {
+		return Plan{}, verified, err
+	}
+	return plan, verified, nil
 }
 
 // BuildMaterializePlanFromVerified consumes an opaque mapped verification
@@ -152,8 +169,12 @@ func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified
 			"target filesystem semantics were inferred from the host OS, not measured for this storage root",
 			"no host-to-downloader path mapping or downloader job was reconciled",
 			"no site release identity was bound to the local metafile artifact",
-			"journaled materialize requires a separately reviewed seed discover --target plan ID and repeats exact source verification in the writing invocation",
+			"journaled materialize requires the reviewed plan ID and repeats exact source verification in the writing invocation",
 		},
+	}
+	if sourceMode == "exact_root" {
+		plan.Warnings = append(plan.Warnings, "this plan ID can select seed materialize --source only when the writing invocation reopens the same exact source root and reproduces the plan")
+		plan.Blockers = append(plan.Blockers, "the serialized plan retains no process-local source capability and cannot authorize a write by itself")
 	}
 	plan.Warnings = append(plan.Warnings, targetProbe.Warnings...)
 	if targetRootIdentity == "" {

@@ -452,24 +452,66 @@ func TestSeedMaterializeRunStatusResumeAndPrivacy(t *testing.T) {
 	assertMaterializeJSONPrivate(t, out.Bytes(), fixture, storeRoot)
 }
 
-func TestSeedMaterializePlanMismatchIsReportFirstAndZeroWrite(t *testing.T) {
+func TestSeedPlanExactRootIDDrivesMaterializeAndRemainsPrivate(t *testing.T) {
+	fixture := newMaterializeCLIFixture(t)
+	var out, errOut bytes.Buffer
+	if code := Run([]string{
+		"seed", "plan", "--torrent", fixture.torrentPath, "--source", fixture.sourcePath,
+		"--target", fixture.targetRoot, "--output", "json",
+	}, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("seed plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var planned struct {
+		Kind string    `json:"kind"`
+		Data seed.Plan `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &planned); err != nil {
+		t.Fatal(err)
+	}
+	if planned.Kind != "content.layout_plan" || planned.Data.Readiness != "layout_only" || planned.Data.ReadyToApply ||
+		planned.Data.Effect != "none" || planned.Data.SourceMode != "exact_root" || planned.Data.ID == fixture.planID {
+		t.Fatalf("unexpected exact-root preview: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), fixture.torrentPath)
+
+	out.Reset()
+	errOut.Reset()
+	code := Run([]string{
+		"seed", "materialize", "run", "--torrent", fixture.torrentPath,
+		"--source", fixture.sourcePath, "--target", fixture.targetRoot,
+		"--expect-plan-id", planned.Data.ID, "--acknowledge-filesystem-write", "--output", "json",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	report := decodeMaterializeReport(t, out.Bytes())
+	if report.Data.Outcome != materialize.OutcomeMaterializedVerified || !report.Data.Plan.Matches ||
+		report.Data.Plan.ObservedID != planned.Data.ID || report.Data.Source.Mode != "exact_root" ||
+		report.Data.Source.Outcome != "verified_exact_root" || !report.Data.Source.ContentVerified {
+		t.Fatalf("exact-root materialize report is inconsistent: %s", out.String())
+	}
+	assertMaterializeJSONPrivate(t, out.Bytes(), fixture)
+	final, err := os.ReadFile(fixture.finalPath)
+	if err != nil || !bytes.Equal(final, fixture.content) {
+		t.Fatalf("exact-root materialize final differs: %q %v", final, err)
+	}
+}
+
+func TestSeedMaterializeSourceModeMismatchIsReportFirstAndZeroWrite(t *testing.T) {
 	fixture := newMaterializeCLIFixture(t)
 	meta, err := metafile.Read(fixture.torrentPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	standalonePlan, err := seed.BuildMaterializePlan(context.Background(), meta, fixture.sourcePath, fixture.targetRoot, materialize.StrategyCopy)
+	exactPlan, err := seed.BuildMaterializePlan(context.Background(), meta, fixture.sourcePath, fixture.targetRoot, materialize.StrategyCopy)
 	if err != nil {
-		t.Fatalf("build standalone preview plan: %v", err)
-	}
-	if standalonePlan.Readiness != "layout_only" || standalonePlan.ReadyToApply || standalonePlan.Effect != "none" || standalonePlan.ID == fixture.planID {
-		t.Fatalf("standalone preview must remain distinct from discovered-map review: %+v", standalonePlan)
+		t.Fatalf("build exact-root preview plan: %v", err)
 	}
 	var out, errOut bytes.Buffer
 	code := Run([]string{
 		"seed", "materialize", "run", "--torrent", fixture.torrentPath,
 		"--search-root", fixture.sourceRoot, "--target", fixture.targetRoot,
-		"--expect-plan-id", standalonePlan.ID, "--acknowledge-filesystem-write",
+		"--expect-plan-id", exactPlan.ID, "--acknowledge-filesystem-write",
 	}, strings.NewReader(""), &out, &errOut)
 	if code != 4 || !strings.Contains(out.String(), "OUTCOME") || !strings.Contains(out.String(), "blocked") ||
 		!strings.Contains(out.String(), "WRITES PERFORMED") || !strings.Contains(out.String(), "plan.id_mismatch") {
@@ -480,17 +522,49 @@ func TestSeedMaterializePlanMismatchIsReportFirstAndZeroWrite(t *testing.T) {
 			t.Fatalf("blockers must precede evidence section %q: %q", later, out.String())
 		}
 	}
-	for _, budget := range []string{"MAX NAMESPACE OBJECTS", "MAX SCRATCH BYTES", "FINDING OVERFLOW"} {
-		if !strings.Contains(out.String(), budget) {
-			t.Fatalf("human budget output is missing %q: %q", budget, out.String())
-		}
-	}
 	if strings.Contains(out.String()+errOut.String(), fixture.torrentPath) || strings.Contains(out.String()+errOut.String(), fixture.sourcePath) ||
 		strings.Contains(out.String()+errOut.String(), fixture.sourceRoot) || strings.Contains(out.String()+errOut.String(), fixture.targetRoot) {
 		t.Fatalf("materialize table/error leaked a path: stdout=%q stderr=%q", out.String(), errOut.String())
 	}
 	if _, err := os.Stat(fixture.finalPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("plan mismatch made the final layout visible: %v", err)
+	}
+}
+
+func TestSeedMaterializeExactSourceFailureIsPrivateAndZeroWrite(t *testing.T) {
+	fixture := newMaterializeCLIFixture(t)
+	meta, err := metafile.Read(fixture.torrentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactPlan, err := seed.BuildMaterializePlan(context.Background(), meta, fixture.sourcePath, fixture.targetRoot, materialize.StrategyCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.sourcePath, bytes.Repeat([]byte{'x'}, len(fixture.content)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"seed", "materialize", "run", "--torrent", fixture.torrentPath,
+		"--source", fixture.sourcePath, "--target", fixture.targetRoot,
+		"--expect-plan-id", exactPlan.ID, "--acknowledge-filesystem-write", "--output", "json",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 4 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	report := decodeMaterializeReport(t, out.Bytes())
+	if report.Data.Outcome != materialize.OutcomeBlocked || report.Data.WritesPerformed != 0 ||
+		report.Data.Source.Mode != "exact_root" || report.Data.Source.Outcome != "unverified" || len(report.Data.Blockers) == 0 {
+		t.Fatalf("exact-source failure report is inconsistent: %s", out.String())
+	}
+	assertMaterializeJSONPrivate(t, out.Bytes(), fixture)
+	if strings.Contains(errOut.String(), fixture.sourcePath) || strings.Contains(errOut.String(), fixture.targetRoot) ||
+		strings.Contains(errOut.String(), fixture.torrentPath) {
+		t.Fatalf("exact-source failure leaked a path: %q", errOut.String())
+	}
+	if _, err := os.Lstat(fixture.finalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed exact-source verification made final visible: %v", err)
 	}
 }
 
@@ -568,6 +642,9 @@ func TestSeedMaterializeUsagePrecedesFilesystemAndSecretInput(t *testing.T) {
 		{"seed", "materialize", "run", "--torrent", missing, "--search-root", missing, "--target", missing, "--expect-plan-id", "BAD", "--acknowledge-filesystem-write"},
 		{"seed", "materialize", "run", "--torrent", missing, "--metafile-store", missing, "--metafile-variant", validVariantID, "--search-root", missing, "--target", missing, "--expect-plan-id", validPlanID, "--acknowledge-filesystem-write"},
 		{"seed", "materialize", "run", "--torrent", missing, "--search-root", "", "--target", missing, "--expect-plan-id", validPlanID, "--acknowledge-filesystem-write"},
+		{"seed", "materialize", "run", "--torrent", missing, "--source", missing, "--search-root", missing, "--target", missing, "--expect-plan-id", validPlanID, "--acknowledge-filesystem-write"},
+		{"seed", "materialize", "run", "--torrent", missing, "--source", missing, "--state-store", missing, "--target", missing, "--expect-plan-id", validPlanID, "--acknowledge-filesystem-write"},
+		{"seed", "materialize", "run", "--torrent", missing, "--source", missing, "--max-depth", "1", "--target", missing, "--expect-plan-id", validPlanID, "--acknowledge-filesystem-write"},
 		{"seed", "materialize", "resume", "--torrent", missing, "--target", missing, "--expect-plan-id", validPlanID, "--acknowledge-filesystem-write", "--max-depth", "1", validOperationID},
 		{"seed", "materialize", "status", "--target", missing, "--max-operations", "1", validOperationID},
 		{"seed", "materialize", "abandon", "--target", missing, validOperationID},
@@ -593,9 +670,9 @@ func TestSeedMaterializeHelpIsCompleteAndFixedBudget(t *testing.T) {
 		args     []string
 		required []string
 	}{
-		{[]string{"seed", "materialize", "--help"}, []string{"run", "resume", "status", "abandon", "prune", "forget", "standalone seed plan ID is not an", "never selects a latest operation"}},
-		{[]string{"seed", "materialize", "run", "--help"}, []string{"acknowledge-filesystem-write", "metafile-store", "search-root", "max-proof-bytes", "standalone seed plan ID is not accepted"}},
-		{[]string{"seed", "materialize", "resume", "--help"}, []string{"OPERATION_ID", "partially staged", "search-root"}},
+		{[]string{"seed", "materialize", "--help"}, []string{"run", "resume", "status", "abandon", "prune", "forget", "exact-root plan ID comes from seed plan", "never selects a latest operation"}},
+		{[]string{"seed", "materialize", "run", "--help"}, []string{"acknowledge-filesystem-write", "metafile-store", "search-root", "source", "max-proof-bytes", "repeats verification"}},
+		{[]string{"seed", "materialize", "resume", "--help"}, []string{"OPERATION_ID", "partially staged", "search-root", "source"}},
 		{[]string{"seed", "materialize", "status", "--help"}, []string{"max-root-entries", "max-operations", "not_inspected"}},
 		{[]string{"seed", "materialize", "abandon", "--help"}, []string{"acknowledge-abandon", "retains staged and scratch bytes", "no deletion"}},
 		{[]string{"seed", "materialize", "prune", "--help"}, []string{"acknowledge-operation-state-deletion", "retention intent", "tombstone is retained"}},

@@ -31,6 +31,7 @@ type materializeExecutionFlags struct {
 	torrentPath    *string
 	storeRoot      *string
 	variantID      *string
+	exactSource    *string
 	searchRoots    stringListFlag
 	stateStore     *string
 	storageProfile *string
@@ -81,21 +82,22 @@ func (a *app) seedMaterialize(args []string) error {
 
 func (a *app) seedMaterializeHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl seed materialize run (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE --snapshot-record RECORD --select-source-match MATCH) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [flags]
+  ptctl seed materialize run (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE --snapshot-record RECORD --select-source-match MATCH) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [flags]
   ptctl seed materialize resume (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [source selector] [flags] OPERATION_ID
   ptctl seed materialize status --target PATH [flags] [OPERATION_ID]
   ptctl seed materialize abandon --target PATH --acknowledge-abandon [flags] OPERATION_ID
   ptctl seed materialize prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID] [flags] OPERATION_ID
   ptctl seed materialize forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [flags] OPERATION_ID
 
-Materialize is copy-only and target-root-local. Run requires either one
-complete live discovery or one explicitly selected stored-profile match that
-is reopened and exactly verified in the writing invocation. The reviewed plan
-must come from seed discover --target with the same live roots, or with the
-same explicit snapshot record and source-match ID. Stored selection never
-claims current uniqueness. The standalone seed plan ID is not an execution
-selector. Resume reads fresh source authority only for a journaled or partially
-staged operation. Status without an operation ID performs a bounded
+Materialize is copy-only and target-root-local. Run requires one exact source
+root, one complete live discovery, or one explicitly selected stored-profile
+match. Every mode is reopened and exactly verified in the writing invocation.
+An exact-root plan ID comes from seed plan with the same --source and target;
+discovery IDs come from seed discover --target with the same live roots or the
+same explicit snapshot record and source-match ID. Serialized plan output is
+never source-proof authority. Stored selection never claims current uniqueness.
+Resume reads fresh source authority only for a journaled or partially staged
+operation. Status without an operation ID performs a bounded
 name-only listing and never selects a latest operation. Abandon is terminal,
 writes one journal event, retains staged and scratch bytes, and never deletes
 source, staging, or published content.
@@ -120,15 +122,16 @@ func addMaterializeExecutionFlags(fs *flag.FlagSet) *materializeExecutionFlags {
 	values.torrentPath = fs.String("torrent", "", "metafile path")
 	values.storeRoot = fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
 	values.variantID = fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
+	values.exactSource = fs.String("source", "", "exact source file or content root reviewed by seed plan")
 	fs.Var(&values.searchRoots, "search-root", "live source root to scan; repeatable")
 	values.stateStore = fs.String("state-store", "", "initialized private state store for explicit indexed source selection")
 	values.storageProfile = fs.String("storage-profile", "", "stored profile name or immutable ID; pair with --state-store")
 	values.snapshotRecord = fs.String("snapshot-record", "", "explicit sealed snapshot descriptor record ID")
 	values.selectedMatch = fs.String("select-source-match", "", "explicit sha256 source-match ID from the selected snapshot")
 	values.targetRoot = fs.String("target", "", "existing local target storage root")
-	values.expectedPlanID = fs.String("expect-plan-id", "", "reviewed 24-hex seed-discover target plan ID")
+	values.expectedPlanID = fs.String("expect-plan-id", "", "reviewed 24-hex seed-plan or seed-discover target plan ID")
 	values.acknowledge = fs.Bool("acknowledge-filesystem-write", false, "acknowledge private journal, staging, and target-layout writes")
-	values.allowNetwork = fs.Bool("allow-network", false, "allow explicit network/UNC source roots; never applies to target")
+	values.allowNetwork = fs.Bool("allow-network", false, "allow network/UNC live search roots; never applies to exact --source or target")
 	values.timeout = fs.Duration("timeout", materializeExecutionDefaultTimeout, "shared discovery and materialization wall-clock budget")
 
 	inventoryDefaults := storage.DefaultInventoryLimits()
@@ -153,6 +156,7 @@ func (values *materializeExecutionFlags) validate(fs *flag.FlagSet, command stri
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
 	indexedRequested := values.indexedRequested(fs)
+	exactRequested := explicit["source"]
 	if *values.targetRoot == "" {
 		return input, seed.DiscoverOptions{}, usageError("%s requires --target", command)
 	}
@@ -168,16 +172,19 @@ func (values *materializeExecutionFlags) validate(fs *flag.FlagSet, command stri
 	if *values.timeout <= 0 || *values.timeout > materializeExecutionMaxTimeout {
 		return input, seed.DiscoverOptions{}, usageError("--timeout must be greater than zero and no more than 168h")
 	}
-	if rootsRequired && len(values.searchRoots) == 0 && !indexedRequested {
-		return input, seed.DiscoverOptions{}, usageError("%s requires live --search-root values or a complete stored-profile source selector", command)
+	if exactRequested && *values.exactSource == "" {
+		return input, seed.DiscoverOptions{}, usageError("%s requires --source to be non-empty", command)
+	}
+	if rootsRequired && !exactRequested && len(values.searchRoots) == 0 && !indexedRequested {
+		return input, seed.DiscoverOptions{}, usageError("%s requires --source, live --search-root values, or a complete stored-profile source selector", command)
 	}
 	for _, root := range values.searchRoots {
 		if root == "" {
 			return input, seed.DiscoverOptions{}, usageError("%s requires every --search-root to be non-empty", command)
 		}
 	}
-	if len(values.searchRoots) > 0 && indexedRequested {
-		return input, seed.DiscoverOptions{}, usageError("--search-root and stored-profile source selection are mutually exclusive")
+	if (exactRequested && len(values.searchRoots) > 0) || (exactRequested && indexedRequested) || (len(values.searchRoots) > 0 && indexedRequested) {
+		return input, seed.DiscoverOptions{}, usageError("--source, --search-root, and stored-profile source selection are mutually exclusive")
 	}
 	if indexedRequested {
 		if *values.stateStore == "" || *values.storageProfile == "" || *values.snapshotRecord == "" || *values.selectedMatch == "" {
@@ -198,7 +205,10 @@ func (values *materializeExecutionFlags) validate(fs *flag.FlagSet, command stri
 			}
 		}
 	}
-	if len(values.searchRoots) == 0 && !indexedRequested && materializeDiscoveryFlagExplicit(fs) {
+	if exactRequested && materializeDiscoveryFlagExplicit(fs) {
+		return input, seed.DiscoverOptions{}, usageError("live discovery flags do not apply to --source exact-root mode")
+	}
+	if len(values.searchRoots) == 0 && !indexedRequested && !exactRequested && materializeDiscoveryFlagExplicit(fs) {
 		return input, seed.DiscoverOptions{}, usageError("live discovery flags require at least one --search-root")
 	}
 
@@ -248,10 +258,13 @@ func (values *materializeExecutionFlags) indexedRequested(fs *flag.FlagSet) bool
 }
 
 func (values *materializeExecutionFlags) hasSourceSelector() bool {
-	return len(values.searchRoots) > 0 || (values.stateStore != nil && *values.stateStore != "")
+	return (values.exactSource != nil && *values.exactSource != "") || len(values.searchRoots) > 0 || (values.stateStore != nil && *values.stateStore != "")
 }
 
 func (values *materializeExecutionFlags) sourceModeLabel() string {
+	if values.exactSource != nil && *values.exactSource != "" {
+		return "exact_root"
+	}
 	if len(values.searchRoots) > 0 {
 		return "live_discovery"
 	}
@@ -324,8 +337,8 @@ func (a *app) seedMaterializeRun(args []string) error {
 	fs := newFlagSet("seed materialize run")
 	values := addMaterializeExecutionFlags(fs)
 	if handled, err := parseStorageFlags(a, fs, args,
-		"ptctl seed materialize run (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE --snapshot-record RECORD --select-source-match MATCH) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [flags]",
-		"Repeats the reviewed seed discover --target shape, matches its plan ID, then journals, stages, exactly verifies, and no-clobber publishes one target layout. Stored-profile mode reopens and re-verifies only the explicitly selected historical assignment and does not claim uniqueness. A standalone seed plan ID is not accepted. No absolute path is reported."); handled || err != nil {
+		"ptctl seed materialize run (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE --snapshot-record RECORD --select-source-match MATCH) --target PATH --expect-plan-id ID --acknowledge-filesystem-write [flags]",
+		"Rebuilds and matches the reviewed plan ID, then journals, stages, exactly verifies, and no-clobber publishes one target layout. --source accepts the ID from seed plan with the same exact source and target, but repeats verification and never trusts serialized proof. Stored-profile mode reopens only the selected historical assignment and does not claim uniqueness. No absolute path is reported."); handled || err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -343,6 +356,13 @@ func (a *app) seedMaterializeRun(args []string) error {
 		safeErr := materializeMetafileLoadError(err)
 		report := materializeRunInputFailureReport(ctx, *values.targetRoot, *values.expectedPlanID, safeErr)
 		return a.finishMaterialize(*values.output, report, safeErr)
+	}
+	if *values.exactSource != "" {
+		report, operationErr := materialize.Run(ctx, materialize.RunOptions{
+			Meta: meta, ExactSourceRoot: *values.exactSource, TargetRoot: *values.targetRoot,
+			ExpectedPlanID: *values.expectedPlanID, Limits: materialize.DefaultLimits(),
+		})
+		return a.finishMaterialize(*values.output, report, operationErr)
 	}
 	discovery, discoveryErr := values.discover(ctx, meta, discoveryOptions)
 	if discoveryErr != nil {
@@ -413,7 +433,10 @@ func (a *app) seedMaterializeResume(args []string) error {
 
 	needsDiscovery := materializePhaseNeedsDiscovery(status.Operation.PhaseAfter)
 	var discovery *seed.DiscoveryResult
-	if needsDiscovery && values.hasSourceSelector() {
+	exactSourceRoot := ""
+	if needsDiscovery && values.exactSource != nil && *values.exactSource != "" {
+		exactSourceRoot = *values.exactSource
+	} else if needsDiscovery && values.hasSourceSelector() {
 		observed, discoveryErr := values.discover(ctx, meta, discoveryOptions)
 		if discoveryErr != nil {
 			status.Outcome = materialize.OutcomeInterrupted
@@ -427,7 +450,7 @@ func (a *app) seedMaterializeResume(args []string) error {
 		discovery = &observed
 	}
 	report, operationErr := materialize.Resume(ctx, materialize.ResumeOptions{
-		Meta: meta, Discovery: discovery, TargetRoot: *values.targetRoot, OperationID: operationID,
+		Meta: meta, Discovery: discovery, ExactSourceRoot: exactSourceRoot, TargetRoot: *values.targetRoot, OperationID: operationID,
 		ExpectedPlanID: *values.expectedPlanID, Limits: materialize.DefaultLimits(),
 	})
 	if !needsDiscovery && values.hasSourceSelector() {

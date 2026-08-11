@@ -58,6 +58,38 @@ func TestBuildMaterializePlanIsVerifiedAndZeroWrite(t *testing.T) {
 	}
 }
 
+func TestBuildMaterializePlanWithExactSourceReturnsSameInvocationAuthority(t *testing.T) {
+	content := []byte("exact authority")
+	piece := sha1.Sum(content)
+	meta, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(len(content)), "name": "final.bin", "piece length": int64(len(content)), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := t.TempDir()
+	source := filepath.Join(sourceRoot, "renamed.bin")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	plan, authority, err := BuildMaterializePlanWithExactSource(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := BuildMaterializePlan(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority == nil || !authority.Matches(meta) || !authority.Result().Verified || plan.ID != ordinary.ID ||
+		plan.SourceMode != "exact_root" || plan.SourceRoot != filepath.Clean(source) {
+		t.Fatalf("exact-source plan/authority mismatch: plan=%#v ordinary=%#v", plan, ordinary)
+	}
+	if len(plan.Blockers) == 0 || len(plan.Warnings) == 0 {
+		t.Fatalf("exact-source plan omitted its non-authority boundary: %#v", plan)
+	}
+}
+
 func TestBuildMaterializePlanSupportsV2AndHybrid(t *testing.T) {
 	content := []byte("verified")
 	v2Root := sha256.Sum256(content)
