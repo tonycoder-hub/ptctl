@@ -131,7 +131,9 @@ capabilities at the edge, not assumptions in the core domain model.
 - an explicitly acknowledged, durable TJUPT bonus-exchange state machine:
   private reviewed intent, fresh exact-option re-observation, deterministic
   no-clobber attempt marker, at most one non-retried POST, and a separately
-  sealed confirmed/rejected/unknown outcome; a marker without an outcome is
+  sealed confirmed/rejected/unknown outcome; its credential-free bounded
+  operation inventory verifies intent records without selecting a latest
+  operation or inferring linked state; a marker without an outcome is
   permanently submission-unknown and is never retried automatically;
 - an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
   bounded GET with no redirect or retry and publishing the strictly validated
@@ -753,7 +755,17 @@ printf '%s' "$TJUPT_COOKIE" | \
 ptctl site bonus exchange status \
   --state-store "$PTCTL_STATE" \
   --intent-record INTENT_RECORD_ID
+
+ptctl site bonus exchange list \
+  --state-store "$PTCTL_STATE"
 ```
+
+`list` is a credential-free recovery aid when an earlier command's output is
+no longer available. It performs two bounded intent-record inventories and two
+strict per-record hash/parse verification passes, returns deterministic
+record-ID order, and marks every row `not_inspected`. It never chooses a newest
+operation or reads attempt/outcome state; pass one selected intent record to `status` for that
+higher-evidence inspection.
 
 Submit performs one fresh bounded GET and verifies the process-local review
 authority before writing the deterministic attempt marker. Within the
@@ -796,11 +808,12 @@ jointly verified outcome record containing that receipt, was bound to the
 operation. Neither field claims global exactly-once coordination across cloned
 or rolled-back stores.
 
-These commands are report-first after valid usage. Complete prepare/status and
+These commands are report-first after valid usage. Complete prepare/status/list and
 a durably recorded confirmed submission exit `0`; rejected, unknown,
 not-submitted, or operationally incomplete submissions exit `1` after printing
 their state. Usage is `2`, and verified sealed-state corruption is integrity
-exit `3`. The workflow does not use require-style exit `4`.
+exit `3`. A bounded but incomplete operation inventory returns `4` after its
+report; it never silently truncates or promotes a partial list.
 
 Read downloader state (read-only commands support qBittorrent and
 Transmission):

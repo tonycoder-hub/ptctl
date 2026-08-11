@@ -91,9 +91,24 @@ type siteBonusExchangeAssurance struct {
 	SerializedAuthority          bool   `json:"serialized_authority"`
 }
 
+type siteBonusExchangeListReport struct {
+	kind            string
+	Outcome         string                           `json:"outcome"`
+	Effect          []string                         `json:"effect"`
+	WritesPerformed int                              `json:"writes_performed"`
+	Complete        bool                             `json:"complete"`
+	Store           metastore.StoreInfo              `json:"store"`
+	Limits          bonusexchange.Limits             `json:"limits"`
+	Used            bonusexchange.OperationListUsage `json:"used"`
+	Operations      []bonusexchange.OperationSummary `json:"operations"`
+	StopReason      string                           `json:"stop_reason,omitempty"`
+	Blockers        []siteDetailFinding              `json:"blockers"`
+	Warnings        []string                         `json:"warnings"`
+}
+
 func (a *app) siteBonusExchange(args []string) error {
 	if len(args) == 0 {
-		return usageError("site bonus exchange requires prepare, submit, or status")
+		return usageError("site bonus exchange requires prepare, submit, status, or list")
 	}
 	switch args[0] {
 	case "prepare":
@@ -102,12 +117,91 @@ func (a *app) siteBonusExchange(args []string) error {
 		return a.siteBonusExchangeSubmit(args[1:])
 	case "status":
 		return a.siteBonusExchangeStatus(args[1:])
+	case "list":
+		return a.siteBonusExchangeList(args[1:])
 	case "-h", "--help", "help":
 		a.siteBonusExchangeHelp()
 		return nil
 	default:
-		return usageError("site bonus exchange requires prepare, submit, or status")
+		return usageError("site bonus exchange requires prepare, submit, status, or list")
 	}
+}
+
+func (a *app) siteBonusExchangeList(args []string) error {
+	fs := newFlagSet("site bonus exchange list")
+	output := fs.String("output", "table", "table or json")
+	storeRoot := fs.String("state-store", "", "initialized private state store")
+	timeout := fs.Duration("timeout", bonusExchangeDefaultTimeout, "local operation inventory timeout")
+	defaults := bonusexchange.DefaultLimits()
+	maxOperations := fs.Int("max-operations", defaults.MaxStatusRecords, "maximum intent records retained")
+	maxStateEntries := fs.Int("max-state-entries", defaults.MaxStatusEntries, "maximum private-store entries per inventory pass")
+	maxStatePathBytes := fs.Int64("max-state-path-bytes", defaults.MaxStatusPathBytes, "maximum private-store path bytes per inventory pass")
+	maxStateBytes := fs.Int64("max-state-bytes", defaults.MaxStatusBytes, "maximum aggregate intent bytes read")
+	if err := fs.Parse(args); err != nil {
+		return usageError("site bonus exchange list: %v", err)
+	}
+	if fs.NArg() != 0 || *storeRoot == "" {
+		return usageError("site bonus exchange list requires --state-store")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if err := validateBonusExchangeTimeout(*timeout); err != nil {
+		return err
+	}
+	limits := defaults
+	limits.MaxStatusRecords = *maxOperations
+	limits.MaxStatusEntries = *maxStateEntries
+	limits.MaxStatusPathBytes = *maxStatePathBytes
+	limits.MaxStatusBytes = *maxStateBytes
+	if err := limits.Validate(); err != nil {
+		return usageError("site bonus exchange list limits are invalid")
+	}
+	report := newSiteBonusExchangeListReport(limits)
+	store, err := metastore.Open(*storeRoot)
+	if err != nil {
+		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "state.store_open_failed", Message: "the private state store could not be opened"})
+		return a.finishSiteBonusExchangeList(*output, report, bonusExchangePublicStateError(err, "open private state store failed"))
+	}
+	report.Store = store.Info()
+	repository, err := bonusexchange.NewRepository(store, limits)
+	if err != nil {
+		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "state.repository_unavailable", Message: "the bonus exchange state repository is unavailable"})
+		return a.finishSiteBonusExchangeList(*output, report, bonusExchangePublicStateError(err, "open bonus exchange repository failed"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	session, err := repository.OpenSession(ctx)
+	if err != nil {
+		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "state.session_open_failed", Message: "the bound state session could not be opened"})
+		return a.finishSiteBonusExchangeList(*output, report, bonusExchangePublicStateError(err, "open bonus exchange state session failed"))
+	}
+	listed, listErr := session.ListOperations(ctx)
+	report.Complete = listed.Complete
+	report.Store = listed.Store
+	report.Used = listed.Used
+	report.Operations = listed.Operations
+	report.StopReason = listed.StopReason
+	closeErr := session.Close()
+	if listErr != nil {
+		report.Outcome = "incomplete"
+		code := safeBonusExchangeListStop(listed.StopReason, listErr)
+		report.Blockers = append(report.Blockers, siteDetailFinding{Code: code, Message: "the bounded operation inventory could not be completely verified"})
+		if errors.Is(listErr, bonusexchange.ErrStatusIncomplete) {
+			return a.finishSiteBonusExchangeList(*output, report, &inconclusiveErr{message: "bonus exchange operation inventory is incomplete; see report"})
+		}
+		if errors.Is(listErr, bonusexchange.ErrCorruptExchange) || errors.Is(listErr, metastore.ErrCorruptRecord) {
+			report.Outcome = "integrity_failed"
+		}
+		return a.finishSiteBonusExchangeList(*output, report, bonusExchangePublicStateError(listErr, "list bonus exchange operations failed"))
+	}
+	if closeErr != nil {
+		report.Outcome = "incomplete"
+		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "state.session_close_failed", Message: "the bound state session could not be closed cleanly"})
+		return a.finishSiteBonusExchangeList(*output, report, fmt.Errorf("close bonus exchange state session failed"))
+	}
+	report.Outcome = "complete"
+	return a.writeSiteBonusExchangeListReport(*output, report)
 }
 
 func (a *app) siteBonusExchangePrepare(args []string) error {
@@ -500,6 +594,18 @@ func newSiteBonusExchangeReport(kind, siteID, selector, reviewID string, config 
 	}
 }
 
+func newSiteBonusExchangeListReport(limits bonusexchange.Limits) siteBonusExchangeListReport {
+	return siteBonusExchangeListReport{
+		kind: "site.bonus.exchange.operation_list", Outcome: "blocked", Effect: []string{bonusexchange.ListEffect},
+		Limits: limits, Operations: []bonusexchange.OperationSummary{}, Blockers: []siteDetailFinding{},
+		Warnings: []string{
+			"the list verifies bounded intent records only; attempt and outcome state remain not_inspected until an explicit intent record is passed to status",
+			"inventory order is deterministic by intent record ID and is never a newest-operation selector",
+			"the two inventory passes are a detected-stable non-atomic observation of one preserved private-store history",
+		},
+	}
+}
+
 func applyBonusExchangeStatus(report *siteBonusExchangeReport, status bonusexchange.Status) {
 	if report == nil {
 		return
@@ -679,6 +785,25 @@ func safeBonusExchangeStateStop(value string, err error) string {
 	}
 }
 
+func safeBonusExchangeListStop(value string, err error) string {
+	switch {
+	case value == "context_cancelled" || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return "state.context_cancelled"
+	case value == "intent_inventory_changed":
+		return "state.intent_inventory_changed"
+	case value == "intent_byte_limit":
+		return "state.intent_byte_limit"
+	case strings.HasPrefix(value, "intent_inventory_"):
+		return value
+	case errors.Is(err, bonusexchange.ErrCorruptExchange), errors.Is(err, metastore.ErrCorruptRecord):
+		return "state.integrity_failed"
+	case errors.Is(err, bonusexchange.ErrStatusIncomplete):
+		return "state.inventory_incomplete"
+	default:
+		return "state.inspection_failed"
+	}
+}
+
 func bonusExchangePublicStateError(err error, fallback string) error {
 	if err == nil {
 		return fmt.Errorf("%s", fallback)
@@ -742,6 +867,46 @@ func (a *app) writeSiteBonusExchangeReport(output string, report siteBonusExchan
 	return writeSiteBonusExchangeHuman(a.stdout, report)
 }
 
+func (a *app) finishSiteBonusExchangeList(output string, report siteBonusExchangeListReport, operationErr error) error {
+	if writeErr := a.writeSiteBonusExchangeListReport(output, report); writeErr != nil {
+		return writeErr
+	}
+	return operationErr
+}
+
+func (a *app) writeSiteBonusExchangeListReport(output string, report siteBonusExchangeListReport) error {
+	if output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	return writeSiteBonusExchangeListHuman(a.stdout, report)
+}
+
+func writeSiteBonusExchangeListHuman(out io.Writer, report siteBonusExchangeListReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nCOMPLETE\t%t\n", terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.Complete)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	if len(report.Blockers) == 0 {
+		fmt.Fprintln(w, "-\tnone")
+	}
+	for _, blocker := range report.Blockers {
+		fmt.Fprintf(w, "%s\t%s\n", terminalSafe(blocker.Code), terminalSafe(blocker.Message))
+	}
+	fmt.Fprintf(w, "\nSTORE ID\t%s\nSTOP REASON\t%s\n", terminalSafe(valueOrUnknown(report.Store.StoreID)), terminalSafe(valueOrUnknown(report.StopReason)))
+	fmt.Fprintf(w, "\nINVENTORY PASSES\t%d\nINTENT VERIFICATION PASSES\t%d\nENTRIES CONSIDERED (ALL PASSES)\t%d\nENTRY LIMIT\t%d per pass\nINTENTS MATCHED (ALL PASSES)\t%d\nINTENT LIMIT\t%d per pass\nINTENTS READ\t%d\nINTENT BYTES\t%d / %d aggregate\nPATH BYTES LIMIT\t%d per pass\n", report.Used.InventoryPasses, report.Used.IntentVerificationPasses, report.Used.EntriesConsidered, report.Limits.MaxStatusEntries, report.Used.IntentRecordsMatched, report.Limits.MaxStatusRecords, report.Used.IntentRecordsRead, report.Used.IntentBytesRead, report.Limits.MaxStatusBytes, report.Limits.MaxStatusPathBytes)
+	fmt.Fprintln(w, "\nOPERATIONS\nINTENT RECORD\tOPERATION ID\tSITE\tOPTION\tEXPECTED REVIEW\tCREATED\tSTATUS")
+	if len(report.Operations) == 0 {
+		fmt.Fprintln(w, "-\t-\t-\t-\t-\t-\tnone")
+	}
+	for _, operation := range report.Operations {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", terminalSafe(operation.IntentRecord.ID.String()), terminalSafe(operation.OperationID.String()), terminalSafe(operation.SiteID), terminalSafe(operation.Selector), terminalSafe(operation.ExpectedReviewID), operation.CreatedAt.UTC().Format(time.RFC3339), terminalSafe(operation.Status))
+	}
+	fmt.Fprintln(w, "\nWARNINGS")
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+	}
+	return w.Flush()
+}
+
 func writeSiteBonusExchangeHuman(out io.Writer, report siteBonusExchangeReport) error {
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	submissionOutcome := valueOrUnknown(report.Request.Submission.Outcome)
@@ -785,6 +950,7 @@ func (a *app) siteBonusExchangeHelp() {
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
   ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID --cookie-stdin --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
+  ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
 
 Prepare writes only a private reviewed intent. Submit validates that intent and
 the production adapter before reading stdin, performs one fresh bounded review,
@@ -795,5 +961,7 @@ After the POST, a bounded local finalization interval may persist the exact
 adapter observation even if the network context ended. If no durable outcome
 can be established, status remains submission-unknown and the attempt must not
 be retried. Status is local and never reads a credential or contacts the site.
+List performs a bounded, detected-stable inventory of verified intent records,
+does not inspect attempt/outcome state, and never chooses a latest operation.
 `)
 }

@@ -129,6 +129,9 @@ printf '%s' "$TJUPT_COOKIE" | ptctl site bonus exchange submit \
 
 ptctl site bonus exchange status \
   --state-store STATE --intent-record INTENT_RECORD_ID
+
+ptctl site bonus exchange list \
+  --state-store STATE
 ```
 
 Prepare is local-only. Submit validates the exact production origin, capability,
@@ -160,6 +163,12 @@ Neither a new process nor JSON can recover submission authority, and rerunning
 submit is rejected before the cookie is read. Status is credential-free and
 never contacts TJUPT.
 
+List is also credential-free and never contacts TJUPT. It verifies a bounded,
+detected-stable set of canonical intent records with two exact-read passes in
+deterministic record-ID order, but leaves each row `not_inspected`. It neither
+reads linked attempt/outcome state nor chooses a latest operation; an operator or script
+must pass one explicit intent record to status.
+
 The marker coordinates one prepared operation within one preserved, uncloned
 private-store history. A separately prepared operation is a separate explicitly
 acknowledged submission. Copying, rolling back, or deleting operation records
@@ -176,11 +185,12 @@ coordination state in the selected history, while the second requires a valid
 live request receipt or a jointly verified outcome record carrying that
 receipt. Neither extends coordination to copied or rolled-back stores.
 
-After usage validation the commands are report-first. Prepare/status and a
+After usage validation the commands are report-first. Prepare/status/list and a
 durably confirmed submission use exit `0`; rejected, unknown, not-submitted, or
 operationally incomplete submission results use exit `1`; usage is `2`; and
-verified sealed-state corruption uses integrity exit `3`. This workflow does
-not assign a meaning to exit `4`.
+verified sealed-state corruption uses integrity exit `3`. A list stopped by an
+entry, record, path, aggregate-byte, or detected-change bound returns `4` after
+printing its incomplete report.
 
 ## Authentication
 

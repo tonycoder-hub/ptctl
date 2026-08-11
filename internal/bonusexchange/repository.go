@@ -32,8 +32,9 @@ func (input PrepareInput) Validate() error {
 }
 
 type Repository struct {
-	store  *metastore.Store
-	limits Limits
+	store                      *metastore.Store
+	limits                     Limits
+	operationListBetweenPasses func()
 }
 
 func NewRepository(store *metastore.Store, limits Limits) (*Repository, error) {
@@ -353,6 +354,161 @@ func (session *Session) Status(ctx context.Context, intentID metastore.RecordID)
 	status.State = candidateState
 	status.Complete = true
 	return status, nil
+}
+
+// ListOperations returns a detected-stable, bounded inventory of verified
+// intent records. It never selects a newest record and deliberately leaves
+// attempt/outcome state uninspected; Status remains the explicit-ID state
+// transition used after a caller chooses one intent record.
+func (session *Session) ListOperations(ctx context.Context) (OperationListResult, error) {
+	result := OperationListResult{
+		Effect: ListEffect, Limits: sessionLimits(session), Store: sessionInfo(session), Operations: []OperationSummary{},
+	}
+	if err := session.ready(ctx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			result.StopReason = "context_cancelled"
+		}
+		return result, err
+	}
+	result.Store = session.bound.Info()
+	listLimits := session.repository.recordLimits()
+	listLimits.MaxEntries = session.repository.limits.MaxStatusEntries
+	listLimits.MaxRecords = session.repository.limits.MaxStatusRecords
+	listLimits.MaxPathBytes = session.repository.limits.MaxStatusPathBytes
+
+	before, err := session.bound.ListRecords(ctx, metastore.RecordKindSiteBonusExchangeIntentV1, listLimits)
+	addOperationListInventoryUsage(&result.Used, before)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			result.StopReason = "context_cancelled"
+		}
+		return result, err
+	}
+	if !before.Complete {
+		result.StopReason = "intent_inventory_" + before.StopReason
+		return result, ErrStatusIncomplete
+	}
+
+	seenOperations := make(map[OperationID]struct{}, len(before.Records))
+	result.Used.IntentVerificationPasses++
+	for _, candidate := range before.Records {
+		record, err := session.loadOperationIntent(ctx, candidate, &result)
+		if err != nil {
+			return result, err
+		}
+		if _, duplicate := seenOperations[record.OperationID]; duplicate {
+			return result, fmt.Errorf("%w: multiple intents share one operation identity", ErrCorruptExchange)
+		}
+		seenOperations[record.OperationID] = struct{}{}
+		result.Operations = append(result.Operations, OperationSummary{
+			IntentRecord: candidate, OperationID: record.OperationID, SiteID: record.SiteID, Selector: record.Selector,
+			ExpectedReviewID: record.ExpectedReviewID, CreatedAt: record.CreatedAt, Status: "not_inspected",
+		})
+	}
+	if session.repository.operationListBetweenPasses != nil {
+		session.repository.operationListBetweenPasses()
+	}
+
+	after, err := session.bound.ListRecords(ctx, metastore.RecordKindSiteBonusExchangeIntentV1, listLimits)
+	addOperationListInventoryUsage(&result.Used, after)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			result.StopReason = "context_cancelled"
+		}
+		return result, err
+	}
+	if !after.Complete {
+		result.StopReason = "intent_inventory_" + after.StopReason
+		return result, ErrStatusIncomplete
+	}
+	if !sameRecordRefs(before.Records, after.Records) {
+		result.StopReason = "intent_inventory_changed"
+		return result, ErrStatusIncomplete
+	}
+	result.Used.IntentVerificationPasses++
+	for _, candidate := range after.Records {
+		if _, err := session.loadOperationIntent(ctx, candidate, &result); err != nil {
+			return result, err
+		}
+	}
+	if err := session.bound.Check(ctx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			result.StopReason = "context_cancelled"
+		}
+		return result, err
+	}
+	result.Complete = true
+	return result, nil
+}
+
+func (session *Session) loadOperationIntent(ctx context.Context, candidate metastore.RecordRef, result *OperationListResult) (IntentRecord, error) {
+	if err := ctx.Err(); err != nil {
+		result.StopReason = "context_cancelled"
+		return IntentRecord{}, err
+	}
+	if candidate.SizeBytes < 0 || candidate.SizeBytes > session.repository.limits.MaxStatusBytes-result.Used.IntentBytesRead {
+		result.StopReason = "intent_byte_limit"
+		return IntentRecord{}, ErrStatusIncomplete
+	}
+	var record IntentRecord
+	var decodeErr error
+	ref, loaded, loadErr := session.bound.LoadRecord(ctx, candidate.Kind, candidate.ID, session.repository.recordLimits(), func(reader io.Reader) error {
+		decoded, innerErr := DecodeIntent(reader, session.repository.limits)
+		if innerErr != nil {
+			decodeErr = innerErr
+			return innerErr
+		}
+		record = decoded
+		return nil
+	})
+	result.Used.IntentRecordsRead++
+	result.Used.IntentBytesRead += loaded.RecordBytesRead
+	if loadErr != nil {
+		switch {
+		case errors.Is(loadErr, context.Canceled), errors.Is(loadErr, context.DeadlineExceeded):
+			result.StopReason = "context_cancelled"
+			return IntentRecord{}, loadErr
+		case errors.Is(loadErr, metastore.ErrRecordNotFound):
+			result.StopReason = "intent_inventory_changed"
+			return IntentRecord{}, ErrStatusIncomplete
+		case errors.Is(decodeErr, ErrCorruptExchange), errors.Is(loadErr, metastore.ErrCorruptRecord), errors.Is(loadErr, metastore.ErrRecordConsumerIncomplete):
+			return IntentRecord{}, fmt.Errorf("%w: intent record verification failed", ErrCorruptExchange)
+		default:
+			return IntentRecord{}, loadErr
+		}
+	}
+	if ref != candidate || record.Validate() != nil {
+		return IntentRecord{}, fmt.Errorf("%w: intent inventory identity disagrees", ErrCorruptExchange)
+	}
+	return record, nil
+}
+
+func addOperationListInventoryUsage(usage *OperationListUsage, inventory metastore.RecordListResult) {
+	if usage == nil {
+		return
+	}
+	usage.InventoryPasses++
+	usage.EntriesConsidered += inventory.Used.EntriesConsidered
+	usage.IntentRecordsMatched += inventory.Used.RecordsMatched
+}
+
+func sameRecordRefs(left, right []metastore.RecordRef) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sessionLimits(session *Session) Limits {
+	if session == nil || session.repository == nil {
+		return Limits{}
+	}
+	return session.repository.limits
 }
 
 func (session *Session) scanOutcomes(ctx context.Context, intent IntentRecord, intentRef metastore.RecordRef, attempt AttemptRecord, attemptRef metastore.RecordRef) (*OutcomeRecord, *metastore.RecordRef, StatusUsage, string, error) {

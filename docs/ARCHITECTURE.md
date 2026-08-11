@@ -321,7 +321,7 @@ non-authoritative.
 
 ## Durable at-most-once bonus exchange
 
-`site bonus exchange prepare|submit|status` is the first concrete
+`site bonus exchange prepare|submit|status|list` is the first concrete
 `bonus.exchange.submit_effectful` workflow. `prepare` stores one canonical
 private intent containing a random operation ID, the exact reviewed semantic
 ID, canonical site/option/origin/route identifiers, and fixed review/submit
@@ -361,6 +361,15 @@ context ends, but it never repeats the POST. `status` is an explicit-ID,
 credential-free local verification that scans bounded outcome records and
 fails closed on missing links, multiple outcomes, corruption, or inventory
 limits; it never selects a latest record.
+
+`list` is the lower-evidence recovery boundary. Under one bound store session
+it enumerates intent locators, strictly loads every retained canonical intent,
+enumerates the same locator/size set again, and strictly reloads each intent
+before success. It rejects duplicate operation identities. Per-pass
+entry/record/path budgets and one aggregate byte budget across both exact-read
+passes stop with an incomplete report.
+Rows remain `not_inspected`: the list does not load attempt/outcome records,
+create process-local submission authority, or select an operation by time.
 
 At-most-once coordination is scoped to one prepared operation in one
 preserved, uncloned private-store history. A separately prepared operation is

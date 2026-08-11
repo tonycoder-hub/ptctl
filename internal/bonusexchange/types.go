@@ -37,6 +37,7 @@ const (
 	ReserveEffect = "write_private_site_bonus_exchange_attempt"
 	OutcomeEffect = "write_private_site_bonus_exchange_outcome"
 	StatusEffect  = "read_private_site_bonus_exchange_status"
+	ListEffect    = "read_private_site_bonus_exchange_operation_list"
 
 	defaultMaxRecordBytes = int64(64 << 10)
 	hardMaxRecordBytes    = int64(256 << 10)
@@ -238,6 +239,38 @@ type StatusUsage struct {
 	OutcomeEntriesConsidered int   `json:"outcome_entries_considered"`
 	OutcomeRecordsRead       int   `json:"outcome_records_read"`
 	OutcomeBytesRead         int64 `json:"outcome_bytes_read"`
+}
+
+// OperationSummary is a verified intent projection. It deliberately does not
+// infer the attempt/outcome state: callers must select IntentRecord.ID and run
+// Status to inspect one operation's complete linked record set.
+type OperationSummary struct {
+	IntentRecord     metastore.RecordRef `json:"intent_record"`
+	OperationID      OperationID         `json:"operation_id"`
+	SiteID           string              `json:"site_id"`
+	Selector         string              `json:"selector"`
+	ExpectedReviewID string              `json:"expected_review_id"`
+	CreatedAt        time.Time           `json:"created_at"`
+	Status           string              `json:"status"`
+}
+
+type OperationListUsage struct {
+	InventoryPasses          int   `json:"inventory_passes"`
+	IntentVerificationPasses int   `json:"intent_verification_passes"`
+	EntriesConsidered        int   `json:"entries_considered"`
+	IntentRecordsMatched     int   `json:"intent_records_matched"`
+	IntentRecordsRead        int   `json:"intent_records_read"`
+	IntentBytesRead          int64 `json:"intent_bytes_read"`
+}
+
+type OperationListResult struct {
+	Effect     string              `json:"effect"`
+	Complete   bool                `json:"complete"`
+	Limits     Limits              `json:"limits"`
+	Used       OperationListUsage  `json:"used"`
+	Operations []OperationSummary  `json:"operations"`
+	Store      metastore.StoreInfo `json:"store"`
+	StopReason string              `json:"stop_reason,omitempty"`
 }
 
 type Status struct {

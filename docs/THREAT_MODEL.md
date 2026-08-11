@@ -227,6 +227,14 @@ and treats multiple or orphan outcomes as corruption. A serialized intent,
 attempt, review, or submission receipt cannot recreate process-local write
 authority.
 
+Bonus-operation discovery is credential-free and read-only. It uses two exact
+intent-loading passes and two bounded intent inventories under one physical
+store binding, rejects duplicate operation IDs and changed locator/size sets,
+and accounts for per-pass entries, retained records, path bytes, and aggregate
+intent bytes. It returns deterministic record-ID order with state explicitly
+`not_inspected`; it never scans linked outcomes for every row, chooses the
+newest timestamp, or turns public list data into submission authority.
+
 Public reports distinguish the verified marker that blocks a future submit in
 the selected preserved history from verification that a single-request receipt
 is bound to the operation. The former alone does not prove that the POST began;

@@ -242,6 +242,135 @@ func TestStatusNeverReportsPreparedBeforeInspectionCompletes(t *testing.T) {
 	}
 }
 
+func TestListOperationsReturnsStableVerifiedIntentsWithoutSelectingState(t *testing.T) {
+	fixture := newExchangeFixture(t)
+	second, prepared, err := fixture.repository.Prepare(context.Background(), PrepareInput{
+		SiteID: "tjupt", Selector: "2", ExpectedReviewID: fixture.intentRecord.ExpectedReviewID,
+		Config: fixture.intentRecord.Config(), ReviewLimits: site.DefaultBonusReviewLimits(), ExchangeLimits: site.DefaultBonusExchangeLimits(),
+	})
+	if err != nil || prepared.WritesPerformed != 1 {
+		t.Fatalf("second intent=%#v receipt=%#v err=%v", second, prepared, err)
+	}
+
+	listed, err := fixture.session.ListOperations(context.Background())
+	if err != nil || !listed.Complete || listed.Effect != ListEffect || listed.StopReason != "" || len(listed.Operations) != 2 ||
+		listed.Used.InventoryPasses != 2 || listed.Used.IntentVerificationPasses != 2 || listed.Used.IntentRecordsRead != 4 || listed.Used.IntentBytesRead <= 0 ||
+		listed.Used.IntentRecordsMatched != 4 || listed.Store.StoreID == "" {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+	if listed.Operations[0].IntentRecord.ID >= listed.Operations[1].IntentRecord.ID {
+		t.Fatalf("operation order is not deterministic: %#v", listed.Operations)
+	}
+	seen := map[OperationID]OperationSummary{}
+	for _, operation := range listed.Operations {
+		if operation.Status != "not_inspected" || operation.IntentRecord.Kind != metastore.RecordKindSiteBonusExchangeIntentV1 ||
+			operation.SiteID != "tjupt" || operation.ExpectedReviewID != fixture.intentRecord.ExpectedReviewID || operation.CreatedAt.IsZero() {
+			t.Fatalf("unexpected operation projection: %#v", operation)
+		}
+		seen[operation.OperationID] = operation
+	}
+	if seen[fixture.intentRecord.OperationID].Selector != "1" || seen[second.OperationID].Selector != "2" {
+		t.Fatalf("operation selectors were not preserved: %#v", seen)
+	}
+}
+
+func TestListOperationsFailsClosedForBudgetsCancellationAndCorruption(t *testing.T) {
+	fixture := newExchangeFixture(t)
+	if _, _, err := fixture.repository.Prepare(context.Background(), PrepareInput{
+		SiteID: "tjupt", Selector: "2", ExpectedReviewID: fixture.intentRecord.ExpectedReviewID,
+		Config: fixture.intentRecord.Config(), ReviewLimits: site.DefaultBonusReviewLimits(), ExchangeLimits: site.DefaultBonusExchangeLimits(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	limited := fixture.repository.limits
+	limited.MaxStatusRecords = 1
+	limitedRepository, err := NewRepository(fixture.store, limited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limitedSession, err := limitedRepository.OpenSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := limitedSession.ListOperations(context.Background())
+	_ = limitedSession.Close()
+	if !errors.Is(err, ErrStatusIncomplete) || listed.Complete || listed.StopReason != "intent_inventory_record_limit" || len(listed.Operations) != 0 || listed.Used.InventoryPasses != 1 {
+		t.Fatalf("record-limited list=%#v err=%v", listed, err)
+	}
+
+	byteLimited := fixture.repository.limits
+	byteLimited.MaxStatusBytes = 1
+	byteRepository, err := NewRepository(fixture.store, byteLimited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byteSession, err := byteRepository.OpenSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err = byteSession.ListOperations(context.Background())
+	_ = byteSession.Close()
+	if !errors.Is(err, ErrStatusIncomplete) || listed.Complete || listed.StopReason != "intent_byte_limit" || listed.Used.IntentRecordsRead != 0 {
+		t.Fatalf("byte-limited list=%#v err=%v", listed, err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	listed, err = fixture.session.ListOperations(canceled)
+	if !errors.Is(err, context.Canceled) || listed.Complete || listed.StopReason != "context_cancelled" || len(listed.Operations) != 0 {
+		t.Fatalf("canceled list=%#v err=%v", listed, err)
+	}
+
+	if _, _, err := fixture.store.ImportRecord(context.Background(), metastore.RecordKindSiteBonusExchangeIntentV1,
+		strings.NewReader("{\"schema\":\"corrupt\"}\n"), fixture.repository.recordLimits()); err != nil {
+		t.Fatal(err)
+	}
+	listed, err = fixture.session.ListOperations(context.Background())
+	if !errors.Is(err, ErrCorruptExchange) || listed.Complete {
+		t.Fatalf("corrupt list=%#v err=%v", listed, err)
+	}
+}
+
+func TestListOperationsRejectsDuplicateOperationIdentity(t *testing.T) {
+	fixture := newExchangeFixture(t)
+	duplicate := fixture.intentRecord
+	duplicate.Selector = "2"
+	duplicate.CreatedAt = duplicate.CreatedAt.Add(time.Second)
+	raw, err := EncodeIntent(duplicate, fixture.repository.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.ImportRecord(context.Background(), metastore.RecordKindSiteBonusExchangeIntentV1,
+		bytes.NewReader(raw), fixture.repository.recordLimits()); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := fixture.session.ListOperations(context.Background())
+	if !errors.Is(err, ErrCorruptExchange) || listed.Complete {
+		t.Fatalf("duplicate operation list=%#v err=%v", listed, err)
+	}
+}
+
+func TestListOperationsSecondExactPassDetectsSameSizeReplacement(t *testing.T) {
+	fixture := newExchangeFixture(t)
+	fixture.repository.operationListBetweenPasses = func() {
+		path := sealedRecordPath(t, fixture.root, metastore.RecordKindSiteBonusExchangeIntentV1, fixture.intentRef.ID)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw[0] ^= 0x01
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed, err := fixture.session.ListOperations(context.Background())
+	if !errors.Is(err, ErrCorruptExchange) || listed.Complete || listed.Used.InventoryPasses != 2 ||
+		listed.Used.IntentVerificationPasses != 2 || listed.Used.IntentRecordsRead != 2 {
+		t.Fatalf("same-size replacement list=%#v err=%v", listed, err)
+	}
+}
+
 func TestOrphanOutcomeCannotReopenPreparedIntent(t *testing.T) {
 	fixture := newExchangeFixture(t)
 	ctx := context.Background()
@@ -312,6 +441,7 @@ func TestCanonicalRecordDecodersRejectAmbiguityAndPreserveReadErrors(t *testing.
 }
 
 type exchangeFixture struct {
+	root          string
 	store         *metastore.Store
 	repository    *Repository
 	session       *Session
@@ -365,10 +495,26 @@ func newExchangeFixture(t *testing.T) exchangeFixture {
 		t.Fatalf("loaded=%#v verified=%v err=%v", loaded, verified, err)
 	}
 	return exchangeFixture{
-		store: store, repository: repository, session: session, intent: verified,
+		root: root, store: store, repository: repository, session: session, intent: verified,
 		intentRecord: intentRecord, intentRef: prepared.Record, review: review, reviewReceipt: reviewReceipt,
 		exchangeStart: time.Date(2026, 8, 12, 5, 6, 7, 0, time.UTC),
 	}
+}
+
+func sealedRecordPath(t *testing.T, root string, kind metastore.RecordKind, id metastore.RecordID) string {
+	t.Helper()
+	digest := strings.TrimPrefix(id.String(), "sha256:")
+	entries, err := os.ReadDir(filepath.Join(root, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.Contains(entry.Name(), string(kind)) && strings.Contains(entry.Name(), digest) {
+			return filepath.Join(root, "objects", entry.Name())
+		}
+	}
+	t.Fatalf("sealed record %s/%s was not found", kind, id)
+	return ""
 }
 
 func newObservedReview(t *testing.T, config site.BonusExchangeConfig) (*site.ObservedBonusReview, site.BonusReviewReceipt) {

@@ -405,9 +405,129 @@ func TestSiteBonusExchangeInvalidAdapterReceiptIsRedactedAndNotPersisted(t *test
 	}
 }
 
+func TestSiteBonusExchangeListRecoversVerifiedIntentIDsWithoutCredential(t *testing.T) {
+	adapter := successfulFakeBonusExchange(t)
+	stateRoot := initializedBonusExchangeStore(t)
+	first := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"prepare", "--state-store", stateRoot, "--expect-review-id", adapter.review.ReviewID, "--output", "json", "fakept", "1",
+	}, false)
+	second := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"prepare", "--state-store", stateRoot, "--expect-review-id", adapter.review.ReviewID, "--output", "json", "fakept", "1",
+	}, false)
+
+	secret := &trackingReader{}
+	var out bytes.Buffer
+	a := &app{stdin: secret, stdout: &out, registry: site.NewRegistry(adapter)}
+	if err := a.siteBonusExchange([]string{"list", "--state-store", stateRoot, "--output", "json"}); err != nil {
+		t.Fatalf("list: %v output=%s", err, out.String())
+	}
+	var envelope struct {
+		Schema string                      `json:"schema"`
+		Kind   string                      `json:"kind"`
+		Data   siteBonusExchangeListReport `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if secret.read || envelope.Schema != "ptctl.dev/v1" || envelope.Kind != "site.bonus.exchange.operation_list" ||
+		envelope.Data.Outcome != "complete" || !envelope.Data.Complete || envelope.Data.WritesPerformed != 0 ||
+		len(envelope.Data.Operations) != 2 || envelope.Data.Used.InventoryPasses != 2 || envelope.Data.Used.IntentVerificationPasses != 2 ||
+		envelope.Data.Used.IntentRecordsRead != 4 || envelope.Data.Blockers == nil || envelope.Data.Warnings == nil ||
+		strings.Contains(out.String(), stateRoot) {
+		t.Fatalf("list=%#v credentialRead=%t output=%s", envelope, secret.read, out.String())
+	}
+	if envelope.Data.Operations[0].IntentRecord.ID >= envelope.Data.Operations[1].IntentRecord.ID {
+		t.Fatalf("operation ordering is unstable: %#v", envelope.Data.Operations)
+	}
+	seen := map[string]bool{}
+	for _, operation := range envelope.Data.Operations {
+		if operation.Status != "not_inspected" || operation.SiteID != "fakept" || operation.Selector != "1" {
+			t.Fatalf("operation state was inferred: %#v", operation)
+		}
+		seen[operation.IntentRecord.ID.String()] = true
+	}
+	if !seen[first.Operation.IntentRecord.ID.String()] || !seen[second.Operation.IntentRecord.ID.String()] {
+		t.Fatalf("prepared intents are missing: %#v", envelope.Data.Operations)
+	}
+
+	out.Reset()
+	a.stdout = &out
+	if err := a.siteBonusExchange([]string{"list", "--state-store", stateRoot}); err != nil {
+		t.Fatal(err)
+	}
+	human := out.String()
+	if strings.Index(human, "BLOCKERS") < 0 || strings.Index(human, "OPERATIONS") < strings.Index(human, "BLOCKERS") ||
+		!strings.Contains(human, "INTENTS MATCHED (ALL PASSES)") || !strings.Contains(human, "not_inspected") || strings.Contains(human, stateRoot) {
+		t.Fatalf("unsafe or unordered human report: %s", human)
+	}
+}
+
+func TestSiteBonusExchangeListBudgetsAndCorruptionAreReportFirst(t *testing.T) {
+	adapter := successfulFakeBonusExchange(t)
+	stateRoot := initializedBonusExchangeStore(t)
+	for range 2 {
+		_ = runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+			"prepare", "--state-store", stateRoot, "--expect-review-id", adapter.review.ReviewID, "--output", "json", "fakept", "1",
+		}, false)
+	}
+
+	secret := &trackingReader{}
+	var out, errOut bytes.Buffer
+	code := Run([]string{"site", "bonus", "exchange", "list", "--state-store", stateRoot, "--max-operations", "1", "--output", "json"}, secret, &out, &errOut)
+	if code != 4 || secret.read || strings.Contains(out.String(), stateRoot) {
+		t.Fatalf("limited code=%d read=%t out=%s err=%s", code, secret.read, out.String(), errOut.String())
+	}
+	var limited struct {
+		Kind string                      `json:"kind"`
+		Data siteBonusExchangeListReport `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &limited); err != nil {
+		t.Fatal(err)
+	}
+	if limited.Kind != "site.bonus.exchange.operation_list" || limited.Data.Outcome != "incomplete" || limited.Data.Complete ||
+		limited.Data.StopReason != "intent_inventory_record_limit" || len(limited.Data.Operations) != 0 || len(limited.Data.Blockers) != 1 {
+		t.Fatalf("limited=%#v", limited.Data)
+	}
+
+	store, err := metastore.Open(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ImportRecord(context.Background(), metastore.RecordKindSiteBonusExchangeIntentV1,
+		strings.NewReader("{\"canary\":\"CORRUPT-INTENT-CANARY\"}\n"), metastore.DefaultRecordLimits()); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	secret = &trackingReader{}
+	code = Run([]string{"site", "bonus", "exchange", "list", "--state-store", stateRoot, "--output", "json"}, secret, &out, &errOut)
+	if code != 3 || secret.read || strings.Contains(out.String(), "CANARY") || strings.Contains(errOut.String(), "CANARY") || strings.Contains(out.String(), stateRoot) {
+		t.Fatalf("corrupt code=%d read=%t out=%s err=%s", code, secret.read, out.String(), errOut.String())
+	}
+	var corrupt struct {
+		Data siteBonusExchangeListReport `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &corrupt); err != nil {
+		t.Fatal(err)
+	}
+	if corrupt.Data.Outcome != "integrity_failed" || corrupt.Data.Complete || len(corrupt.Data.Blockers) != 1 || corrupt.Data.Blockers[0].Code != "state.integrity_failed" {
+		t.Fatalf("corrupt=%#v", corrupt.Data)
+	}
+}
+
+func TestSiteBonusExchangeListRejectsInvalidLimitsBeforeStoreAccess(t *testing.T) {
+	secret := &trackingReader{}
+	var out, errOut bytes.Buffer
+	missing := filepath.Join(t.TempDir(), "must-not-open")
+	code := Run([]string{"site", "bonus", "exchange", "list", "--state-store", missing, "--max-operations", "0", "--output", "json"}, secret, &out, &errOut)
+	if code != 2 || secret.read || out.Len() != 0 || strings.Contains(errOut.String(), missing) {
+		t.Fatalf("code=%d read=%t out=%q err=%q", code, secret.read, out.String(), errOut.String())
+	}
+}
+
 func TestSiteBonusExchangeHelpAndDispatch(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if code := Run([]string{"site", "bonus", "exchange", "help"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), "deterministic at-most-once attempt marker") {
+	if code := Run([]string{"site", "bonus", "exchange", "help"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), "deterministic at-most-once attempt marker") || !strings.Contains(out.String(), "never chooses a latest operation") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()
