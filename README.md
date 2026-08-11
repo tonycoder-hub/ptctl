@@ -128,11 +128,13 @@ capabilities at the edge, not assumptions in the core domain model.
 - bounded qBittorrent or Transmission per-file ledgers for one uniquely
   identified ordinary multi-file job, with stable index, size, selection,
   completion, and per-binding host-to-client path checks;
-- explicitly acknowledged exact qBittorrent stopped-job adoption downstream
+- explicitly acknowledged exact qBittorrent or Transmission stopped-job
+  adoption downstream
   of a current materialized-final proof, with typed queue-absence gating, a
   durable request-intent journal, one non-retried add POST, after-ledger/path
   checks, exact final re-verification, and no automatic replay of an unknown
-  request;
+  request; Transmission is intentionally v1-only because its RPC ledger has no
+  typed v2 identity;
 - explicit qBittorrent recheck and optional controlled start downstream of a
   canonical stopped-adoption completion, with version-bound v4/v5 routes,
   durable per-request intent, exact typed job/per-file layout reobservation,
@@ -599,7 +601,8 @@ printf '%s' "$TRANSMISSION_PASSWORD" | ptctl client list \
   --password-stdin
 ```
 
-Adopt one exact materialized layout into qBittorrent without starting it:
+Adopt one exact materialized layout into qBittorrent or Transmission without
+starting it:
 
 ```bash
 # First review the deterministic adoption plan. MATERIALIZE_PLAN_ID is the
@@ -637,6 +640,11 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt run \
   --output json
 ```
 
+For Transmission, use `--driver transmission`, its full RPC URL (for example
+`https://seedbox.example/transmission/rpc`), and the Transmission credential.
+Only v1 metafiles are eligible: Transmission's audited `hash_string` claim is
+a complete SHA-1/v1 identity, but the RPC does not expose a typed v2 hash.
+
 Version 1 is intentionally a one-way, stopped-add handoff. It requires the
 exact raw metafile from the owner-only metafile store, a current exact proof of
 the committed (or retained) materialized final, and a complete typed-infohash
@@ -646,13 +654,28 @@ submits the exact stored bytes with the reviewed save path and requests a
 stopped/paused job. It never changes an existing job, moves data, starts a
 recheck, resumes transfer, deletes content, or retires the source.
 
-The normal run uses one login, one complete ledger read before the request, one
-add POST, and one complete ledger read after it. Success additionally requires
+The normal qBittorrent run uses one login, one complete ledger read before the
+request, one add POST, and one complete ledger read after it. Transmission uses
+its fixed two-request CSRF/version handshake followed by the same
+before/add/after sequence, for five requests total. Success additionally
+requires
 one unique exact typed-infohash job in a stopped state, the reviewed size and
 lexical save/content paths, a second exact verification of the materialized
 final, and a durable completion marker. Its outcome is
-`adopted_pending_client_recheck`, not “seeding verified”: qBittorrent does not
-expose the raw private variant and no client recheck is performed.
+`adopted_pending_client_recheck`, not “seeding verified”. Neither client proves
+the raw private variant it stored, and no client recheck is performed.
+
+Transmission accepts only an explicit `torrent_added` response; its documented
+`torrent_duplicate` success envelope is treated as a rejected adoption, not as
+evidence that this invocation created the observed job. The modern and legacy
+envelopes follow the official
+[current RPC specification](https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md#34-adding-a-torrent)
+and
+[Transmission 4.0.6 RPC specification](https://github.com/transmission/transmission/blob/4.0.6/docs/rpc-spec.md#34-adding-a-torrent).
+If a Transmission add response is lost, a later same-hash job is not
+automatically attributed to the request. The user may remove that
+external/conflicting job and explicitly repeat the stopped add, but ptctl will
+not mutate it.
 
 If the POST response or after-ledger is lost, the durable attempt remains
 `request_result_unknown`. Resume first reads the current queue and never
@@ -725,7 +748,7 @@ An operation ID is deterministic from the reviewed adoption plan; no command
 enumerates or chooses a “latest” operation. JSON kind `client.adoption` keeps declared
 effects, actual/uncertain journal writes, request counts, before/after typed
 identity states, current-final proof basis, and non-null findings separate.
-Raw host/client paths, endpoint, username, password, opaque qB job key, magnet
+Raw host/client paths, endpoint, username, password, opaque downloader job key, magnet
 URI, tracker URL, passkey, and raw metafile bytes never enter the report.
 
 `prune` is a separate local-only deletion boundary. It requires the full
@@ -735,11 +758,13 @@ makes no network request. Before deletion it copies the canonical intent,
 bounded attempt chain, completion, and their domain-separated IDs into a
 durable owner-private retention intent. It then removes only the selected
 operation's original markers and empty scratch directory and publishes a
-retention completion. The resulting two-marker tombstone remains usable by
-`client activate` only after a same-invocation bound read recreates opaque
-`VerifiedCompletion` authority. JSON or a copied public observation cannot do
-so. An intent-only crash state blocks ordinary resume and is recoverable only
-by repeating the same explicit prune selector. JSON kind is
+retention completion. For qBittorrent adoption, the resulting two-marker
+tombstone remains usable by `client activate` only after a same-invocation
+bound read recreates opaque `VerifiedCompletion` authority. Transmission
+adoption deliberately does not grant the qBittorrent-only recheck/start port.
+JSON or a copied public observation cannot do so. An intent-only crash state
+blocks ordinary resume and is recoverable only by repeating the same explicit
+prune selector. JSON kind is
 `client.adoption.retention`; `pruned` and `already_pruned` return `0`.
 
 Adoption `forget` is a third, narrower irreversible boundary. It accepts only

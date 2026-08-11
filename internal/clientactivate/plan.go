@@ -45,6 +45,9 @@ func PrepareAuthority(final *materialize.VerifiedFinal, adoption *clientadopt.Ve
 	if final == nil || !final.Verified() || adoption == nil || !adoption.Verified() || !canonicalSHA256ID(options.ClientConfigID) {
 		return nil, fmt.Errorf("%w: final or adoption authority is unavailable", ErrPolicy)
 	}
+	if adoption.Plan().Driver != clientadopt.DriverQBittorrent {
+		return nil, fmt.Errorf("%w: existing-job recheck and start are currently available only for qBittorrent adoption", ErrPolicy)
+	}
 	if err := options.FileLimits.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: client file-ledger limits are invalid", ErrPolicy)
 	}

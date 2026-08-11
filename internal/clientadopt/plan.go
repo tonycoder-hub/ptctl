@@ -8,6 +8,7 @@ import (
 )
 
 type PlanOptions struct {
+	Driver         string
 	ClientConfigID string
 	HostRoot       string
 	ClientRoot     string
@@ -40,8 +41,12 @@ func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*Prepa
 	if _, ok := projection.ContentPath(); !ok {
 		return nil, fmt.Errorf("%w: client content path is unavailable", ErrPolicy)
 	}
+	driver := options.Driver
+	if driver == "" {
+		driver = DriverQBittorrent
+	}
 	plan := Plan{
-		Schema: PlanSchemaV1, Action: ActionAddStopped, Driver: DriverQBittorrent,
+		Schema: PlanSchemaV1, Action: ActionAddStopped, Driver: driver,
 		ClientConfigID: options.ClientConfigID, PathMappingID: projection.PathMappingID,
 		ClientPathSemantics: projection.PathSemantics, ExpectedSavePathRef: projection.SavePathRef,
 		ExpectedContentPathRef: projection.ContentPathRef, MetafileVariantID: observation.MetafileVariantID,

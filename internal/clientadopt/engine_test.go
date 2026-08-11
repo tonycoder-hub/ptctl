@@ -27,6 +27,7 @@ type fakeMutationSession struct {
 	ledgers            []downloader.LedgerSnapshot
 	readErrs           []error
 	addErr             error
+	addStopReason      string
 	adds               int
 	suppressAddRequest bool
 }
@@ -80,7 +81,10 @@ func (session *fakeMutationSession) AddStopped(_ context.Context, request downlo
 		receipt.Complete = false
 	}
 	if session.addErr != nil {
-		receipt.StopReason = "transport_failed"
+		receipt.StopReason = session.addStopReason
+		if receipt.StopReason == "" {
+			receipt.StopReason = "transport_failed"
+		}
 	}
 	return receipt, session.addErr
 }
@@ -116,7 +120,7 @@ func TestRunAdoptsAbsentJobStoppedAndRecordsTerminalJournal(t *testing.T) {
 	before := ledgerSnapshot(fixture.meta, nil, time.Now().UTC())
 	after := ledgerSnapshot(fixture.meta, &downloader.Torrent{
 		Hash: "opaque-job", InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"}, IdentityIssues: []string{},
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{},
 		SizeBytes: fixture.meta.TotalLength, State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
 	}, before.ObservedAtEnd.Add(time.Millisecond))
 	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
@@ -171,6 +175,77 @@ func TestRunAdoptsAbsentJobStoppedAndRecordsTerminalJournal(t *testing.T) {
 	}
 }
 
+func TestTransmissionRunAdoptsV1StoppedWithoutGrantingUnknownResponseAttribution(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	prepared := prepareTransmissionFixturePlan(t, fixture)
+	savePath, _ := prepared.savePath()
+	contentPath, _ := prepared.contentPath()
+	before := ledgerSnapshotForDriver(fixture.meta, downloader.DriverTransmission, nil, time.Now().UTC())
+	after := ledgerSnapshotForDriver(fixture.meta, downloader.DriverTransmission, &downloader.Torrent{
+		Hash: fixture.meta.InfoHashV1, InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
+		IdentityEvidence: []string{"transmission_hash_string_sha1"}, IdentityIssues: []string{},
+		SizeBytes: fixture.meta.TotalLength, State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}, before.ObservedAtEnd.Add(time.Millisecond))
+	session := &fakeMutationSession{requests: 2, ledgers: []downloader.LedgerSnapshot{before, after}}
+	report, err := Run(ctx, RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Metafile: fixture.payload(t), Session: session, AcknowledgeAdd: true,
+	})
+	if err != nil || report.Outcome != OutcomeAdoptedPendingRecheck || report.Plan.Driver != DriverTransmission ||
+		session.requests != 5 || !report.Journal.CompletionDurable {
+		t.Fatalf("report=%#v requests=%d err=%v", report, session.requests, err)
+	}
+
+	secondFixture := makeMaterializedFixture(t, ctx)
+	uncertainPlan := prepareTransmissionFixturePlan(t, secondFixture)
+	uncertainSave, _ := uncertainPlan.savePath()
+	uncertainContent, _ := uncertainPlan.contentPath()
+	uncertainBefore := ledgerSnapshotForDriver(secondFixture.meta, downloader.DriverTransmission, nil, time.Now().UTC())
+	uncertainAfter := ledgerSnapshotForDriver(secondFixture.meta, downloader.DriverTransmission, &downloader.Torrent{
+		Hash: secondFixture.meta.InfoHashV1, InfoHashV1: secondFixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
+		IdentityEvidence: []string{"transmission_hash_string_sha1"}, IdentityIssues: []string{}, SizeBytes: secondFixture.meta.TotalLength,
+		State: "stoppedDL", SavePath: uncertainSave, ContentPath: uncertainContent,
+	}, uncertainBefore.ObservedAtEnd.Add(time.Millisecond))
+	failed := &fakeMutationSession{requests: 2, ledgers: []downloader.LedgerSnapshot{uncertainBefore, uncertainAfter}, addErr: fmt.Errorf("response lost")}
+	unknown, err := Run(ctx, RunOptions{
+		Prepared: uncertainPlan, ExpectedPlanID: uncertainPlan.PlanID(), Metafile: secondFixture.payload(t), Session: failed, AcknowledgeAdd: true,
+	})
+	if !errors.Is(err, ErrRequestUnknown) || unknown.Outcome != OutcomeRequestUnknown || unknown.Journal.CompletionDurable {
+		t.Fatalf("uncertain report=%#v err=%v", unknown, err)
+	}
+	resume := &fakeMutationSession{requests: 2, ledgers: []downloader.LedgerSnapshot{uncertainAfter}}
+	resumed, err := Resume(ctx, uncertainPlan.OperationID(), RunOptions{
+		Prepared: uncertainPlan, ExpectedPlanID: uncertainPlan.PlanID(), Session: resume,
+	})
+	if !errors.Is(err, ErrRequestUnknown) || resumed.Outcome != OutcomeRequestUnknown || resume.adds != 0 ||
+		resumed.Client.Status != "exact_job_observed_without_durable_transmission_acceptance" {
+		t.Fatalf("resume=%#v adds=%d err=%v", resumed, resume.adds, err)
+	}
+}
+
+func TestTransmissionDuplicateResponseNeverCreatesAdoptionCompletion(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	prepared := prepareTransmissionFixturePlan(t, fixture)
+	savePath, _ := prepared.savePath()
+	contentPath, _ := prepared.contentPath()
+	before := ledgerSnapshotForDriver(fixture.meta, downloader.DriverTransmission, nil, time.Now().UTC())
+	after := ledgerSnapshotForDriver(fixture.meta, downloader.DriverTransmission, &downloader.Torrent{
+		Hash: fixture.meta.InfoHashV1, InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
+		IdentityEvidence: []string{"transmission_hash_string_sha1"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
+		State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}, before.ObservedAtEnd.Add(time.Millisecond))
+	session := &fakeMutationSession{requests: 2, ledgers: []downloader.LedgerSnapshot{before, after},
+		addErr: fmt.Errorf("duplicate"), addStopReason: "already_exists"}
+	report, err := Run(ctx, RunOptions{
+		Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Metafile: fixture.payload(t), Session: session, AcknowledgeAdd: true,
+	})
+	if !errors.Is(err, ErrPolicy) || report.Outcome != OutcomeBlocked || report.Journal.CompletionDurable ||
+		report.Client.Status != "add_rejected_existing_exact_job" {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+}
+
 func containsWarning(warnings []string, fragment string) bool {
 	for _, warning := range warnings {
 		if strings.Contains(warning, fragment) {
@@ -204,7 +279,7 @@ func TestResumeNeverRepeatsUnknownAddWithoutExplicitAcknowledgement(t *testing.T
 	contentPath, _ := prepared.contentPath()
 	after := ledgerSnapshot(fixture.meta, &downloader.Torrent{
 		Hash: "opaque-repeat", InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
 		State: "pausedDL", SavePath: savePath, ContentPath: contentPath,
 	}, before.ObservedAtEnd.Add(time.Second))
 	repeat := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
@@ -285,7 +360,7 @@ func TestResumeRecoversOnlyAnExactEmptyInitializationNamespace(t *testing.T) {
 	before := ledgerSnapshot(fixture.meta, nil, time.Now().UTC())
 	after := ledgerSnapshot(fixture.meta, &downloader.Torrent{
 		Hash: "recovered-job", InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
 		State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
 	}, before.ObservedAtEnd.Add(time.Millisecond))
 	mutation := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
@@ -491,13 +566,33 @@ func prepareFixturePlan(t *testing.T, fixture materializedFixture) *PreparedPlan
 	return prepared
 }
 
+func prepareTransmissionFixturePlan(t *testing.T, fixture materializedFixture) *PreparedPlan {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(fixture.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := BuildPlan(fixture.verified, PlanOptions{
+		Driver: DriverTransmission, ClientConfigID: "sha256:" + strings.Repeat("d", 64),
+		HostRoot: root, ClientRoot: "/downloads", ClientWindows: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared
+}
+
 func ledgerSnapshot(meta *metafile.MetaInfo, job *downloader.Torrent, started time.Time) downloader.LedgerSnapshot {
+	return ledgerSnapshotForDriver(meta, downloader.DriverQBittorrent, job, started)
+}
+
+func ledgerSnapshotForDriver(meta *metafile.MetaInfo, driver string, job *downloader.Torrent, started time.Time) downloader.LedgerSnapshot {
 	jobs := []downloader.Torrent{}
 	if job != nil {
 		jobs = append(jobs, *job)
 	}
 	return downloader.LedgerSnapshot{
-		Driver: "qbittorrent", ObservedAtStart: started, ObservedAtEnd: started.Add(time.Millisecond), Complete: true,
+		Driver: driver, ObservedAtStart: started, ObservedAtEnd: started.Add(time.Millisecond), Complete: true,
 		Capabilities: downloader.LedgerCapabilities{TypedInfoHashes: true, ContentPath: true, JobFiles: true}, Jobs: jobs,
 	}
 }

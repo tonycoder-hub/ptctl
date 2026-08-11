@@ -55,6 +55,7 @@ type readSession struct {
 	nextID       int64
 	version      string
 	rpcVersion   string
+	addAttempted bool
 }
 
 type openSessionError struct {
@@ -67,9 +68,11 @@ func (err *openSessionError) Unwrap() error     { return err.err }
 func (err *openSessionError) RequestsMade() int { return err.requests }
 
 var (
-	_ downloader.Driver        = (*Adapter)(nil)
-	_ downloader.LedgerDriver  = (*Adapter)(nil)
-	_ downloader.LedgerSession = (*readSession)(nil)
+	_ downloader.Driver           = (*Adapter)(nil)
+	_ downloader.LedgerDriver     = (*Adapter)(nil)
+	_ downloader.StoppedAddDriver = (*Adapter)(nil)
+	_ downloader.LedgerSession    = (*readSession)(nil)
+	_ downloader.MutationSession  = (*readSession)(nil)
 )
 
 func New(endpoint string) (*Adapter, error) {
@@ -233,13 +236,22 @@ type rawHTTPResponse struct {
 }
 
 func (s *readSession) execute(ctx context.Context, body []byte, token string, maxBody int64) (rawHTTPResponse, error) {
+	return s.executeReader(ctx, bytes.NewReader(body), int64(len(body)), token, maxBody)
+}
+
+func (s *readSession) executeReader(ctx context.Context, body io.Reader, contentLength int64, token string, maxBody int64) (rawHTTPResponse, error) {
 	if maxBody <= 0 || maxBody > 32<<20 {
 		return rawHTTPResponse{}, fmt.Errorf("invalid Transmission response limit")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.adapter.endpoint.String(), bytes.NewReader(body))
+	if body == nil || contentLength < 0 || contentLength > 64<<20 {
+		return rawHTTPResponse{}, fmt.Errorf("invalid Transmission request body")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.adapter.endpoint.String(), body)
 	if err != nil {
 		return rawHTTPResponse{}, fmt.Errorf("build Transmission request")
 	}
+	req.ContentLength = contentLength
+	req.Close = true
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Content-Type", "application/json")
@@ -256,7 +268,7 @@ func (s *readSession) execute(ctx context.Context, body []byte, token string, ma
 		if contextErr := ctx.Err(); contextErr != nil {
 			return rawHTTPResponse{}, contextErr
 		}
-		return rawHTTPResponse{}, fmt.Errorf("Transmission read failed")
+		return rawHTTPResponse{}, fmt.Errorf("Transmission request failed")
 	}
 	defer resp.Body.Close()
 	result := rawHTTPResponse{

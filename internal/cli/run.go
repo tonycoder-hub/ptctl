@@ -150,7 +150,7 @@ Usage:
 
   ptctl client status --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
   ptctl client list --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
-  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
+  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
   ptctl client adopt run [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
   ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add --acknowledge-repeat-add] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
@@ -190,7 +190,7 @@ Safety defaults:
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
   * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone; forget has a third acknowledgement and irreversibly deletes only that exact tombstone plus its last recovery marker.
   * Seed retire plan performs fresh proof reads only and grants no deletion authority. Run/resume require a separate exact plan ID and deletion acknowledgement, journal every explicit name, and never remove directories, aliases, padding, empty files, or final content. Prune has its own acknowledgement and deletes only one terminal operation's private journal while retaining a tombstone; forget has a third acknowledgement and deletes only that exact tombstone plus its last recovery marker.
-  * Client adoption only adds an absent exact-infohash qBittorrent job in stopped mode. It journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
+  * Client adoption only adds an absent exact-infohash qBittorrent or Transmission job in stopped mode. Transmission is v1-only, and only qBittorrent adoption can feed the separate recheck/start workflow. Adoption journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
   * Client activation only rechecks or starts the reviewed exact existing job, with at most one non-retried mutation per invocation. Its separately acknowledged local prune deletes only one terminal private journal after sealing an exact tombstone and never reads a credential or contacts the client.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.

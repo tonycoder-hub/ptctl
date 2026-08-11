@@ -1,6 +1,7 @@
 // Package clientadopt coordinates one exact, already-materialized layout with
-// a downloader. Version 1 only adds an absent qBittorrent job in stopped mode;
-// it never changes an existing job, rechecks, moves, deletes, or retires data.
+// a downloader. Version 1 only adds an absent built-in downloader job in
+// stopped mode; it never changes an existing job, rechecks, moves, deletes, or
+// retires data.
 package clientadopt
 
 import (
@@ -23,6 +24,7 @@ const (
 	CompletionSchemaV1 = "ptctl.client-adopt-completion/v1"
 	ActionAddStopped   = "add_stopped"
 	DriverQBittorrent  = "qbittorrent"
+	DriverTransmission = "transmission"
 
 	operationDirectoryPrefix = materialize.ClientAdoptOperationDirectoryPrefix
 	maximumAttempts          = 3
@@ -60,7 +62,7 @@ type Plan struct {
 }
 
 func (plan Plan) Validate() error {
-	if plan.Schema != PlanSchemaV1 || plan.Action != ActionAddStopped || plan.Driver != DriverQBittorrent ||
+	if plan.Schema != PlanSchemaV1 || plan.Action != ActionAddStopped ||
 		!canonicalSHA256ID(plan.ClientConfigID) || !canonicalSHA256ID(plan.PathMappingID) ||
 		!canonicalSHA256ID(plan.ExpectedSavePathRef) || !canonicalSHA256ID(plan.ExpectedContentPathRef) ||
 		!canonicalSHA256ID(plan.MetafileVariantID) || plan.MetafileBytes <= 0 || plan.MetafileBytes > 32<<20 ||
@@ -74,6 +76,10 @@ func (plan Plan) Validate() error {
 	}
 	if err := (downloader.TypedIdentity{InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2}).Validate(); err != nil {
 		return fmt.Errorf("%w: adoption typed identity is invalid", ErrPolicy)
+	}
+	descriptor, ok := downloader.DescribeStoppedAddDriver(plan.Driver)
+	if !ok || !descriptor.SupportsIdentity(downloader.TypedIdentity{InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2}) {
+		return fmt.Errorf("%w: adoption driver cannot prove the required typed identity", ErrPolicy)
 	}
 	if _, err := materialize.ParseOperationID(plan.MaterializeOperationID); err != nil {
 		return fmt.Errorf("%w: materialize operation ID is invalid", ErrPolicy)

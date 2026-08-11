@@ -359,7 +359,7 @@ func makeRetireFixtureMode(t *testing.T, retainActivation bool) retireFixture {
 	}
 	now := time.Now().UTC()
 	job := downloader.Torrent{Hash: "opaque-retirement-job", InfoHashV1: meta.InfoHashV1,
-		IdentityStatus: downloader.IdentityStatusValid, IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"},
+		IdentityStatus: downloader.IdentityStatusValid, IdentityEvidence: []string{"magnet_xt_btih_hex"},
 		IdentityIssues: []string{}, SizeBytes: meta.TotalLength, State: "stoppedDL", Progress: 0.25,
 		SavePath: savePath, ContentPath: contentPath}
 	adoptionSession := &retireAdoptionSession{requests: 1, ledgers: []downloader.LedgerSnapshot{

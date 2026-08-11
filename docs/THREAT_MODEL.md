@@ -312,19 +312,29 @@ the CLI validates the exact private-store artifact selector, committed or
 retained materialize selector, current target-root/final proof, host/client
 mapping, endpoint, user-derived client configuration ID, reviewed adoption plan
 ID, and any existing operation selector it can inspect locally. The
-acknowledgement authorizes only one exact-metafile qBittorrent add request in
-stopped mode plus the small private target-root-local journal. It does not
+acknowledgement authorizes only one exact-metafile add request to the selected
+built-in qBittorrent or Transmission adapter in stopped mode, plus the small
+private target-root-local journal. It does not
 authorize changing an existing job, rechecking, starting, pausing, moving,
 removing, deleting, or retiring content.
 
-One complete before-ledger must prove typed identity absence. A generic qB job
+One complete before-ledger must prove typed identity absence. A generic job
 hash, name, size, path, progress, or state never selects identity; unavailable,
 invalid, partial, conflicting, or duplicate typed rows make absence
-unprovable. The canonical request intent is durable before the POST. The
-effectful transport is HTTP/1.1-only, fresh/no-keepalive, proxy-free,
-redirect-free, bounded, serial, and non-retrying. A lost response remains
-unknown even if the body may have reached qBittorrent. Resume reads the current
-ledger first and does not repeat without both acknowledgements.
+unprovable. qBittorrent may prove typed v1/v2 identity from allowlisted magnet
+evidence. Transmission may prove only v1 identity from its complete
+`hash_string`; pure-v2 and hybrid adoption are rejected before credentials,
+network access, or journal writes. The canonical request intent is durable
+before the POST. qBittorrent uses one login request; Transmission uses a fixed
+two-request CSRF/version handshake. The effectful add is then one HTTP/1.1-only,
+fresh/no-keepalive, proxy-free, redirect-free, bounded, serial, non-retried
+request. A lost response is initially unknown even if the body may have reached
+the client. qBittorrent recovery may later combine the durable attempt and
+complete absence-before observation with one current exact stopped job;
+Transmission is stricter and requires the same invocation's explicit
+accepted-add response, so a duplicate response or later same-hash job does not
+establish attribution. Resume reads the current ledger first and does not repeat
+without both acknowledgements.
 Read-only status validates the canonical marker namespace but does not infer a
 historical directory-fsync result. Effectful resume refreshes that durability
 boundary before it reads the client ledger or relies on a marker.
@@ -361,13 +371,15 @@ revoke an opaque process-local completion capability issued before forgetting.
 After the POST, a terminal marker requires one unique exact typed job, stopped
 state, reviewed size and exact lexical save/content paths, plus a second exact
 final verification. These are bracketed, non-atomic observations. They neither
-prove that qBittorrent stored the submitted private variant nor that it has
-checked or is reading the materialized bytes. The public report uses only
+prove that the selected downloader stored the submitted private variant nor
+that it has checked or is reading the materialized bytes. The public report
+uses only
 one-way client/path/job references and never includes host/client paths,
 endpoint, username, password, generic job key, magnet URI, tracker material,
 or raw metafile bytes.
 
-Client activation is a second, narrower existing-job mutation boundary. It is
+Client activation is a second, narrower qBittorrent-only existing-job mutation
+boundary. Transmission adoption does not grant this authority. Activation is
 unavailable without a same-invocation exact final authority and a canonical
 stopped-adoption completion from the same client configuration and path
 mapping. `run` requires `--acknowledge-client-recheck`; optional start requires

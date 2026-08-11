@@ -54,7 +54,7 @@ func Preview(ctx context.Context, prepared *PreparedPlan, session downloader.Led
 	if session != nil {
 		report.Client.RequestsMade = session.RequestsMade()
 	}
-	if err := validateFreshLedgerSession(session); err != nil {
+	if err := validateFreshLedgerSession(session, prepared); err != nil {
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
@@ -143,7 +143,7 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 	if options.Session != nil {
 		report.Client.RequestsMade = options.Session.RequestsMade()
 	}
-	if err := validateFreshLedgerSession(options.Session); err != nil {
+	if err := validateFreshLedgerSession(options.Session, options.Prepared); err != nil {
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
@@ -219,7 +219,7 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 	if options.Session != nil {
 		report.Client.RequestsMade = options.Session.RequestsMade()
 	}
-	if err := validateFreshLedgerSession(options.Session); err != nil {
+	if err := validateFreshLedgerSession(options.Session, options.Prepared); err != nil {
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
@@ -307,6 +307,15 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 			report.finalize()
 			return report, err
 		}
+		if options.Prepared.plan.Driver == DriverTransmission {
+			report.Outcome = OutcomeRequestUnknown
+			report.Operation.PhaseAfter = "request_result_unknown"
+			report.Operation.Resumable = true
+			report.Client.Status = "exact_job_observed_without_durable_transmission_acceptance"
+			report.addBlocker("client.transmission_add_acceptance_unavailable", "an exact Transmission job exists after an interrupted prior request, but no same-invocation accepted add response is available to attribute it")
+			report.finalize()
+			return report, ErrRequestUnknown
+		}
 		return finalizeObserved(ctx, options, handle, assessment, report)
 	}
 	if assessment.status != downloader.LedgerIdentityAbsent {
@@ -371,7 +380,7 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 	}
 	plan := handle.state.Intent.Plan
 	report.Plan = PlanReport{
-		ID: handle.state.Intent.PlanID, Matches: true, Action: plan.Action, ClientConfigID: plan.ClientConfigID,
+		ID: handle.state.Intent.PlanID, Matches: true, Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID,
 		PathMappingID: plan.PathMappingID, ClientPathSemantics: plan.ClientPathSemantics,
 		ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef,
 	}
@@ -429,7 +438,9 @@ func executeAdd(ctx context.Context, options RunOptions, handle *journalHandle, 
 		return report, err
 	}
 	requestsBefore := options.Session.RequestsMade()
-	mutation, mutationErr := options.Session.AddStopped(ctx, downloader.AddStoppedRequest{Metafile: options.Metafile, SavePath: savePath})
+	mutation, mutationErr := options.Session.AddStopped(ctx, downloader.AddStoppedRequest{
+		Metafile: options.Metafile, SavePath: savePath, Identity: options.Prepared.typedIdentity(),
+	})
 	requestsAfter := options.Session.RequestsMade()
 	report.Client.AddAttempted = requestsAfter > requestsBefore
 	report.Client.AddReceipt = safeMutationReceipt(mutation, options.Prepared.plan.MetafileBytes)
@@ -474,6 +485,31 @@ func executeAdd(ctx context.Context, options RunOptions, handle *journalHandle, 
 		report.Operation.PhaseAfter = "request_result_unknown"
 		report.finalize()
 		return report, errors.Join(ErrRequestUnknown, mutationErr, gateErr)
+	}
+	if mutation.StopReason == "already_exists" {
+		if options.Prepared.plan.Driver != DriverTransmission {
+			err = fmt.Errorf("%w: downloader returned an unsupported duplicate-add receipt", ErrIntegrity)
+			classifyFailure(&report, err)
+			report.Operation.PhaseAfter = "request_result_unknown"
+			report.finalize()
+			return report, err
+		}
+		report.Outcome = OutcomeBlocked
+		report.Operation.PhaseAfter = "request_rejected_existing_job"
+		report.Operation.Resumable = true
+		report.Client.Status = "add_rejected_existing_exact_job"
+		report.addBlocker("client.add_rejected_existing_job", "Transmission explicitly reported a duplicate; the exact job is not attributable to this adoption operation")
+		report.finalize()
+		return report, errors.Join(ErrPolicy, mutationErr)
+	}
+	if mutationErr != nil && options.Prepared.plan.Driver == DriverTransmission {
+		report.Outcome = OutcomeRequestUnknown
+		report.Operation.PhaseAfter = "request_result_unknown"
+		report.Operation.Resumable = true
+		report.Client.Status = "transmission_add_acceptance_unavailable"
+		report.addIssue("client.transmission_add_unconfirmed", "the Transmission add response was not accepted, so the exact job observed afterward is not attributable to this operation")
+		report.finalize()
+		return report, errors.Join(ErrRequestUnknown, mutationErr)
 	}
 	if mutationErr != nil {
 		report.addIssue("client.add_response_unconfirmed", "the add response failed, but a unique exact stopped job was observed afterward")
@@ -546,20 +582,24 @@ func readIdentityLedger(ctx context.Context, session downloader.LedgerSession, p
 	if afterRequests-beforeRequests != 1 {
 		return result, fmt.Errorf("%w: downloader ledger request count is invalid", ErrIntegrity)
 	}
-	if snapshot.Driver != DriverQBittorrent || !snapshot.Capabilities.TypedInfoHashes || !snapshot.Capabilities.ContentPath {
+	if snapshot.Driver != prepared.plan.Driver || !snapshot.Capabilities.TypedInfoHashes || !snapshot.Capabilities.ContentPath {
 		return result, fmt.Errorf("%w: downloader ledger lacks the reviewed typed-identity or content-path capability", ErrPolicy)
+	}
+	if err := downloader.ValidateLedgerDriverClaims(snapshot); err != nil {
+		return result, fmt.Errorf("%w: downloader ledger claim provenance is invalid", ErrIntegrity)
 	}
 	assessment, err := downloader.AssessLedgerIdentity(snapshot, prepared.typedIdentity())
 	result = downloaderAssessment{status: assessment.Status, started: snapshot.ObservedAtStart, ended: snapshot.ObservedAtEnd, result: assessment}
 	return result, err
 }
 
-func validateFreshLedgerSession(session downloader.LedgerSession) error {
-	if session == nil {
+func validateFreshLedgerSession(session downloader.LedgerSession, prepared *PreparedPlan) error {
+	if session == nil || prepared == nil {
 		return fmt.Errorf("%w: downloader ledger session is unavailable", ErrPolicy)
 	}
-	if session.RequestsMade() != 1 {
-		return fmt.Errorf("%w: downloader session must contain exactly one completed login before adoption", ErrIntegrity)
+	descriptor, ok := downloader.DescribeStoppedAddDriver(prepared.plan.Driver)
+	if !ok || session.RequestsMade() != descriptor.OpenRequests {
+		return fmt.Errorf("%w: downloader session opening request count is invalid", ErrIntegrity)
 	}
 	return nil
 }
@@ -727,7 +767,7 @@ func safeMutationReceipt(value downloader.MutationReceipt, expectedBytes int64) 
 	}
 	result.Complete = validSuccessfulMutation(value, expectedBytes)
 	switch value.StopReason {
-	case "context_cancelled", "payload_invalid", "save_path_invalid", "payload_unavailable", "request_build_failed", "session_unavailable", "transport_failed", "response_read_failed", "http_rejected", "response_invalid":
+	case "context_cancelled", "payload_invalid", "save_path_invalid", "payload_unavailable", "request_build_failed", "session_unavailable", "transport_failed", "response_read_failed", "http_rejected", "response_invalid", "csrf_expired", "already_exists":
 		result.StopReason = value.StopReason
 	case "":
 	default:
@@ -797,7 +837,7 @@ func applyRetainedJournalReport(report *Report, state journalState) {
 		plan := state.Intent.Plan
 		expected := report.Plan.ExpectedID
 		report.Plan = PlanReport{ID: state.Intent.PlanID, ExpectedID: expected, Matches: expected == "" || expected == state.Intent.PlanID,
-			Action: plan.Action, ClientConfigID: plan.ClientConfigID,
+			Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID,
 			PathMappingID: plan.PathMappingID, ClientPathSemantics: plan.ClientPathSemantics,
 			ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef}
 		report.Final.Observation = historicalFinalObservation(plan)

@@ -39,6 +39,7 @@ type PlanReport struct {
 	ExpectedID             string `json:"expected_id,omitempty"`
 	Matches                bool   `json:"matches"`
 	Action                 string `json:"action"`
+	Driver                 string `json:"driver"`
 	ClientConfigID         string `json:"client_config_id"`
 	PathMappingID          string `json:"path_mapping_id"`
 	ClientPathSemantics    string `json:"client_path_semantics"`
@@ -127,7 +128,7 @@ func newReport(prepared *PreparedPlan, expectedID string) Report {
 		Operation: OperationReport{ID: operationID, Status: "not_created", PhaseBefore: "planned", PhaseAfter: "planned"},
 		Plan: PlanReport{
 			ID: planID, ExpectedID: expectedID, Matches: expectedID == "" || expectedID == planID,
-			Action: plan.Action, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
+			Action: plan.Action, Driver: plan.Driver, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
 			ClientPathSemantics: plan.ClientPathSemantics, ExpectedSavePathRef: plan.ExpectedSavePathRef,
 			ExpectedContentPathRef: plan.ExpectedContentPathRef,
 		},
@@ -137,7 +138,7 @@ func newReport(prepared *PreparedPlan, expectedID string) Report {
 		Journal:  JournalReport{Status: "not_created", RetentionState: "not_requested"},
 		Blockers: []Finding{}, Issues: []Finding{},
 		Warnings: []string{
-			"qBittorrent cannot prove that its stored private metafile bytes equal the submitted exact variant",
+			"the downloader cannot prove that its stored private metafile bytes equal the submitted exact variant",
 			"adoption stops before client recheck; source retirement remains a separate explicit workflow",
 			"client and filesystem observations are bracketed and non-atomic",
 		},

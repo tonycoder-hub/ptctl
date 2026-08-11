@@ -244,7 +244,7 @@ func makeActivationFixtureFromMode(t *testing.T, raw []byte, sources []activatio
 	opaque := "opaque-activation-job"
 	before := activationLedger(meta, nil, time.Now().UTC())
 	job := downloader.Torrent{Hash: opaque, InfoHashV1: meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"}, IdentityIssues: []string{}, SizeBytes: meta.TotalLength,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: meta.TotalLength,
 		State: "stoppedDL", Progress: 0.25, SavePath: savePath, ContentPath: contentPath}
 	after := activationLedger(meta, &job, before.ObservedAtEnd.Add(time.Millisecond))
 	adoption := &adoptionSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}
@@ -303,7 +303,7 @@ func TestPrepareAuthorityAcceptsBoundRetainedAdoptionCompletion(t *testing.T) {
 
 func (fixture activationFixture) job(state string, progress float64) downloader.Torrent {
 	return downloader.Torrent{Hash: fixture.opaqueKey, InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: fixture.meta.TotalLength,
 		State: state, Progress: progress, SavePath: fixture.savePath, ContentPath: fixture.contentPath}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
+	"github.com/tonycoder-hub/ptctl/internal/downloader/transmission"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
@@ -48,7 +49,7 @@ type preparedClientAdopt struct {
 	timeout  time.Duration
 	prepared *clientadopt.PreparedPlan
 	payload  *metastore.ArtifactPayload
-	adapter  *qbittorrent.Adapter
+	adapter  downloader.StoppedAddDriver
 	username string
 }
 
@@ -77,7 +78,7 @@ func (a *app) clientAdopt(args []string) error {
 
 func (a *app) clientAdoptHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent --url URL --username USER --password-stdin [--output table|json]
+  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
   ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID --acknowledge-client-add [--output table|json]
   ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID [--acknowledge-client-add] [--acknowledge-repeat-add] [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
@@ -91,7 +92,11 @@ source data. Exact raw bytes must come from the private metafile store.
 Run records a durable target-root-local request intent before its one add POST.
 If the response is lost, resume first observes the queue and never repeats the
 POST unless --acknowledge-repeat-add is explicit. A successful outcome remains
-pending client recheck; qBittorrent cannot expose the stored private variant.
+pending client recheck; neither client can prove its stored private variant.
+
+Transmission adoption accepts only v1 metafiles because its audited RPC ledger
+exposes a full SHA-1 identity but no typed v2 identity. It does not enable the
+qBittorrent-only recheck/start workflow.
 
 Prune is a separate local-only deletion boundary. It copies one terminal
 canonical journal into an owner-private tombstone before deleting only that
@@ -114,14 +119,14 @@ func addClientAdoptFlags(fs *flag.FlagSet, execution bool) *clientAdoptFlags {
 	values.hostRoot = fs.String("host-root", "", "host namespace root containing the target")
 	values.clientRoot = fs.String("client-root", "", "downloader-visible namespace root")
 	values.clientStyle = fs.String("client-style", "posix", "downloader path style: posix or windows")
-	values.driver = fs.String("driver", "qbittorrent", "downloader driver")
-	values.endpoint = fs.String("url", "", "qBittorrent Web API origin")
-	values.username = fs.String("username", "", "qBittorrent username")
+	values.driver = fs.String("driver", "qbittorrent", "downloader driver: qbittorrent or transmission")
+	values.endpoint = fs.String("url", "", "downloader API origin or Transmission RPC URL")
+	values.username = fs.String("username", "", "downloader username")
 	values.passwordStdin = fs.Bool("password-stdin", false, "read downloader password from stdin")
 	values.timeout = fs.Duration("timeout", clientAdoptDefaultTimeout, "shared final-proof and client wall-clock budget")
 	if execution {
 		values.expectedAdoptionPlan = fs.String("expect-adoption-plan-id", "", "reviewed 24-hex client adoption plan ID")
-		values.acknowledgeAdd = fs.Bool("acknowledge-client-add", false, "acknowledge one stopped qBittorrent add request")
+		values.acknowledgeAdd = fs.Bool("acknowledge-client-add", false, "acknowledge one stopped downloader add request")
 		values.repeatAdd = fs.Bool("acknowledge-repeat-add", false, "acknowledge repeating a prior request whose result remains unknown")
 	}
 	return values
@@ -145,8 +150,8 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	if !*values.passwordStdin {
 		return result, usageError("%s requires --password-stdin", command)
 	}
-	if *values.driver != "qbittorrent" {
-		return result, usageError("--driver currently supports only qbittorrent")
+	if *values.driver != downloader.DriverQBittorrent && *values.driver != downloader.DriverTransmission {
+		return result, usageError("--driver must be qbittorrent or transmission")
 	}
 	if *values.clientStyle != "posix" && *values.clientStyle != "windows" {
 		return result, usageError("--client-style must be posix or windows")
@@ -163,7 +168,7 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	if err := storage.ValidatePathMappingConfig(*values.hostRoot, *values.clientRoot, windows); err != nil {
 		return result, usageError("%s path mapping is invalid: %v", command, err)
 	}
-	adapter, err := qbittorrent.New(*values.endpoint)
+	adapter, err := newStoppedAddDriver(*values.driver, *values.endpoint)
 	if err != nil {
 		return result, usageError("%s downloader endpoint is invalid", command)
 	}
@@ -196,7 +201,7 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 		return result, err
 	}
 	prepared, err := clientadopt.BuildPlan(verified, clientadopt.PlanOptions{
-		ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot, ClientWindows: windows,
+		Driver: *values.driver, ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot, ClientWindows: windows,
 	})
 	if err != nil {
 		return result, err
@@ -219,6 +224,17 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 		output: *values.output, timeout: *values.timeout, prepared: prepared, payload: payload,
 		adapter: adapter, username: *values.username,
 	}, nil
+}
+
+func newStoppedAddDriver(name, endpoint string) (downloader.StoppedAddDriver, error) {
+	switch name {
+	case downloader.DriverQBittorrent:
+		return qbittorrent.New(endpoint)
+	case downloader.DriverTransmission:
+		return transmission.New(endpoint)
+	default:
+		return nil, fmt.Errorf("unsupported stopped-add downloader driver %q", name)
+	}
 }
 
 func (a *app) clientAdoptPlan(args []string) error {
@@ -514,9 +530,9 @@ func writeClientAdoptHuman(out io.Writer, report clientadopt.Report) error {
 		terminalSafe(valueOrUnknown(report.Operation.ID)), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseBefore), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
 	fmt.Fprintln(w, "\nBLOCKERS")
 	writeClientAdoptFindings(w, report.Blockers)
-	fmt.Fprintf(w, "\nPLAN\nID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nACTION\t%s\nCLIENT CONFIG\t%s\nPATH MAPPING\t%s\nPATH SEMANTICS\t%s\nSAVE PATH REF\t%s\nCONTENT PATH REF\t%s\n",
+	fmt.Fprintf(w, "\nPLAN\nID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nACTION\t%s\nDRIVER\t%s\nCLIENT CONFIG\t%s\nPATH MAPPING\t%s\nPATH SEMANTICS\t%s\nSAVE PATH REF\t%s\nCONTENT PATH REF\t%s\n",
 		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(materializeValueOr(report.Plan.ExpectedID, "not_requested")), report.Plan.Matches,
-		terminalSafe(report.Plan.Action), terminalSafe(report.Plan.ClientConfigID), terminalSafe(report.Plan.PathMappingID), terminalSafe(report.Plan.ClientPathSemantics),
+		terminalSafe(report.Plan.Action), terminalSafe(report.Plan.Driver), terminalSafe(report.Plan.ClientConfigID), terminalSafe(report.Plan.PathMappingID), terminalSafe(report.Plan.ClientPathSemantics),
 		terminalSafe(report.Plan.ExpectedSavePathRef), terminalSafe(report.Plan.ExpectedContentPathRef))
 	fmt.Fprintf(w, "\nMATERIALIZED FINAL\nSTATUS\t%s\nVARIANT\t%s\nMATERIALIZE OPERATION\t%s\nMATERIALIZE PLAN\t%s\nROOT IDENTITY\t%s\nFINAL IDENTITY\t%s\nBYTES VERIFIED\t%d\nASSURANCE\t%s\n",
 		terminalSafe(report.Final.Status), terminalSafe(report.Final.Observation.MetafileVariantID), terminalSafe(report.Final.Observation.OperationID),

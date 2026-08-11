@@ -31,7 +31,7 @@ func makeTerminalAdoptionFixture(t *testing.T) terminalAdoptionFixture {
 	before := ledgerSnapshot(materialized.meta, nil, time.Now().UTC())
 	after := ledgerSnapshot(materialized.meta, &downloader.Torrent{
 		Hash: "opaque-retention-job", InfoHashV1: materialized.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
-		IdentityEvidence: []string{"qbittorrent.magnet_uri.xt"}, IdentityIssues: []string{}, SizeBytes: materialized.meta.TotalLength,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{}, SizeBytes: materialized.meta.TotalLength,
 		State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
 	}, before.ObservedAtEnd.Add(time.Millisecond))
 	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after}}

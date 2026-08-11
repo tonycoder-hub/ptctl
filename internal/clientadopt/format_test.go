@@ -54,6 +54,26 @@ func TestMarkerReadFailureRemainsOperational(t *testing.T) {
 	}
 }
 
+func TestPlanDriverIdentityCapabilitiesAreFailClosed(t *testing.T) {
+	base := validFormatIntent(t).Plan
+	base.Driver = DriverTransmission
+	if err := base.Validate(); err != nil {
+		t.Fatalf("Transmission v1 plan rejected: %v", err)
+	}
+	base.InfoHashV2 = strings.Repeat("a", 64)
+	if err := base.Validate(); err == nil {
+		t.Fatal("Transmission hybrid plan was accepted without typed v2 ledger authority")
+	}
+	base.InfoHashV1 = ""
+	if err := base.Validate(); err == nil {
+		t.Fatal("Transmission pure-v2 plan was accepted")
+	}
+	base.Driver = DriverQBittorrent
+	if err := base.Validate(); err != nil {
+		t.Fatalf("qBittorrent pure-v2 plan rejected: %v", err)
+	}
+}
+
 func validFormatIntent(t *testing.T) Intent {
 	t.Helper()
 	shaID := func(character string) string { return "sha256:" + strings.Repeat(character, 64) }

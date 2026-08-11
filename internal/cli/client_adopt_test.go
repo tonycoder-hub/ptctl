@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -60,6 +61,19 @@ type clientAdoptServer struct {
 	add        atomic.Int32
 	serverFail atomic.Bool
 	testing    *testing.T
+}
+
+type transmissionAdoptServer struct {
+	server *httptest.Server
+	meta   *metafile.MetaInfo
+	raw    []byte
+
+	added     atomic.Bool
+	handshake atomic.Int32
+	session   atomic.Int32
+	ledger    atomic.Int32
+	add       atomic.Int32
+	testing   *testing.T
 }
 
 func TestClientAdoptPlanRunStatusAndPrivacy(t *testing.T) {
@@ -143,6 +157,43 @@ func TestClientAdoptPlanRunStatusAndPrivacy(t *testing.T) {
 	if reader.read || server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBeforeStatus {
 		t.Fatalf("mismatched plan crossed credential/network boundary: read=%t requests=%d", reader.read, server.login.Load()+server.ledger.Load()+server.add.Load())
 	}
+}
+
+func TestTransmissionClientAdoptPlanAndRunRemainStoppedAndV1Only(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newTransmissionAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+	base := transmissionClientAdoptBaseArgs(fixture, server.server.URL)
+
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	planned := decodeClientAdoptReport(t, out.Bytes())
+	if planned.Data.Outcome != clientadopt.OutcomeReady || planned.Data.Plan.Driver != "transmission" ||
+		planned.Data.Client.RequestsMade != 3 || planned.Data.Client.BeforeIdentity != "absent" {
+		t.Fatalf("unexpected Transmission plan: %s", out.String())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	runArgs := append([]string{"client", "adopt", "run"}, base...)
+	runArgs = append(runArgs, "--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+	if adopted.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck || adopted.Data.Plan.Driver != "transmission" ||
+		adopted.Data.Client.RequestsMade != 5 || !adopted.Data.Client.AddReceipt.Complete ||
+		adopted.Data.Client.BeforeIdentity != "absent" || adopted.Data.Client.AfterIdentity != "exact_unique" ||
+		!adopted.Data.Journal.CompletionDurable {
+		t.Fatalf("unexpected Transmission adoption: %s", out.String())
+	}
+	if server.handshake.Load() != 2 || server.session.Load() != 2 || server.ledger.Load() != 3 || server.add.Load() != 1 {
+		t.Fatalf("wire counts handshake=%d session=%d ledger=%d add=%d", server.handshake.Load(), server.session.Load(), server.ledger.Load(), server.add.Load())
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture, server.server.URL)
 }
 
 func TestClientAdoptUnknownRequestIsNotRepeatedWithoutAcknowledgement(t *testing.T) {
@@ -311,6 +362,20 @@ func TestClientAdoptForgetBadUsageDoesNotReadInput(t *testing.T) {
 	}
 }
 
+func TestClientAdoptUnsupportedDriverDoesNotReadPasswordOrFilesystem(t *testing.T) {
+	reader := &trackingReader{}
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"client", "adopt", "plan", "--metafile-store", "not-opened", "--metafile-variant", "not-parsed",
+		"--target", "not-opened", "--materialize-operation", "not-parsed", "--materialize-plan-id", "not-parsed",
+		"--host-root", "not-opened", "--client-root", "/not-opened", "--driver", "deluge",
+		"--url", "https://not-opened.invalid", "--username", "nobody", "--password-stdin",
+	}, reader, &out, &errOut)
+	if code != 2 || reader.read || !strings.Contains(errOut.String(), "qbittorrent or transmission") {
+		t.Fatalf("code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+}
+
 func newClientAdoptCLIFixture(t *testing.T) clientAdoptCLIFixture {
 	t.Helper()
 	fixture := newMaterializeCLIFixture(t)
@@ -349,11 +414,117 @@ func clientAdoptBaseArgs(fixture clientAdoptCLIFixture, endpoint string) []strin
 	}
 }
 
+func transmissionClientAdoptBaseArgs(fixture clientAdoptCLIFixture, endpoint string) []string {
+	return []string{
+		"--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
+		"--target", fixture.materialize.targetRoot, "--materialize-operation", fixture.operation,
+		"--materialize-plan-id", fixture.materialize.planID,
+		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--driver", "transmission", "--url", endpoint, "--username", clientAdoptUser, "--password-stdin",
+		"--timeout", "1m", "--output", "json",
+	}
+}
+
 func newClientAdoptServer(t *testing.T, meta *metafile.MetaInfo, raw []byte) *clientAdoptServer {
 	t.Helper()
 	result := &clientAdoptServer{meta: meta, raw: append([]byte(nil), raw...), testing: t}
 	result.server = httptest.NewServer(http.HandlerFunc(result.serveHTTP))
 	return result
+}
+
+func newTransmissionAdoptServer(t *testing.T, meta *metafile.MetaInfo, raw []byte) *transmissionAdoptServer {
+	t.Helper()
+	result := &transmissionAdoptServer{meta: meta, raw: append([]byte(nil), raw...), testing: t}
+	result.server = httptest.NewServer(http.HandlerFunc(result.serveHTTP))
+	return result
+}
+
+func (server *transmissionAdoptServer) serveHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path != "/transmission/rpc" {
+		http.NotFound(writer, request)
+		return
+	}
+	username, password, ok := request.BasicAuth()
+	if !ok || username != clientAdoptUser || password != clientAdoptPassword {
+		server.testing.Errorf("invalid Transmission adoption authentication")
+		writer.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if request.Header.Get("X-Transmission-Session-Id") == "" {
+		server.handshake.Add(1)
+		writer.Header().Set("X-Transmission-Session-Id", "transmission-adopt-token")
+		writer.Header().Set("X-Transmission-Rpc-Version", "6.0.0")
+		writer.WriteHeader(http.StatusConflict)
+		return
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		server.testing.Errorf("read Transmission adoption request: %v", err)
+		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var rpc map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rpc); err != nil {
+		server.testing.Errorf("decode Transmission adoption request: %v", err)
+		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var method string
+	_ = json.Unmarshal(rpc["method"], &method)
+	switch method {
+	case "session_get":
+		server.session.Add(1)
+		server.writeResponse(writer, rpc, map[string]any{"version": "4.1.0", "rpc_version_semver": "6.0.0", "rpc_version": 18})
+	case "torrent_get":
+		server.ledger.Add(1)
+		jobs := []any{}
+		if server.added.Load() {
+			jobs = append(jobs, map[string]any{
+				"hash_string": server.meta.InfoHashV1, "name": materializeFinalName,
+				"total_size": server.meta.TotalLength, "percent_complete": 0.0, "status": 0,
+				"download_dir": clientAdoptRoot, "downloaded_ever": int64(0), "uploaded_ever": int64(0),
+			})
+		}
+		server.writeResponse(writer, rpc, map[string]any{"torrents": jobs})
+	case "torrent_add":
+		server.add.Add(1)
+		var params struct {
+			DownloadDir string `json:"download_dir"`
+			Metainfo    string `json:"metainfo"`
+			Paused      bool   `json:"paused"`
+		}
+		if err := json.Unmarshal(rpc["params"], &params); err != nil {
+			server.testing.Errorf("decode Transmission add params: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		decoded, err := base64.StdEncoding.DecodeString(params.Metainfo)
+		if err != nil || !bytes.Equal(decoded, server.raw) || params.DownloadDir != clientAdoptRoot || !params.Paused {
+			server.testing.Errorf("Transmission add did not submit exact stopped payload")
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		server.added.Store(true)
+		server.writeResponse(writer, rpc, map[string]any{"torrent_added": map[string]any{
+			"id": 7, "name": materializeFinalName, "hash_string": server.meta.InfoHashV1,
+		}})
+	default:
+		server.testing.Errorf("unexpected Transmission adoption method %q", method)
+		writer.WriteHeader(http.StatusBadRequest)
+	}
+}
+
+func (server *transmissionAdoptServer) writeResponse(writer http.ResponseWriter, request map[string]json.RawMessage, result map[string]any) {
+	var id int64
+	if err := json.Unmarshal(request["id"], &id); err != nil {
+		server.testing.Errorf("decode Transmission adoption request id: %v", err)
+		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(writer).Encode(map[string]any{"jsonrpc": "2.0", "result": result, "id": id}); err != nil {
+		server.testing.Errorf("encode Transmission adoption response: %v", err)
+	}
 }
 
 func (server *clientAdoptServer) serveHTTP(writer http.ResponseWriter, request *http.Request) {

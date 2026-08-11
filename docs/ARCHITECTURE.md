@@ -722,7 +722,7 @@ client verification or transfer-state transition:
 ```text
 exact stored metafile + current exact final + complete typed queue absence
   -> durable target-root-local request intent
-  -> one qBittorrent add POST requesting stopped/paused state
+  -> one built-in downloader add POST requesting stopped/paused state
   -> complete typed queue observation of one exact stopped job
   -> exact final reverify
   -> durable adopted-pending-recheck marker
@@ -740,20 +740,28 @@ path and mapping references.
 `downloader.MutationSession` extends the bounded ledger session with one
 `AddStopped` port. The exact raw payload is an opaque, one-shot
 `MetafilePayload` loaded only from the bound private metastore object. The
-qBittorrent implementation reuses one authenticated session, disables HTTP/2,
-connection reuse, redirects, proxy use, and automatic retry, streams one
-bounded multipart POST, and reports request/byte completion separately. Its
-generic `hash` remains an opaque job locator; only typed v1/v2 claims establish
-identity.
+qBittorrent implementation reuses one authenticated session and streams one
+bounded multipart POST. The Transmission implementation uses its fixed
+two-request CSRF/version handshake and streams one bounded base64 payload in
+the version-appropriate `torrent_add` or `torrent-add` envelope with paused
+state requested. Both implementations disable HTTP/2, connection reuse,
+redirects, proxy use, and automatic retry, and report request/byte completion
+separately. Generic job hashes remain opaque locators. qBittorrent can establish
+typed v1 and v2 identity; Transmission adoption is restricted to v1 because
+its audited ledger exposes only the SHA-1 `hash_string` identity.
 
 Before a new operation, one complete ledger must prove absence. Any unavailable,
 invalid, partial, conflicting, or duplicate typed identity fails closed.
-Hybrid identity requires both hash families on the same job. Names, sizes,
-progress, and paths never select a job. After the POST, success requires one
-unique exact job, expected size, stopped state, and exact lexical save/content
-paths. This is still a client claim: the completion marker says
-`adopted_pending_client_recheck`, while the raw metafile variant remains
-unobservable to qBittorrent.
+Hybrid identity requires both hash families on the same qBittorrent job and is
+therefore ineligible for Transmission adoption. Names, sizes, progress, and
+paths never select a job. After the POST, success requires one unique exact
+job, expected size, stopped state, and exact lexical save/content paths. For
+Transmission it also requires the same invocation's explicit accepted-add
+response whose returned v1 hash matches the reviewed identity: a duplicate
+response is rejected, and an unknown response cannot be attributed later
+merely because an exact job appears. This is still a client
+claim: the completion marker says `adopted_pending_client_recheck`, while the
+raw metafile variant remains unobservable to either downloader.
 
 The deterministic operation directory is reserved by the materialize layout
 validator and contains canonical no-clobber intent, bounded attempt, and
@@ -786,8 +794,10 @@ crash state is advanced only by prune; ordinary run/resume/status never crosses
 the deletion boundary. The complete tombstone is still read through the same
 bound target and operation identities. Only that same-invocation read creates
 `clientadopt.VerifiedCompletion`, so activation can consume the historical
-completion without treating public JSON as authority. The tombstone does not
-claim that the client job or final is current.
+completion without treating public JSON as authority. Only qBittorrent
+adoption completion can feed the implemented qBittorrent recheck/start port;
+Transmission completion is deliberately rejected at that authority boundary.
+The tombstone does not claim that the client job or final is current.
 
 `client adopt forget` is the separately acknowledged irreversible boundary
 after prune. It selects one full adoption operation ID and reviewed plan ID.
@@ -826,7 +836,8 @@ explicit location change -> current per-file proof -> bracket result
 source-retirement eligibility proof -> separately acknowledged per-name journal
 ```
 
-The implemented activation and retirement paths support explicit resume,
+The implemented qBittorrent activation and client-neutral retirement paths
+support explicit resume,
 preserve no-overwrite/no-implicit-selection defaults, and never infer source
 retirement from materialization or stopped-job adoption. Location change and
 job removal remain unimplemented.

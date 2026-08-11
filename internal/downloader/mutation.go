@@ -22,6 +22,9 @@ type MetafilePayload interface {
 type AddStoppedRequest struct {
 	Metafile MetafilePayload
 	SavePath string
+	// Identity is the reviewed typed identity of Metafile. Implementations
+	// whose add response exposes identity must compare it exactly.
+	Identity TypedIdentity
 }
 
 type MutationReceipt struct {
@@ -43,6 +46,59 @@ type MutationReceipt struct {
 type MutationSession interface {
 	LedgerSession
 	AddStopped(context.Context, AddStoppedRequest) (MutationReceipt, error)
+}
+
+// StoppedAddDriver is the deliberately narrow mutation port used by client
+// adoption. It cannot recheck, start, move, remove, or otherwise control an
+// existing job.
+type StoppedAddDriver interface {
+	LedgerDriver
+	OpenMutationSession(context.Context, Credential) (MutationSession, error)
+	ClientConfigID(string) (string, error)
+}
+
+// StoppedAddDescriptor is code-owned policy for one audited built-in stopped
+// add implementation. In particular, a read adapter does not gain mutation
+// authority merely by returning a matching Driver string in a snapshot.
+type StoppedAddDescriptor struct {
+	Driver         string
+	OpenRequests   int
+	SupportsV1     bool
+	SupportsV2     bool
+	SupportsHybrid bool
+}
+
+func DescribeStoppedAddDriver(driver string) (StoppedAddDescriptor, bool) {
+	switch driver {
+	case DriverQBittorrent:
+		return StoppedAddDescriptor{
+			Driver: DriverQBittorrent, OpenRequests: 1,
+			SupportsV1: true, SupportsV2: true, SupportsHybrid: true,
+		}, true
+	case DriverTransmission:
+		return StoppedAddDescriptor{
+			Driver: DriverTransmission, OpenRequests: 2,
+			SupportsV1: true,
+		}, true
+	default:
+		return StoppedAddDescriptor{}, false
+	}
+}
+
+func (descriptor StoppedAddDescriptor) SupportsIdentity(identity TypedIdentity) bool {
+	if identity.Validate() != nil {
+		return false
+	}
+	switch {
+	case identity.InfoHashV1 != "" && identity.InfoHashV2 != "":
+		return descriptor.SupportsHybrid
+	case identity.InfoHashV1 != "":
+		return descriptor.SupportsV1
+	case identity.InfoHashV2 != "":
+		return descriptor.SupportsV2
+	default:
+		return false
+	}
 }
 
 const (
@@ -226,6 +282,59 @@ func AssessLedgerIdentity(snapshot LedgerSnapshot, identity TypedIdentity) (Ledg
 		result.Status = LedgerIdentityAbsent
 	}
 	return result, nil
+}
+
+// ValidateLedgerDriverClaims checks the code-owned identity semantics of an
+// audited built-in adapter. It is intentionally separate from the generic
+// typed-identity matcher so tests and internal algorithms can still exercise
+// the matcher with synthetic driver names without granting those names client
+// adoption authority.
+func ValidateLedgerDriverClaims(snapshot LedgerSnapshot) error {
+	if _, recognized := DescribeLedgerDriver(snapshot.Driver); !recognized {
+		return fmt.Errorf("downloader ledger driver is unsupported")
+	}
+	for _, job := range snapshot.Jobs {
+		if !validDriverIdentityEvidence(snapshot.Driver, job) {
+			return fmt.Errorf("downloader ledger identity evidence is invalid")
+		}
+	}
+	return nil
+}
+
+func validDriverIdentityEvidence(driver string, job Torrent) bool {
+	if len(job.IdentityEvidence) > 8 || len(job.IdentityIssues) > 8 {
+		return false
+	}
+	for _, values := range [][]string{job.IdentityEvidence, job.IdentityIssues} {
+		for _, value := range values {
+			if value == "" || len(value) > 128 {
+				return false
+			}
+		}
+	}
+	if job.IdentityStatus != IdentityStatusValid {
+		return true
+	}
+	switch driver {
+	case DriverQBittorrent:
+		var v1, v2 bool
+		for _, evidence := range job.IdentityEvidence {
+			switch evidence {
+			case "magnet_xt_btih_hex", "magnet_xt_btih_base32":
+				v1 = true
+			case "magnet_xt_btmh_sha256":
+				v2 = true
+			default:
+				return false
+			}
+		}
+		return (job.InfoHashV1 == "" || v1) && (job.InfoHashV2 == "" || v2)
+	case DriverTransmission:
+		return job.InfoHashV1 != "" && job.InfoHashV2 == "" && len(job.IdentityEvidence) == 1 &&
+			job.IdentityEvidence[0] == "transmission_hash_string_sha1" && len(job.IdentityIssues) == 0
+	default:
+		return false
+	}
 }
 
 func classifyTypedJob(identity TypedIdentity, job Torrent) string {

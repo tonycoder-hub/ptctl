@@ -323,7 +323,7 @@ func selectRetentionMarker(report *RetentionReport, marker RetentionIntent, opti
 	}
 	plan := marker.Intent.Plan
 	report.Operation = OperationReport{ID: marker.OperationID.String(), Status: "pruning", PhaseBefore: "adopted_pending_client_recheck", PhaseAfter: "retention_intent_recorded", Resumable: false}
-	report.Plan = PlanReport{ID: marker.PlanID, ExpectedID: options.ExpectedPlanID, Matches: true, Action: plan.Action,
+	report.Plan = PlanReport{ID: marker.PlanID, ExpectedID: options.ExpectedPlanID, Matches: true, Action: plan.Action, Driver: plan.Driver,
 		ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID, ClientPathSemantics: plan.ClientPathSemantics,
 		ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef}
 	report.Target.ExpectedRootIdentity = marker.TargetRootIdentity
