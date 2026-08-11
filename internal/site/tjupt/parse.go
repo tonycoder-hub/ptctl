@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	xhtml "golang.org/x/net/html"
 
@@ -43,6 +45,9 @@ func classifyBonusPage(finalURL *url.URL, body []byte) (domain.AuthenticationSta
 		return domain.AuthenticationUnauthenticated, ""
 	}
 	if challengeMarker.Match(body) {
+		return domain.AuthenticationIndeterminate, ""
+	}
+	if finalURL == nil || !strings.HasSuffix(strings.ToLower(finalURL.Path), "/mybonusapps.php") || finalURL.RawQuery != "" || !utf8.Valid(body) {
 		return domain.AuthenticationIndeterminate, ""
 	}
 	username := parseUsername(body)
@@ -89,16 +94,82 @@ func parseUsername(body []byte) string {
 	if end < 0 {
 		return ""
 	}
-	return strings.TrimSpace(title[:end])
+	username := strings.TrimSpace(title[:end])
+	if !validAccountText(username, 256) {
+		return ""
+	}
+	return username
 }
 
 func parseBonusBalance(body []byte) string {
 	text := plainText(string(body))
-	match := balancePattern.FindStringSubmatch(text)
-	if len(match) != 3 {
+	match := balancePattern.FindStringSubmatchIndex(text)
+	if len(match) != 6 || match[2] < 0 || match[3] < match[2] {
 		return ""
 	}
-	return strings.ReplaceAll(match[1], ",", "")
+	if match[3] < len(text) {
+		next := text[match[3]]
+		if (next >= '0' && next <= '9') || next == ',' || next == '.' {
+			return ""
+		}
+	}
+	return canonicalBonusBalance(text[match[2]:match[3]])
+}
+
+func validAccountText(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || !utf8.ValidString(value) {
+		return false
+	}
+	for _, current := range value {
+		if unicode.IsControl(current) || unicode.In(current, unicode.Cf, unicode.Cs) {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalBonusBalance(value string) string {
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) > 2 || parts[0] == "" {
+		return ""
+	}
+	integer := parts[0]
+	if strings.Contains(integer, ",") {
+		groups := strings.Split(integer, ",")
+		if len(groups[0]) < 1 || len(groups[0]) > 3 || !decimalDigits(groups[0]) {
+			return ""
+		}
+		for _, group := range groups[1:] {
+			if len(group) != 3 || !decimalDigits(group) {
+				return ""
+			}
+		}
+	} else if !decimalDigits(integer) {
+		return ""
+	}
+	integer = strings.ReplaceAll(integer, ",", "")
+	if len(parts) == 1 {
+		return integer
+	}
+	if parts[1] == "" || !decimalDigits(parts[1]) {
+		return ""
+	}
+	return integer + "." + parts[1]
+}
+
+func decimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, current := range value {
+		if current < '0' || current > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func parseBonusRows(body []byte) []domain.BonusCatalogRow {

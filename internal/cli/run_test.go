@@ -38,10 +38,10 @@ func TestCredentialMustNotBeAcceptedAsArgument(t *testing.T) {
 	}
 }
 
-func TestInvalidOutputAndMissingCapabilityDoNotReadSecrets(t *testing.T) {
+func TestInvalidOutputAndRejectedSiteDoNotReadSecrets(t *testing.T) {
 	for _, args := range [][]string{
 		{"site", "status", "--cookie-stdin", "--output", "yaml", "tjupt"},
-		{"site", "account", "--cookie-stdin", "tjupt"},
+		{"site", "account", "--cookie-stdin", "unknown"},
 		{"client", "status", "--url", "https://seedbox.invalid", "--password-stdin", "--output", "yaml"},
 	} {
 		reader := &trackingReader{}

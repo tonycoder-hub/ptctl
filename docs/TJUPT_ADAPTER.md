@@ -29,6 +29,18 @@ the store phase of `site metafile fetch`, plus the intent/attempt/outcome record
 phases of `site bonus exchange`; storage profile/index commands are a separate
 filesystem-ledger boundary and never contact TJUPT.
 
+## Partial account snapshot
+
+`site account --cookie-stdin tjupt` performs one bounded GET to the exact
+authenticated `mybonusapps.php` route. It requires valid UTF-8, a bounded
+username from the recognized page title, and a canonical bonus decimal. The
+public `site.account` snapshot contains those two site claims and an observation
+time. Uploaded/downloaded totals, ratio, seeding, and leeching remain absent;
+the adapter does not scrape unrelated markup to fill optional fields.
+
+The snapshot is read-only and point-in-time. It neither authorizes a bonus form
+submission nor proves that a prior exchange caused a balance change.
+
 ## Why the bonus catalog remains site-defined
 
 TJUPT identifies itself as NexusPHP. Its authenticated `mybonusapps.php` page

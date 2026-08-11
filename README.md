@@ -120,8 +120,9 @@ capabilities at the edge, not assumptions in the core domain model.
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
 - typed, capability-checked site ports instead of a monolithic driver;
-- an experimental TJUPT session check, torrent search, torrent-detail
-  observation, bonus catalog parser, and exact-option zero-write bonus review
+- an experimental TJUPT session check, bounded partial account snapshot,
+  torrent search, torrent-detail observation, bonus catalog parser, and
+  exact-option zero-write bonus review
   through one bounded, same-origin HTTPS GET per invocation, with fail-closed
   page recognition, no redirect, and no retry; detail requests deliberately
   omit NexusPHP's view-counting `hit` parameter; bonus review records a bounded
@@ -679,6 +680,7 @@ secret input is refused. Do not paste the value into issues, logs, or chat.
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
+printf '%s' "$TJUPT_COOKIE" | ptctl site account --cookie-stdin tjupt
 printf '%s' "$TJUPT_COOKIE" | ptctl site search --cookie-stdin tjupt "Ubuntu"
 printf '%s' "$TJUPT_COOKIE" | ptctl site detail --cookie-stdin tjupt REMOTE_ID
 printf '%s' "$TJUPT_COOKIE" | ptctl site bonus-catalog --cookie-stdin tjupt
@@ -691,6 +693,12 @@ only `details.php?id=REMOTE_ID`: it does not send `hit=1`, follow the download
 link, fetch the metafile, or persist an observation. Its display title, optional
 peer counts, and matching internal link are current site claims, not metafile
 identity or storage-content proof.
+
+`site account` reads the authenticated `mybonusapps.php` page and reports only
+the username and canonical bonus balance proved by that page. Uploaded and
+downloaded totals, ratio, and active peer counts remain absent rather than
+being guessed from unrelated markup. The snapshot is a point-in-time site
+claim, not a signed ledger or proof of a bonus exchange.
 
 `bonus-catalog` now exposes a bounded selector hint when its compatibility
 parser can identify one exact hidden numeric `option`; a missing selector is

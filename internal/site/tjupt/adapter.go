@@ -50,6 +50,7 @@ func New(baseURL string) *Adapter {
 func (a *Adapter) Descriptor() domain.SiteDescriptor {
 	capabilities := []domain.Capability{
 		domain.CapabilityAuthCheck,
+		domain.CapabilityAccountRead,
 		domain.CapabilitySearch,
 		domain.CapabilityBonusRead,
 	}
@@ -118,6 +119,9 @@ func (a *Adapter) BonusCatalog(ctx context.Context, credential site.Credential) 
 }
 
 func (a *Adapter) get(ctx context.Context, credential site.Credential, path string, query url.Values) ([]byte, *url.URL, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	if credential.Method() != domain.AuthMethodCookieHeader {
 		return nil, nil, fmt.Errorf("TJUPT requires cookie_header authentication")
 	}

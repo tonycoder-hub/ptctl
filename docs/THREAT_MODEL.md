@@ -100,11 +100,16 @@ HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
 callers must not loop or parallelize site commands. There is no Cloudflare or
 CAPTCHA bypass.
 
-Ordinary status, search, bonus catalog/review, and detail reads use the same fresh HTTP/1.1,
-no-reuse, no-redirect transport as the effectful fetch. The detail route sends
+Ordinary status, account, search, bonus catalog/review, and detail reads use the
+same fresh HTTP/1.1, no-reuse, no-redirect transport as the effectful fetch.
+The detail route sends
 only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
 parameter and never follows the download reference found in the page.
 Bonus review sends only the one GET and has no POST-capable transport surface.
+The account projection accepts only the exact authenticated bonus-page route,
+valid UTF-8, a bounded username, and a canonical bonus decimal. Fields absent
+from that page remain unknown, and the snapshot cannot confirm exchange
+causality or a continuously current balance.
 
 The separate bonus-exchange command has a fixed two-request ceiling: one fresh
 review GET and, only after a new durable deterministic attempt marker, at most

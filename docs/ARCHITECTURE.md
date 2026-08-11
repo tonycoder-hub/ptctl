@@ -284,6 +284,12 @@ and durable action schemas. They are not forced into universal fields. The effec
 metafile capability is instead a tracker-visible GET plus a private-store
 publication boundary; it grants no general site-write or detail-read authority.
 
+The TJUPT `account.read` port is deliberately partial. One authenticated,
+bounded `mybonusapps.php` response supplies only a validated username and
+canonical bonus balance. Optional uploaded/downloaded totals, ratio, and peer
+counts stay absent. This observation is a current site claim and is not reused
+as submission authority or as proof that an exchange changed the balance.
+
 ## Read-only bonus-offer review
 
 `site bonus review` is the first concrete `bonus.offer.review` port. It pins the
