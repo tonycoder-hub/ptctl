@@ -58,19 +58,23 @@ const (
 	// reviewed, journaled removal of empty immediate source-parent directories.
 	ParentCleanupOperationDirectoryPrefix = ".ptctl-parent-cleanup-"
 	parentCleanupDirectoryPrefix          = ParentCleanupOperationDirectoryPrefix
-	intentFileName                        = "intent.json"
-	journalDirectoryName                  = "journal"
-	stageDirectoryName                    = "stage"
-	scratchDirectoryName                  = "scratch"
-	retentionDirectoryName                = "retention"
-	retentionIntentFileName               = "intent.json"
-	retentionCompleteName                 = "complete.json"
-	eventFilePrefix                       = "event-"
-	eventFileSuffix                       = ".json"
+	// ParentCleanupForgetMarkerPrefix reserves the target-root recovery marker
+	// used while one exact retained parent-cleanup tombstone is forgotten.
+	ParentCleanupForgetMarkerPrefix = ".ptctl-parent-cleanup-forget-"
+	parentCleanupForgetMarkerPrefix = ParentCleanupForgetMarkerPrefix
+	intentFileName                  = "intent.json"
+	journalDirectoryName            = "journal"
+	stageDirectoryName              = "stage"
+	scratchDirectoryName            = "scratch"
+	retentionDirectoryName          = "retention"
+	retentionIntentFileName         = "intent.json"
+	retentionCompleteName           = "complete.json"
+	eventFilePrefix                 = "event-"
+	eventFileSuffix                 = ".json"
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientAdoptForgetMarkerPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, clientRemoveDirectoryPrefix, clientRemoveForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix, parentCleanupDirectoryPrefix}
+	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientAdoptForgetMarkerPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, clientRemoveDirectoryPrefix, clientRemoveForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix, parentCleanupDirectoryPrefix, parentCleanupForgetMarkerPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {

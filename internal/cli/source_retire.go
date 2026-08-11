@@ -101,6 +101,8 @@ func (a *app) seedRetireHelp() {
   ptctl seed retire parent-cleanup run --target PATH --retirement-operation ID --retirement-plan-id ID --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [--output table|json]
   ptctl seed retire parent-cleanup resume --target PATH --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [--output table|json] OPERATION_ID
   ptctl seed retire parent-cleanup status --target PATH [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup prune --target PATH --expect-cleanup-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup forget --target PATH --expect-cleanup-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
 The plan command is read-only. It requires one complete live source discovery,
 a current exact materialized-final proof, one canonical terminal client
@@ -142,7 +144,10 @@ roots and every higher ancestor, never reports child names, and grants no
 directory-deletion authority. Run must reproduce an explicit reviewed cleanup
 plan ID, journals each exact attempt, rechecks emptiness after that durable
 delay, and removes only the same empty directory identity. Resume is explicit;
-status is historical only. A pruned tombstone cannot authorize a new plan.
+status is historical only. Its separately acknowledged prune replaces one
+terminal journal with an exact no-path tombstone; forget irreversibly removes
+only that exact tombstone through a root-level recovery marker. A pruned
+tombstone cannot authorize a new plan or recover an absolute parent path.
 `)
 }
 

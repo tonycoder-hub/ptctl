@@ -13,7 +13,7 @@ domains and reconciles them around verifiable torrent metadata.
 > explicit `client activate run|resume|prune|forget` recheck/start operations,
 > acknowledged `client remove run|resume|prune|forget` exact-job removal that always
 > retains local data, acknowledged source-name retirement, and the separate
-> acknowledged `seed retire parent-cleanup run|resume` empty-directory boundary. The
+> acknowledged `seed retire parent-cleanup run|resume|prune|forget` empty-directory boundary. The
 > fetch also crosses a separate,
 > tracker-visible read boundary. Materialize creates a new target layout;
 > `prune` can delete only one explicitly selected operation's owner-private
@@ -38,8 +38,10 @@ domains and reconciles them around verifiable torrent metadata.
 > terminal retirement operation's private journal and retains its tombstone;
 > `seed retire forget` has a third acknowledgement and irreversibly removes
 > that exact tombstone plus its last recovery marker. Parent cleanup can remove
-> only reviewed same-identity empty immediate parents, never recursively; its
-> private execution journal has no pruning/forget transition in this slice.
+> only reviewed same-identity empty immediate parents, never recursively;
+> `parent-cleanup prune` replaces only one terminal private cleanup journal with
+> an exact no-path tombstone, and `parent-cleanup forget` separately removes
+> only that tombstone plus its last recovery marker.
 > Reads may still update
 > atime or hydrate an offline placeholder.
 
@@ -203,6 +205,10 @@ capabilities at the edge, not assumptions in the core domain model.
   candidate before its first write, removes only same-identity immediate
   parents that are still empty, and supports explicit resume and historical
   status without recursive ancestor cleanup;
+- separately acknowledged pruning of one terminal parent-cleanup journal into
+  an exact no-path historical tombstone, followed only on explicit request by
+  recoverable identity-bound deletion of that tombstone and its final root
+  attribution marker;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -213,8 +219,7 @@ client-layout reconciliation for attributed file semantics such as padding or
 symlink leaves and for zero-length files without an observed physical binding,
   reflink/hardlink or cross-filesystem materialization, automatic execution of
   serialized plan reports, recursive or policy-selected source-parent cleanup,
-  parent-cleanup journal pruning/forgetting, staging cleanup or rollback,
-published-layout deletion, site
+  staging cleanup or rollback, published-layout deletion, site
 writes, browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
 
@@ -1208,6 +1213,18 @@ ptctl seed retire parent-cleanup resume \
   --output json \
   sha256:PARENT_CLEANUP_OPERATION_DIGEST
 
+ptctl seed retire parent-cleanup prune --target "D:\PT" \
+  --expect-cleanup-plan-id sha256:PARENT_CLEANUP_PLAN_DIGEST \
+  --acknowledge-operation-state-deletion \
+  --output json \
+  sha256:PARENT_CLEANUP_OPERATION_DIGEST
+
+ptctl seed retire parent-cleanup forget --target "D:\PT" \
+  --expect-cleanup-plan-id sha256:PARENT_CLEANUP_PLAN_DIGEST \
+  --acknowledge-historical-evidence-deletion \
+  --output json \
+  sha256:PARENT_CLEANUP_OPERATION_DIGEST
+
 ptctl seed retire prune --target "D:\PT" \
   --expect-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
   --acknowledge-operation-state-deletion \
@@ -1268,9 +1285,35 @@ its absence claims are historical and it does not reopen source roots. No
 parent-cleanup command recursively removes ancestors, search roots, files, or
 non-empty directories, and no serialized report is accepted as authority.
 Resume authority begins only once the canonical intent is durable; an earlier
-partial initialization fails closed and this slice has no automatic repair or
-prune for that private debris. Execution JSON kind is
+partial initialization fails closed and is not inferred into a resumable
+operation. Execution JSON kind is
 `content.source_retirement.parent_cleanup`.
+
+`parent-cleanup prune` is a distinct local deletion boundary. It accepts one
+explicit terminal cleanup operation, the matching cleanup-plan ID, and
+`--acknowledge-operation-state-deletion`. Before deleting anything it validates
+the canonical terminal cleanup journal, seals a private retention intent that
+contains no absolute parent paths, and performs a bounded exact inventory of
+the flat `journal/` and empty `scratch/` namespaces. Only those identity-bound
+private objects are removed. A retention completion is published after the
+operation root is exactly its lock plus the two-marker retention directory.
+Intent-only or post-removal crash states are advanced only by repeating the
+same prune selector; ordinary run, resume, and status stop at the durable prune
+boundary. The tombstone retains cleanup/retirement lineage and removed-parent
+counts as historical evidence, but cannot recover a parent path or prove that
+a parent remains absent. JSON kind is
+`content.source_retirement.parent_cleanup.retention`.
+
+`parent-cleanup forget` is the final, separately acknowledged boundary. It
+accepts only that complete exact tombstone, the same full operation and plan
+IDs, and `--acknowledge-historical-evidence-deletion`. It first publishes an
+owner-private root-level intent containing the exact no-path tombstone, then
+removes the two retained markers, empty retention directory, and exact
+lock-only operation subtree. The root marker is removed last after target-root
+durability is confirmed. A crash can resume only from the same explicit IDs;
+there is no list/latest or age selector. Once the last marker is gone, a repeat
+reports `absent_unattributed`, never historical idempotent success. JSON kind
+is `content.source_retirement.parent_cleanup.forget`.
 
 `prune` is a second, narrower deletion boundary. It accepts only one explicit
 terminal operation ID, the exact reviewed plan ID, and
@@ -1678,6 +1721,15 @@ explicit selector, terminal-state, filesystem, or bounded-inventory policy
 blocker returns `4`. It never reads downloader credentials or contacts the
 client.
 
+Parent-cleanup pruning and forgetting use the same report-first lattice:
+`pruned`/`already_pruned` and a newly confirmed `forgotten` return `0`;
+interruption, uncertain durability/removal, or unattributed absence after the
+last forget marker return `1`; invalid usage or a missing acknowledgement
+returns `2`; marker/journal/namespace integrity failure returns `3`; and an
+explicit selector, terminal-state, filesystem, or bounded-inventory policy
+blocker returns `4`. Neither transition reads source roots, credentials, or a
+downloader.
+
 Client-activation pruning uses the same local report-first lattice:
 `pruned`/`already_pruned` return `0`, interruption or uncertain durability or
 removal returns `1`, invalid usage or a missing acknowledgement returns `2`,
@@ -1749,7 +1801,9 @@ explicit retention pruning and exact tombstone forgetting), reviewed client
 recheck/start (including explicit retention pruning and exact tombstone
 forgetting), and acknowledged
 source-name retirement (including its separate journal pruning and explicit
-last-evidence forget transition), are
+last-evidence forget transition), and exact empty-parent cleanup (including
+its separate no-path journal pruning and explicit last-evidence forget
+transition), are
 the explicit write exceptions to the otherwise
 zero-write operational surface.
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md).

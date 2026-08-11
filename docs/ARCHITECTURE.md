@@ -1339,12 +1339,44 @@ claims historical; it does not touch the source roots. Reports hide absolute
 parent paths by default and expose bounded attempt/removal/durability receipts.
 The protocol remains bracketed and non-atomic with respect to unrelated writers
 after its final observations; it does not claim recursive cleanup, block
-reclamation, or rollback. This slice deliberately retains the completed or
-partial parent-cleanup operation journal; it does not yet add a prune/forget
-authority for that new state family. A crash or filesystem failure before the
+reclamation, or rollback. A crash or filesystem failure before the
 canonical intent is durably published leaves fail-closed private initialization
 debris rather than resumable authority; the implementation never repairs that
 namespace by inference.
+
+Terminal parent-cleanup journals have their own retention transition:
+
+```text
+complete canonical parent-cleanup journal + explicit operation/plan + prune ack
+  -> durable owner-private no-path retention intent
+  -> bounded exact inventory of flat journal + empty scratch
+  -> identity-bound removal of only those private control objects
+  -> exact lock + retention-directory namespace audit
+  -> durable retention completion
+```
+
+`seed retire parent-cleanup prune` preserves cleanup plan/intent/completion
+IDs, retirement operation/plan/completion lineage, search-scope ID, removed
+parent count, and retired-file count. It deliberately preserves no absolute
+parent path or per-parent filesystem identity. Therefore the tombstone is
+historical terminal evidence but cannot rebuild a cleanup plan, reopen a
+source namespace, or assert current absence. An intent-only or post-removal
+crash state blocks ordinary run/resume/status and can be advanced only with the
+same full operation ID, cleanup-plan ID, and prune acknowledgement. There is no
+list/latest or age selection.
+
+The separately acknowledged `seed retire parent-cleanup forget` transition
+copies the complete exact tombstone into a deterministic, owner-private
+root-level recovery intent before deleting either retained marker. It then
+removes the completion and intent, the empty retention directory, and the
+exact lock-only operation subtree; the unchanged root marker is removed last
+after the operation name is proven durably absent. Only that explicit forget
+selector may recover either durable boundary. Ordinary run/resume/status and
+prune observe the boundary without advancing it. After the last marker is
+removed, subsequent absence is `absent_unattributed`, not historical success.
+The JSON kinds are
+`content.source_retirement.parent_cleanup.retention` and
+`content.source_retirement.parent_cleanup.forget`.
 
 Terminal source-retirement journals may be retired only through the separate
 `seed retire prune` transition. The selector is one full operation ID plus its

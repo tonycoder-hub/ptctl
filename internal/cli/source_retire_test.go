@@ -50,6 +50,18 @@ type sourceRetireParentCleanupExecutionJSONEnvelope struct {
 	Data   sourceretire.ParentCleanupExecutionReport `json:"data"`
 }
 
+type sourceRetireParentCleanupRetentionJSONEnvelope struct {
+	Schema string                                    `json:"schema"`
+	Kind   string                                    `json:"kind"`
+	Data   sourceretire.ParentCleanupRetentionReport `json:"data"`
+}
+
+type sourceRetireParentCleanupForgetJSONEnvelope struct {
+	Schema string                                 `json:"schema"`
+	Kind   string                                 `json:"kind"`
+	Data   sourceretire.ParentCleanupForgetReport `json:"data"`
+}
+
 func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
 	fixture := newClientAdoptCLIFixture(t)
 	server := newClientActivateServer(t, fixture.meta, fixture.raw)
@@ -367,7 +379,9 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	errOut.Reset()
 	if code := Run([]string{"seed", "retire", "parent-cleanup", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
 		!strings.Contains(out.String(), "immediate parents") || !strings.Contains(out.String(), "zero-write") ||
-		!strings.Contains(out.String(), "acknowledge-empty-parent-removal") || !strings.Contains(out.String(), "recursively removes") {
+		!strings.Contains(out.String(), "acknowledge-empty-parent-removal") || !strings.Contains(out.String(), "recursively removes") ||
+		!strings.Contains(out.String(), "acknowledge-operation-state-deletion") ||
+		!strings.Contains(out.String(), "acknowledge-historical-evidence-deletion") || !strings.Contains(out.String(), "no-path tombstone") {
 		t.Fatalf("parent cleanup help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()
@@ -442,6 +456,24 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 		"--expect-cleanup-plan-id", plan, "--acknowledge-empty-parent-removal", "--max-parents", "10001"},
 		reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
 		t.Fatalf("over-protocol cleanup review limit code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	cleanupOperation, err := sourceretire.ParentCleanupOperationIDForPlanID(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "prune", "--target", "missing",
+		"--expect-cleanup-plan-id", plan, cleanupOperation.String()}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("missing parent cleanup prune acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "forget", "--target", "missing",
+		"--expect-cleanup-plan-id", plan, cleanupOperation.String()}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("missing parent cleanup forget acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
 	}
 }
 
@@ -729,6 +761,85 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 		t.Fatalf("parent cleanup terminal resume disagrees: %s", out.String())
 	}
 
+	cleanupPruneArgs := []string{"seed", "retire", "parent-cleanup", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-cleanup-plan-id", cleanup.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json",
+		cleanupExecution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupPruneArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup prune code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanupPruned := decodeSourceRetireParentCleanupRetentionReport(t, out.Bytes())
+	if cleanupPruned.Schema != "ptctl.dev/v1" || cleanupPruned.Kind != "content.source_retirement.parent_cleanup.retention" ||
+		cleanupPruned.Data.Outcome != sourceretire.ParentCleanupRetentionOutcomePruned || !cleanupPruned.Data.Markers.ExactTombstone ||
+		cleanupPruned.Data.WritesPerformed == 0 || cleanupPruned.Data.Operation.Resumable || cleanupPruned.Data.Blockers == nil ||
+		cleanupPruned.Data.Issues == nil || cleanupPruned.Data.Warnings == nil {
+		t.Fatalf("unexpected parent cleanup prune report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run(cleanupStatusArgs, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 {
+		t.Fatalf("retained parent cleanup status code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	cleanupRetained := decodeSourceRetireParentCleanupExecutionReport(t, out.Bytes())
+	if cleanupRetained.Data.Outcome != sourceretire.ParentCleanupExecutionOutcomeAlreadyRemoved ||
+		cleanupRetained.Data.Operation.Status != "retained" || cleanupRetained.Data.WritesPerformed != 0 || len(cleanupRetained.Data.Directories) != 0 {
+		t.Fatalf("retained parent cleanup status disagrees: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(cleanupPruneArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("idempotent parent cleanup prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	cleanupRepruned := decodeSourceRetireParentCleanupRetentionReport(t, out.Bytes())
+	if cleanupRepruned.Data.Outcome != sourceretire.ParentCleanupRetentionOutcomeAlreadyPruned || cleanupRepruned.Data.WritesPerformed != 0 {
+		t.Fatalf("idempotent parent cleanup prune changed state: %s", out.String())
+	}
+
+	cleanupForgetArgs := []string{"seed", "retire", "parent-cleanup", "forget", "--target", fixture.materialize.targetRoot,
+		"--expect-cleanup-plan-id", cleanup.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json",
+		cleanupExecution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupForgetArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanupForgotten := decodeSourceRetireParentCleanupForgetReport(t, out.Bytes())
+	if cleanupForgotten.Schema != "ptctl.dev/v1" || cleanupForgotten.Kind != "content.source_retirement.parent_cleanup.forget" ||
+		cleanupForgotten.Data.Outcome != sourceretire.ParentCleanupForgetOutcomeForgotten ||
+		!cleanupForgotten.Data.Authority.TargetHistoricalEvidenceErased || cleanupForgotten.Data.Authority.MarkerDurable ||
+		cleanupForgotten.Data.WritesPerformed == 0 || cleanupForgotten.Data.Operation.Resumable || cleanupForgotten.Data.Blockers == nil ||
+		cleanupForgotten.Data.Issues == nil || cleanupForgotten.Data.Warnings == nil {
+		t.Fatalf("unexpected parent cleanup forget report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupForgetArgs, reader, &out, &errOut); code != 1 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("repeated parent cleanup forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanupAbsent := decodeSourceRetireParentCleanupForgetReport(t, out.Bytes())
+	if cleanupAbsent.Data.Outcome != sourceretire.ParentCleanupForgetOutcomeAbsentUnattributed ||
+		cleanupAbsent.Data.WritesPerformed != 0 || cleanupAbsent.Data.Authority.TargetHistoricalEvidenceErased {
+		t.Fatalf("repeated parent cleanup forget claimed historical idempotence: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
 	resumeArgs := append([]string(nil), runArgs...)
 	resumeArgs[2] = "resume"
 	resumeArgs = append(resumeArgs, execution.Data.Operation.ID)
@@ -934,6 +1045,24 @@ func decodeSourceRetireParentCleanupExecutionReport(t *testing.T, raw []byte) so
 	var result sourceRetireParentCleanupExecutionJSONEnvelope
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatalf("decode source retirement parent cleanup execution report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireParentCleanupRetentionReport(t *testing.T, raw []byte) sourceRetireParentCleanupRetentionJSONEnvelope {
+	t.Helper()
+	var result sourceRetireParentCleanupRetentionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement parent cleanup retention report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireParentCleanupForgetReport(t *testing.T, raw []byte) sourceRetireParentCleanupForgetJSONEnvelope {
+	t.Helper()
+	var result sourceRetireParentCleanupForgetJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement parent cleanup forget report: %v\n%s", err, raw)
 	}
 	return result
 }

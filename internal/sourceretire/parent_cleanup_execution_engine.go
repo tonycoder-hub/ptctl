@@ -51,6 +51,16 @@ func RunParentCleanup(ctx context.Context, options ParentCleanupRunOptions) (Par
 	// it before rebuilding the now-historical empty-parent review, so rerunning
 	// the same acknowledged command is idempotent after directories disappear.
 	if existingTarget, targetInfo, bindErr := fsbind.BindExisting(options.Review.TargetRoot); bindErr == nil {
+		report.Target = ParentCleanupExecutionTargetReport{
+			ObservedRootIdentity: targetInfo.Identity.String(), RootIdentityBound: true, SameFilesystem: true,
+		}
+		if controlled, controlErr := applyParentCleanupLifecycleControl(ctx, existingTarget, operation, &report); controlled || controlErr != nil {
+			_ = existingTarget.Close()
+			if controlErr != nil {
+				return mapParentCleanupExecutionError(&report, controlErr, "the existing parent-cleanup lifecycle boundary could not be inspected")
+			}
+			return report, nil
+		}
 		existing, openErr := openParentCleanupJournal(ctx, existingTarget, operation, options.Limits)
 		if openErr == nil {
 			defer existingTarget.Close()
@@ -134,6 +144,12 @@ func RunParentCleanup(ctx context.Context, options ParentCleanupRunOptions) (Par
 		return parentCleanupExecutionIntegrity(&report, "the parent-cleanup operation ID could not be derived")
 	}
 	report.Operation = ParentCleanupExecutionOperationReport{ID: operation.String(), PlanID: review.Plan.ID, Status: "initializing", Phase: "planned"}
+	if controlled, controlErr := applyParentCleanupLifecycleControl(ctx, target, operation, &report); controlled || controlErr != nil {
+		if controlErr != nil {
+			return mapParentCleanupExecutionError(&report, controlErr, "the parent-cleanup lifecycle boundary changed after live review")
+		}
+		return report, nil
+	}
 	intent, err := parentCleanupIntentFromAuthority(operation, review.authority, options.Limits, roots)
 	if err != nil {
 		return mapParentCleanupExecutionError(&report, err, "the live cleanup authority cannot be represented by the execution protocol")
@@ -194,6 +210,12 @@ func ResumeParentCleanup(ctx context.Context, options ParentCleanupResumeOptions
 		return mapParentCleanupExecutionError(&report, err, "the parent-cleanup journal root could not be bound")
 	}
 	defer target.Close()
+	if controlled, controlErr := applyParentCleanupLifecycleControl(ctx, target, options.OperationID, &report); controlled || controlErr != nil {
+		if controlErr != nil {
+			return mapParentCleanupExecutionError(&report, controlErr, "the parent-cleanup lifecycle boundary could not be inspected")
+		}
+		return report, nil
+	}
 	report.addEffect("read_private_parent_cleanup_journal")
 	journal, err := openParentCleanupJournal(ctx, target, options.OperationID, options.Limits)
 	if err != nil {
@@ -239,6 +261,15 @@ func ParentCleanupStatus(ctx context.Context, options ParentCleanupStatusOptions
 		return mapParentCleanupExecutionError(&report, err, "the parent-cleanup journal root could not be bound")
 	}
 	defer target.Close()
+	report.Target = ParentCleanupExecutionTargetReport{
+		ObservedRootIdentity: targetInfo.Identity.String(), RootIdentityBound: true, SameFilesystem: true,
+	}
+	if controlled, controlErr := applyParentCleanupLifecycleControl(ctx, target, options.OperationID, &report); controlled || controlErr != nil {
+		if controlErr != nil {
+			return mapParentCleanupExecutionError(&report, controlErr, "the parent-cleanup lifecycle boundary could not be inspected")
+		}
+		return report, nil
+	}
 	report.addEffect("read_private_parent_cleanup_journal")
 	journal, err := openParentCleanupJournal(ctx, target, options.OperationID, options.Limits)
 	if err != nil {
@@ -258,6 +289,13 @@ func ParentCleanupStatus(ctx context.Context, options ParentCleanupStatusOptions
 	}
 	report.finalize()
 	return report, nil
+}
+
+func applyParentCleanupLifecycleControl(ctx context.Context, target *fsbind.Session, operation ParentCleanupOperationID, report *ParentCleanupExecutionReport) (bool, error) {
+	if controlled, err := applyParentCleanupForgetControl(ctx, target, operation, report); controlled || err != nil {
+		return controlled, err
+	}
+	return applyParentCleanupRetentionControl(ctx, target, operation, report)
 }
 
 func continueParentCleanup(ctx context.Context, report *ParentCleanupExecutionReport, journal *parentCleanupJournal, roots []string, showPaths bool) (ParentCleanupExecutionReport, error) {

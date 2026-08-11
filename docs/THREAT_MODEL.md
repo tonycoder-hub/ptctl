@@ -710,7 +710,30 @@ or non-empty directories and never performs recursive deletion. `status` is a
 historical journal read only; it intentionally does not claim that source
 namespaces remain absent now. A partial operation namespace created before the
 canonical intent became durable is not repaired or treated as resume authority;
-it remains fail-closed private debris pending a future explicit cleanup design.
+it remains fail-closed private debris rather than being inferred into a valid
+operation.
+
+Parent-cleanup heavy-state deletion is a separate, locally acknowledged
+authority. `parent-cleanup prune` accepts one full operation ID and its exact
+cleanup-plan ID; no list/latest, age, or policy selector exists. It validates a
+terminal canonical journal, durably seals a retention intent with no absolute
+parent paths, and performs a bounded exact inventory before removing only the
+identity-bound flat journal and empty scratch state. Completion is recorded
+only after the remaining namespace is exactly the operation lock plus the two
+retention markers. Intent-only and post-removal crash states block ordinary
+run/resume/status and are advanced only by the same prune selector. The sealed
+tombstone preserves historical lineage and counts but cannot recreate a path,
+authorize another directory removal, or prove current absence.
+
+`parent-cleanup forget` is a third authority with a distinct historical-
+evidence-deletion acknowledgement. Before touching a complete exact tombstone
+it publishes a deterministic owner-private root marker containing that no-path
+evidence. It then removes only the retained markers, their empty directory,
+and the exact lock-only operation subtree; the root marker is removed last
+after parent-directory durability. A crash resumes only from the same explicit
+operation and plan IDs. Ordinary status and prune recognize this boundary but
+never advance it. Once the last marker is gone, the tool reports only
+unattributed absence and cannot infer a previous successful forget.
 
 All usage, metafile, current-final, terminal-activation, mapping, endpoint, and
 live-source discovery/preflight failures are handled before password stdin and
@@ -1017,9 +1040,8 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - broader quota/age policy
   (materialize, adoption, activation, and source-retirement heavy state have
   exact explicit pruning and each tombstone family has a separately
-  acknowledged forget transition; the newer parent-cleanup journal does not
-  yet have either transition, and no operation is selected automatically by
-  policy);
+  acknowledged forget transition; parent-cleanup now has the same explicit
+  no-path lifecycle, and no operation is selected automatically by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location transitions and client-side

@@ -197,6 +197,8 @@ Usage:
   ptctl seed retire parent-cleanup run --target PATH --retirement-operation ID --retirement-plan-id ID --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [--output table|json]
   ptctl seed retire parent-cleanup resume --target PATH --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [--output table|json] OPERATION_ID
   ptctl seed retire parent-cleanup status --target PATH [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup prune --target PATH --expect-cleanup-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup forget --target PATH --expect-cleanup-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -208,7 +210,7 @@ Safety defaults:
   * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
   * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone; forget has a third acknowledgement and irreversibly deletes only that exact tombstone plus its last recovery marker.
   * Seed retire plan performs fresh proof reads only and grants no deletion authority. Run/resume require a separate exact plan ID and deletion acknowledgement, journal every explicit name, and never remove directories, aliases, padding, empty files, or final content. Prune has its own acknowledgement and deletes only one terminal operation's private journal while retaining a tombstone; forget has a third acknowledgement and deletes only that exact tombstone plus its last recovery marker.
-  * Seed retire parent-cleanup plan is zero-write. Its separately acknowledged run/resume journal and remove only reviewed same-identity empty immediate parents; they never recurse into ancestors, search roots, files, or non-empty directories.
+  * Seed retire parent-cleanup plan is zero-write. Its separately acknowledged run/resume journal and remove only reviewed same-identity empty immediate parents; they never recurse into ancestors, search roots, files, or non-empty directories. Prune replaces one terminal cleanup journal with an exact no-path tombstone; forget separately and irreversibly removes only that exact tombstone through a final root-level recovery marker.
   * Client adoption only adds an absent exact-infohash qBittorrent or Transmission job in stopped mode. Transmission is v1-only; a matching built-in driver can feed the separate reviewed recheck/start workflow. Adoption journals the request intent, never retries an unknown add automatically, and does not recheck, resume, move, or delete content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
   * Client activation only rechecks or starts the reviewed exact existing job, with at most one non-retried mutation per invocation. Its separately acknowledged local prune deletes only one terminal private journal after sealing an exact tombstone and never reads a credential or contacts the client.
   * Client removal targets one reviewed typed-identity job, explicitly keeps local data, journals intent before one non-retried request, and requires exact queue absence plus final filesystem re-verification before completion.
@@ -2111,6 +2113,10 @@ func jsonKind(data any) string {
 		return "content.source_retirement.parent_cleanup_plan"
 	case sourceretire.ParentCleanupExecutionReport:
 		return "content.source_retirement.parent_cleanup"
+	case sourceretire.ParentCleanupRetentionReport:
+		return "content.source_retirement.parent_cleanup.retention"
+	case sourceretire.ParentCleanupForgetReport:
+		return "content.source_retirement.parent_cleanup.forget"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

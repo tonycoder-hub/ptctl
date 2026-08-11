@@ -34,6 +34,10 @@ func (a *app) seedRetireParentCleanup(args []string) error {
 		return a.seedRetireParentCleanupResume(args[1:])
 	case "status":
 		return a.seedRetireParentCleanupStatus(args[1:])
+	case "prune":
+		return a.seedRetireParentCleanupPrune(args[1:])
+	case "forget":
+		return a.seedRetireParentCleanupForget(args[1:])
 	default:
 		return usageError("unknown seed retire parent-cleanup subcommand %q", args[0])
 	}
@@ -45,6 +49,8 @@ func (a *app) seedRetireParentCleanupHelp() {
   ptctl seed retire parent-cleanup run --target PATH --retirement-operation ID --retirement-plan-id ID --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [flags]
   ptctl seed retire parent-cleanup resume --target PATH --search-root PATH [--search-root PATH...] --expect-cleanup-plan-id ID --acknowledge-empty-parent-removal [flags] OPERATION_ID
   ptctl seed retire parent-cleanup status --target PATH [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup prune --target PATH --expect-cleanup-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup forget --target PATH --expect-cleanup-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
 The plan is strictly zero-write. It reads one explicit live terminal source-
 retirement journal, proves the exact retired names currently absent in the same
@@ -59,7 +65,11 @@ Each exact immediate parent gets a durable attempt marker, a fresh post-journal
 empty observation, identity-bound empty-directory removal, and a completion
 marker. Resume selects one exact operation; status is historical and read-only.
 No command recursively removes ancestors, search roots, files, or non-empty
-directories.
+directories. Prune uses a separate acknowledgement to replace one terminal
+cleanup journal with an exact no-path tombstone. Forget uses a third
+acknowledgement, first publishes a root-level recovery marker, then removes
+only that exact tombstone and finally the marker. Neither command selects a
+latest operation or regains parent-path authority from historical state.
 `)
 }
 
@@ -306,6 +316,205 @@ func (a *app) seedRetireParentCleanupStatus(args []string) error {
 		ShowAbsolutePaths: *showAbsolute,
 	})
 	return a.finishParentCleanupExecution(*output, report, operationErr)
+}
+
+func (a *app) seedRetireParentCleanupPrune(args []string) error {
+	fs := newFlagSet("seed retire parent-cleanup prune")
+	output := fs.String("output", "table", "table or json")
+	target := fs.String("target", "", "existing materialized target root containing the terminal parent-cleanup operation")
+	expected := fs.String("expect-cleanup-plan-id", "", "reviewed sha256 parent-cleanup plan ID")
+	acknowledge := fs.Bool("acknowledge-operation-state-deletion", false, "acknowledge deletion of the private cleanup journal and retention of a no-path tombstone")
+	timeout := fs.Duration("timeout", parentCleanupDefaultTimeout, "parent-cleanup operation-state pruning wall-clock budget")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *target == "" {
+		return usageError("seed retire parent-cleanup prune requires --target and exactly one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validSourceRetireExecutionPlanID(*expected) {
+		return usageError("seed retire parent-cleanup prune requires a canonical --expect-cleanup-plan-id")
+	}
+	if !*acknowledge {
+		return usageError("seed retire parent-cleanup prune requires --acknowledge-operation-state-deletion")
+	}
+	if *timeout <= 0 || *timeout > parentCleanupMaxTimeout {
+		return usageError("seed retire parent-cleanup prune --timeout must be greater than zero and no more than 1h")
+	}
+	operation, err := sourceretire.ParseParentCleanupOperationID(fs.Arg(0))
+	derived, deriveErr := sourceretire.ParentCleanupOperationIDForPlanID(*expected)
+	if err != nil || deriveErr != nil || derived != operation {
+		return usageError("seed retire parent-cleanup prune requires matching canonical operation and cleanup plan IDs")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := sourceretire.PruneParentCleanup(ctx, sourceretire.ParentCleanupPruneOptions{
+		TargetRoot: *target, OperationID: operation, ExpectedCleanupPlanID: *expected, Acknowledge: true,
+		JournalLimits:   sourceretire.DefaultParentCleanupExecutionLimits(),
+		RetentionLimits: sourceretire.DefaultExecutionRetentionLimits(),
+	})
+	return a.finishParentCleanupRetention(*output, report, operationErr)
+}
+
+func (a *app) seedRetireParentCleanupForget(args []string) error {
+	fs := newFlagSet("seed retire parent-cleanup forget")
+	output := fs.String("output", "table", "table or json")
+	target := fs.String("target", "", "existing materialized target root containing the retained parent-cleanup tombstone")
+	expected := fs.String("expect-cleanup-plan-id", "", "reviewed sha256 parent-cleanup plan ID")
+	acknowledge := fs.Bool("acknowledge-historical-evidence-deletion", false, "acknowledge irreversible deletion of the retained cleanup tombstone and final historical attribution")
+	timeout := fs.Duration("timeout", parentCleanupDefaultTimeout, "parent-cleanup historical-evidence deletion wall-clock budget")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *target == "" {
+		return usageError("seed retire parent-cleanup forget requires --target and exactly one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validSourceRetireExecutionPlanID(*expected) {
+		return usageError("seed retire parent-cleanup forget requires a canonical --expect-cleanup-plan-id")
+	}
+	if !*acknowledge {
+		return usageError("seed retire parent-cleanup forget requires --acknowledge-historical-evidence-deletion")
+	}
+	if *timeout <= 0 || *timeout > parentCleanupMaxTimeout {
+		return usageError("seed retire parent-cleanup forget --timeout must be greater than zero and no more than 1h")
+	}
+	operation, err := sourceretire.ParseParentCleanupOperationID(fs.Arg(0))
+	derived, deriveErr := sourceretire.ParentCleanupOperationIDForPlanID(*expected)
+	if err != nil || deriveErr != nil || derived != operation {
+		return usageError("seed retire parent-cleanup forget requires matching canonical operation and cleanup plan IDs")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := sourceretire.ForgetParentCleanupTombstone(ctx, sourceretire.ParentCleanupForgetOptions{
+		TargetRoot: *target, OperationID: operation, ExpectedCleanupPlanID: *expected, Acknowledge: true,
+		Limits: sourceretire.DefaultParentCleanupForgetLimits(),
+	})
+	return a.finishParentCleanupForget(*output, report, operationErr)
+}
+
+func (a *app) finishParentCleanupRetention(output string, report sourceretire.ParentCleanupRetentionReport, operationErr error) error {
+	if err := a.writeParentCleanupRetention(output, report); err != nil {
+		return err
+	}
+	if errors.Is(operationErr, sourceretire.ErrExecutionIntegrity) || report.Outcome == sourceretire.ParentCleanupRetentionOutcomeIntegrityFailed {
+		return &integrityErr{message: "parent-cleanup retention state failed integrity validation; see report"}
+	}
+	if report.Outcome == sourceretire.ParentCleanupRetentionOutcomeBlocked {
+		return &inconclusiveErr{message: "parent-cleanup operation-state pruning was blocked; see report"}
+	}
+	if operationErr != nil || report.Outcome == sourceretire.ParentCleanupRetentionOutcomeInterrupted {
+		return fmt.Errorf("parent-cleanup operation-state pruning was interrupted; see report")
+	}
+	return nil
+}
+
+func (a *app) finishParentCleanupForget(output string, report sourceretire.ParentCleanupForgetReport, operationErr error) error {
+	if err := a.writeParentCleanupForget(output, report); err != nil {
+		return err
+	}
+	if errors.Is(operationErr, sourceretire.ErrExecutionIntegrity) || report.Outcome == sourceretire.ParentCleanupForgetOutcomeIntegrityFailed {
+		return &integrityErr{message: "parent-cleanup historical evidence failed integrity validation; see report"}
+	}
+	if report.Outcome == sourceretire.ParentCleanupForgetOutcomeBlocked {
+		return &inconclusiveErr{message: "parent-cleanup historical-evidence deletion was blocked; see report"}
+	}
+	if report.Outcome == sourceretire.ParentCleanupForgetOutcomeAbsentUnattributed {
+		return fmt.Errorf("parent-cleanup historical evidence is absent without a remaining attribution marker; see report")
+	}
+	if operationErr != nil || report.Outcome != sourceretire.ParentCleanupForgetOutcomeForgotten {
+		return fmt.Errorf("parent-cleanup historical-evidence deletion was interrupted or its durability is unconfirmed; see report")
+	}
+	return nil
+}
+
+func (a *app) writeParentCleanupRetention(output string, report sourceretire.ParentCleanupRetentionReport) error {
+	if output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	if output != "table" {
+		return usageError("--output must be table or json")
+	}
+	return writeParentCleanupRetentionHuman(a.stdout, report)
+}
+
+func (a *app) writeParentCleanupForget(output string, report sourceretire.ParentCleanupForgetReport) error {
+	if output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	if output != "table" {
+		return usageError("--output must be table or json")
+	}
+	return writeParentCleanupForgetHuman(a.stdout, report)
+}
+
+func writeParentCleanupRetentionHuman(out io.Writer, report sourceretire.ParentCleanupRetentionReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\n",
+		terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain)
+	writeSourceRetireFindings(w, "BLOCKERS", report.Blockers)
+	writeSourceRetireFindings(w, "ISSUES", report.Issues)
+	fmt.Fprintf(w, "\nOPERATION\nID\t%s\nCLEANUP PLAN\t%s\nSTATUS\t%s\nPHASE\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(valueOrDash(report.Operation.ID)), terminalSafe(valueOrDash(report.Operation.PlanID)), terminalSafe(report.Operation.Status),
+		terminalSafe(report.Operation.Phase), report.Operation.Resumable)
+	fmt.Fprintf(w, "\nTOMBSTONE\nSTATE\t%s\nINTENT MARKER\t%s\nCOMPLETE MARKER\t%s\nINTENT DURABLE\t%t\nCOMPLETION DURABLE\t%t\nEXACT\t%t\nPRUNE RESUMABLE\t%t\n",
+		terminalSafe(report.Markers.State), terminalSafe(valueOrDash(report.Markers.IntentMarkerID)), terminalSafe(valueOrDash(report.Markers.CompleteMarkerID)),
+		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.PruneResumable)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nINTENT\t%s\nTERMINAL COMPLETION\t%s\nRETIREMENT OPERATION\t%s\nRETIREMENT PLAN\t%s\nRETIREMENT COMPLETION\t%s\nSEARCH SCOPE\t%s\nPARENTS REMOVED\t%d\nRETIRED FILES\t%d\nASSURANCE\t%s\n",
+		terminalSafe(valueOrDash(report.Proof.Basis)), terminalSafe(valueOrDash(report.Proof.IntentID)), terminalSafe(valueOrDash(report.Proof.TerminalCompletionID)),
+		terminalSafe(valueOrDash(report.Proof.RetirementOperationID)), terminalSafe(valueOrDash(report.Proof.RetirementPlanID)),
+		terminalSafe(valueOrDash(report.Proof.RetirementCompletionID)), terminalSafe(valueOrDash(report.Proof.SearchScopeID)),
+		report.Proof.ParentsRemoved, report.Proof.RetiredFiles, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nCONTROL DIRECTORIES\t%d\nMARKER TEMPORARIES\t%d\nMARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\n",
+		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications,
+		report.Writes.RemovalAttempts, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved,
+		report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals)
+	fmt.Fprintf(w, "\nLIMITS / USED\nMAX OBJECTS\t%d\nMAX PATH BYTES\t%d\nMAX BYTES\t%d\nMAX MEMORY BYTES\t%d\nOBJECTS\t%d\nPATH BYTES\t%d\nBYTES\t%d\nMEMORY BYTES\t%d\n",
+		report.Limits.MaxObjects, report.Limits.MaxPathBytes, report.Limits.MaxBytes, report.Limits.MaxMemoryBytes,
+		report.Used.ObjectsConsidered, report.Used.PathBytesConsidered, report.Used.BytesConsidered, report.Used.MemoryBytesConsidered)
+	if len(report.Warnings) > 0 {
+		fmt.Fprintln(w, "\nWARNINGS")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+		}
+	}
+	return w.Flush()
+}
+
+func writeParentCleanupForgetHuman(out io.Writer, report sourceretire.ParentCleanupForgetReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\n",
+		terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain)
+	writeSourceRetireFindings(w, "BLOCKERS", report.Blockers)
+	writeSourceRetireFindings(w, "ISSUES", report.Issues)
+	fmt.Fprintf(w, "\nOPERATION\nID\t%s\nCLEANUP PLAN\t%s\nSTATUS\t%s\nPHASE\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(valueOrDash(report.Operation.ID)), terminalSafe(valueOrDash(report.Operation.PlanID)), terminalSafe(report.Operation.Status),
+		terminalSafe(report.Operation.Phase), report.Operation.Resumable)
+	fmt.Fprintf(w, "\nAUTHORITY\nSTATE\t%s\nFORGET MARKER\t%s\nMARKER DURABLE\t%t\nRETENTION INTENT\t%s\nRETENTION COMPLETE\t%s\nEXACT TOMBSTONE EVIDENCE AVAILABLE\t%t\nTARGET HISTORICAL EVIDENCE ERASED\t%t\n",
+		terminalSafe(report.Authority.State), terminalSafe(valueOrDash(report.Authority.MarkerID)), report.Authority.MarkerDurable,
+		terminalSafe(valueOrDash(report.Authority.RetentionIntentMarkerID)), terminalSafe(valueOrDash(report.Authority.RetentionCompleteMarkerID)),
+		report.Authority.ExactTombstoneEvidenceAvailable, report.Authority.TargetHistoricalEvidenceErased)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nINTENT\t%s\nTERMINAL COMPLETION\t%s\nRETIREMENT OPERATION\t%s\nRETIREMENT PLAN\t%s\nRETIREMENT COMPLETION\t%s\nSEARCH SCOPE\t%s\nPARENTS REMOVED\t%d\nRETIRED FILES\t%d\nASSURANCE\t%s\n",
+		terminalSafe(valueOrDash(report.Proof.Basis)), terminalSafe(valueOrDash(report.Proof.IntentID)), terminalSafe(valueOrDash(report.Proof.TerminalCompletionID)),
+		terminalSafe(valueOrDash(report.Proof.RetirementOperationID)), terminalSafe(valueOrDash(report.Proof.RetirementPlanID)),
+		terminalSafe(valueOrDash(report.Proof.RetirementCompletionID)), terminalSafe(valueOrDash(report.Proof.SearchScopeID)),
+		report.Proof.ParentsRemoved, report.Proof.RetiredFiles, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nMARKER TEMPORARIES\t%d\nMARKER PUBLICATIONS\t%d\nAMBIGUOUS MARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\n",
+		report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications, report.Writes.AmbiguousMarkerPublications,
+		report.Writes.RemovalAttempts, report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved,
+		report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals)
+	fmt.Fprintf(w, "\nLIMITS\nMAX MARKER BYTES\t%d\n", report.Limits.MaxMarkerBytes)
+	if len(report.Warnings) > 0 {
+		fmt.Fprintln(w, "\nWARNINGS")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
+		}
+	}
+	return w.Flush()
 }
 
 func (a *app) finishParentCleanupExecution(output string, report sourceretire.ParentCleanupExecutionReport, operationErr error) error {
