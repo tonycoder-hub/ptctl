@@ -194,11 +194,11 @@ type DiscoveryResult struct {
 	verifiedScopeID     string
 }
 
-// VerifiedSource returns the process-local proof retained by this discovery
-// invocation for either a unique complete live-search result or one explicitly
-// selected and live-reverified indexed assignment. It is intentionally omitted
-// from JSON, so a serialized report cannot be replayed later as content
-// authority.
+// VerifiedSource returns the process-local proof retained by this source
+// observation for a unique complete live-search result, one explicitly
+// selected and live-reverified indexed assignment, or one explicitly selected
+// exact layout. It is intentionally omitted from JSON, so a serialized report
+// cannot be replayed later as content authority.
 func (result *DiscoveryResult) VerifiedSource(meta *metafile.MetaInfo) (*metafile.VerifiedSource, bool) {
 	if result == nil || result.verifiedSource == nil ||
 		result.Selection.SelectedID == "" || result.Selection.SelectedID != result.verifiedSelectionID || !result.verifiedSource.Matches(meta) {
@@ -211,6 +211,11 @@ func (result *DiscoveryResult) VerifiedSource(meta *metafile.MetaInfo) (*metafil
 		}
 	case "indexed_explicit":
 		if result.SourceOutcome != "verified_selected" || result.Selection.Status != "ready_explicit" ||
+			result.verifiedScopeID == "" || result.Selection.ScopeID != result.verifiedScopeID {
+			return nil, false
+		}
+	case "exact_root":
+		if result.SourceOutcome != "verified_exact_root" || result.Selection.Status != "ready_exact" ||
 			result.verifiedScopeID == "" || result.Selection.ScopeID != result.verifiedScopeID {
 			return nil, false
 		}

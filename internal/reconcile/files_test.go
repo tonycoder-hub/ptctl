@@ -57,6 +57,104 @@ func TestMultiFileLayoutClosesClientStorageRelation(t *testing.T) {
 	}
 }
 
+func TestExactRootReconcilesPhysicalEmptyFilesAcrossProofFamilies(t *testing.T) {
+	for _, version := range []string{"v1", "v2", "hybrid"} {
+		t.Run(version, func(t *testing.T) {
+			meta, discovery, source, hostRoot := reconciledExactMultiFileWithEmpty(t, version)
+			job := matchingJob(meta, "/downloads/bundle")
+			job.SizeBytes = physicalBytes(meta)
+			job.SavePath = "/downloads"
+			before, after := ledgerPair(job)
+			before.Capabilities.JobFiles, after.Capabilities.JobFiles = true, true
+			limits := downloader.DefaultJobFileLedgerLimits()
+			files := []downloader.JobFile{
+				{Index: 0, RelativeComponents: []string{"bundle", "data.bin"}, SizeBytes: 3, Progress: 1, Selection: downloader.JobFileSelectionSelected, Complete: true},
+				{Index: 1, RelativeComponents: []string{"bundle", "empty.bin"}, SizeBytes: 0, Progress: 1, Selection: downloader.JobFileSelectionSelected, Complete: true},
+			}
+			filesBefore := downloader.JobFileLedgerSnapshot{
+				Driver: downloader.DriverQBittorrent, JobKey: job.Hash,
+				ObservedAtStart: before.ObservedAtEnd.Add(100 * time.Millisecond), ObservedAtEnd: before.ObservedAtEnd.Add(200 * time.Millisecond),
+				Complete: true, Limits: limits,
+				Used: downloader.JobFileLedgerUsage{FilesConsidered: 2, PathBytes: 29, ResponseBytes: 512}, Files: files,
+			}
+			filesAfter := filesBefore
+			filesAfter.ObservedAtStart = filesBefore.ObservedAtEnd.Add(100 * time.Millisecond)
+			filesAfter.ObservedAtEnd = filesBefore.ObservedAtEnd.Add(200 * time.Millisecond)
+			filesAfter.Files = append([]downloader.JobFile(nil), files...)
+			for index := range filesAfter.Files {
+				filesAfter.Files[index].RelativeComponents = append([]string(nil), filesAfter.Files[index].RelativeComponents...)
+			}
+			if key, ok := SelectExactJobForFileRead(meta, before, limits); !ok || key != job.Hash {
+				t.Fatalf("ordinary empty-file manifest was not eligible for one bounded file read: key=%q ok=%t", key, ok)
+			}
+			report, err := Build(BuildInput{
+				Meta: meta, Discovery: discovery, VerifiedSource: source,
+				Client: ClientBracket{
+					Requested: true, Before: &before, After: &after, RequestsMade: 5,
+					FileLayoutMode: "auto", FileLimits: limits, FileAttempted: true, FileRequestsMade: 2,
+					FilesBefore: &filesBefore, FilesAfter: &filesAfter,
+				},
+				PathMapping: &PathMappingOptions{HostRoot: hostRoot, ClientRoot: "/downloads"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Outcome != "consistent" || report.Ledgers.Storage.Status != "verified_exact_root" || !report.Ledgers.Storage.ProcessLocalProof ||
+				relationStatus(report, "storage_content_proof") != "verified_exact_root" || relationStatus(report, "verified_source_vs_job_path") != "same_location" {
+				t.Fatalf("exact empty-file layout did not reconcile: %#v", report)
+			}
+			if report.Ledgers.Downloader.FileLayout.FilesExpected != 2 || report.Ledgers.Downloader.FileLayout.FilesSelected != 2 || report.Ledgers.Downloader.FileLayout.FilesComplete != 2 {
+				t.Fatalf("empty client file was omitted from the ledger: %#v", report.Ledgers.Downloader.FileLayout)
+			}
+			if version == "v1" {
+				unattributed, err := seed.Discover(context.Background(), meta, seed.DiscoverOptions{
+					SearchRoots: []string{hostRoot}, InventoryLimits: storage.DefaultInventoryLimits(),
+					MatchLimits: metafile.DefaultSourceMatchLimits(), Strategy: "copy",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				unattributedSource, ok := unattributed.VerifiedSource(meta)
+				if !ok {
+					t.Fatalf("ordinary discovery did not retain its nonempty proof: %#v", unattributed)
+				}
+				withoutEmptyAuthority, err := Build(BuildInput{
+					Meta: meta, Discovery: unattributed, VerifiedSource: unattributedSource,
+					Client: ClientBracket{
+						Requested: true, Before: &before, After: &after, RequestsMade: 5,
+						FileLayoutMode: "auto", FileLimits: limits, FileAttempted: true, FileRequestsMade: 2,
+						FilesBefore: &filesBefore, FilesAfter: &filesAfter,
+					},
+					PathMapping: &PathMappingOptions{HostRoot: hostRoot, ClientRoot: "/downloads"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if withoutEmptyAuthority.Outcome == "consistent" || relationStatus(withoutEmptyAuthority, "verified_source_vs_job_path") == "same_location" {
+					t.Fatalf("unattributed empty index produced a false path proof: %#v", withoutEmptyAuthority)
+				}
+
+				public := discovery.PublicReportCopy()
+				replayed, err := Build(BuildInput{
+					Meta: meta, Discovery: public, VerifiedSource: source,
+					Client: ClientBracket{
+						Requested: true, Before: &before, After: &after, RequestsMade: 5,
+						FileLayoutMode: "auto", FileLimits: limits, FileAttempted: true, FileRequestsMade: 2,
+						FilesBefore: &filesBefore, FilesAfter: &filesAfter,
+					},
+					PathMapping: &PathMappingOptions{HostRoot: hostRoot, ClientRoot: "/downloads"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if replayed.Outcome == "consistent" || replayed.Ledgers.Storage.ProcessLocalProof || relationStatus(replayed, "storage_content_proof") != "incomplete" {
+					t.Fatalf("public exact-root DTO recreated storage authority: %#v", replayed)
+				}
+			}
+		})
+	}
+}
+
 func TestTransmissionV1MultiFileLayoutClosesClientStorageRelation(t *testing.T) {
 	meta, discovery, source, hostRoot := reconciledMultiFile(t)
 	job, before, after, filesBefore, filesAfter, limits := stableMultiFileBracket(meta)
@@ -314,14 +412,13 @@ func TestFileLayoutRejectsUnsupportedManifestAndNamespaceAmbiguity(t *testing.T)
 	for _, file := range []metafile.File{
 		{Path: []string{"padding"}, Length: 1, Attribute: "p"},
 		{Path: []string{"link"}, Length: 1, Attribute: "l"},
-		{Path: []string{"empty"}, Length: 0},
 	} {
 		if manifestSupportsClientFileLayout(&metafile.MetaInfo{MultiFile: true, Files: []metafile.File{file}}) {
 			t.Fatalf("unsupported manifest file was accepted: %#v", file)
 		}
 	}
-	if !manifestSupportsClientFileLayout(&metafile.MetaInfo{MultiFile: true, Files: []metafile.File{{Path: []string{"ordinary"}, Length: 1}}}) {
-		t.Fatal("ordinary nonempty file layout was rejected")
+	if !manifestSupportsClientFileLayout(&metafile.MetaInfo{MultiFile: true, Files: []metafile.File{{Path: []string{"ordinary"}, Length: 1}, {Path: []string{"empty"}, Length: 0}}}) {
+		t.Fatal("ordinary layout containing a physical empty file was rejected")
 	}
 
 	if _, err := parseClientRelativeComponents([]string{"%2e%2e"}, false); err != nil {
@@ -488,6 +585,62 @@ func reconciledMultiFileVersion(t *testing.T, version string) (*metafile.MetaInf
 	source, ok := discovery.VerifiedSource(meta)
 	if !ok {
 		t.Fatalf("multi-file discovery did not retain process-local proof: %#v", discovery)
+	}
+	return meta, discovery, source, hostRoot
+}
+
+func reconciledExactMultiFileWithEmpty(t *testing.T, version string) (*metafile.MetaInfo, seed.DiscoveryResult, *metafile.VerifiedSource, string) {
+	t.Helper()
+	data := []byte("abc")
+	files := []any{
+		map[string]any{"length": int64(len(data)), "path": []any{"data.bin"}},
+		map[string]any{"length": int64(0), "path": []any{"empty.bin"}},
+	}
+	info := map[string]any{"name": "bundle"}
+	switch version {
+	case "v1":
+		piece := sha1.Sum(data)
+		info["files"] = files
+		info["piece length"] = int64(len(data))
+		info["pieces"] = piece[:]
+	case "v2", "hybrid":
+		root := sha256.Sum256(data)
+		info["file tree"] = map[string]any{
+			"data.bin":  map[string]any{"": map[string]any{"length": int64(len(data)), "pieces root": root[:]}},
+			"empty.bin": map[string]any{"": map[string]any{"length": int64(0)}},
+		}
+		info["meta version"] = int64(2)
+		info["piece length"] = int64(16384)
+		if version == "hybrid" {
+			piece := sha1.Sum(data)
+			info["files"] = files
+			info["pieces"] = piece[:]
+		}
+	default:
+		t.Fatalf("unsupported proof family %q", version)
+	}
+	meta, err := metafile.Parse(testBencode(map[string]any{"info": info}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostRoot := t.TempDir()
+	bundleRoot := filepath.Join(hostRoot, "bundle")
+	if err := os.Mkdir(bundleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleRoot, "data.bin"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleRoot, "empty.bin"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := seed.ObserveExactSource(context.Background(), meta, bundleRoot, seed.ExactSourceOptions{TimeBudget: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := discovery.VerifiedSource(meta)
+	if !ok {
+		t.Fatalf("exact source observation did not retain proof: %#v", discovery)
 	}
 	return meta, discovery, source, hostRoot
 }

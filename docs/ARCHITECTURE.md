@@ -63,8 +63,10 @@ credentials. TJUPT is one adapter, not a special case in the content model.
 `reconcile report` is the second vertical slice. One invocation resolves and
 parses one exact metafile, optionally reads one authenticated site detail page,
 optionally opens one read-only downloader session, reads a
-bounded job ledger, performs ordinary storage discovery and content proof, then
-reads the job ledger again. For one uniquely identified ordinary multi-file job, `auto`
+bounded job ledger, performs either ordinary storage discovery or an explicitly
+selected exact-layout content proof, then reads the job ledger again. The exact
+mode proves the selected layout only and does not claim filesystem-wide
+uniqueness. For one uniquely identified ordinary multi-file job, `auto`
 mode attempts one bounded per-file read before the storage proof and sends a
 second afterward only when the first completed. The outer job observations and
 successful inner file observations form a serial bracket, not an atomic
@@ -152,9 +154,11 @@ Expected paths are projected from the opaque same-call `VerifiedSource`, not
 from mutable discovery report fields. The public report copy deliberately
 drops that process-local capability. Mapping scope records an opaque mapping ID
 and exact POSIX or Windows comparison semantics. A shared top-level
-`content_path` alone remains insufficient. Any nonempty file attribute
-(including padding or symlink semantics) and non-padding empty files are
-conservatively unsupported for the full-layout claim. Windows comparisons
+`content_path` alone remains insufficient. An explicit exact-layout observation
+also binds the name and identity of every ordinary physical zero-length file,
+so those indices can participate in the full-layout relation. An unattributed
+empty index remains incomplete. Any nonempty file attribute (including padding
+or symlink semantics) is conservatively unsupported. Windows comparisons
 require exact case because case sensitivity can vary by directory or remote
 filesystem.
 
@@ -487,10 +491,12 @@ the selected map, but they keep verification completeness false and cannot be
 used to infer how many other current layouts exist.
 
 `reconcile report` consumes the same result and therefore cannot become
-`consistent` from a historical snapshot. Only ordinary same-invocation full
-`--search-root` enumeration can currently establish current absence or unique
-selection. Refresh is a separate explicit write; read commands never update an
-index implicitly.
+`consistent` from a historical snapshot. Ordinary same-invocation full
+`--search-root` enumeration can establish current absence or unique selection.
+Alternatively, explicit `--source` can establish `verified_exact_root` for one
+selected layout and can become locally consistent with a client, but never
+establishes uniqueness or absence outside that layout. Refresh is a separate
+explicit write; read commands never update an index implicitly.
 
 ## Read-only storage discovery
 
@@ -577,7 +583,7 @@ Piece layers are proof material, not trust roots: parsing reduces each layer
 with BEP 52 zero-subtree rules and compares it with the corresponding file
 `pieces root`.
 
-Discovery source outcome and optional handoff are separate axes:
+Source-observation outcome and optional handoff are separate axes:
 
 - `verified_unique`: the complete search found exactly one verified layout;
 - `verified_ambiguous`: at least two distinct layouts are verified, even if a
@@ -585,11 +591,14 @@ Discovery source outcome and optional handoff are separate axes:
 - `not_found`: a complete search found none;
 - `verified_selected`: one caller-selected historical locator map passed exact
   live reobservation and content verification; no uniqueness is claimed;
+- `verified_exact_root`: one explicitly selected exact file or content root
+  passed current full-layout and content verification; no uniqueness is claimed;
 - `incomplete`: uniqueness or absence cannot be established because scanning
   or verification stopped early.
 
-`verified_unique` and `verified_selected` can retain a process-local selected
-source, but only the former is a current search result. Target conflicts or
+`verified_unique`, `verified_selected`, and `verified_exact_root` can retain a
+process-local selected source, but only the first is a current complete-search
+result. Target conflicts or
 client-path mapping errors can block the handoff without erasing the source
 outcome. A produced plan remains `layout_only`, `effect:none`, and
 `ready_to_apply:false`; its blockers explain which mutation and reconciliation

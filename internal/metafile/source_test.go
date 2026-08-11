@@ -94,6 +94,59 @@ func TestVerifiedSourceBindingsHideIdentityOpener(t *testing.T) {
 	}
 }
 
+func TestVerifyContentSourceRetainsPhysicalEmptyFileAuthority(t *testing.T) {
+	content := []byte("x")
+	piece := sha1.Sum(content)
+	meta, err := Parse(bencode(map[string]any{"info": map[string]any{
+		"files": []any{
+			map[string]any{"length": int64(len(content)), "path": []any{"data.bin"}},
+			map[string]any{"length": int64(0), "path": []any{"empty.bin"}},
+		},
+		"name": "bundle", "piece length": int64(1), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "data.bin"), content)
+	emptyPath := filepath.Join(root, "empty.bin")
+	writeTestFile(t, emptyPath, nil)
+
+	verified, err := VerifyContentSource(context.Background(), meta, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verified.Result().Verified {
+		t.Fatalf("exact layout did not verify: %#v", verified.Result())
+	}
+	path, ok := verified.Path(1)
+	if !ok || path != emptyPath {
+		t.Fatalf("physical empty-file binding was discarded: path=%q ok=%t bindings=%#v", path, ok, verified.Bindings())
+	}
+	precondition, err := verified.SourcePrecondition(1)
+	if err != nil || precondition.SizeBytes != 0 {
+		t.Fatalf("empty-file authority is unusable: precondition=%#v err=%v", precondition, err)
+	}
+	if reverified, err := verified.Reverify(context.Background(), meta); err != nil || !reverified.Result().Verified {
+		t.Fatalf("empty-file authority could not be reverified: result=%#v err=%v", reverified, err)
+	}
+
+	observed, err := os.Stat(emptyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(emptyPath, emptyPath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, emptyPath, nil)
+	if err := os.Chtimes(emptyPath, observed.ModTime(), observed.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verified.Reverify(context.Background(), meta); err == nil {
+		t.Fatal("same-size, same-mtime empty-file replacement retained source authority")
+	}
+}
+
 func TestVerifiedSourceReverifyRejectsExactNamedReplacement(t *testing.T) {
 	content := []byte("content")
 	meta := testSingleV1Meta(t, "source.bin", content)

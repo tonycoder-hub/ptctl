@@ -752,7 +752,8 @@ or report. Single-file path agreement also requires the client-reported size to
 match. The expected path is derived from the same-call process-local storage
 proof plus the invocation mapping; exported discovery fields cannot substitute
 for that proof, and the public report drops the capability entirely.
-For an ordinary multi-file job, every nonempty physical manifest index must
+For an ordinary multi-file job, every ordinary non-padding physical manifest
+index must
 appear exactly once with its expected size, remain selected and fully seeded,
 and have an effective lexical path equal to the independently mapped
 same-call source binding. A matching top-level content path alone cannot reveal
@@ -761,9 +762,12 @@ the returned relative file path, while `content_path` must be a consistent
 ancestor. Transmission fixes its formula as `download_dir` plus each ordered
 `files[].name`, with `download_dir + name` as the required content ancestor;
 the parallel `file_stats` array must have exactly the same length and order.
-Alternate formulas are not tried opportunistically. Any nonempty
-file attribute (including padding or symlink semantics) and non-padding empty
-files remain unsupported for this full-layout claim. Windows path case is
+Alternate formulas are not tried opportunistically. An explicit exact-layout
+source proof requires each ordinary zero-length manifest name to exist as a
+regular file and retains its identity, so that index can be compared safely.
+Discovery or historical evidence without that physical binding remains
+incomplete. Any nonempty file attribute (including padding or symlink
+semantics) remains unsupported for this full-layout claim. Windows path case is
 compared exactly rather than assuming case-insensitive semantics for a
 particular directory or remote filesystem.
 
@@ -782,7 +786,8 @@ execution command.
 
 ### Read side effects and remote storage
 
-For inspect, verify, discovery, planning, reconciliation, ordinary site reads,
+For inspect, verify, discovery, planning, reconciliation (including explicit
+exact-layout `--source`), ordinary site reads,
 downloader reads, and the discovery/read phases of materialize, metadata and
 content reads may update atime, wake disks, hydrate a cloud placeholder,
 traverse a FUSE/SMB backend, or incur network cost. "Read-only" means zero

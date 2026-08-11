@@ -433,7 +433,7 @@ func manifestSupportsClientFileLayout(meta *metafile.MetaInfo) bool {
 		return false
 	}
 	for _, file := range meta.Files {
-		if file.Attribute != "" || file.Length == 0 {
+		if file.Attribute != "" {
 			return false
 		}
 	}

@@ -65,7 +65,7 @@ func VerifyContentSource(ctx context.Context, meta *MetaInfo, contentPath string
 	}
 	bindings := make([]SourceBinding, 0, len(specs))
 	for fileIndex, spec := range specs {
-		if spec.padding || spec.empty || spec.path == "" || spec.length == 0 {
+		if spec.padding || spec.empty || spec.path == "" {
 			continue
 		}
 		bindings = append(bindings, SourceBinding{FileIndex: fileIndex, Path: filepath.Clean(spec.path)})

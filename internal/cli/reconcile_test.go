@@ -379,6 +379,40 @@ func TestReconcileReportMultiFileLayoutUsesFiveRequestsAndReconciles(t *testing.
 		reconciliationClientRoot+"/bundle/"+fileNames[0], reconciliationClientRoot+"/bundle/"+fileNames[1])
 }
 
+func TestReconcileReportExactSourceReconcilesPhysicalEmptyFileEndToEnd(t *testing.T) {
+	torrentPath, sourceRoot, hostRoot, fileNames, meta := writeExactEmptyReconciliationFixture(t)
+	const jobKey = "OPAQUE-EMPTY-JOB-KEY-CANARY"
+	server, requests := newMultiFileReconciliationServer(t, meta, fileNames, []string{jobKey}, 0)
+	defer server.Close()
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"reconcile", "report", "--torrent", torrentPath, "--source", sourceRoot,
+		"--driver", "qbittorrent", "--url", server.URL, "--username", reconciliationClientUser, "--password-stdin",
+		"--host-root", hostRoot, "--client-root", reconciliationClientRoot, "--client-style", "posix",
+		"--timeout", "1m", "--output", "json",
+	}, strings.NewReader(reconciliationClientPassword), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if requests.login.Load() != 1 || requests.jobs.Load() != 2 || requests.files.Load() != 2 {
+		t.Fatalf("login=%d jobs=%d files=%d; wanted exact-source five-request bracket", requests.login.Load(), requests.jobs.Load(), requests.files.Load())
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	layout := response.Data.Ledgers.Downloader.FileLayout
+	if response.Data.Outcome != "consistent" || response.Data.Ledgers.Storage.Status != "verified_exact_root" || !response.Data.Ledgers.Storage.ProcessLocalProof ||
+		relationStatusCLI(response.Data, "storage_content_proof") != "verified_exact_root" || relationStatusCLI(response.Data, "verified_source_vs_job_path") != "same_location" ||
+		layout.Status != "observed_stable" || layout.FilesExpected != 2 || layout.FilesObserved != 2 || layout.FilesSelected != 2 || layout.FilesComplete != 2 {
+		t.Fatalf("physical empty file did not close exact reconciliation: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), torrentPath, sourceRoot, hostRoot, server.URL, reconciliationClientUser, reconciliationClientPassword, jobKey)
+}
+
 func TestReconcileReportFileLayoutOffAndAmbiguousDoNotReadJobFiles(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -471,6 +505,59 @@ func TestReconcileReportStorageOnlyIsPartialAndReportOriented(t *testing.T) {
 	assertJSONStringsExclude(t, out.Bytes(), torrentPath, searchRoot)
 }
 
+func TestReconcileReportExactSourceIsSelectedProofWithoutUniquenessClaim(t *testing.T) {
+	torrentPath, sourceRoot, _ := writeReconciliationFixture(t)
+	sourcePath := filepath.Join(sourceRoot, "PTCTL-CLIENT-PATH-CANARY.bin")
+	var out, errOut bytes.Buffer
+	code := Run([]string{"reconcile", "report", "--torrent", torrentPath, "--source", sourcePath, "--output", "json"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var response struct {
+		Kind string           `json:"kind"`
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	storageRelation := relationStatusCLI(response.Data, "storage_content_proof")
+	if response.Kind != "ledger.reconciliation" || response.Data.Outcome != "partial" ||
+		response.Data.Ledgers.Storage.Status != "verified_exact_root" || storageRelation != "verified_exact_root" ||
+		!response.Data.Ledgers.Storage.ProcessLocalProof || response.Data.Ledgers.Storage.SelectedSourceID == "" ||
+		response.Data.Ledgers.Storage.Discovery.Selection.Basis != "explicit_exact_root_full_layout_verified" ||
+		response.Data.Ledgers.Storage.Discovery.Scan.PathConfinement != "explicit_exact_root" {
+		t.Fatalf("exact source proof was mislabeled: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), torrentPath, sourceRoot, sourcePath)
+
+	out.Reset()
+	errOut.Reset()
+	code = Run([]string{"reconcile", "report", "--torrent", torrentPath, "--source", sourcePath}, strings.NewReader(""), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "SOURCE SCOPE") || !strings.Contains(out.String(), "explicit_exact_root") {
+		t.Fatalf("exact source scope was not explicit in the table: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestReconcileReportExactSourceFailureIsStructuredAndPathPrivate(t *testing.T) {
+	torrentPath, sourceRoot, _ := writeReconciliationFixture(t)
+	missing := filepath.Join(sourceRoot, "PTCTL-EXACT-SOURCE-FAILURE-CANARY.bin")
+	var out, errOut bytes.Buffer
+	code := Run([]string{"reconcile", "report", "--torrent", torrentPath, "--source", missing, "--output", "json"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Outcome != "incomplete" || response.Data.Ledgers.Storage.Status != "incomplete" || relationStatusCLI(response.Data, "storage_content_proof") != "incomplete" || !hasReportFindingCLI(response.Data.Blockers, "source.exact_root_verification_failed") {
+		t.Fatalf("exact source failure was not structured: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), torrentPath, sourceRoot, missing, "PTCTL-EXACT-SOURCE-FAILURE-CANARY")
+}
+
 func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	torrentPath, searchRoot, _ := writeReconciliationFixture(t)
 	missingTorrent := filepath.Join(t.TempDir(), "missing.torrent")
@@ -481,6 +568,10 @@ func TestReconcileReportValidatesEverythingBeforePasswordRead(t *testing.T) {
 	}
 	tooManyRoots = append(tooManyRoots, clientGroup...)
 	tests := [][]string{
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--search-root", searchRoot}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--state-store", "unused", "--storage-profile", "unused"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source", filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), "--allow-network"}, clientGroup...),
+		append([]string{"reconcile", "report", "--torrent", torrentPath, "--source="}, clientGroup...),
 		{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--url", "https://seedbox.invalid"},
 		{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--client-file-layout", "off"},
 		{"reconcile", "report", "--torrent", torrentPath, "--search-root", searchRoot, "--max-client-files", "2"},
@@ -555,7 +646,7 @@ func TestReconcileReportRequireReconciledExitsFourAfterJSON(t *testing.T) {
 
 func TestReconcileReportHelpAndHumanOrderAreExplicit(t *testing.T) {
 	var helpOut, helpErr bytes.Buffer
-	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
+	if code := Run([]string{"reconcile", "report", "--help"}, strings.NewReader(""), &helpOut, &helpErr); code != 0 || helpErr.Len() != 0 || !strings.Contains(helpOut.String(), "Client-only reads") || !strings.Contains(helpOut.String(), "--source PATH") || !strings.Contains(helpOut.String(), "not filesystem-wide uniqueness") || !strings.Contains(helpOut.String(), "site-cookie-stdin") || !strings.Contains(helpOut.String(), "credential-bundle-stdin") || !strings.Contains(helpOut.String(), "current site claim") || !strings.Contains(helpOut.String(), "max-candidate-edges") || !strings.Contains(helpOut.String(), "client-file-layout") || !strings.Contains(helpOut.String(), "max-client-file-response-bytes") || !strings.Contains(helpOut.String(), "site-binding-record") || !strings.Contains(helpOut.String(), "at most two bounded file-list reads") || !strings.Contains(helpOut.String(), "never retried") || !strings.Contains(helpOut.String(), "require-reconciled") {
 		t.Fatalf("code/help stdout=%q stderr=%q", helpOut.String(), helpErr.String())
 	}
 
@@ -664,6 +755,15 @@ func relationStatusCLI(report reconcile.Report, kind string) string {
 	return ""
 }
 
+func hasReportFindingCLI(findings []reconcile.ReportFinding, code string) bool {
+	for _, finding := range findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func writeReconciliationFixture(t *testing.T) (string, string, *metafile.MetaInfo) {
 	t.Helper()
 	const name = "PTCTL-CLIENT-PATH-CANARY.bin"
@@ -710,6 +810,33 @@ func writeMultiFileReconciliationFixture(t *testing.T) (torrentPath, searchRoot,
 	return torrentPath, searchRoot, hostRoot, fileNames, meta
 }
 
+func writeExactEmptyReconciliationFixture(t *testing.T) (torrentPath, sourceRoot, hostRoot string, fileNames []string, meta *metafile.MetaInfo) {
+	t.Helper()
+	content := []byte("abc")
+	torrentPath = filepath.Join(t.TempDir(), "reconcile-empty.torrent")
+	if err := os.WriteFile(torrentPath, testV1MultiFileMetafileWithEmpty(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostRoot = t.TempDir()
+	sourceRoot = filepath.Join(hostRoot, "bundle")
+	if err := os.Mkdir(sourceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fileNames = []string{"data.bin", "empty.bin"}
+	if err := os.WriteFile(filepath.Join(sourceRoot, fileNames[0]), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, fileNames[1]), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	meta, err = metafile.Read(torrentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return torrentPath, sourceRoot, hostRoot, fileNames, meta
+}
+
 func testV1MultiFileMetafile(content []byte) []byte {
 	piece0 := sha1.Sum(content[:4])
 	piece1 := sha1.Sum(content[4:])
@@ -719,10 +846,23 @@ func testV1MultiFileMetafile(content []byte) []byte {
 	return append(result, 'e', 'e')
 }
 
+func testV1MultiFileMetafileWithEmpty(content []byte) []byte {
+	piece := sha1.Sum(content)
+	result := []byte("d4:infod5:filesld6:lengthi3e4:pathl8:data.bineed6:lengthi0e4:pathl9:empty.bineee4:name6:bundle12:piece lengthi3e6:pieces20:")
+	result = append(result, piece[:]...)
+	return append(result, 'e', 'e')
+}
+
 func newMultiFileReconciliationServer(t *testing.T, meta *metafile.MetaInfo, fileNames, jobKeys []string, fileStatus int) (*httptest.Server, *reconciliationClientRequests) {
 	t.Helper()
 	requests := &reconciliationClientRequests{}
 	magnet := "magnet:?xt=urn:btih:" + meta.InfoHashV1
+	physicalBytes := int64(0)
+	for _, file := range meta.Files {
+		if !strings.Contains(file.Attribute, "p") {
+			physicalBytes += file.Length
+		}
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v2/auth/login":
@@ -744,9 +884,9 @@ func newMultiFileReconciliationServer(t *testing.T, meta *metafile.MetaInfo, fil
 			rows := make([]map[string]any, 0, len(jobKeys))
 			for _, jobKey := range jobKeys {
 				rows = append(rows, map[string]any{
-					"hash": jobKey, "magnet_uri": magnet, "name": "bundle", "size": int64(6),
+					"hash": jobKey, "magnet_uri": magnet, "name": meta.Name, "size": physicalBytes,
 					"progress": 1.0, "state": "uploading", "save_path": reconciliationClientRoot,
-					"content_path": reconciliationClientRoot + "/bundle", "downloaded": int64(6), "uploaded": int64(10),
+					"content_path": reconciliationClientRoot + "/" + meta.Name, "downloaded": physicalBytes, "uploaded": int64(10),
 				})
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -763,10 +903,14 @@ func newMultiFileReconciliationServer(t *testing.T, meta *metafile.MetaInfo, fil
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"index": 0, "name": "bundle/" + fileNames[0], "size": int64(3), "progress": 1.0, "priority": 1, "is_seed": true},
-				{"index": 1, "name": "bundle/" + fileNames[1], "size": int64(3), "progress": 1.0, "priority": 1, "is_seed": true},
-			})
+			rows := make([]map[string]any, 0, len(fileNames))
+			for index, fileName := range fileNames {
+				rows = append(rows, map[string]any{
+					"index": index, "name": meta.Name + "/" + fileName, "size": meta.Files[index].Length,
+					"progress": 1.0, "priority": 1, "is_seed": true,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(rows)
 		default:
 			http.NotFound(w, r)
 		}

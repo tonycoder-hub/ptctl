@@ -124,13 +124,17 @@ capabilities at the edge, not assumptions in the core domain model.
   explicit numeric loopback HTTP), with passwords accepted only through stdin;
 - read-only reconciliation that can first observe one authenticated live site
   detail page, then brackets storage proof with two snapshots from one audited
-  read-only downloader session, stream-decodes a bounded job ledger, and
+  read-only downloader session, accepts either bounded discovery or one
+  explicitly selected exact layout, stream-decodes a bounded job ledger, and
   reports variant, infohash, content-proof, and path relations as separate
-  evidence axes; qBittorrent supplies typed v1/v2 magnet claims while
-  Transmission supplies only its full SHA-1/v1 `hash_string` claim;
+  evidence axes; an exact layout proves only the selected root, never
+  filesystem-wide uniqueness, qBittorrent supplies typed v1/v2 magnet claims,
+  and Transmission supplies only its full SHA-1/v1 `hash_string` claim;
 - bounded qBittorrent or Transmission per-file ledgers for one uniquely
   identified ordinary multi-file job, with stable index, size, selection,
-  completion, and per-binding host-to-client path checks;
+  completion, and per-binding host-to-client path checks, including physical
+  zero-length files when an exact-layout observation binds their names and
+  identities;
 - explicitly acknowledged exact qBittorrent or Transmission stopped-job
   adoption downstream
   of a current materialized-final proof, with typed queue-absence gating, a
@@ -173,7 +177,8 @@ capabilities at the edge, not assumptions in the core domain model.
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
 index alone, background refresh/watchers, downloader pause/location or broader
 existing-job mutation,
-attributed/empty-file client-layout reconciliation,
+client-layout reconciliation for attributed file semantics such as padding or
+symlink leaves and for zero-length files without an observed physical binding,
 reflink/hardlink or cross-filesystem materialization, automatic execution of
 serialized plan reports, source-parent/staging cleanup or rollback,
 published-layout deletion, site
@@ -1230,6 +1235,14 @@ printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
   --output json
 ```
 
+When the intended layout is already known, replace all `--search-root` flags
+with `--source PATH`. That path is reopened as one exact single-file object or
+multi-file content root and every non-padding manifest name is verified in the
+same invocation. The report uses `verified_exact_root` and can reconcile that
+selected layout with the client, but it does not claim that another matching
+copy does not exist elsewhere. `--source`, live search roots, and a stored
+profile selector are mutually exclusive.
+
 The [qBittorrent WebUI API torrent-list fields](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-list)
 are treated as untrusted client claims. Its generic `hash` remains an opaque
 job locator. Typed identities come only from strictly parsed `xt=urn:btih:...` and
@@ -1286,9 +1299,11 @@ supplies indexed relative paths, sizes, progress, seed state, and selection.
 `auto` reads only the one uniquely identified job, once before and once after
 local proof. Every index must remain stable, agree with the metafile, be
 selected and complete, and map exactly from the same-call verified host source
-into the downloader's lexical namespace. Any nonempty file attribute
-(including padding or symlink semantics) and non-padding empty files remain
-unsupported for this full-layout claim.
+into the downloader's lexical namespace. Ordinary physical zero-length files
+participate only when that proof observed their names and regular-file
+identities, as explicit `--source` does. Discovery that cannot attribute an
+empty name remains fail-closed. Any nonempty file attribute (including padding
+or symlink semantics) remains unsupported for this full-layout claim.
 Use `--client-file-layout off` to retain a partial report without the two file
 reads. Matching only a top-level content path is never enough.
 

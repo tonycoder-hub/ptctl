@@ -225,10 +225,10 @@ type clientAssessment struct {
 }
 
 // Build creates a read-only reconciliation report. VerifiedSource must be the
-// opaque value returned by the same Discovery invocation, and Client.Before
-// and Client.After must bracket that invocation. A JSON round-trip
-// intentionally loses the storage proof and therefore cannot produce a
-// verified relation.
+// opaque value returned by the same live/indexed discovery or exact-root
+// observation, and Client.Before and Client.After must bracket that
+// observation. A JSON round-trip intentionally loses the storage proof and
+// therefore cannot produce a verified relation.
 func Build(input BuildInput) (Report, error) {
 	if input.Meta == nil {
 		return Report{}, fmt.Errorf("metafile is nil")
@@ -309,7 +309,7 @@ func Build(input BuildInput) (Report, error) {
 	storageRelation.Status = input.Discovery.SourceOutcome
 	storageRelation.LeftIDs = append(storageRelation.LeftIDs, meta.MetafileVariantID)
 	storageLedger := StorageLedger{Status: input.Discovery.SourceOutcome, Discovery: sanitizedDiscovery(input.Discovery, input.ShowAbsolutePaths)}
-	if input.Discovery.SourceOutcome == "verified_unique" {
+	if verifiedStorageOutcome(input.Discovery.SourceOutcome) {
 		storageLedger.SelectedSourceID = input.Discovery.Selection.SelectedID
 		storageRelation.RightIDs = append(storageRelation.RightIDs, input.Discovery.Selection.SelectedID)
 		retainedSource, retained := input.Discovery.VerifiedSource(meta)
@@ -327,7 +327,7 @@ func Build(input BuildInput) (Report, error) {
 			storageRelation.Status = "incomplete"
 			storageLedger.Status = "incomplete"
 			storageRelation.BlockerCodes = append(storageRelation.BlockerCodes, "storage.process_local_proof_missing")
-			report.Blockers = append(report.Blockers, ReportFinding{Code: "storage.process_local_proof_missing", Message: "the unique discovery result is not backed by a same-invocation process-local proof"})
+			report.Blockers = append(report.Blockers, ReportFinding{Code: "storage.process_local_proof_missing", Message: "the selected storage result is not backed by a same-invocation process-local proof"})
 		}
 	} else {
 		storageRelation.EvidenceLevel = input.Discovery.BestEvidence
@@ -361,7 +361,7 @@ func Build(input BuildInput) (Report, error) {
 	case input.PathMapping == nil:
 		pathRelation.Status = "mapping_not_requested"
 		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.mapping_not_requested")
-	case storageRelation.Status != "verified_unique" || !storageLedger.ProcessLocalProof:
+	case !verifiedStorageOutcome(storageRelation.Status) || !storageLedger.ProcessLocalProof:
 		pathRelation.Status = relationDependencyStatus(storageRelation.Status)
 		pathRelation.BlockerCodes = append(pathRelation.BlockerCodes, "path.storage_proof_unavailable")
 	case client.relation.Status != "exact_unique" || client.job == nil:
@@ -1087,13 +1087,17 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 	if storageStatus == "verified_ambiguous" || clientStatus == "ambiguous" {
 		return "ambiguous"
 	}
-	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") || (siteDetailRequested && siteDetailStatus != "observed_current_ref") || storageStatus == "incomplete" || (storageStatus == "verified_unique" && !processProof) || (clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
+	if (siteBindingRequested && siteStatus != "historical_observed_exact_variant") || (siteDetailRequested && siteDetailStatus != "observed_current_ref") || storageStatus == "incomplete" || (verifiedStorageOutcome(storageStatus) && !processProof) || (clientRequested && clientStatus == "incomplete") || pathStatus == "incomplete" {
 		return "incomplete"
 	}
 	if processProof && clientStatus == "exact_unique" && pathStatus == "same_location" {
 		return "consistent"
 	}
 	return "partial"
+}
+
+func verifiedStorageOutcome(status string) bool {
+	return status == "verified_unique" || status == "verified_exact_root"
 }
 
 func relationDependencyStatus(status string) string {

@@ -175,7 +175,7 @@ Usage:
   ptctl client remove prune --target PATH --expect-removal-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client remove forget --target PATH --expect-removal-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
-  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
+  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE) [--output table|json]
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
@@ -329,9 +329,9 @@ func (a *app) reconcileReport(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE) [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around bounded, exact storage discovery. It performs zero writes. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
+		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. Exact stopped adoption and reviewed existing-job recheck/start support both built-in drivers; Transmission mutation authority is v1-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
@@ -343,6 +343,7 @@ func (a *app) reconcileReport(args []string) error {
 	torrentPath := fs.String("torrent", "", "metafile path")
 	storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
 	variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
+	exactSource := fs.String("source", "", "explicit exact-layout source file or content root; mutually exclusive with discovery")
 	var searchRoots stringListFlag
 	fs.Var(&searchRoots, "search-root", "storage root to scan; repeatable")
 	stateStore := fs.String("state-store", "", "initialized private state store; pair with --storage-profile")
@@ -399,12 +400,26 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
+	exactRequested := explicit["source"]
 	indexedRequested := explicit["state-store"] || explicit["storage-profile"] || explicit["snapshot-record"]
-	if len(searchRoots) == 0 && !indexedRequested {
-		return usageError("reconcile report requires --search-root or the --state-store/--storage-profile pair")
+	if exactRequested && *exactSource == "" {
+		return usageError("reconcile report requires --source to be non-empty")
 	}
-	if len(searchRoots) > 0 && indexedRequested {
-		return usageError("--search-root and stored-profile index mode are mutually exclusive")
+	if !exactRequested && len(searchRoots) == 0 && !indexedRequested {
+		return usageError("reconcile report requires --source, --search-root, or the --state-store/--storage-profile pair")
+	}
+	sourceModes := 0
+	if exactRequested {
+		sourceModes++
+	}
+	if len(searchRoots) > 0 {
+		sourceModes++
+	}
+	if indexedRequested {
+		sourceModes++
+	}
+	if sourceModes > 1 {
+		return usageError("--source, --search-root, and stored-profile index mode are mutually exclusive")
 	}
 	if indexedRequested && (*stateStore == "" || *storageProfile == "") {
 		return usageError("stored-profile mode requires non-empty --state-store and --storage-profile")
@@ -415,6 +430,13 @@ func (a *app) reconcileReport(args []string) error {
 	for _, name := range []string{"max-depth", "max-directories", "max-entries", "max-directory-entries"} {
 		if indexedRequested && explicit[name] {
 			return usageError("--%s applies only to live --search-root scanning; refresh limits are fixed by the storage profile", name)
+		}
+	}
+	if exactRequested {
+		for _, name := range []string{"allow-network", "max-depth", "max-directories", "max-entries", "max-directory-entries", "max-candidates", "max-path-bytes", "max-candidates-per-file", "max-candidate-edges", "max-states", "max-verified-layouts", "max-proof-bytes"} {
+			if explicit[name] {
+				return usageError("--%s applies only to discovery source modes, not --source", name)
+			}
 		}
 	}
 	var explicitDescriptor metastore.RecordID
@@ -540,7 +562,7 @@ func (a *app) reconcileReport(args []string) error {
 	if err := inventoryLimits.Validate(); err != nil {
 		return usageError("reconcile report: %v", err)
 	}
-	if !indexedRequested && len(searchRoots) > inventoryLimits.MaxRoots {
+	if !indexedRequested && !exactRequested && len(searchRoots) > inventoryLimits.MaxRoots {
 		return usageError("reconcile report accepts at most %d --search-root values", inventoryLimits.MaxRoots)
 	}
 	if err := matchLimits.Validate(); err != nil {
@@ -739,7 +761,12 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	var discovery seed.DiscoveryResult
 	var discoveryErr error
-	if indexedRequested {
+	if exactRequested {
+		discovery, discoveryErr = seed.ObserveExactSource(ctx, meta, *exactSource, seed.ExactSourceOptions{
+			ShowAbsolutePaths: *showAbsolute,
+			TimeBudget:        *timeout,
+		})
+	} else if indexedRequested {
 		candidateLimits := storageindex.DefaultCandidateLimits()
 		candidateLimits.MaxCandidates = inventoryLimits.MaxCandidates
 		candidateLimits.MaxPathBytes = inventoryLimits.MaxPathBytes
@@ -781,6 +808,15 @@ func (a *app) reconcileReport(args []string) error {
 	if session != nil {
 		bracket.RequestsMade = session.RequestsMade()
 		_ = session.Close()
+	}
+	if discoveryErr != nil && exactRequested {
+		if len(discovery.Blockers) == 0 {
+			discovery.Blockers = append(discovery.Blockers, seed.DiscoveryBlocker{
+				Code:    "source.exact_root_observation_incomplete",
+				Message: "the explicitly selected exact source could not be observed completely",
+			})
+		}
+		discoveryErr = nil
 	}
 	if discoveryErr != nil {
 		return discoveryErr
@@ -1923,8 +1959,8 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 	}
 
 	discovery := report.Ledgers.Storage.Discovery
-	fmt.Fprintf(w, "\nSTORAGE SCAN\nSOURCE OUTCOME\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nSHARED COMMAND TIME BUDGET\t%s\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\n",
-		terminalSafe(discovery.SourceOutcome), discovery.Scan.Complete, discovery.Scan.VerificationComplete,
+	fmt.Fprintf(w, "\nSTORAGE SCAN\nSOURCE OUTCOME\t%s\nSOURCE SCOPE\t%s\nSCAN COMPLETE\t%t\nVERIFICATION COMPLETE\t%t\nSHARED COMMAND TIME BUDGET\t%s\nENTRIES\t%d / %d\nRETAINED FILES\t%d / %d\nCANDIDATE EDGES OBSERVED\t%d / %d (+1 proves truncation)\nCANDIDATE STATES\t%d / %d\nPROOF BUDGET CHARGED\t%s / %s\n",
+		terminalSafe(discovery.SourceOutcome), terminalSafe(discovery.Scan.PathConfinement), discovery.Scan.Complete, discovery.Scan.VerificationComplete,
 		(time.Duration(discovery.Scan.TimeBudgetMillis) * time.Millisecond).String(),
 		discovery.Scan.InventoryUsed.EntriesExamined, discovery.Scan.InventoryLimits.MaxEntries,
 		discovery.Scan.InventoryUsed.CandidatesRetained, discovery.Scan.InventoryLimits.MaxCandidates,
