@@ -670,6 +670,22 @@ empty/padding entry, unselected hardlink name, final, client job, or private
 metafile. No outcome promises block reclamation, cleanup, rollback, or the
 absence of an out-of-band writer.
 
+The separate `seed retire parent-cleanup plan` command remains zero-write and
+credential-free. It accepts only one explicit terminal retirement operation,
+the reviewed retirement plan ID, and the original explicit search-root scope.
+The live journal must still exist: a pruned tombstone intentionally has no
+absolute paths and cannot regain cleanup authority. Before classifying any
+parent, the planner proves every retired name absent twice and checks the
+journaled parent set against fixed parent/path budgets. Search roots and all
+higher ancestors are categorically excluded. A bounded one-entry read is
+sufficient to retain a non-empty parent without disclosing its child name; an
+empty candidate must instead be rebound by the exact recorded filesystem
+identity and observed empty a second time. Parent replacement, a reappeared
+retired name, budget exhaustion, cancellation, or an incomplete namespace read
+prevents an eligible plan. The resulting deterministic ID is review evidence
+only, `cleanup_authority` is `none`, and the empty observations remain
+bracketed non-atomic. There is no directory-deletion route in this slice.
+
 All usage, metafile, current-final, terminal-activation, mapping, endpoint, and
 live-source discovery/preflight failures are handled before password stdin and
 before opening a downloader session. Authentication or bounded read failure is
@@ -981,7 +997,7 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - durable OS-keyring or audited credential-helper integration;
 - downloader pause/location transitions and client-side
   private-variant observability;
-- source-parent directory cleanup, block-reclamation accounting, and explicit
+- execution of reviewed source-parent cleanup, block-reclamation accounting, and explicit
   retirement of unselected aliases; journaled retirement intentionally removes
   only the reviewed regular-file names;
 - current-filesystem completeness tokens or journal-backed incremental index

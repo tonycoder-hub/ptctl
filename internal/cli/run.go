@@ -193,6 +193,7 @@ Usage:
   ptctl seed retire status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed retire prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl seed retire forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup plan --target PATH --retirement-operation ID --retirement-plan-id ID --search-root PATH [--search-root PATH...] [--output table|json]
   ptctl version [--output table|json]
 
 Safety defaults:
@@ -2102,6 +2103,8 @@ func jsonKind(data any) string {
 		return "content.source_retirement.retention"
 	case sourceretire.ExecutionForgetReport:
 		return "content.source_retirement.forget"
+	case sourceretire.ParentCleanupReport:
+		return "content.source_retirement.parent_cleanup_plan"
 	case reconcile.Report:
 		return "ledger.reconciliation"
 	default:

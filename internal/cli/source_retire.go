@@ -82,6 +82,8 @@ func (a *app) seedRetire(args []string) error {
 		return a.seedRetirePrune(args[1:])
 	case "forget":
 		return a.seedRetireForget(args[1:])
+	case "parent-cleanup":
+		return a.seedRetireParentCleanup(args[1:])
 	default:
 		return usageError("unknown seed retire subcommand %q", args[0])
 	}
@@ -95,6 +97,7 @@ func (a *app) seedRetireHelp() {
   ptctl seed retire status --target PATH [--output table|json] [OPERATION_ID]
   ptctl seed retire prune --target PATH --expect-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl seed retire forget --target PATH --expect-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
+  ptctl seed retire parent-cleanup plan --target PATH --retirement-operation ID --retirement-plan-id ID --search-root PATH [--search-root PATH...] [--output table|json]
 
 The plan command is read-only. It requires one complete live source discovery,
 a current exact materialized-final proof, one canonical terminal client
@@ -129,6 +132,12 @@ Search roots must deliberately identify the source names under review. If they
 also discover the published final, ambiguity or final-overlap blocks the plan.
 Only content-bearing regular-file names are represented; empty files, padding,
 directories, and broader cleanup remain out of scope.
+
+Parent-cleanup plan is a later, credential-free, zero-write review of the exact
+immediate parents retained by one live terminal retirement journal. It protects
+search roots and every higher ancestor, never reports child names, and grants
+no directory-deletion authority. A pruned tombstone has no path authority and
+is therefore ineligible.
 `)
 }
 

@@ -188,6 +188,11 @@ capabilities at the edge, not assumptions in the core domain model.
   exact retired names currently absent, current downloader use, and current
   materialized-final content proof separate; pruned tombstones remain
   historical only and a reappeared retired name is a current conflict;
+- credential-free, zero-write planning for exact immediate parents left by one
+  live terminal source-retirement journal: retired names are proved absent in
+  the original root scope, search roots and ancestors are protected, child
+  names are never reported, and only same-identity parents observed empty twice
+  become review candidates; the plan grants no directory-deletion authority;
 - versioned experimental JSON envelopes (`ptctl.dev/v1`) and control-safe
   human-readable tables.
 
@@ -197,7 +202,8 @@ existing-job mutation,
 client-layout reconciliation for attributed file semantics such as padding or
 symlink leaves and for zero-length files without an observed physical binding,
 reflink/hardlink or cross-filesystem materialization, automatic execution of
-serialized plan reports, source-parent/staging cleanup or rollback,
+serialized plan reports, execution of reviewed source-parent cleanup, staging
+cleanup or rollback,
 published-layout deletion, site
 writes, browser login, third-party executable plugins, ratio manipulation, or
 Cloudflare bypass.
@@ -1164,6 +1170,14 @@ ptctl seed retire status --target "D:\PT" --output json \
 
 ptctl seed retire status --target "D:\PT" --output json
 
+ptctl seed retire parent-cleanup plan \
+  --target "D:\PT" \
+  --retirement-operation sha256:SOURCE_RETIREMENT_OPERATION_DIGEST \
+  --retirement-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
+  --search-root "D:\Media\Original" \
+  --require-cleanable \
+  --output json
+
 ptctl seed retire prune --target "D:\PT" \
   --expect-plan-id sha256:SOURCE_RETIREMENT_PLAN_DIGEST \
   --acknowledge-operation-state-deletion \
@@ -1186,6 +1200,20 @@ root forget marker is `forget_in_progress_not_inspected`. It does not open
 their journals, select a latest operation, expose unrelated names, or claim
 terminal/source-absence state. Passing an ID retains the exact historical
 journal, tombstone, or visible forget-marker read.
+
+`parent-cleanup plan` is a credential-free, zero-write follow-up that must run
+before `prune`, because only the live terminal journal retains the exact source
+parents. It reuses the full operation ID, retirement plan ID, and original
+search-root scope; proves every retired name absent twice; and then considers
+only the journaled immediate parents. A search root is always
+`protected_search_root`, a parent with any observed entry is
+`retained_nonempty`, and only an unchanged parent observed empty twice is an
+`empty_stable_candidate`. The deterministic cleanup-plan ID excludes the
+timestamped absence-observation ID and optional path display, so a later proof
+can reproduce it without trusting serialized JSON. Child entry names are never
+emitted. The command performs no removal and reports `cleanup_authority: none`;
+this slice intentionally has no cleanup execution command. JSON kind is
+`content.source_retirement.parent_cleanup_plan`.
 
 `prune` is a second, narrower deletion boundary. It accepts only one explicit
 terminal operation ID, the exact reviewed plan ID, and

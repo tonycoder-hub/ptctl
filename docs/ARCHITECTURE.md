@@ -1281,6 +1281,33 @@ selects a latest operation, and malformed objects in the reserved
 source-retirement namespace make the listing incomplete rather than being
 ignored.
 
+One additional read-only surface consumes the live terminal journal before it
+is pruned:
+
+```text
+explicit retirement operation + reviewed retirement plan
+  -> canonical live terminal journal (retained tombstone is ineligible)
+  -> original normalized search-root scope
+  -> two-pass identity-bound absence of every exact retired name
+  -> group only the journaled immediate parents
+  -> protect each search root and every unrecorded ancestor
+  -> bounded one-entry probe retains every non-empty parent
+  -> rebind and observe each initially empty parent a second time
+  -> deterministic parent-cleanup review plan (cleanup authority: none)
+```
+
+`seed retire parent-cleanup plan` never opens a write handle and never reports
+child names. Public rows carry only a domain-separated parent-path reference,
+the bound filesystem identity, retired-file count, status, and bounded usage;
+absolute parent paths require an explicit display flag and do not change the
+plan ID. Only `empty_stable_candidate` parents were the same recorded object
+and empty in both reads. `protected_search_root` and `retained_nonempty` rows
+can never become candidates in that plan. The proof is still sequential and
+non-atomic, and serialized plan data has no deletion authority. Pruning is an
+intentional boundary: its no-path tombstone cannot recreate this planner's
+live parent authority. No directory-removal executor is implemented in this
+slice.
+
 Terminal source-retirement journals may be retired only through the separate
 `seed retire prune` transition. The selector is one full operation ID plus its
 reviewed plan ID; prune has no implicit list/latest or age-based selector. A
