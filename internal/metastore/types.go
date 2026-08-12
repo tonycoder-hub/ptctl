@@ -40,6 +40,17 @@ var (
 	// durability boundary, but removal or directory flushing of its private
 	// staging name failed. The final object must not be rolled back.
 	ErrPublishedCleanupIncomplete = errors.New("private store publication staging cleanup is incomplete")
+
+	// ErrRemovalDurabilityUnconfirmed means an exact sealed-record name was
+	// observed absent after an attempted removal, but the directory durability
+	// boundary could not be confirmed. Callers must retain the removal receipt
+	// and recover through the same explicit higher-level transition.
+	ErrRemovalDurabilityUnconfirmed = errors.New("private store record removal durability is unconfirmed")
+
+	// ErrRemovalAmbiguous means a sealed-record removal crossed a namespace
+	// boundary whose final state could not be proven. It never authorizes a
+	// caller to infer that the selected record is absent.
+	ErrRemovalAmbiguous = errors.New("private store record removal outcome is ambiguous")
 )
 
 type ArtifactID string

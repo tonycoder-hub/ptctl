@@ -132,6 +132,14 @@ ptctl site bonus exchange status \
 
 ptctl site bonus exchange list \
   --state-store STATE
+
+ptctl site bonus exchange prune \
+  --state-store STATE --intent-record INTENT_RECORD_ID \
+  --operation-id OPERATION_ID --acknowledge-state-prune
+
+ptctl site bonus exchange forget \
+  --state-store STATE --retention-record RETENTION_RECORD_ID \
+  --operation-id OPERATION_ID --acknowledge-history-forget
 ```
 
 Prepare is local-only. Submit validates the exact production origin, capability,
@@ -163,16 +171,29 @@ Neither a new process nor JSON can recover submission authority, and rerunning
 submit is rejected before the cookie is read. Status is credential-free and
 never contacts TJUPT.
 
-List is also credential-free and never contacts TJUPT. It verifies a bounded,
-detected-stable set of canonical intent records with two exact-read passes in
-deterministic record-ID order, but leaves each row `not_inspected`. It neither
-reads linked attempt/outcome state nor chooses a latest operation; an operator or script
-must pass one explicit intent record to status.
+List is also credential-free and never contacts TJUPT. It verifies bounded,
+detected-stable sets of canonical live intents and historical retention/forget
+markers in deterministic original-intent-ID order, but leaves each row
+explicitly uninspected. It neither infers the complete linked transition nor
+chooses a latest operation; an operator or script must pass one explicit intent
+record to status.
+
+Prune and forget are local state-store protocols, not TJUPT adapter requests.
+Prune requires a separate acknowledgement and exact intent/operation selector,
+accepts only a complete terminal outcome, writes one deterministic
+non-executable tombstone first, and then removes the exact outcome, attempt, and
+intent records. A prepared or submission-unknown operation is never pruned.
+Forget requires a second irreversible acknowledgement and exact
+retention/operation selector. It writes a deterministic recovery marker before
+removing the tombstone and removes that marker last. Once the last marker is
+gone, later absence is reported as unattributed rather than as proof of an
+earlier forget.
 
 The marker coordinates one prepared operation within one preserved, uncloned
 private-store history. A separately prepared operation is a separate explicitly
-acknowledged submission. Copying, rolling back, or deleting operation records
-can create an independent history that a local file marker cannot coordinate.
+acknowledged submission. Copying, rolling back, or manually deleting operation
+records can create an independent history that a local file marker cannot
+coordinate; only the explicit terminal prune/forget protocol is supported.
 Read-only status proves the records currently visible in its selected store
 through a bounded, detected-stable but
 non-atomic scan; it does not infer the historical directory-sync/no-clobber
@@ -185,12 +206,14 @@ coordination state in the selected history, while the second requires a valid
 live request receipt or a jointly verified outcome record carrying that
 receipt. Neither extends coordination to copied or rolled-back stores.
 
-After usage validation the commands are report-first. Prepare/status/list and a
-durably confirmed submission use exit `0`; rejected, unknown, not-submitted, or
-operationally incomplete submission results use exit `1`; usage is `2`; and
-verified sealed-state corruption uses integrity exit `3`. A list stopped by an
-entry, record, path, aggregate-byte, or detected-change bound returns `4` after
-printing its incomplete report.
+After usage validation the commands are report-first. Prepare/status/list, a
+durably confirmed submission, `pruned`/`already_pruned`, and a newly confirmed
+`forgotten` use exit `0`; rejected, unknown, not-submitted, operationally
+incomplete submission, retention interruption/ambiguity, or unattributed
+post-forget absence uses exit `1`; usage or a missing acknowledgement is `2`;
+and verified sealed-state corruption uses integrity exit `3`. A list stopped by
+an entry, record, path, aggregate-byte, or detected-change bound, or a retention
+policy blocker, returns `4` after printing its incomplete report.
 
 ## Authentication
 

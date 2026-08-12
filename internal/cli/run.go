@@ -143,6 +143,8 @@ Usage:
   ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID --cookie-stdin --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
+  ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]
+  ptctl site bonus exchange forget --state-store DIR --retention-record RECORD_ID --operation-id ID --acknowledge-history-forget [--output table|json]
   ptctl site metafile fetch --cookie-stdin --acknowledge-site-effect --metafile-store DIR [--output table|json] SITE REMOTE_ID
   ptctl site metafile binding list --metafile-store DIR [--output table|json]
   ptctl site metafile binding inspect --metafile-store DIR [--output table|json] RECORD_ID

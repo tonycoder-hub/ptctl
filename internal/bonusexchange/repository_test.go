@@ -22,7 +22,8 @@ func TestRepositoryEnforcesAtMostOnceAuthorityChain(t *testing.T) {
 	ctx := context.Background()
 
 	status, err := fixture.session.Status(ctx, fixture.intentRef.ID)
-	if err != nil || !status.Complete || status.State != StatePrepared || status.Attempt != nil || status.Outcome != nil {
+	if err != nil || !status.Complete || status.State != StatePrepared || status.Attempt != nil || status.Outcome != nil ||
+		status.Used.Retention.InventoryPasses == 0 {
 		t.Fatalf("prepared status=%#v err=%v", status, err)
 	}
 

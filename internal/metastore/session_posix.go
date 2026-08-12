@@ -259,6 +259,46 @@ func platformSessionRemovePrivate(session *rootSession, relative string) error {
 	return nil
 }
 
+func platformSessionStageRecordRemoval(session *rootSession, sourceRelative, stagingRelative string) (bool, bool, error) {
+	sourceDirectory, sourceName, sourceErr := posixSessionTarget(session, sourceRelative)
+	stagingDirectory, stagingName, stagingErr := posixSessionTarget(session, stagingRelative)
+	if sourceErr != nil || stagingErr != nil || sourceDirectory != session.objectsDirectory || stagingDirectory != session.temporaryDirectory ||
+		sourceName == "." || stagingName == "." {
+		return false, false, fmt.Errorf("sealed record removal names are invalid")
+	}
+	if err := unix.Linkat(int(sourceDirectory.Fd()), sourceName, int(stagingDirectory.Fd()), stagingName, 0); err != nil {
+		if errors.Is(err, syscall.EEXIST) {
+			return true, false, ErrRemovalAmbiguous
+		}
+		return true, false, fmt.Errorf("stage sealed record removal failed")
+	}
+	return true, true, nil
+}
+
+func platformSessionRemoveRecordName(session *rootSession, relative string) (bool, bool, error) {
+	directory, name, err := posixSessionTarget(session, relative)
+	if err != nil || (directory != session.objectsDirectory && directory != session.temporaryDirectory) || name == "." {
+		return false, false, fmt.Errorf("sealed record removal name is invalid")
+	}
+	if err := unix.Unlinkat(int(directory.Fd()), name, 0); err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			return true, true, ErrRemovalAmbiguous
+		}
+		return true, false, fmt.Errorf("remove sealed record name failed")
+	}
+	return true, true, nil
+}
+
+func platformSessionSyncRecordRemoval(session *rootSession) error {
+	if session == nil || session.objectsDirectory == nil || session.temporaryDirectory == nil {
+		return ErrRemovalDurabilityUnconfirmed
+	}
+	if unix.Fsync(int(session.objectsDirectory.Fd())) != nil || unix.Fsync(int(session.temporaryDirectory.Fd())) != nil {
+		return ErrRemovalDurabilityUnconfirmed
+	}
+	return nil
+}
+
 func platformConfirmPrivateStoreLayout(session *rootSession) error {
 	if session == nil {
 		return fmt.Errorf("bound store session is unavailable")

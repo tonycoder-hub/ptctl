@@ -132,9 +132,12 @@ capabilities at the edge, not assumptions in the core domain model.
   private reviewed intent, fresh exact-option re-observation, deterministic
   no-clobber attempt marker, at most one non-retried POST, and a separately
   sealed confirmed/rejected/unknown outcome; its credential-free bounded
-  operation inventory verifies intent records without selecting a latest
-  operation or inferring linked state; a marker without an outcome is
-  permanently submission-unknown and is never retried automatically;
+  operation inventory verifies live intents plus historical retention/forget
+  markers without selecting a latest operation or inferring linked state; a
+  marker without an outcome is permanently submission-unknown and is never
+  retried automatically; an acknowledged local prune can replace only a
+  complete terminal chain with an exact non-executable tombstone, and a
+  separate acknowledged forget can erase that last historical evidence;
 - an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
   bounded GET with no redirect or retry and publishing the strictly validated
   exact response only into an initialized private metafile store;
@@ -758,14 +761,29 @@ ptctl site bonus exchange status \
 
 ptctl site bonus exchange list \
   --state-store "$PTCTL_STATE"
+
+ptctl site bonus exchange prune \
+  --state-store "$PTCTL_STATE" \
+  --intent-record INTENT_RECORD_ID \
+  --operation-id OPERATION_ID \
+  --acknowledge-state-prune
+
+ptctl site bonus exchange forget \
+  --state-store "$PTCTL_STATE" \
+  --retention-record RETENTION_RECORD_ID \
+  --operation-id OPERATION_ID \
+  --acknowledge-history-forget
 ```
 
 `list` is a credential-free recovery aid when an earlier command's output is
-no longer available. It performs two bounded intent-record inventories and two
-strict per-record hash/parse verification passes, returns deterministic
-record-ID order, and marks every row `not_inspected`. It never chooses a newest
-operation or reads attempt/outcome state; pass one selected intent record to `status` for that
-higher-evidence inspection.
+no longer available. It performs detected-stable bounded inventories of live
+intent records and historical retention/forget markers, hash-verifies and
+strictly parses every retained record, returns deterministic
+original-intent-ID order, and
+marks each row `not_inspected`, `pruning_not_inspected`,
+`pruned_not_inspected`, or `forgetting_not_inspected`. It never chooses a
+newest operation or infers the full attempt/outcome transition; pass one
+selected intent record to `status` for that higher-evidence inspection.
 
 Submit performs one fresh bounded GET and verifies the process-local review
 authority before writing the deterministic attempt marker. Within the
@@ -790,9 +808,11 @@ reusing older authority.
 
 The at-most-once marker coordinates one prepared operation within one
 preserved private-store history. A separately prepared operation is a separate
-explicitly acknowledged submission. Do not clone, roll back, or selectively
-delete the history and then reuse an intent: no local file protocol can
-coordinate independent restored copies. Read-only `status` re-verifies the
+explicitly acknowledged submission. Do not clone, roll back, or manually
+delete records and then reuse an intent: no local file protocol can coordinate
+independent restored copies. The only supported deletion boundaries are the
+explicit terminal `prune` and `forget` protocols below. Read-only `status`
+re-verifies the
 records currently visible in the selected store through a bounded,
 detected-stable but non-atomic scan. It does not
 reconstruct the historical no-clobber or directory-sync receipt. Consequently,
@@ -808,12 +828,38 @@ jointly verified outcome record containing that receipt, was bound to the
 operation. Neither field claims global exactly-once coordination across cloned
 or rolled-back stores.
 
-These commands are report-first after valid usage. Complete prepare/status/list and
-a durably recorded confirmed submission exit `0`; rejected, unknown,
-not-submitted, or operationally incomplete submissions exit `1` after printing
-their state. Usage is `2`, and verified sealed-state corruption is integrity
-exit `3`. A bounded but incomplete operation inventory returns `4` after its
-report; it never silently truncates or promotes a partial list.
+`prune` is local-only and never reads a cookie or contacts TJUPT. It requires
+the exact intent-record and operation IDs plus its own acknowledgement. Only a
+complete `confirmed`, `rejected`, explicit `unknown`, or `not_submitted` outcome
+is eligible. `prepared` and `attempt_reserved_submission_unknown` are blocked
+with zero deletion because their records remain the authority that prevents an
+unsafe repeat POST. Before removing anything, prune seals and re-verifies one
+deterministic retention record containing the exact canonical terminal chain
+and store identity. It then removes outcome, attempt, and intent by their
+domain-separated record digests, with a deterministic owner-private residue
+and directory durability checks making each crash boundary recoverable by
+repeating the same selectors. A completed or recovered prune returns the
+non-executable tombstone ID; it never recreates submission authority.
+
+`forget` is a second, narrower and irreversible local boundary. It requires the
+exact retention-record and operation IDs plus a distinct acknowledgement, and
+first proves that all executable terminal records are already absent. It then
+publishes an exact deterministic forget marker, removes the tombstone, and
+removes the forget marker last. Repeating the same selector recovers an
+interrupted transition while that marker remains. Once the final marker is
+durably absent, a later invocation deliberately reports
+`unattributed_absence`: it cannot distinguish a prior successful forget from a
+record ID that never existed, and it never claims `already_forgotten`.
+
+These commands are report-first after valid usage. Complete
+prepare/status/list, a durably recorded confirmed submission,
+`pruned`/`already_pruned`, and a newly confirmed `forgotten` exit `0`.
+Rejected, unknown, not-submitted, operationally incomplete submissions,
+retention interruption/uncertain durability, and unattributed post-forget
+absence exit `1` after printing their state. Usage or a missing acknowledgement
+is `2`, and verified sealed-state corruption is integrity exit `3`. A bounded
+but incomplete inventory or retention policy blocker returns `4` after its
+report; partial evidence is never silently promoted.
 
 Read downloader state (read-only commands support qBittorrent and
 Transmission):
@@ -1908,6 +1954,15 @@ recorded provenance. Missing or unreadable records return `1`, usage returns
 returns `4`, always after any non-usage report. Locator listing returns `0`
 when its bounded inventory is complete and report-first `4` when a record,
 entry, or name-byte limit stops it.
+
+Bonus-exchange retention is also report-first. `pruned`, `already_pruned`, and
+a newly confirmed `forgotten` return `0`; operational interruption, uncertain
+record-removal durability, removal ambiguity, or unattributed absence after the
+last forget marker return `1`; invalid usage or a missing deletion
+acknowledgement returns `2`; sealed-record integrity failure returns `3`; and a
+non-terminal operation, incomplete bounded inventory, explicit selector
+conflict, or other retention policy blocker returns `4`. Prune and forget are
+credential-free and perform no site request.
 
 Materialize validates every selector, acknowledgement, timeout, and limit
 before opening a metafile, source root, target root, or journal. Successful

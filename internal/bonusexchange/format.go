@@ -20,6 +20,14 @@ func EncodeOutcome(record OutcomeRecord, limits Limits) ([]byte, error) {
 	return encodeRecord(record, limits, record.Validate)
 }
 
+func EncodeRetention(record RetentionRecord, limits Limits) ([]byte, error) {
+	return encodeRecord(record, limits, record.Validate)
+}
+
+func EncodeForget(record ForgetRecord, limits Limits) ([]byte, error) {
+	return encodeRecord(record, limits, record.Validate)
+}
+
 func DecodeIntent(reader io.Reader, limits Limits) (IntentRecord, error) {
 	var record IntentRecord
 	if err := decodeRecord(reader, limits, &record, func() error { return record.Validate() }); err != nil {
@@ -40,6 +48,22 @@ func DecodeOutcome(reader io.Reader, limits Limits) (OutcomeRecord, error) {
 	var record OutcomeRecord
 	if err := decodeRecord(reader, limits, &record, func() error { return record.Validate() }); err != nil {
 		return OutcomeRecord{}, err
+	}
+	return record, nil
+}
+
+func DecodeRetention(reader io.Reader, limits Limits) (RetentionRecord, error) {
+	var record RetentionRecord
+	if err := decodeRecord(reader, limits, &record, func() error { return record.Validate() }); err != nil {
+		return RetentionRecord{}, err
+	}
+	return record, nil
+}
+
+func DecodeForget(reader io.Reader, limits Limits) (ForgetRecord, error) {
+	var record ForgetRecord
+	if err := decodeRecord(reader, limits, &record, func() error { return record.Validate() }); err != nil {
+		return ForgetRecord{}, err
 	}
 	return record, nil
 }

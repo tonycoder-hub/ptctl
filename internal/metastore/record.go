@@ -18,13 +18,15 @@ import (
 const (
 	// Record kinds are schema identifiers, not caller-defined labels. Adding a
 	// kind is a store-format compatibility decision and must be explicit here.
-	RecordKindStorageProfileV1           RecordKind = "storage.profile.v1"
-	RecordKindStorageIndexDataV1         RecordKind = "storage.index.data.v1"
-	RecordKindStorageIndexDescriptorV1   RecordKind = "storage.index.descriptor.v1"
-	RecordKindSiteMetafileBindingV1      RecordKind = "site.metafile.binding.v1"
-	RecordKindSiteBonusExchangeIntentV1  RecordKind = "site.bonus.exchange.intent.v1"
-	RecordKindSiteBonusExchangeAttemptV1 RecordKind = "site.bonus.exchange.attempt.v1"
-	RecordKindSiteBonusExchangeOutcomeV1 RecordKind = "site.bonus.exchange.outcome.v1"
+	RecordKindStorageProfileV1             RecordKind = "storage.profile.v1"
+	RecordKindStorageIndexDataV1           RecordKind = "storage.index.data.v1"
+	RecordKindStorageIndexDescriptorV1     RecordKind = "storage.index.descriptor.v1"
+	RecordKindSiteMetafileBindingV1        RecordKind = "site.metafile.binding.v1"
+	RecordKindSiteBonusExchangeIntentV1    RecordKind = "site.bonus.exchange.intent.v1"
+	RecordKindSiteBonusExchangeAttemptV1   RecordKind = "site.bonus.exchange.attempt.v1"
+	RecordKindSiteBonusExchangeOutcomeV1   RecordKind = "site.bonus.exchange.outcome.v1"
+	RecordKindSiteBonusExchangeRetentionV1 RecordKind = "site.bonus.exchange.retention.v1"
+	RecordKindSiteBonusExchangeForgetV1    RecordKind = "site.bonus.exchange.forget.v1"
 
 	defaultMaxRecordBytes = int64(64 << 20)
 	hardMaxRecordBytes    = int64(64 << 20)
@@ -42,6 +44,7 @@ const (
 	recordImportEffect = "write_private_sealed_record"
 	recordLoadEffect   = "read_private_sealed_record"
 	recordVerifyEffect = "verify_private_sealed_record_set"
+	recordSyncEffect   = "confirm_private_sealed_record_set_durability"
 	hardMaxRecordSet   = 16
 )
 
@@ -74,7 +77,9 @@ func ParseRecordKind(value string) (RecordKind, error) {
 		RecordKindSiteMetafileBindingV1,
 		RecordKindSiteBonusExchangeIntentV1,
 		RecordKindSiteBonusExchangeAttemptV1,
-		RecordKindSiteBonusExchangeOutcomeV1:
+		RecordKindSiteBonusExchangeOutcomeV1,
+		RecordKindSiteBonusExchangeRetentionV1,
+		RecordKindSiteBonusExchangeForgetV1:
 		return RecordKind(value), nil
 	default:
 		return "", fmt.Errorf("sealed record kind is invalid")
@@ -165,6 +170,16 @@ type RecordSetVerificationReceipt struct {
 	RecordsVerified int       `json:"records_verified"`
 	BytesRead       int64     `json:"bytes_read"`
 	Store           StoreInfo `json:"store"`
+}
+
+type RecordSetDurabilityReceipt struct {
+	Effect              string    `json:"effect"`
+	Complete            bool      `json:"complete"`
+	DurabilityConfirmed bool      `json:"durability_confirmed"`
+	VerificationPasses  int       `json:"verification_passes"`
+	RecordsVerified     int       `json:"records_verified"`
+	BytesRead           int64     `json:"bytes_read"`
+	Store               StoreInfo `json:"store"`
 }
 
 type RecordListUsage struct {
@@ -666,6 +681,8 @@ func allRecordKinds() []RecordKind {
 		RecordKindSiteBonusExchangeIntentV1,
 		RecordKindSiteBonusExchangeAttemptV1,
 		RecordKindSiteBonusExchangeOutcomeV1,
+		RecordKindSiteBonusExchangeRetentionV1,
+		RecordKindSiteBonusExchangeForgetV1,
 	}
 }
 

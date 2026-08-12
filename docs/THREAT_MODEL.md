@@ -133,11 +133,32 @@ and is never used to justify another automatic request.
 This coordination applies to one prepared operation and assumes one preserved
 private-store history. A separately prepared operation is a separate explicit
 submission. Copying or rolling back the store before the attempt marker, or
-deleting all records for an operation, can create independent histories that
-no local no-clobber marker can coordinate. Reports state this scope explicitly.
+manually deleting records, can create independent histories that no local
+no-clobber marker can coordinate. Reports state this scope explicitly.
 A later read-only status uses a bounded, detected-stable but non-atomic scan to
 prove currently visible record bytes and links, but cannot retroactively
 prove that an earlier directory sync or no-clobber publication completed.
+
+Bonus-exchange retention never expands this remote authority. `prune` and
+`forget` are credential-free and have no site adapter or HTTP surface. Prune is
+blocked unless one bound store session proves an exact complete terminal chain;
+prepared and submission-unknown records are retained because deleting them
+could erase the only local retry barrier. The deterministic tombstone is
+published and durably reverified before any executable record is removed.
+Exact-record deletion verifies the domain-separated digest and size, stages a
+deterministic owner-private residue, removes only the selected names, syncs the
+affected directories, and rechecks the bound physical store. Corrupt residue,
+identity change, ambiguity, cancellation, or durability failure stops closed
+and preserves the recovery selector.
+
+Forget is intentionally a second acknowledgement. It first proves the
+executable records absent and publishes a deterministic marker containing the
+exact tombstone before deleting that tombstone; the marker is removed last.
+This orders crash recovery but is not an audit-retention promise or secure
+erasure guarantee: storage media, backups, copied stores, and filesystem
+journals may retain bytes. After final marker removal the program has no basis
+to claim earlier success, so later absence is unattributed. Neither protocol
+coordinates a cloned or rolled-back store history.
 
 `site metafile fetch` is scoped to one validated remote ID and one GET. It does
 not perform a preceding detail lookup, follow a redirect, retry, or fan out to
@@ -227,13 +248,15 @@ and treats multiple or orphan outcomes as corruption. A serialized intent,
 attempt, review, or submission receipt cannot recreate process-local write
 authority.
 
-Bonus-operation discovery is credential-free and read-only. It uses two exact
-intent-loading passes and two bounded intent inventories under one physical
-store binding, rejects duplicate operation IDs and changed locator/size sets,
-and accounts for per-pass entries, retained records, path bytes, and aggregate
-intent bytes. It returns deterministic record-ID order with state explicitly
-`not_inspected`; it never scans linked outcomes for every row, chooses the
-newest timestamp, or turns public list data into submission authority.
+Bonus-operation discovery is credential-free and read-only. It uses repeated
+exact loading and detected-stable bounded inventories for live intents and
+historical retention/forget markers under one physical store binding, rejects
+duplicate or disagreeing operation IDs and changed locator/size sets, and
+accounts for per-pass entries, retained records, path bytes, and separate live
+and historical byte totals. It returns deterministic original-intent-ID order
+with state explicitly uninspected; it never infers every linked transition,
+chooses the newest timestamp, or turns public list data into submission
+authority.
 
 Public reports distinguish the verified marker that blocks a future submit in
 the selected preserved history from verification that a single-request receipt

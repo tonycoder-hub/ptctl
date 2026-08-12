@@ -52,13 +52,15 @@ type siteBonusExchangeScope struct {
 }
 
 type siteBonusExchangeOperation struct {
-	Status        string               `json:"status"`
-	Complete      bool                 `json:"complete"`
-	OperationID   string               `json:"operation_id,omitempty"`
-	IntentRecord  *metastore.RecordRef `json:"intent_record,omitempty"`
-	AttemptRecord *metastore.RecordRef `json:"attempt_record,omitempty"`
-	OutcomeRecord *metastore.RecordRef `json:"outcome_record,omitempty"`
-	StopReason    string               `json:"stop_reason,omitempty"`
+	Status          string               `json:"status"`
+	Complete        bool                 `json:"complete"`
+	OperationID     string               `json:"operation_id,omitempty"`
+	IntentRecord    *metastore.RecordRef `json:"intent_record,omitempty"`
+	AttemptRecord   *metastore.RecordRef `json:"attempt_record,omitempty"`
+	OutcomeRecord   *metastore.RecordRef `json:"outcome_record,omitempty"`
+	RetentionRecord *metastore.RecordRef `json:"retention_record,omitempty"`
+	ForgetRecord    *metastore.RecordRef `json:"forget_record,omitempty"`
+	StopReason      string               `json:"stop_reason,omitempty"`
 }
 
 type siteBonusExchangeRequest struct {
@@ -77,6 +79,11 @@ type siteBonusExchangePersistence struct {
 	AttemptRecordVerified bool                `json:"attempt_record_verified"`
 	OutcomeRecordVerified bool                `json:"outcome_record_verified"`
 	OutcomeDurable        bool                `json:"outcome_durable"`
+	RetentionWrites       int                 `json:"retention_writes"`
+	ForgetWrites          int                 `json:"forget_writes"`
+	RecordsRemoved        int                 `json:"records_removed"`
+	RecordsAlreadyAbsent  int                 `json:"records_already_absent"`
+	RemovalDurable        bool                `json:"removal_durable"`
 }
 
 type siteBonusExchangeAssurance struct {
@@ -89,6 +96,10 @@ type siteBonusExchangeAssurance struct {
 	AtMostOnceScope              string `json:"at_most_once_scope"`
 	NoAutomaticRetry             bool   `json:"no_automatic_retry"`
 	SerializedAuthority          bool   `json:"serialized_authority"`
+	TerminalChainVerified        bool   `json:"terminal_chain_verified"`
+	NonExecutableTombstone       bool   `json:"non_executable_tombstone"`
+	NoNetworkAccess              bool   `json:"no_network_access"`
+	HistoricalEvidenceErased     bool   `json:"historical_evidence_erased"`
 }
 
 type siteBonusExchangeListReport struct {
@@ -108,7 +119,7 @@ type siteBonusExchangeListReport struct {
 
 func (a *app) siteBonusExchange(args []string) error {
 	if len(args) == 0 {
-		return usageError("site bonus exchange requires prepare, submit, status, or list")
+		return usageError("site bonus exchange requires prepare, submit, status, list, prune, or forget")
 	}
 	switch args[0] {
 	case "prepare":
@@ -119,11 +130,15 @@ func (a *app) siteBonusExchange(args []string) error {
 		return a.siteBonusExchangeStatus(args[1:])
 	case "list":
 		return a.siteBonusExchangeList(args[1:])
+	case "prune":
+		return a.siteBonusExchangePrune(args[1:])
+	case "forget":
+		return a.siteBonusExchangeForget(args[1:])
 	case "-h", "--help", "help":
 		a.siteBonusExchangeHelp()
 		return nil
 	default:
-		return usageError("site bonus exchange requires prepare, submit, status, or list")
+		return usageError("site bonus exchange requires prepare, submit, status, list, prune, or forget")
 	}
 }
 
@@ -133,10 +148,10 @@ func (a *app) siteBonusExchangeList(args []string) error {
 	storeRoot := fs.String("state-store", "", "initialized private state store")
 	timeout := fs.Duration("timeout", bonusExchangeDefaultTimeout, "local operation inventory timeout")
 	defaults := bonusexchange.DefaultLimits()
-	maxOperations := fs.Int("max-operations", defaults.MaxStatusRecords, "maximum intent records retained")
+	maxOperations := fs.Int("max-operations", defaults.MaxStatusRecords, "maximum live or retained operations returned")
 	maxStateEntries := fs.Int("max-state-entries", defaults.MaxStatusEntries, "maximum private-store entries per inventory pass")
 	maxStatePathBytes := fs.Int64("max-state-path-bytes", defaults.MaxStatusPathBytes, "maximum private-store path bytes per inventory pass")
-	maxStateBytes := fs.Int64("max-state-bytes", defaults.MaxStatusBytes, "maximum aggregate intent bytes read")
+	maxStateBytes := fs.Int64("max-state-bytes", defaults.MaxStatusBytes, "maximum aggregate bytes read per live or historical axis")
 	if err := fs.Parse(args); err != nil {
 		return usageError("site bonus exchange list: %v", err)
 	}
@@ -332,6 +347,173 @@ func (a *app) siteBonusExchangeStatus(args []string) error {
 		addBonusExchangeBlocker(&report, "state.session_close_failed", "the bound state session could not be closed cleanly")
 		return a.finishSiteBonusExchange(*output, report, fmt.Errorf("close bonus exchange state session failed"))
 	}
+	return a.writeSiteBonusExchangeReport(*output, report)
+}
+
+func (a *app) siteBonusExchangePrune(args []string) error {
+	fs := newFlagSet("site bonus exchange prune")
+	output := fs.String("output", "table", "table or json")
+	storeRoot := fs.String("state-store", "", "initialized private state store")
+	intentValue := fs.String("intent-record", "", "sealed intent record ID")
+	operationValue := fs.String("operation-id", "", "full bonus exchange operation ID")
+	acknowledge := fs.Bool("acknowledge-state-prune", false, "acknowledge deletion of this terminal executable state")
+	timeout := fs.Duration("timeout", bonusExchangeDefaultTimeout, "local retention timeout")
+	if err := fs.Parse(args); err != nil {
+		return usageError("site bonus exchange prune: %v", err)
+	}
+	if fs.NArg() != 0 || *storeRoot == "" || *intentValue == "" || *operationValue == "" || !*acknowledge {
+		return usageError("site bonus exchange prune requires --state-store, --intent-record, --operation-id, and --acknowledge-state-prune")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if err := validateBonusExchangeTimeout(*timeout); err != nil {
+		return err
+	}
+	intentID, err := metastore.ParseRecordID(*intentValue)
+	if err != nil {
+		return usageError("--intent-record must be a canonical sealed record ID")
+	}
+	operationID, err := bonusexchange.ParseOperationID(*operationValue)
+	if err != nil {
+		return usageError("--operation-id must be a canonical bonus exchange operation ID")
+	}
+	report := newSiteBonusExchangeRetentionReport("site.bonus.exchange.prune", bonusexchange.PruneEffect)
+	report.Acknowledgement = siteBonusExchangeAcknowledgement{Provided: true, Scope: "delete_exact_terminal_intent_attempt_outcome_and_retain_tombstone"}
+	report.Operation.OperationID = operationID.String()
+	intentRef := metastore.RecordRef{Kind: metastore.RecordKindSiteBonusExchangeIntentV1, ID: intentID}
+	report.Operation.IntentRecord = &intentRef
+
+	store, err := metastore.Open(*storeRoot)
+	if err != nil {
+		addBonusExchangeBlocker(&report, "state.store_open_failed", "the private state store could not be opened")
+		return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(err, "open private state store failed"))
+	}
+	report.Persistence.Store = store.Info()
+	repository, err := bonusexchange.NewRepository(store, bonusexchange.DefaultLimits())
+	if err != nil {
+		addBonusExchangeBlocker(&report, "state.repository_unavailable", "the bonus exchange state repository is unavailable")
+		return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(err, "open bonus exchange repository failed"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	session, err := repository.OpenSession(ctx)
+	if err != nil {
+		addBonusExchangeBlocker(&report, "state.session_open_failed", "the bound state session could not be opened")
+		return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(err, "open bonus exchange state session failed"))
+	}
+	retained, pruneErr := session.Prune(ctx, intentID, operationID)
+	applyBonusExchangeRetentionReceipt(&report, retained)
+	closeErr := session.Close()
+	if pruneErr != nil {
+		code := safeBonusExchangeRetentionStop(retained.StopReason, pruneErr)
+		addBonusExchangeBlocker(&report, code, "the selected terminal operation could not be safely replaced by its tombstone")
+		switch {
+		case errors.Is(pruneErr, bonusexchange.ErrCorruptExchange), errors.Is(pruneErr, metastore.ErrCorruptRecord):
+			report.Outcome = "integrity_failed"
+			return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(pruneErr, "prune bonus exchange state failed"))
+		case errors.Is(pruneErr, bonusexchange.ErrRetentionPolicy), errors.Is(pruneErr, bonusexchange.ErrInvalidExchange):
+			report.Outcome = "blocked"
+			return a.finishSiteBonusExchange(*output, report, &inconclusiveErr{message: "bonus exchange state pruning was blocked; see report"})
+		case errors.Is(pruneErr, bonusexchange.ErrExchangeNotFound):
+			report.Outcome = "not_found"
+			return a.finishSiteBonusExchange(*output, report, fmt.Errorf("bonus exchange operation was not found"))
+		default:
+			report.Outcome = "incomplete"
+			return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(pruneErr, "prune bonus exchange state failed"))
+		}
+	}
+	if closeErr != nil {
+		report.Outcome = "incomplete"
+		addBonusExchangeBlocker(&report, "state.session_close_failed", "the bound state session could not be closed cleanly")
+		return a.finishSiteBonusExchange(*output, report, fmt.Errorf("close bonus exchange state session failed"))
+	}
+	report.Outcome = "pruned"
+	if retained.RetentionWrites == 0 && retained.RecordsRemoved == 0 && retained.WritesPerformed == 0 {
+		report.Outcome = "already_pruned"
+	}
+	return a.writeSiteBonusExchangeReport(*output, report)
+}
+
+func (a *app) siteBonusExchangeForget(args []string) error {
+	fs := newFlagSet("site bonus exchange forget")
+	output := fs.String("output", "table", "table or json")
+	storeRoot := fs.String("state-store", "", "initialized private state store")
+	retentionValue := fs.String("retention-record", "", "sealed retention record ID")
+	operationValue := fs.String("operation-id", "", "full bonus exchange operation ID")
+	acknowledge := fs.Bool("acknowledge-history-forget", false, "acknowledge irreversible deletion of this tombstone")
+	timeout := fs.Duration("timeout", bonusExchangeDefaultTimeout, "local historical-evidence deletion timeout")
+	if err := fs.Parse(args); err != nil {
+		return usageError("site bonus exchange forget: %v", err)
+	}
+	if fs.NArg() != 0 || *storeRoot == "" || *retentionValue == "" || *operationValue == "" || !*acknowledge {
+		return usageError("site bonus exchange forget requires --state-store, --retention-record, --operation-id, and --acknowledge-history-forget")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if err := validateBonusExchangeTimeout(*timeout); err != nil {
+		return err
+	}
+	retentionID, err := metastore.ParseRecordID(*retentionValue)
+	if err != nil {
+		return usageError("--retention-record must be a canonical sealed record ID")
+	}
+	operationID, err := bonusexchange.ParseOperationID(*operationValue)
+	if err != nil {
+		return usageError("--operation-id must be a canonical bonus exchange operation ID")
+	}
+	report := newSiteBonusExchangeRetentionReport("site.bonus.exchange.forget", bonusexchange.ForgetEffect)
+	report.Acknowledgement = siteBonusExchangeAcknowledgement{Provided: true, Scope: "irreversibly_delete_exact_bonus_exchange_tombstone"}
+	report.Operation.OperationID = operationID.String()
+	retentionRef := metastore.RecordRef{Kind: metastore.RecordKindSiteBonusExchangeRetentionV1, ID: retentionID}
+	report.Operation.RetentionRecord = &retentionRef
+
+	store, err := metastore.Open(*storeRoot)
+	if err != nil {
+		addBonusExchangeBlocker(&report, "state.store_open_failed", "the private state store could not be opened")
+		return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(err, "open private state store failed"))
+	}
+	report.Persistence.Store = store.Info()
+	repository, err := bonusexchange.NewRepository(store, bonusexchange.DefaultLimits())
+	if err != nil {
+		addBonusExchangeBlocker(&report, "state.repository_unavailable", "the bonus exchange state repository is unavailable")
+		return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(err, "open bonus exchange repository failed"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	session, err := repository.OpenSession(ctx)
+	if err != nil {
+		addBonusExchangeBlocker(&report, "state.session_open_failed", "the bound state session could not be opened")
+		return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(err, "open bonus exchange state session failed"))
+	}
+	forgotten, forgetErr := session.Forget(ctx, retentionID, operationID)
+	applyBonusExchangeForgetReceipt(&report, forgotten)
+	closeErr := session.Close()
+	if forgetErr != nil {
+		code := safeBonusExchangeRetentionStop(forgotten.StopReason, forgetErr)
+		addBonusExchangeBlocker(&report, code, "the selected tombstone could not be safely and completely erased")
+		switch {
+		case errors.Is(forgetErr, bonusexchange.ErrCorruptExchange), errors.Is(forgetErr, metastore.ErrCorruptRecord):
+			report.Outcome = "integrity_failed"
+			return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(forgetErr, "forget bonus exchange history failed"))
+		case errors.Is(forgetErr, bonusexchange.ErrRetentionPolicy), errors.Is(forgetErr, bonusexchange.ErrInvalidExchange):
+			report.Outcome = "blocked"
+			return a.finishSiteBonusExchange(*output, report, &inconclusiveErr{message: "bonus exchange history deletion was blocked; see report"})
+		case errors.Is(forgetErr, bonusexchange.ErrExchangeNotFound):
+			report.Outcome = "unattributed_absence"
+			return a.finishSiteBonusExchange(*output, report, fmt.Errorf("bonus exchange retention evidence was not found"))
+		default:
+			report.Outcome = "incomplete"
+			return a.finishSiteBonusExchange(*output, report, bonusExchangePublicStateError(forgetErr, "forget bonus exchange history failed"))
+		}
+	}
+	if closeErr != nil {
+		report.Outcome = "incomplete"
+		addBonusExchangeBlocker(&report, "state.session_close_failed", "the bound state session could not be closed cleanly")
+		return a.finishSiteBonusExchange(*output, report, fmt.Errorf("close bonus exchange state session failed"))
+	}
+	report.Outcome = "forgotten"
 	return a.writeSiteBonusExchangeReport(*output, report)
 }
 
@@ -587,7 +769,7 @@ func newSiteBonusExchangeReport(kind, siteID, selector, reviewID string, config 
 		Blockers: []siteDetailFinding{},
 		Warnings: []string{
 			"the deterministic attempt marker is written before the form POST; an existing marker is never retried",
-			"at-most-once coordination is per prepared operation within one preserved, uncloned private-store history; do not roll back, duplicate, or delete its operation records",
+			"at-most-once coordination is per prepared operation within one preserved, uncloned private-store history; do not roll back, duplicate, or manually delete its records; terminal prune and forget require their explicit acknowledged commands",
 			"confirmed means an allowlisted site-local redirect was observed, not a signed statement or atomic balance proof",
 			"after a POST, a missing durable outcome remains submission-unknown and requires status inspection, never automatic retry",
 		},
@@ -599,10 +781,102 @@ func newSiteBonusExchangeListReport(limits bonusexchange.Limits) siteBonusExchan
 		kind: "site.bonus.exchange.operation_list", Outcome: "blocked", Effect: []string{bonusexchange.ListEffect},
 		Limits: limits, Operations: []bonusexchange.OperationSummary{}, Blockers: []siteDetailFinding{},
 		Warnings: []string{
-			"the list verifies bounded intent records only; attempt and outcome state remain not_inspected until an explicit intent record is passed to status",
+			"the list verifies bounded live intents and historical retention/forget markers; the full attempt/outcome transition remains not_inspected until an explicit intent record is passed to status",
 			"inventory order is deterministic by intent record ID and is never a newest-operation selector",
-			"the two inventory passes are a detected-stable non-atomic observation of one preserved private-store history",
+			"each live or historical inventory uses a detected-stable non-atomic observation of one preserved private-store history",
 		},
+	}
+}
+
+func newSiteBonusExchangeRetentionReport(kind, effect string) siteBonusExchangeReport {
+	report := newSiteBonusExchangeReport(kind, "unknown", "unknown", "", site.BonusExchangeConfig{})
+	report.Effect = []string{effect}
+	report.Request.Status = "not_requested_local_retention"
+	report.Acknowledgement.Scope = "required_explicit_local_deletion_boundary"
+	report.Persistence.Status = "inspection_not_started"
+	report.Assurance.NoNetworkAccess = true
+	report.Assurance.AtMostOnceScope = "historical_local_state_only_no_submission_authority"
+	report.Warnings = []string{
+		"prune is allowed only for a complete terminal outcome and retains one deterministic non-executable tombstone",
+		"prepared and submission-unknown operations are never pruned because their durable records are still required to prevent an unsafe retry",
+		"forget is a separate irreversible acknowledgement; after its final marker is deleted, later absence cannot prove that forgetting previously succeeded",
+		"these commands never read a cookie, contact the site, or submit a form",
+	}
+	return report
+}
+
+func applyBonusExchangeRetentionReceipt(report *siteBonusExchangeReport, receipt bonusexchange.RetentionReceipt) {
+	if report == nil {
+		return
+	}
+	report.WritesPerformed = receipt.WritesPerformed
+	report.Operation.Status = receipt.State
+	report.Operation.Complete = receipt.Complete
+	report.Operation.OperationID = receipt.OperationID.String()
+	report.Operation.StopReason = receipt.StopReason
+	if receipt.IntentRecordID != "" {
+		ref := metastore.RecordRef{Kind: metastore.RecordKindSiteBonusExchangeIntentV1, ID: receipt.IntentRecordID}
+		report.Operation.IntentRecord = &ref
+	}
+	if receipt.RetentionRecord.ID != "" {
+		ref := receipt.RetentionRecord
+		report.Operation.RetentionRecord = &ref
+	}
+	report.Scope.SiteID = valueOrUnknown(receipt.SiteID)
+	report.Scope.Selector = valueOrUnknown(receipt.Selector)
+	report.Scope.ExpectedReviewID = receipt.ExpectedReviewID
+	report.Persistence.Store = receipt.Store
+	report.Persistence.RetentionWrites = receipt.RetentionWrites
+	report.Persistence.RecordsRemoved = receipt.RecordsRemoved
+	report.Persistence.RecordsAlreadyAbsent = receipt.RecordsAlreadyAbsent
+	report.Persistence.RemovalDurable = receipt.DurabilityConfirmed
+	report.Persistence.Status = "retention_incomplete"
+	if receipt.Complete {
+		report.Persistence.Status = "terminal_tombstone_durable"
+	}
+	report.Assurance.TerminalChainVerified = safeTerminalBonusExchangeState(receipt.TerminalState)
+	report.Assurance.NonExecutableTombstone = receipt.Complete && receipt.RetentionRecord.ID != ""
+}
+
+func applyBonusExchangeForgetReceipt(report *siteBonusExchangeReport, receipt bonusexchange.ForgetReceipt) {
+	if report == nil {
+		return
+	}
+	report.WritesPerformed = receipt.WritesPerformed
+	report.Operation.Status = receipt.State
+	report.Operation.Complete = receipt.Complete
+	report.Operation.OperationID = receipt.OperationID.String()
+	report.Operation.StopReason = receipt.StopReason
+	if receipt.RetentionRecord.ID != "" {
+		ref := receipt.RetentionRecord
+		report.Operation.RetentionRecord = &ref
+	}
+	if receipt.ForgetRecord.ID != "" {
+		ref := receipt.ForgetRecord
+		report.Operation.ForgetRecord = &ref
+	}
+	report.Scope.SiteID = valueOrUnknown(receipt.SiteID)
+	report.Scope.Selector = valueOrUnknown(receipt.Selector)
+	report.Scope.ExpectedReviewID = receipt.ExpectedReviewID
+	report.Persistence.Store = receipt.Store
+	report.Persistence.ForgetWrites = receipt.ForgetWrites
+	report.Persistence.RecordsRemoved = receipt.RecordsRemoved
+	report.Persistence.RecordsAlreadyAbsent = receipt.RecordsAlreadyAbsent
+	report.Persistence.RemovalDurable = receipt.DurabilityConfirmed
+	report.Persistence.Status = "forget_incomplete"
+	if receipt.Complete {
+		report.Persistence.Status = "historical_evidence_erased"
+	}
+	report.Assurance.TerminalChainVerified = safeTerminalBonusExchangeState(receipt.TerminalState)
+	report.Assurance.HistoricalEvidenceErased = receipt.Complete && receipt.DurabilityConfirmed
+}
+
+func safeTerminalBonusExchangeState(state string) bool {
+	switch state {
+	case bonusexchange.StateConfirmed, bonusexchange.StateRejected, bonusexchange.StateUnknown, bonusexchange.StateNotSubmitted:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -654,6 +928,16 @@ func applyBonusExchangeStatus(report *siteBonusExchangeReport, status bonusexcha
 		if status.Complete {
 			report.Assurance.SubmissionRequestBound = true
 		}
+	}
+	if status.RetentionRef != nil {
+		copyRef := *status.RetentionRef
+		report.Operation.RetentionRecord = &copyRef
+		report.Assurance.NonExecutableTombstone = status.Complete
+		report.Assurance.TerminalChainVerified = status.Complete
+	}
+	if status.ForgetRef != nil {
+		copyRef := *status.ForgetRef
+		report.Operation.ForgetRecord = &copyRef
 	}
 	if status.Store.StoreID != "" {
 		report.Persistence.Store = status.Store
@@ -804,6 +1088,34 @@ func safeBonusExchangeListStop(value string, err error) string {
 	}
 }
 
+func safeBonusExchangeRetentionStop(value string, err error) string {
+	switch value {
+	case "context_cancelled", "retention_policy_blocked", "operation_not_found", "durability_unconfirmed",
+		"removal_ambiguous", "inventory_incomplete", "integrity_failed", "operation_interrupted",
+		"operation_not_terminal", "forget_in_progress", "prune_incomplete", "transition_interrupted",
+		"retention_not_found_unattributed":
+		return "state." + value
+	}
+	switch {
+	case errors.Is(err, bonusexchange.ErrCorruptExchange), errors.Is(err, metastore.ErrCorruptRecord):
+		return "state.integrity_failed"
+	case errors.Is(err, bonusexchange.ErrRetentionPolicy):
+		return "state.retention_policy_blocked"
+	case errors.Is(err, bonusexchange.ErrInvalidExchange):
+		return "state.selector_conflict"
+	case errors.Is(err, bonusexchange.ErrExchangeNotFound), errors.Is(err, metastore.ErrRecordNotFound):
+		return "state.operation_not_found"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "state.context_cancelled"
+	case errors.Is(err, metastore.ErrRemovalDurabilityUnconfirmed), errors.Is(err, metastore.ErrDurabilityUnconfirmed):
+		return "state.durability_unconfirmed"
+	case errors.Is(err, metastore.ErrRemovalAmbiguous):
+		return "state.removal_ambiguous"
+	default:
+		return "state.operation_interrupted"
+	}
+}
+
 func bonusExchangePublicStateError(err error, fallback string) error {
 	if err == nil {
 		return fmt.Errorf("%s", fallback)
@@ -892,13 +1204,13 @@ func writeSiteBonusExchangeListHuman(out io.Writer, report siteBonusExchangeList
 		fmt.Fprintf(w, "%s\t%s\n", terminalSafe(blocker.Code), terminalSafe(blocker.Message))
 	}
 	fmt.Fprintf(w, "\nSTORE ID\t%s\nSTOP REASON\t%s\n", terminalSafe(valueOrUnknown(report.Store.StoreID)), terminalSafe(valueOrUnknown(report.StopReason)))
-	fmt.Fprintf(w, "\nINVENTORY PASSES\t%d\nINTENT VERIFICATION PASSES\t%d\nENTRIES CONSIDERED (ALL PASSES)\t%d\nENTRY LIMIT\t%d per pass\nINTENTS MATCHED (ALL PASSES)\t%d\nINTENT LIMIT\t%d per pass\nINTENTS READ\t%d\nINTENT BYTES\t%d / %d aggregate\nPATH BYTES LIMIT\t%d per pass\n", report.Used.InventoryPasses, report.Used.IntentVerificationPasses, report.Used.EntriesConsidered, report.Limits.MaxStatusEntries, report.Used.IntentRecordsMatched, report.Limits.MaxStatusRecords, report.Used.IntentRecordsRead, report.Used.IntentBytesRead, report.Limits.MaxStatusBytes, report.Limits.MaxStatusPathBytes)
-	fmt.Fprintln(w, "\nOPERATIONS\nINTENT RECORD\tOPERATION ID\tSITE\tOPTION\tEXPECTED REVIEW\tCREATED\tSTATUS")
+	fmt.Fprintf(w, "\nINTENT INVENTORY PASSES\t%d\nINTENT VERIFICATION PASSES\t%d\nINTENT ENTRIES CONSIDERED\t%d\nHISTORICAL INVENTORY PASSES\t%d\nHISTORICAL ENTRIES CONSIDERED\t%d\nENTRY LIMIT\t%d per pass\nINTENTS MATCHED (ALL PASSES)\t%d\nRECORD LIMIT\t%d per kind/pass\nINTENTS READ\t%d\nINTENT BYTES\t%d\nHISTORICAL RECORDS READ\t%d\nHISTORICAL BYTES\t%d\nSTATE BYTE LIMIT\t%d aggregate per axis\nPATH BYTES LIMIT\t%d per pass\n", report.Used.InventoryPasses, report.Used.IntentVerificationPasses, report.Used.EntriesConsidered, report.Used.Retention.InventoryPasses, report.Used.Retention.EntriesConsidered, report.Limits.MaxStatusEntries, report.Used.IntentRecordsMatched, report.Limits.MaxStatusRecords, report.Used.IntentRecordsRead, report.Used.IntentBytesRead, report.Used.Retention.RecordsRead, report.Used.Retention.BytesRead, report.Limits.MaxStatusBytes, report.Limits.MaxStatusPathBytes)
+	fmt.Fprintln(w, "\nOPERATIONS\nINTENT RECORD\tRETENTION RECORD\tFORGET RECORD\tOPERATION ID\tSITE\tOPTION\tEXPECTED REVIEW\tCREATED\tSTATUS")
 	if len(report.Operations) == 0 {
-		fmt.Fprintln(w, "-\t-\t-\t-\t-\t-\tnone")
+		fmt.Fprintln(w, "-\t-\t-\t-\t-\t-\t-\t-\tnone")
 	}
 	for _, operation := range report.Operations {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", terminalSafe(operation.IntentRecord.ID.String()), terminalSafe(operation.OperationID.String()), terminalSafe(operation.SiteID), terminalSafe(operation.Selector), terminalSafe(operation.ExpectedReviewID), operation.CreatedAt.UTC().Format(time.RFC3339), terminalSafe(operation.Status))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", terminalSafe(operation.IntentRecord.ID.String()), terminalSafe(bonusRecordID(operation.RetentionRecord)), terminalSafe(bonusRecordID(operation.ForgetRecord)), terminalSafe(operation.OperationID.String()), terminalSafe(operation.SiteID), terminalSafe(operation.Selector), terminalSafe(operation.ExpectedReviewID), operation.CreatedAt.UTC().Format(time.RFC3339), terminalSafe(operation.Status))
 	}
 	fmt.Fprintln(w, "\nWARNINGS")
 	for _, warning := range report.Warnings {
@@ -924,13 +1236,13 @@ func writeSiteBonusExchangeHuman(out io.Writer, report siteBonusExchangeReport) 
 		fmt.Fprintf(w, "%s\t%s\n", terminalSafe(blocker.Code), terminalSafe(blocker.Message))
 	}
 	fmt.Fprintf(w, "\nSITE\t%s\nOPTION\t%s\nEXPECTED REVIEW\t%s\nORIGIN\t%s\nREVIEW ROUTE\t%s\nACTION ROUTE\t%s\n", terminalSafe(report.Scope.SiteID), terminalSafe(report.Scope.Selector), terminalSafe(report.Scope.ExpectedReviewID), terminalSafe(report.Scope.Origin), terminalSafe(report.Scope.ReviewRouteID), terminalSafe(report.Scope.ActionRouteID))
-	fmt.Fprintf(w, "\nOPERATION STATUS\t%s\nOPERATION COMPLETE\t%t\nOPERATION ID\t%s\nINTENT RECORD\t%s\nATTEMPT RECORD\t%s\nOUTCOME RECORD\t%s\n", terminalSafe(report.Operation.Status), report.Operation.Complete, terminalSafe(valueOrUnknown(report.Operation.OperationID)), terminalSafe(bonusRecordID(report.Operation.IntentRecord)), terminalSafe(bonusRecordID(report.Operation.AttemptRecord)), terminalSafe(bonusRecordID(report.Operation.OutcomeRecord)))
+	fmt.Fprintf(w, "\nOPERATION STATUS\t%s\nOPERATION COMPLETE\t%t\nOPERATION ID\t%s\nINTENT RECORD\t%s\nATTEMPT RECORD\t%s\nOUTCOME RECORD\t%s\nRETENTION RECORD\t%s\nFORGET RECORD\t%s\n", terminalSafe(report.Operation.Status), report.Operation.Complete, terminalSafe(valueOrUnknown(report.Operation.OperationID)), terminalSafe(bonusRecordID(report.Operation.IntentRecord)), terminalSafe(bonusRecordID(report.Operation.AttemptRecord)), terminalSafe(bonusRecordID(report.Operation.OutcomeRecord)), terminalSafe(bonusRecordID(report.Operation.RetentionRecord)), terminalSafe(bonusRecordID(report.Operation.ForgetRecord)))
 	if report.Operation.StopReason != "" {
 		fmt.Fprintf(w, "OPERATION STOP\t%s\n", terminalSafe(report.Operation.StopReason))
 	}
 	fmt.Fprintf(w, "\nREQUEST STATUS\t%s\nREQUESTS MADE\t%d\nREVIEW REQUESTS\t%d\nSUBMISSION REQUESTS\t%d\nAUTOMATIC RETRIES\t%d\nREDIRECTS FOLLOWED\t%d\nSUBMISSION OUTCOME\t%s\nSUBMISSION STOP\t%s\n", terminalSafe(report.Request.Status), report.Request.RequestsMade, report.Request.Submission.Used.ReviewRequestsAttempted, report.Request.Submission.Used.SubmissionRequestsAttempted, report.Request.Submission.Used.AutomaticRetries, report.Request.Submission.Used.RedirectsFollowed, terminalSafe(submissionOutcome), terminalSafe(submissionStop))
-	fmt.Fprintf(w, "\nPERSISTENCE\t%s\nSTORE ID\t%s\nINTENT WRITES\t%d\nATTEMPT WRITES\t%d\nOUTCOME WRITES\t%d\nATTEMPT RECORD VERIFIED\t%t\nOUTCOME RECORD VERIFIED\t%t\nOUTCOME DURABLE THIS INVOCATION\t%t\n", terminalSafe(report.Persistence.Status), terminalSafe(valueOrUnknown(report.Persistence.Store.StoreID)), report.Persistence.IntentWrites, report.Persistence.AttemptWrites, report.Persistence.OutcomeWrites, report.Persistence.AttemptRecordVerified, report.Persistence.OutcomeRecordVerified, report.Persistence.OutcomeDurable)
-	fmt.Fprintf(w, "\nFRESH REVIEW REPRODUCED\t%t\nPROCESS-LOCAL REVIEW AUTHORITY\t%t\nATTEMPT MARKER DURABLE THIS INVOCATION\t%t\nPROCESS-LOCAL OUTCOME AUTHORITY\t%t\nATTEMPT MARKER BLOCKS FUTURE SUBMISSIONS\t%t\nSUBMISSION REQUEST BOUND VERIFIED\t%t\nAT-MOST-ONCE SCOPE\t%s\nNO AUTOMATIC RETRY\t%t\nSERIALIZED AUTHORITY\t%t\n", report.Assurance.FreshReviewReproduced, report.Assurance.ProcessLocalReviewAuthority, report.Assurance.AttemptMarkerDurable, report.Assurance.ProcessLocalOutcomeAuthority, report.Assurance.AttemptMarkerBlocksFuture, report.Assurance.SubmissionRequestBound, terminalSafe(report.Assurance.AtMostOnceScope), report.Assurance.NoAutomaticRetry, report.Assurance.SerializedAuthority)
+	fmt.Fprintf(w, "\nPERSISTENCE\t%s\nSTORE ID\t%s\nINTENT WRITES\t%d\nATTEMPT WRITES\t%d\nOUTCOME WRITES\t%d\nRETENTION WRITES\t%d\nFORGET WRITES\t%d\nRECORDS REMOVED\t%d\nRECORDS ALREADY ABSENT\t%d\nREMOVAL DURABLE\t%t\nATTEMPT RECORD VERIFIED\t%t\nOUTCOME RECORD VERIFIED\t%t\nOUTCOME DURABLE THIS INVOCATION\t%t\n", terminalSafe(report.Persistence.Status), terminalSafe(valueOrUnknown(report.Persistence.Store.StoreID)), report.Persistence.IntentWrites, report.Persistence.AttemptWrites, report.Persistence.OutcomeWrites, report.Persistence.RetentionWrites, report.Persistence.ForgetWrites, report.Persistence.RecordsRemoved, report.Persistence.RecordsAlreadyAbsent, report.Persistence.RemovalDurable, report.Persistence.AttemptRecordVerified, report.Persistence.OutcomeRecordVerified, report.Persistence.OutcomeDurable)
+	fmt.Fprintf(w, "\nFRESH REVIEW REPRODUCED\t%t\nPROCESS-LOCAL REVIEW AUTHORITY\t%t\nATTEMPT MARKER DURABLE THIS INVOCATION\t%t\nPROCESS-LOCAL OUTCOME AUTHORITY\t%t\nATTEMPT MARKER BLOCKS FUTURE SUBMISSIONS\t%t\nSUBMISSION REQUEST BOUND VERIFIED\t%t\nTERMINAL CHAIN VERIFIED\t%t\nNON-EXECUTABLE TOMBSTONE\t%t\nNO NETWORK ACCESS\t%t\nHISTORICAL EVIDENCE ERASED\t%t\nAT-MOST-ONCE SCOPE\t%s\nNO AUTOMATIC RETRY\t%t\nSERIALIZED AUTHORITY\t%t\n", report.Assurance.FreshReviewReproduced, report.Assurance.ProcessLocalReviewAuthority, report.Assurance.AttemptMarkerDurable, report.Assurance.ProcessLocalOutcomeAuthority, report.Assurance.AttemptMarkerBlocksFuture, report.Assurance.SubmissionRequestBound, report.Assurance.TerminalChainVerified, report.Assurance.NonExecutableTombstone, report.Assurance.NoNetworkAccess, report.Assurance.HistoricalEvidenceErased, terminalSafe(report.Assurance.AtMostOnceScope), report.Assurance.NoAutomaticRetry, report.Assurance.SerializedAuthority)
 	fmt.Fprintln(w, "\nWARNINGS")
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(w, "-\t%s\n", terminalSafe(warning))
@@ -939,7 +1251,7 @@ func writeSiteBonusExchangeHuman(out io.Writer, report siteBonusExchangeReport) 
 }
 
 func bonusRecordID(ref *metastore.RecordRef) string {
-	if ref == nil {
+	if ref == nil || ref.ID == "" {
 		return "-"
 	}
 	return ref.ID.String()
@@ -951,6 +1263,8 @@ func (a *app) siteBonusExchangeHelp() {
   ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID --cookie-stdin --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
+  ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]
+  ptctl site bonus exchange forget --state-store DIR --retention-record RECORD_ID --operation-id ID --acknowledge-history-forget [--output table|json]
 
 Prepare writes only a private reviewed intent. Submit validates that intent and
 the production adapter before reading stdin, performs one fresh bounded review,
@@ -961,7 +1275,18 @@ After the POST, a bounded local finalization interval may persist the exact
 adapter observation even if the network context ended. If no durable outcome
 can be established, status remains submission-unknown and the attempt must not
 be retried. Status is local and never reads a credential or contacts the site.
-List performs a bounded, detected-stable inventory of verified intent records,
-does not inspect attempt/outcome state, and never chooses a latest operation.
+List performs bounded, detected-stable inventories of verified live intents and
+historical retention/forget markers. It does not infer the complete transition
+state and never chooses a latest operation.
+
+Prune is a local, credential-free transition available only for an explicitly
+selected complete terminal operation. It durably writes one deterministic,
+non-executable tombstone before removing the exact outcome, attempt, and intent
+records. Prepared and submission-unknown operations are never pruned.
+
+Forget is a separate irreversible local transition with its own explicit
+acknowledgement. It writes a deterministic crash-recovery marker before removing
+the selected tombstone, then removes that marker last. Once complete, a later
+absence is deliberately unattributed and is not reported as already forgotten.
 `)
 }

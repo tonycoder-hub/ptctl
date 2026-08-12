@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,9 +21,14 @@ import (
 )
 
 const (
-	IntentSchemaV1  = "ptctl.site-bonus-exchange-intent/v1"
-	AttemptSchemaV1 = "ptctl.site-bonus-exchange-attempt/v1"
-	OutcomeSchemaV1 = "ptctl.site-bonus-exchange-outcome/v1"
+	IntentSchemaV1    = "ptctl.site-bonus-exchange-intent/v1"
+	AttemptSchemaV1   = "ptctl.site-bonus-exchange-attempt/v1"
+	OutcomeSchemaV1   = "ptctl.site-bonus-exchange-outcome/v1"
+	RetentionSchemaV1 = "ptctl.site-bonus-exchange-retention/v1"
+	ForgetSchemaV1    = "ptctl.site-bonus-exchange-forget/v1"
+
+	RetentionBasisExactTerminal = "exact_terminal_bonus_exchange_record_set"
+	ForgetBasisExactRetention   = "exact_bonus_exchange_retention_selected_for_erasure"
 
 	StatePrepared               = "prepared"
 	StateAttemptReservedUnknown = "attempt_reserved_submission_unknown"
@@ -31,6 +37,9 @@ const (
 	StateUnknown                = "unknown"
 	StateNotSubmitted           = "not_submitted"
 	StateInspectionIncomplete   = "inspection_incomplete"
+	StatePruning                = "pruning"
+	StatePruned                 = "pruned"
+	StateForgetting             = "forgetting"
 
 	PrepareEffect = "write_private_site_bonus_exchange_intent"
 	LoadEffect    = "read_private_site_bonus_exchange_intent"
@@ -38,6 +47,8 @@ const (
 	OutcomeEffect = "write_private_site_bonus_exchange_outcome"
 	StatusEffect  = "read_private_site_bonus_exchange_status"
 	ListEffect    = "read_private_site_bonus_exchange_operation_list"
+	PruneEffect   = "prune_private_site_bonus_exchange_state"
+	ForgetEffect  = "forget_private_site_bonus_exchange_history"
 
 	defaultMaxRecordBytes = int64(64 << 10)
 	hardMaxRecordBytes    = int64(256 << 10)
@@ -50,6 +61,8 @@ var (
 	ErrCorruptExchange        = errors.New("bonus exchange state is corrupt")
 	ErrAttemptAlreadyReserved = errors.New("bonus exchange attempt is already reserved")
 	ErrStatusIncomplete       = errors.New("bonus exchange status is incomplete")
+	ErrExchangeNotFound       = errors.New("bonus exchange operation was not found")
+	ErrRetentionPolicy        = errors.New("bonus exchange retention policy blocked the operation")
 )
 
 type Limits struct {
@@ -179,6 +192,57 @@ type OutcomeRecord struct {
 	Receipt         site.BonusExchangeReceipt `json:"receipt"`
 }
 
+// RetentionRecord is the deterministic, non-executable historical projection
+// of one complete terminal intent/attempt/outcome chain. It contains no
+// credential or request authority and can never authorize another POST.
+type RetentionRecord struct {
+	Schema        string              `json:"schema"`
+	Basis         string              `json:"basis"`
+	StoreID       string              `json:"store_id"`
+	OperationID   OperationID         `json:"operation_id"`
+	TerminalState string              `json:"terminal_state"`
+	Intent        IntentRecord        `json:"intent"`
+	IntentRef     metastore.RecordRef `json:"intent_record"`
+	Attempt       AttemptRecord       `json:"attempt"`
+	AttemptRef    metastore.RecordRef `json:"attempt_record"`
+	Outcome       OutcomeRecord       `json:"outcome"`
+	OutcomeRef    metastore.RecordRef `json:"outcome_record"`
+}
+
+func (record RetentionRecord) Validate() error {
+	if record.Schema != RetentionSchemaV1 || record.Basis != RetentionBasisExactTerminal || !safeText(record.StoreID, 128) ||
+		record.Intent.Validate() != nil || record.Attempt.Validate() != nil || record.Outcome.Validate() != nil ||
+		record.OperationID != record.Intent.OperationID || !record.Attempt.MatchesIntent(record.Intent, record.IntentRef) ||
+		!record.Outcome.Matches(record.Intent, record.IntentRef, record.Attempt, record.AttemptRef) ||
+		record.TerminalState != stateFromOutcome(record.Outcome.Receipt.Outcome) || !terminalRetentionState(record.TerminalState) ||
+		!exactRecordRef(metastore.RecordKindSiteBonusExchangeIntentV1, record.Intent, record.IntentRef) ||
+		!exactRecordRef(metastore.RecordKindSiteBonusExchangeAttemptV1, record.Attempt, record.AttemptRef) ||
+		!exactRecordRef(metastore.RecordKindSiteBonusExchangeOutcomeV1, record.Outcome, record.OutcomeRef) {
+		return fmt.Errorf("%w: retention value is invalid", ErrInvalidExchange)
+	}
+	return nil
+}
+
+// ForgetRecord is a deterministic crash-recovery marker. It copies the exact
+// tombstone before that tombstone is erased and is itself removed last.
+type ForgetRecord struct {
+	Schema       string              `json:"schema"`
+	Basis        string              `json:"basis"`
+	StoreID      string              `json:"store_id"`
+	OperationID  OperationID         `json:"operation_id"`
+	Retention    RetentionRecord     `json:"retention"`
+	RetentionRef metastore.RecordRef `json:"retention_record"`
+}
+
+func (record ForgetRecord) Validate() error {
+	if record.Schema != ForgetSchemaV1 || record.Basis != ForgetBasisExactRetention || !safeText(record.StoreID, 128) ||
+		record.Retention.Validate() != nil || record.StoreID != record.Retention.StoreID || record.OperationID != record.Retention.OperationID ||
+		!exactRecordRef(metastore.RecordKindSiteBonusExchangeRetentionV1, record.Retention, record.RetentionRef) {
+		return fmt.Errorf("%w: forget value is invalid", ErrInvalidExchange)
+	}
+	return nil
+}
+
 func (record OutcomeRecord) Validate() error {
 	operationID, operationErr := ParseOperationID(record.OperationID.String())
 	intentID, intentErr := metastore.ParseRecordID(record.IntentRecordID.String())
@@ -235,32 +299,88 @@ type OutcomeReceipt struct {
 	Store               metastore.StoreInfo `json:"store"`
 }
 
-type StatusUsage struct {
-	OutcomeEntriesConsidered int   `json:"outcome_entries_considered"`
-	OutcomeRecordsRead       int   `json:"outcome_records_read"`
-	OutcomeBytesRead         int64 `json:"outcome_bytes_read"`
+type RetentionUsage struct {
+	InventoryPasses   int   `json:"inventory_passes"`
+	EntriesConsidered int   `json:"entries_considered"`
+	RecordsRead       int   `json:"records_read"`
+	BytesRead         int64 `json:"bytes_read"`
 }
 
-// OperationSummary is a verified intent projection. It deliberately does not
-// infer the attempt/outcome state: callers must select IntentRecord.ID and run
-// Status to inspect one operation's complete linked record set.
+type RetentionReceipt struct {
+	Effect               string                           `json:"effect"`
+	Complete             bool                             `json:"complete"`
+	State                string                           `json:"state"`
+	OperationID          OperationID                      `json:"operation_id"`
+	IntentRecordID       metastore.RecordID               `json:"intent_record_id"`
+	TerminalState        string                           `json:"terminal_state,omitempty"`
+	SiteID               string                           `json:"site_id,omitempty"`
+	Selector             string                           `json:"selector,omitempty"`
+	ExpectedReviewID     string                           `json:"expected_review_id,omitempty"`
+	RetentionRecord      metastore.RecordRef              `json:"retention_record"`
+	RetentionWrites      int                              `json:"retention_writes"`
+	RemovalReceipts      []metastore.RecordRemovalReceipt `json:"removal_receipts"`
+	RecordsRemoved       int                              `json:"records_removed"`
+	RecordsAlreadyAbsent int                              `json:"records_already_absent"`
+	WritesPerformed      int                              `json:"writes_performed"`
+	DurabilityConfirmed  bool                             `json:"durability_confirmed"`
+	Used                 RetentionUsage                   `json:"used"`
+	Store                metastore.StoreInfo              `json:"store"`
+	StopReason           string                           `json:"stop_reason,omitempty"`
+}
+
+type ForgetReceipt struct {
+	Effect               string                           `json:"effect"`
+	Complete             bool                             `json:"complete"`
+	State                string                           `json:"state"`
+	OperationID          OperationID                      `json:"operation_id"`
+	TerminalState        string                           `json:"terminal_state,omitempty"`
+	SiteID               string                           `json:"site_id,omitempty"`
+	Selector             string                           `json:"selector,omitempty"`
+	ExpectedReviewID     string                           `json:"expected_review_id,omitempty"`
+	RetentionRecord      metastore.RecordRef              `json:"retention_record"`
+	ForgetRecord         metastore.RecordRef              `json:"forget_record"`
+	ForgetWrites         int                              `json:"forget_writes"`
+	RemovalReceipts      []metastore.RecordRemovalReceipt `json:"removal_receipts"`
+	RecordsRemoved       int                              `json:"records_removed"`
+	RecordsAlreadyAbsent int                              `json:"records_already_absent"`
+	WritesPerformed      int                              `json:"writes_performed"`
+	DurabilityConfirmed  bool                             `json:"durability_confirmed"`
+	Used                 RetentionUsage                   `json:"used"`
+	Store                metastore.StoreInfo              `json:"store"`
+	StopReason           string                           `json:"stop_reason,omitempty"`
+}
+
+type StatusUsage struct {
+	OutcomeEntriesConsidered int            `json:"outcome_entries_considered"`
+	OutcomeRecordsRead       int            `json:"outcome_records_read"`
+	OutcomeBytesRead         int64          `json:"outcome_bytes_read"`
+	Retention                RetentionUsage `json:"retention"`
+}
+
+// OperationSummary is a verified live-intent or historical-retention
+// projection. It deliberately does not infer the full transition state:
+// callers must select the explicit record ID and run Status to inspect one
+// operation's complete linked record set.
 type OperationSummary struct {
-	IntentRecord     metastore.RecordRef `json:"intent_record"`
-	OperationID      OperationID         `json:"operation_id"`
-	SiteID           string              `json:"site_id"`
-	Selector         string              `json:"selector"`
-	ExpectedReviewID string              `json:"expected_review_id"`
-	CreatedAt        time.Time           `json:"created_at"`
-	Status           string              `json:"status"`
+	IntentRecord     metastore.RecordRef  `json:"intent_record"`
+	RetentionRecord  *metastore.RecordRef `json:"retention_record,omitempty"`
+	ForgetRecord     *metastore.RecordRef `json:"forget_record,omitempty"`
+	OperationID      OperationID          `json:"operation_id"`
+	SiteID           string               `json:"site_id"`
+	Selector         string               `json:"selector"`
+	ExpectedReviewID string               `json:"expected_review_id"`
+	CreatedAt        time.Time            `json:"created_at"`
+	Status           string               `json:"status"`
 }
 
 type OperationListUsage struct {
-	InventoryPasses          int   `json:"inventory_passes"`
-	IntentVerificationPasses int   `json:"intent_verification_passes"`
-	EntriesConsidered        int   `json:"entries_considered"`
-	IntentRecordsMatched     int   `json:"intent_records_matched"`
-	IntentRecordsRead        int   `json:"intent_records_read"`
-	IntentBytesRead          int64 `json:"intent_bytes_read"`
+	InventoryPasses          int            `json:"inventory_passes"`
+	IntentVerificationPasses int            `json:"intent_verification_passes"`
+	EntriesConsidered        int            `json:"entries_considered"`
+	IntentRecordsMatched     int            `json:"intent_records_matched"`
+	IntentRecordsRead        int            `json:"intent_records_read"`
+	IntentBytesRead          int64          `json:"intent_bytes_read"`
+	Retention                RetentionUsage `json:"retention"`
 }
 
 type OperationListResult struct {
@@ -274,18 +394,22 @@ type OperationListResult struct {
 }
 
 type Status struct {
-	Effect     string               `json:"effect"`
-	Complete   bool                 `json:"complete"`
-	State      string               `json:"state"`
-	Intent     IntentRecord         `json:"intent"`
-	IntentRef  metastore.RecordRef  `json:"intent_record"`
-	Attempt    *AttemptRecord       `json:"attempt,omitempty"`
-	AttemptRef *metastore.RecordRef `json:"attempt_record,omitempty"`
-	Outcome    *OutcomeRecord       `json:"outcome,omitempty"`
-	OutcomeRef *metastore.RecordRef `json:"outcome_record,omitempty"`
-	Used       StatusUsage          `json:"used"`
-	Store      metastore.StoreInfo  `json:"store"`
-	StopReason string               `json:"stop_reason,omitempty"`
+	Effect       string               `json:"effect"`
+	Complete     bool                 `json:"complete"`
+	State        string               `json:"state"`
+	Intent       IntentRecord         `json:"intent"`
+	IntentRef    metastore.RecordRef  `json:"intent_record"`
+	Attempt      *AttemptRecord       `json:"attempt,omitempty"`
+	AttemptRef   *metastore.RecordRef `json:"attempt_record,omitempty"`
+	Outcome      *OutcomeRecord       `json:"outcome,omitempty"`
+	OutcomeRef   *metastore.RecordRef `json:"outcome_record,omitempty"`
+	Retention    *RetentionRecord     `json:"retention,omitempty"`
+	RetentionRef *metastore.RecordRef `json:"retention_record,omitempty"`
+	Forget       *ForgetRecord        `json:"forget,omitempty"`
+	ForgetRef    *metastore.RecordRef `json:"forget_record,omitempty"`
+	Used         StatusUsage          `json:"used"`
+	Store        metastore.StoreInfo  `json:"store"`
+	StopReason   string               `json:"stop_reason,omitempty"`
 }
 
 type verifiedIntentAuthority struct {
@@ -378,4 +502,26 @@ func safeText(value string, maximum int) bool {
 		}
 	}
 	return true
+}
+
+func terminalRetentionState(state string) bool {
+	switch state {
+	case StateConfirmed, StateRejected, StateUnknown, StateNotSubmitted:
+		return true
+	default:
+		return false
+	}
+}
+
+func exactRecordRef(kind metastore.RecordKind, value any, ref metastore.RecordRef) bool {
+	if ref.Kind != kind {
+		return false
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	raw = append(raw, '\n')
+	want, err := metastore.ComputeRecordRef(kind, raw)
+	return err == nil && want == ref
 }

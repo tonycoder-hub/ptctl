@@ -116,6 +116,47 @@ func (bound *BoundRecordSession) VerifyRecordSet(ctx context.Context, records []
 	return bound.store.verifyRecordSetSession(ctx, bound.session, records, limits)
 }
 
+// ConfirmRecordSetDurability brackets a directory durability boundary with
+// two exact set verifications. It is used to recover an immutable protocol
+// marker whose original publication receipt was lost or inconclusive.
+func (bound *BoundRecordSession) ConfirmRecordSetDurability(ctx context.Context, records []RecordRef, limits RecordLimits) (RecordSetDurabilityReceipt, error) {
+	receipt := RecordSetDurabilityReceipt{Effect: recordSyncEffect, Store: bound.Info()}
+	if bound == nil {
+		return receipt, fmt.Errorf("confirm sealed record durability: session is unavailable")
+	}
+	bound.mu.Lock()
+	defer bound.mu.Unlock()
+	if err := bound.ready(ctx); err != nil {
+		return receipt, err
+	}
+	if err := validateRecordSet(records, limits); err != nil {
+		return receipt, err
+	}
+	before, err := bound.store.verifyRecordSetSession(ctx, bound.session, records, limits)
+	receipt.VerificationPasses++
+	receipt.RecordsVerified += before.RecordsVerified
+	receipt.BytesRead += before.BytesRead
+	if err != nil || !before.Complete {
+		return receipt, err
+	}
+	if err := syncRecordRemoval(bound.session); err != nil {
+		return receipt, ErrRemovalDurabilityUnconfirmed
+	}
+	after, err := bound.store.verifyRecordSetSession(ctx, bound.session, records, limits)
+	receipt.VerificationPasses++
+	receipt.RecordsVerified += after.RecordsVerified
+	receipt.BytesRead += after.BytesRead
+	if err != nil || !after.Complete {
+		return receipt, err
+	}
+	if err := bound.session.check("after_record_set_durability"); err != nil {
+		return receipt, fmt.Errorf("confirm sealed record durability: bound identity changed")
+	}
+	receipt.Complete = true
+	receipt.DurabilityConfirmed = true
+	return receipt, nil
+}
+
 func (bound *BoundRecordSession) ListRecords(ctx context.Context, kind RecordKind, limits RecordLimits) (RecordListResult, error) {
 	result := RecordListResult{Kind: kind, Limits: limits, Records: []RecordRef{}}
 	if bound == nil {
@@ -133,6 +174,25 @@ func (bound *BoundRecordSession) ListRecords(ctx context.Context, kind RecordKin
 		return result, err
 	}
 	return bound.store.listRecordsSession(ctx, bound.session, kind, limits)
+}
+
+// RemoveRecordExact performs one recoverable exact-record retirement while
+// retaining the same physical-store authority as the caller's preceding and
+// following protocol reads.
+func (bound *BoundRecordSession) RemoveRecordExact(ctx context.Context, record RecordRef, limits RecordLimits) (RecordRemovalReceipt, error) {
+	receipt := RecordRemovalReceipt{Effect: recordRemovalEffect, Record: record, Store: bound.Info()}
+	if bound == nil {
+		return receipt, fmt.Errorf("remove sealed record: session is unavailable")
+	}
+	bound.mu.Lock()
+	defer bound.mu.Unlock()
+	if err := bound.ready(ctx); err != nil {
+		return receipt, err
+	}
+	if err := validateRecordRemoval(record, limits); err != nil {
+		return receipt, err
+	}
+	return bound.store.removeRecordSession(ctx, bound.session, record, limits)
 }
 
 func (bound *BoundRecordSession) Close() error {

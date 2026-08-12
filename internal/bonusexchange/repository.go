@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type Repository struct {
 	store                      *metastore.Store
 	limits                     Limits
 	operationListBetweenPasses func()
+	retentionTransitionHook    func(string) error
 }
 
 func NewRepository(store *metastore.Store, limits Limits) (*Repository, error) {
@@ -276,6 +278,44 @@ func (session *Session) Status(ctx context.Context, intentID metastore.RecordID)
 	if err := session.ready(ctx); err != nil {
 		return status, err
 	}
+	forget, forgetRef, foundForget, err := session.findForgetByIntent(ctx, intentID, &status.Used.Retention)
+	if err != nil {
+		status.StopReason = retentionStopReason(err)
+		return status, err
+	}
+	if foundForget {
+		if forget.StoreID != session.bound.Info().StoreID {
+			return status, fmt.Errorf("%w: forget marker store identity disagrees", ErrCorruptExchange)
+		}
+		applyRetentionStatus(&status, forget.Retention, forget.RetentionRef)
+		status.Forget = &forget
+		status.ForgetRef = &forgetRef
+		status.State = StateForgetting
+		status.Complete = true
+		return status, nil
+	}
+	retention, retentionRef, foundRetention, err := session.findRetentionByIntent(ctx, intentID, &status.Used.Retention)
+	if err != nil {
+		status.StopReason = retentionStopReason(err)
+		return status, err
+	}
+	if foundRetention {
+		if retention.StoreID != session.bound.Info().StoreID {
+			return status, fmt.Errorf("%w: retention marker store identity disagrees", ErrCorruptExchange)
+		}
+		applyRetentionStatus(&status, retention, retentionRef)
+		remaining, presenceErr := session.retainedOriginalsRemain(ctx, retention)
+		if presenceErr != nil {
+			status.StopReason = retentionStopReason(presenceErr)
+			return status, presenceErr
+		}
+		status.State = StatePruned
+		if remaining {
+			status.State = StatePruning
+		}
+		status.Complete = true
+		return status, nil
+	}
 	intent, _, err := session.LoadIntent(ctx, intentID)
 	if err != nil {
 		return status, err
@@ -291,7 +331,9 @@ func (session *Session) Status(ctx context.Context, intentID metastore.RecordID)
 		return status, err
 	}
 	matchedRecord, matchedRef, outcomeUsage, stopReason, outcomeErr := session.scanOutcomes(ctx, intent.record, intent.ref, attempt, attemptRef)
-	status.Used = outcomeUsage
+	status.Used.OutcomeEntriesConsidered = outcomeUsage.OutcomeEntriesConsidered
+	status.Used.OutcomeRecordsRead = outcomeUsage.OutcomeRecordsRead
+	status.Used.OutcomeBytesRead = outcomeUsage.OutcomeBytesRead
 	if outcomeErr != nil {
 		status.StopReason = stopReason
 		return status, outcomeErr
@@ -357,9 +399,10 @@ func (session *Session) Status(ctx context.Context, intentID metastore.RecordID)
 }
 
 // ListOperations returns a detected-stable, bounded inventory of verified
-// intent records. It never selects a newest record and deliberately leaves
-// attempt/outcome state uninspected; Status remains the explicit-ID state
-// transition used after a caller chooses one intent record.
+// live intents and historical retention/forget markers. It never selects a
+// newest record and deliberately leaves the full transition state
+// uninspected; Status remains the explicit-ID state transition used after a
+// caller chooses one operation.
 func (session *Session) ListOperations(ctx context.Context) (OperationListResult, error) {
 	result := OperationListResult{
 		Effect: ListEffect, Limits: sessionLimits(session), Store: sessionInfo(session), Operations: []OperationSummary{},
@@ -431,6 +474,70 @@ func (session *Session) ListOperations(ctx context.Context) (OperationListResult
 			return result, err
 		}
 	}
+	retained, err := session.listAllRetentionStable(ctx, &result.Used.Retention)
+	if err != nil {
+		result.StopReason = retentionStopReason(err)
+		return result, err
+	}
+	forgotten, err := session.listAllForgetStable(ctx, &result.Used.Retention)
+	if err != nil {
+		result.StopReason = retentionStopReason(err)
+		return result, err
+	}
+	operationIndex := make(map[OperationID]int, len(result.Operations)+len(retained)+len(forgotten))
+	for index := range result.Operations {
+		operationIndex[result.Operations[index].OperationID] = index
+	}
+	for _, entry := range retained {
+		index, exists := operationIndex[entry.record.OperationID]
+		if exists {
+			current := &result.Operations[index]
+			if current.IntentRecord != entry.record.IntentRef || current.RetentionRecord != nil {
+				return result, fmt.Errorf("%w: live and retained operation identities disagree", ErrCorruptExchange)
+			}
+			copyRef := entry.ref
+			current.RetentionRecord = &copyRef
+			current.Status = "pruning_not_inspected"
+			continue
+		}
+		copyRef := entry.ref
+		operationIndex[entry.record.OperationID] = len(result.Operations)
+		result.Operations = append(result.Operations, OperationSummary{
+			IntentRecord: entry.record.IntentRef, RetentionRecord: &copyRef, OperationID: entry.record.OperationID,
+			SiteID: entry.record.Intent.SiteID, Selector: entry.record.Intent.Selector,
+			ExpectedReviewID: entry.record.Intent.ExpectedReviewID, CreatedAt: entry.record.Intent.CreatedAt,
+			Status: "pruned_not_inspected",
+		})
+	}
+	for _, entry := range forgotten {
+		index, exists := operationIndex[entry.record.OperationID]
+		if exists {
+			current := &result.Operations[index]
+			if current.IntentRecord != entry.record.Retention.IntentRef || current.ForgetRecord != nil ||
+				(current.RetentionRecord != nil && *current.RetentionRecord != entry.record.RetentionRef) {
+				return result, fmt.Errorf("%w: forget operation identities disagree", ErrCorruptExchange)
+			}
+			copyRef := entry.ref
+			current.ForgetRecord = &copyRef
+			current.Status = "forgetting_not_inspected"
+			continue
+		}
+		copyRef := entry.ref
+		operationIndex[entry.record.OperationID] = len(result.Operations)
+		result.Operations = append(result.Operations, OperationSummary{
+			IntentRecord: entry.record.Retention.IntentRef, ForgetRecord: &copyRef, OperationID: entry.record.OperationID,
+			SiteID: entry.record.Retention.Intent.SiteID, Selector: entry.record.Retention.Intent.Selector,
+			ExpectedReviewID: entry.record.Retention.Intent.ExpectedReviewID, CreatedAt: entry.record.Retention.Intent.CreatedAt,
+			Status: "forgetting_not_inspected",
+		})
+	}
+	if len(result.Operations) > session.repository.limits.MaxStatusRecords {
+		result.StopReason = "operation_limit"
+		return result, ErrStatusIncomplete
+	}
+	sort.Slice(result.Operations, func(i, j int) bool {
+		return result.Operations[i].IntentRecord.ID < result.Operations[j].IntentRecord.ID
+	})
 	if err := session.bound.Check(ctx); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			result.StopReason = "context_cancelled"

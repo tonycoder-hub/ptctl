@@ -321,7 +321,7 @@ non-authoritative.
 
 ## Durable at-most-once bonus exchange
 
-`site bonus exchange prepare|submit|status|list` is the first concrete
+`site bonus exchange prepare|submit|status|list|prune|forget` is the first concrete
 `bonus.exchange.submit_effectful` workflow. `prepare` stores one canonical
 private intent containing a random operation ID, the exact reviewed semantic
 ID, canonical site/option/origin/route identifiers, and fixed review/submit
@@ -363,20 +363,43 @@ fails closed on missing links, multiple outcomes, corruption, or inventory
 limits; it never selects a latest record.
 
 `list` is the lower-evidence recovery boundary. Under one bound store session
-it enumerates intent locators, strictly loads every retained canonical intent,
-enumerates the same locator/size set again, and strictly reloads each intent
-before success. It rejects duplicate operation identities. Per-pass
-entry/record/path budgets and one aggregate byte budget across both exact-read
-passes stop with an incomplete report.
-Rows remain `not_inspected`: the list does not load attempt/outcome records,
-create process-local submission authority, or select an operation by time.
+it separately enumerates live intent locators and historical retention/forget
+locators, strictly loads every canonical record, and repeats each locator/size
+inventory before success. It rejects duplicate or disagreeing operation
+identities. Per-pass entry/record/path budgets and separate aggregate byte
+budgets for the live and historical axes stop with an incomplete report. Rows
+remain explicitly uninspected (`not_inspected`, `pruning_not_inspected`,
+`pruned_not_inspected`, or `forgetting_not_inspected`): the list does not infer
+the complete linked transition, create process-local submission authority, or
+select an operation by time.
+
+Terminal retention is a separate, local-only state machine. `prune` accepts one
+exact intent record and operation ID only after `status` proves a complete
+terminal intent/attempt/outcome chain. It canonicalizes that entire chain into
+a deterministic, content-addressed `site.bonus.exchange.retention.v1` record,
+publishes and jointly re-verifies it under the same bound store session, then
+removes outcome, attempt, and intent by exact record identity. Each removal
+uses a deterministic private residue and brackets namespace deletion with
+content verification and directory durability. A crash is recovered only by
+repeating the same explicit selectors. Prepared state and an attempt marker
+without a durable outcome are never eligible.
+
+`forget` accepts only one explicit retained tombstone after proving the three
+executable records absent. It publishes a deterministic
+`site.bonus.exchange.forget.v1` crash-recovery marker, removes the retention
+record, and removes that marker last. No serialized record or JSON value can
+authorize a site request. After the last marker is gone there is deliberately
+no persistent idempotence oracle: absence is unattributed rather than
+`already_forgotten`.
 
 At-most-once coordination is scoped to one prepared operation in one
 preserved, uncloned private-store history. A separately prepared operation is
 a separate explicitly acknowledged submission. A restored or independently
 copied history is a different coordinator and cannot be made mutually exclusive
-by a local no-clobber file. Read-only status proves the current record bytes,
-links, and store binding through a
+by a local no-clobber file. Manual deletion is unsupported; the terminal
+prune/forget protocols preserve their own ordered recovery evidence but cannot
+coordinate an independently cloned or rolled-back history. Read-only status
+proves the current record bytes, links, and store binding through a
 bounded, detected-stable but non-atomic scan; it does not reconstruct a past
 publication's directory-sync/no-clobber receipt. Operation-scoped durability
 fields are therefore set only by the invocation that crossed

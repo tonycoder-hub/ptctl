@@ -8,9 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+type windowsRecordDispositionInformation struct{ DeleteFile byte }
 
 type windowsDirectoryGuard struct {
 	path string
@@ -282,6 +285,140 @@ func platformSessionRemovePrivate(session *rootSession, relative string) error {
 		return nil
 	}
 	return fmt.Errorf("remove private staging file failed")
+}
+
+func platformSessionStageRecordRemoval(session *rootSession, sourceRelative, stagingRelative string) (bool, bool, error) {
+	sourcePath, sourceErr := windowsSessionPath(session, sourceRelative)
+	stagingPath, stagingErr := windowsSessionPath(session, stagingRelative)
+	if sourceErr != nil || stagingErr != nil || filepath.Dir(sourceRelative) != objectsDir || filepath.Dir(stagingRelative) != temporaryDir {
+		return false, false, fmt.Errorf("sealed record removal names are invalid")
+	}
+	source, sourceInfo, err := session.openValidated(sourceRelative, false)
+	if err != nil {
+		return false, false, err
+	}
+	_ = source.Close()
+	from, err := windows.UTF16PtrFromString(windowsAPIPath(sourcePath))
+	if err != nil {
+		return false, false, fmt.Errorf("sealed record removal source encoding failed")
+	}
+	to, err := windows.UTF16PtrFromString(windowsAPIPath(stagingPath))
+	if err != nil {
+		return false, false, fmt.Errorf("sealed record removal staging encoding failed")
+	}
+	moveErr := windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
+	if moveErr != nil {
+		if errors.Is(moveErr, windows.ERROR_ALREADY_EXISTS) || errors.Is(moveErr, windows.ERROR_FILE_EXISTS) {
+			return true, false, ErrRemovalAmbiguous
+		}
+		remaining, _, remainingErr := session.openValidated(sourceRelative, false)
+		if remaining != nil {
+			_ = remaining.Close()
+		}
+		staged, stagedInfo, stagedErr := session.openValidated(stagingRelative, false)
+		if staged != nil {
+			_ = staged.Close()
+		}
+		if errors.Is(remainingErr, errArtifactNotFound) && stagedErr == nil && os.SameFile(sourceInfo, stagedInfo) {
+			return true, true, ErrRemovalDurabilityUnconfirmed
+		}
+		return true, false, ErrRemovalAmbiguous
+	}
+	staged, stagedInfo, stagedErr := session.openValidated(stagingRelative, false)
+	if staged != nil {
+		_ = staged.Close()
+	}
+	if stagedErr != nil || !os.SameFile(sourceInfo, stagedInfo) {
+		return true, true, ErrRemovalAmbiguous
+	}
+	return true, true, nil
+}
+
+func platformSessionRemoveRecordName(session *rootSession, relative string) (bool, bool, error) {
+	absolute, err := windowsSessionPath(session, relative)
+	if err != nil || (filepath.Dir(relative) != objectsDir && filepath.Dir(relative) != temporaryDir) {
+		return false, false, fmt.Errorf("sealed record removal name is invalid")
+	}
+	pointer, err := windows.UTF16PtrFromString(windowsAPIPath(absolute))
+	if err != nil {
+		return false, false, fmt.Errorf("sealed record removal path encoding failed")
+	}
+	handle, err := windows.CreateFile(pointer,
+		windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_WRITE_THROUGH, 0)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return true, true, ErrRemovalAmbiguous
+		}
+		return true, false, fmt.Errorf("open sealed record for removal failed")
+	}
+	file := os.NewFile(uintptr(handle), "private-metastore-record-removal")
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return true, false, fmt.Errorf("wrap sealed record removal handle failed")
+	}
+	if err := platformValidateOpenFile(file, false); err != nil {
+		_ = file.Close()
+		return true, false, fmt.Errorf("sealed record removal object is unsafe")
+	}
+	disposition := windowsRecordDispositionInformation{DeleteFile: 1}
+	removeErr := windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo,
+		(*byte)(unsafe.Pointer(&disposition)), uint32(unsafe.Sizeof(disposition)))
+	closeErr := file.Close()
+	remaining, _, remainingErr := session.openValidated(relative, false)
+	if remaining != nil {
+		_ = remaining.Close()
+	}
+	if removeErr == nil && closeErr == nil && errors.Is(remainingErr, errArtifactNotFound) {
+		return true, true, nil
+	}
+	if errors.Is(remainingErr, errArtifactNotFound) {
+		return true, true, ErrRemovalAmbiguous
+	}
+	return true, false, ErrRemovalAmbiguous
+}
+
+func platformSessionSyncRecordRemoval(session *rootSession) error {
+	if session == nil || session.objectsDirectory == nil || session.temporaryDirectory == nil {
+		return ErrRemovalDurabilityUnconfirmed
+	}
+	if syncWindowsRecordDirectory(filepath.Join(session.path, objectsDir), session.objectsDirectory) != nil ||
+		syncWindowsRecordDirectory(filepath.Join(session.path, temporaryDir), session.temporaryDirectory) != nil {
+		return ErrRemovalDurabilityUnconfirmed
+	}
+	return nil
+}
+
+func syncWindowsRecordDirectory(path string, expected *os.File) error {
+	pointer, err := windows.UTF16PtrFromString(windowsAPIPath(path))
+	if err != nil {
+		return fmt.Errorf("record directory path encoding failed")
+	}
+	handle, err := windows.CreateFile(pointer,
+		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_WRITE_THROUGH, 0)
+	if err != nil {
+		return fmt.Errorf("open record directory for durability failed")
+	}
+	file := os.NewFile(uintptr(handle), "private-metastore-record-directory-sync")
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return fmt.Errorf("wrap record directory durability handle failed")
+	}
+	defer file.Close()
+	actual, statErr := file.Stat()
+	wanted, wantedErr := expected.Stat()
+	if statErr != nil || wantedErr != nil || !os.SameFile(actual, wanted) || platformValidateOpenFile(file, true) != nil {
+		return fmt.Errorf("record directory durability handle is unsafe")
+	}
+	if windows.FlushFileBuffers(handle) != nil {
+		return fmt.Errorf("flush record directory failed")
+	}
+	return nil
 }
 
 func platformConfirmPrivateStoreLayout(*rootSession) error {

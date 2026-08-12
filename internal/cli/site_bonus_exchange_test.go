@@ -525,9 +525,171 @@ func TestSiteBonusExchangeListRejectsInvalidLimitsBeforeStoreAccess(t *testing.T
 	}
 }
 
+func TestSiteBonusExchangePruneAndForgetLifecycleIsLocal(t *testing.T) {
+	adapter := successfulFakeBonusExchange(t)
+	stateRoot := initializedBonusExchangeStore(t)
+	prepared := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"prepare", "--state-store", stateRoot, "--expect-review-id", adapter.review.ReviewID, "--output", "json", "fakept", "1",
+	}, false)
+	submitted := runBonusExchangeCLI(t, &app{stdin: strings.NewReader("sid=COOKIE-RETENTION-CANARY"), registry: site.NewRegistry(adapter)}, []string{
+		"submit", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--expect-review-id", adapter.review.ReviewID, "--cookie-stdin", "--acknowledge-bonus-exchange", "--output", "json", "fakept", "1",
+	}, false)
+	if submitted.Outcome != bonusexchange.StateConfirmed || submitted.Operation.OutcomeRecord == nil {
+		t.Fatalf("terminal submission=%#v", submitted)
+	}
+	requestsBefore := [3]int{adapter.opened, adapter.reviews, adapter.submissions}
+
+	pruneReader := &trackingReader{}
+	pruned, raw, _ := runBonusExchangeProcess(t, pruneReader, 0,
+		"prune", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--operation-id", prepared.Operation.OperationID, "--acknowledge-state-prune", "--output", "json")
+	if pruneReader.read || strings.Contains(raw, stateRoot) || pruned.Outcome != "pruned" || pruned.Operation.Status != bonusexchange.StatePruned ||
+		!pruned.Operation.Complete || pruned.Operation.RetentionRecord == nil || pruned.Persistence.RetentionWrites != 1 ||
+		pruned.Persistence.RecordsRemoved != 3 || !pruned.Persistence.RemovalDurable || !pruned.Assurance.TerminalChainVerified ||
+		!pruned.Assurance.NonExecutableTombstone || !pruned.Assurance.NoNetworkAccess || pruned.FormSubmissionAttempts != 0 ||
+		pruned.Request.Status != "not_requested_local_retention" || [3]int{adapter.opened, adapter.reviews, adapter.submissions} != requestsBefore {
+		t.Fatalf("pruned=%#v read=%t adapter=%#v raw=%s", pruned, pruneReader.read, adapter, raw)
+	}
+	retentionID := pruned.Operation.RetentionRecord.ID.String()
+
+	statusReader := &trackingReader{}
+	status := runBonusExchangeCLI(t, &app{stdin: statusReader}, []string{
+		"status", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(), "--output", "json",
+	}, false)
+	if statusReader.read || status.Outcome != bonusexchange.StatePruned || status.Operation.RetentionRecord == nil ||
+		status.Operation.RetentionRecord.ID.String() != retentionID || status.Operation.IntentRecord == nil || status.Operation.AttemptRecord == nil ||
+		status.Operation.OutcomeRecord == nil || !status.Assurance.NonExecutableTombstone || !status.Assurance.TerminalChainVerified {
+		t.Fatalf("retained status=%#v read=%t", status, statusReader.read)
+	}
+
+	repeated, _, _ := runBonusExchangeProcess(t, &trackingReader{}, 0,
+		"prune", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--operation-id", prepared.Operation.OperationID, "--acknowledge-state-prune", "--output", "json")
+	if repeated.Outcome != "already_pruned" || repeated.WritesPerformed != 0 || repeated.Persistence.RetentionWrites != 0 ||
+		repeated.Persistence.RecordsAlreadyAbsent != 3 || !repeated.Persistence.RemovalDurable {
+		t.Fatalf("repeated prune=%#v", repeated)
+	}
+
+	list := readBonusExchangeList(t, stateRoot)
+	if len(list.Operations) != 1 || list.Operations[0].Status != "pruned_not_inspected" || list.Operations[0].RetentionRecord == nil ||
+		list.Operations[0].RetentionRecord.ID.String() != retentionID || list.Operations[0].ForgetRecord != nil {
+		t.Fatalf("retained list=%#v", list)
+	}
+
+	forgetReader := &trackingReader{}
+	forgotten, raw, _ := runBonusExchangeProcess(t, forgetReader, 0,
+		"forget", "--state-store", stateRoot, "--retention-record", retentionID,
+		"--operation-id", prepared.Operation.OperationID, "--acknowledge-history-forget", "--output", "json")
+	if forgetReader.read || strings.Contains(raw, stateRoot) || forgotten.Outcome != "forgotten" || forgotten.Operation.Status != "forgotten" ||
+		!forgotten.Operation.Complete || forgotten.Operation.ForgetRecord == nil || forgotten.Persistence.ForgetWrites != 1 ||
+		forgotten.Persistence.RecordsRemoved != 2 || !forgotten.Persistence.RemovalDurable || !forgotten.Assurance.TerminalChainVerified ||
+		!forgotten.Assurance.HistoricalEvidenceErased || !forgotten.Assurance.NoNetworkAccess ||
+		[3]int{adapter.opened, adapter.reviews, adapter.submissions} != requestsBefore {
+		t.Fatalf("forgotten=%#v read=%t adapter=%#v raw=%s", forgotten, forgetReader.read, adapter, raw)
+	}
+	if after := readBonusExchangeList(t, stateRoot); len(after.Operations) != 0 || !after.Complete {
+		t.Fatalf("post-forget list=%#v", after)
+	}
+
+	absent, _, _ := runBonusExchangeProcess(t, &trackingReader{}, 1,
+		"forget", "--state-store", stateRoot, "--retention-record", retentionID,
+		"--operation-id", prepared.Operation.OperationID, "--acknowledge-history-forget", "--output", "json")
+	if absent.Outcome != "unattributed_absence" || absent.WritesPerformed != 0 || absent.Operation.Complete ||
+		absent.Assurance.HistoricalEvidenceErased || len(absent.Blockers) != 1 {
+		t.Fatalf("repeated forget=%#v", absent)
+	}
+}
+
+func TestSiteBonusExchangePruneBlocksNonTerminalStateWithoutNetwork(t *testing.T) {
+	adapter := successfulFakeBonusExchange(t)
+	stateRoot := initializedBonusExchangeStore(t)
+	prepared := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"prepare", "--state-store", stateRoot, "--expect-review-id", adapter.review.ReviewID, "--output", "json", "fakept", "1",
+	}, false)
+
+	reader := &trackingReader{}
+	blocked, _, _ := runBonusExchangeProcess(t, reader, 4,
+		"prune", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--operation-id", prepared.Operation.OperationID, "--acknowledge-state-prune", "--output", "json")
+	if reader.read || blocked.Outcome != "blocked" || blocked.Operation.Status != bonusexchange.StatePrepared ||
+		blocked.WritesPerformed != 0 || blocked.Operation.RetentionRecord != nil || !blocked.Assurance.NoNetworkAccess || adapter.opened != 0 {
+		t.Fatalf("prepared prune=%#v read=%t adapter=%#v", blocked, reader.read, adapter)
+	}
+	conflict, _, _ := runBonusExchangeProcess(t, &trackingReader{}, 4,
+		"prune", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--operation-id", "sha256:"+strings.Repeat("c", 64), "--acknowledge-state-prune", "--output", "json")
+	if conflict.Outcome != "blocked" || conflict.WritesPerformed != 0 || len(conflict.Blockers) != 1 || conflict.Blockers[0].Code != "state.selector_conflict" {
+		t.Fatalf("selector conflict=%#v", conflict)
+	}
+
+	store, err := metastore.Open(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := bonusexchange.NewRepository(store, bonusexchange.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := repository.OpenSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, _, err := session.LoadIntent(context.Background(), prepared.Operation.IntentRecord.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := site.NewObservedBonusReview(adapter.review, adapter.reviewReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, reserved, err := session.ReserveAttempt(context.Background(), intent, observed, adapter.reviewReceipt)
+	if err != nil || !reserved.Acquired || reserved.WritesPerformed != 1 {
+		t.Fatalf("reserve=%#v err=%v", reserved, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader = &trackingReader{}
+	unknown, _, _ := runBonusExchangeProcess(t, reader, 4,
+		"prune", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--operation-id", prepared.Operation.OperationID, "--acknowledge-state-prune", "--output", "json")
+	if reader.read || unknown.Outcome != "blocked" || unknown.Operation.Status != bonusexchange.StateAttemptReservedUnknown ||
+		unknown.WritesPerformed != 0 || unknown.Operation.RetentionRecord != nil || !unknown.Assurance.NoNetworkAccess || adapter.opened != 0 {
+		t.Fatalf("submission-unknown prune=%#v read=%t adapter=%#v", unknown, reader.read, adapter)
+	}
+}
+
+func TestSiteBonusExchangeRetentionUsagePrecedesStoreAccess(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "MUST-NOT-BE-OPENED")
+	validRecord := "sha256:" + strings.Repeat("a", 64)
+	validOperation := "sha256:" + strings.Repeat("b", 64)
+	tests := [][]string{
+		{"prune", "--state-store", missing, "--intent-record", validRecord, "--operation-id", validOperation},
+		{"prune", "--state-store", missing, "--intent-record", "bad", "--operation-id", validOperation, "--acknowledge-state-prune"},
+		{"prune", "--state-store", missing, "--intent-record", validRecord, "--operation-id", "bad", "--acknowledge-state-prune"},
+		{"forget", "--state-store", missing, "--retention-record", validRecord, "--operation-id", validOperation},
+		{"forget", "--state-store", missing, "--retention-record", "bad", "--operation-id", validOperation, "--acknowledge-history-forget"},
+		{"forget", "--state-store", missing, "--retention-record", validRecord, "--operation-id", "bad", "--acknowledge-history-forget"},
+	}
+	for _, args := range tests {
+		reader := &trackingReader{}
+		var out, errOut bytes.Buffer
+		command := append([]string{"site", "bonus", "exchange"}, args...)
+		if code := Run(command, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 || strings.Contains(errOut.String(), missing) {
+			t.Fatalf("args=%v code=%d read=%t out=%q err=%q", args, code, reader.read, out.String(), errOut.String())
+		}
+		if _, err := os.Stat(missing); !os.IsNotExist(err) {
+			t.Fatalf("usage validation accessed the store: %v", err)
+		}
+	}
+}
+
 func TestSiteBonusExchangeHelpAndDispatch(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if code := Run([]string{"site", "bonus", "exchange", "help"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), "deterministic at-most-once attempt marker") || !strings.Contains(out.String(), "never chooses a latest operation") {
+	if code := Run([]string{"site", "bonus", "exchange", "help"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), "deterministic at-most-once attempt marker") || !strings.Contains(out.String(), "never chooses a latest operation") ||
+		!strings.Contains(out.String(), "acknowledge-state-prune") || !strings.Contains(out.String(), "acknowledge-history-forget") || !strings.Contains(out.String(), "submission-unknown operations are never pruned") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()
@@ -613,6 +775,43 @@ func runBonusExchangeCLI(t *testing.T, a *app, args []string, wantErr bool) site
 	}
 	if envelope.Kind == "" || envelope.Data.Blockers == nil || envelope.Data.Warnings == nil || strings.Contains(out.String(), "COOKIE-") {
 		t.Fatalf("unsafe or incomplete envelope: %s", out.String())
+	}
+	return envelope.Data
+}
+
+func runBonusExchangeProcess(t *testing.T, reader *trackingReader, wantCode int, args ...string) (siteBonusExchangeReport, string, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	command := append([]string{"site", "bonus", "exchange"}, args...)
+	code := Run(command, reader, &out, &errOut)
+	if code != wantCode {
+		t.Fatalf("code=%d want=%d output=%s err=%s", code, wantCode, out.String(), errOut.String())
+	}
+	var envelope struct {
+		Kind string                  `json:"kind"`
+		Data siteBonusExchangeReport `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode report: %v output=%s", err, out.String())
+	}
+	if envelope.Kind == "" || envelope.Data.Blockers == nil || envelope.Data.Warnings == nil || strings.Contains(out.String(), "COOKIE-") || strings.Contains(errOut.String(), "COOKIE-") {
+		t.Fatalf("unsafe or incomplete envelope: output=%s err=%s", out.String(), errOut.String())
+	}
+	return envelope.Data, out.String(), errOut.String()
+}
+
+func readBonusExchangeList(t *testing.T, stateRoot string) siteBonusExchangeListReport {
+	t.Helper()
+	var out bytes.Buffer
+	a := &app{stdin: &trackingReader{}, stdout: &out}
+	if err := a.siteBonusExchange([]string{"list", "--state-store", stateRoot, "--output", "json"}); err != nil {
+		t.Fatalf("list: %v output=%s", err, out.String())
+	}
+	var envelope struct {
+		Data siteBonusExchangeListReport `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode list: %v output=%s", err, out.String())
 	}
 	return envelope.Data
 }
