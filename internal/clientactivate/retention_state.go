@@ -274,8 +274,10 @@ func (state retentionState) journalState() journalState {
 		return result
 	}
 	result.Intent, result.IntentID = state.Intent.Intent, state.Intent.IntentID
-	recheck := state.Intent.RecheckCompletion
-	result.RecheckCompletion, result.RecheckCompletionID = &recheck, state.Intent.RecheckCompletionID
+	if state.Intent.RecheckCompletion != nil {
+		recheck := *state.Intent.RecheckCompletion
+		result.RecheckCompletion, result.RecheckCompletionID = &recheck, state.Intent.RecheckCompletionID
+	}
 	if state.Intent.ActivationCompletion != nil {
 		activation := *state.Intent.ActivationCompletion
 		result.ActivationCompletion, result.ActivationCompletionID = &activation, state.Intent.ActivationCompletionID

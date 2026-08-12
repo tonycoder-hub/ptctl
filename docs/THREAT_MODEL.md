@@ -700,6 +700,22 @@ closed. `run` requires `--acknowledge-client-recheck`; optional start requires
 requires the matching repeat acknowledgement. No acknowledgement grants pause,
 move, removal, deletion, source retirement, or a different job selector.
 
+An attributed terminal client stop can authorize a later start-only activation
+without granting another recheck. This path accepts only the process-local
+capability produced by a bound live stop journal or exact stop retention
+tombstone with `accepted_response_then_exact_stopped`; public observations and
+JSON round trips are powerless. The full stop selector, its prior terminal
+activation, current exact final, client configuration, path mapping, typed job,
+complete snapshot, and observation ordering are validated before password
+stdin or network access. The downloader is then observed complete and stopped
+again before a `start_after_stop` plan exists. Its run writes request intent
+before at most one native start request, never sends a recheck, never
+automatically repeats an unknown result, and freshly re-verifies both the
+started claim and exact final before completion. A causality-unproven stop is
+historical evidence only and cannot authorize restart. The new completion does
+not prove a remote job generation or continuous stability and cannot upgrade
+independent content or lexical-path evidence.
+
 Activation pruning is a separate local deletion authority. It requires one
 full activation operation ID, its reviewed plan ID, and
 `--acknowledge-operation-state-deletion`; all syntax and hard limits are

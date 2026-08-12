@@ -3,6 +3,7 @@ package clientactivate
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
@@ -18,20 +19,23 @@ type AuthorityOptions struct {
 	FileLimits     downloader.JobFileLedgerLimits
 }
 
-// PreparedAuthority retains current exact-final, canonical adoption, and raw
-// path-mapping authority only in memory. A downloader observation completes a
-// deterministic PreparedPlan.
+// PreparedAuthority retains the current exact final, one canonical lineage
+// prerequisite, and raw path-mapping authority only in memory. A downloader
+// observation completes a deterministic PreparedPlan.
 type PreparedAuthority struct {
-	verifiedFinal    *materialize.VerifiedFinal
-	verifiedAdoption *clientadopt.VerifiedCompletion
-	final            materialize.FinalObservation
-	adoption         clientadopt.CompletionObservation
-	projection       materialize.FinalClientProjection
-	clientConfigID   string
-	driver           string
-	expectedJobID    string
-	windows          bool
-	fileLimits       downloader.JobFileLedgerLimits
+	verifiedFinal     *materialize.VerifiedFinal
+	verifiedAdoption  *clientadopt.VerifiedCompletion
+	terminalStopProof TerminalStopStartProof
+	terminalStop      *TerminalStopPrerequisite
+	priorPlan         Plan
+	final             materialize.FinalObservation
+	adoption          clientadopt.CompletionObservation
+	projection        materialize.FinalClientProjection
+	clientConfigID    string
+	driver            string
+	expectedJobID     string
+	windows           bool
+	fileLimits        downloader.JobFileLedgerLimits
 }
 
 type PreparedPlan struct {
@@ -82,24 +86,91 @@ func PrepareAuthority(final *materialize.VerifiedFinal, adoption *clientadopt.Ve
 	}, nil
 }
 
+// PrepareStartAfterStopAuthority binds a prior terminal activation, one
+// attributed terminal stop, the current exact final, and the invocation-scoped
+// client namespace before any downloader credential or request is needed.
+func PrepareStartAfterStopAuthority(final *materialize.VerifiedFinal, completion *VerifiedCompletion,
+	stop TerminalStopStartProof, options AuthorityOptions) (*PreparedAuthority, error) {
+	if stop == nil {
+		return nil, fmt.Errorf("%w: terminal client-stop authority is unavailable", ErrPolicy)
+	}
+	current, err := PrepareCurrentUse(final, completion, CurrentUseOptions{
+		ClientConfigID: options.ClientConfigID, HostRoot: options.HostRoot, ClientRoot: options.ClientRoot,
+		ClientWindows: options.ClientWindows, FileLimits: options.FileLimits,
+	})
+	if err != nil {
+		return nil, err
+	}
+	prerequisite, ok := stop.ActivationStartPrerequisite()
+	if !ok || prerequisite.validate() != nil {
+		return nil, fmt.Errorf("%w: terminal client-stop authority cannot authorize start", ErrPolicy)
+	}
+	expectation := current.Expectation()
+	priorPlan := completion.Plan()
+	priorObservation := completion.Observation()
+	priorObservedEnd, priorTimeErr := time.Parse(time.RFC3339Nano, priorObservation.ObservedAtEnd)
+	finalObservation := final.Observation()
+	if priorTimeErr != nil || priorObservedEnd.IsZero() || prerequisite.ObservedAtStart.Before(priorObservedEnd) ||
+		prerequisite.Driver != expectation.Driver || prerequisite.UseID != expectation.UseID ||
+		prerequisite.JobID != expectation.JobID || prerequisite.FileLayoutID != expectation.FileLayoutID ||
+		prerequisite.ClientConfigID != expectation.ClientConfigID || prerequisite.PathMappingID != expectation.PathMappingID ||
+		prerequisite.ActivationOperationID != expectation.ActivationOperationID ||
+		prerequisite.ActivationPlanID != expectation.ActivationPlanID || prerequisite.ActivationTerminalID != expectation.TerminalMarkerID ||
+		prerequisite.MetafileVariantID != finalObservation.MetafileVariantID || prerequisite.InfoHashV1 != finalObservation.InfoHashV1 ||
+		prerequisite.InfoHashV2 != finalObservation.InfoHashV2 || prerequisite.MaterializeOperationID != finalObservation.OperationID ||
+		prerequisite.MaterializePlanID != finalObservation.MaterializePlanID || prerequisite.TargetRootIdentity != finalObservation.TargetRootIdentity ||
+		prerequisite.FinalObjectIdentity != finalObservation.FinalObjectIdentity || prerequisite.MultiFile != finalObservation.MultiFile ||
+		prerequisite.ManifestFiles != finalObservation.ManifestFiles || prerequisite.ContentBytes != finalObservation.ContentBytes {
+		return nil, fmt.Errorf("%w: terminal client-stop authority differs from the prior activation or exact final", ErrIntegrity)
+	}
+	prepared := current.prepared
+	if prepared == nil || priorPlan.Validate() != nil {
+		return nil, fmt.Errorf("%w: prior activation authority is unavailable", ErrIntegrity)
+	}
+	value := prerequisite
+	prepared.terminalStopProof, prepared.terminalStop, prepared.priorPlan = stop, &value, priorPlan
+	prepared.adoption = historicalAdoption(priorPlan)
+	return prepared, nil
+}
+
 func mustAdoptionOperation(value string) clientadopt.OperationID {
 	id, _ := clientadopt.ParseOperationID(value)
 	return id
 }
 
 func BuildPlan(authority *PreparedAuthority, descriptor downloader.ExistingJobControlDescriptor, observed clientObservation, startAfterRecheck bool) (*PreparedPlan, error) {
-	if authority == nil || authority.verifiedFinal == nil || authority.verifiedAdoption == nil ||
+	if authority == nil || authority.verifiedFinal == nil ||
 		descriptor.Validate() != nil || descriptor.Driver != authority.driver {
 		return nil, fmt.Errorf("%w: activation plan authority is unavailable", ErrPolicy)
 	}
-	if err := observed.validateForPlan(authority); err != nil {
-		return nil, err
-	}
 	action := ActionRecheckOnly
-	if startAfterRecheck {
-		action = ActionRecheckThenStart
+	var stopLink *TerminalStopLink
+	if authority.terminalStop != nil {
+		if authority.terminalStopProof == nil || startAfterRecheck || authority.verifiedAdoption != nil || authority.priorPlan.Validate() != nil {
+			return nil, fmt.Errorf("%w: start-after-stop authority is contradictory", ErrPolicy)
+		}
+		if err := observed.validateForStoppedStartPlan(authority, *authority.terminalStop); err != nil {
+			return nil, err
+		}
+		action = ActionStartAfterStop
+		value := authority.terminalStop.planLink()
+		stopLink = &value
+	} else {
+		if authority.verifiedAdoption == nil {
+			return nil, fmt.Errorf("%w: stopped-adoption authority is unavailable", ErrPolicy)
+		}
+		if err := observed.validateForPlan(authority); err != nil {
+			return nil, err
+		}
+		if startAfterRecheck {
+			action = ActionRecheckThenStart
+		}
 	}
 	final, adoption, projection := authority.final, authority.adoption, authority.projection
+	if action == ActionStartAfterStop {
+		prior := authority.priorPlan
+		adoption = historicalAdoption(prior)
+	}
 	plan := Plan{
 		Schema: PlanSchemaV1, Action: action, Driver: authority.driver, ClientConfigID: authority.clientConfigID,
 		Control: descriptor, PathMappingID: projection.PathMappingID, ClientPathSemantics: projection.PathSemantics,
@@ -108,6 +179,7 @@ func BuildPlan(authority *PreparedAuthority, descriptor downloader.ExistingJobCo
 		MetafileVariantID: final.MetafileVariantID, InfoHashV1: final.InfoHashV1, InfoHashV2: final.InfoHashV2,
 		MaterializeOperationID: final.OperationID, MaterializePlanID: final.MaterializePlanID,
 		AdoptionOperationID: adoption.OperationID, AdoptionPlanID: adoption.PlanID, AdoptionCompletionID: adoption.CompletionID,
+		TerminalStop:       stopLink,
 		TargetRootIdentity: final.TargetRootIdentity, FinalObjectIdentity: final.FinalObjectIdentity,
 		MultiFile: final.MultiFile, ManifestFiles: final.ManifestFiles, ContentBytes: final.ContentBytes,
 		FileLimits: authority.fileLimits,

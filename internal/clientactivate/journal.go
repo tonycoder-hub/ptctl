@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
@@ -401,6 +402,9 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 			}
 			break
 		}
+		if state.Intent.Plan.Action == ActionStartAfterStop {
+			return state, fmt.Errorf("%w: start-after-stop journal contains a recheck attempt", ErrIntegrity)
+		}
 		attempt, id, markerRaw, readErr := handle.readAttempt(ctx, name)
 		if readErr != nil {
 			return state, readErr
@@ -420,6 +424,9 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 		observed = append(observed, namedMarkerObservation{components: []string{name}, raw: markerRaw})
 	}
 	if regular[recheckStartedFileName] {
+		if state.Intent.Plan.Action == ActionStartAfterStop {
+			return state, fmt.Errorf("%w: start-after-stop journal contains a recheck-started marker", ErrIntegrity)
+		}
 		if len(state.RecheckAttemptIDs) == 0 {
 			return state, fmt.Errorf("%w: recheck-started marker has no request", ErrIntegrity)
 		}
@@ -441,6 +448,9 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 		observed = append(observed, namedMarkerObservation{components: []string{recheckStartedFileName}, raw: raw})
 	}
 	if regular[recheckCompletionFileName] {
+		if state.Intent.Plan.Action == ActionStartAfterStop {
+			return state, fmt.Errorf("%w: start-after-stop journal contains a recheck completion", ErrIntegrity)
+		}
 		if len(state.RecheckAttemptIDs) == 0 {
 			return state, fmt.Errorf("%w: recheck completion has no request", ErrIntegrity)
 		}
@@ -481,24 +491,26 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 			}
 			break
 		}
-		if state.Intent.Plan.Action != ActionRecheckThenStart || state.RecheckCompletion == nil {
-			return state, fmt.Errorf("%w: start attempt has no reviewed recheck completion", ErrIntegrity)
+		prerequisite, previousEnd, prerequisiteErr := startPrerequisite(state)
+		if prerequisiteErr != nil {
+			return state, prerequisiteErr
 		}
 		attempt, id, markerRaw, readErr := handle.readAttempt(ctx, name)
 		if readErr != nil {
 			return state, readErr
 		}
 		if attempt.Action != AttemptActionStart || attempt.OperationID != state.Intent.OperationID || attempt.PlanID != state.Intent.PlanID || attempt.Sequence != sequence ||
-			attempt.PrerequisiteID != state.RecheckCompletionID.String() || attempt.JobID != state.Intent.Plan.JobID || attempt.FileLayoutID != state.Intent.Plan.ExpectedFileLayoutID {
+			attempt.PrerequisiteID != prerequisite || attempt.JobID != state.Intent.Plan.JobID || attempt.FileLayoutID != state.Intent.Plan.ExpectedFileLayoutID {
 			return state, fmt.Errorf("%w: start attempt disagrees with the intent", ErrIntegrity)
 		}
 		if sequence > 1 && attempt.PreviousAttemptID != state.StartAttemptIDs[len(state.StartAttemptIDs)-1].String() {
 			return state, fmt.Errorf("%w: start attempt chain differs", ErrIntegrity)
 		}
-		previousEnd := state.RecheckCompletion.ObservedAtEnd
-		reusedCompletionObservation := sequence == 1 &&
-			attempt.ObservedAtStart.Equal(state.RecheckCompletion.ObservedAtStart) &&
-			attempt.ObservedAtEnd.Equal(state.RecheckCompletion.ObservedAtEnd)
+		reusedCompletionObservation := false
+		if state.RecheckCompletion != nil {
+			reusedCompletionObservation = sequence == 1 && attempt.ObservedAtStart.Equal(state.RecheckCompletion.ObservedAtStart) &&
+				attempt.ObservedAtEnd.Equal(state.RecheckCompletion.ObservedAtEnd)
+		}
 		if sequence > 1 {
 			previousEnd = state.StartAttempts[len(state.StartAttempts)-1].ObservedAtEnd
 		}
@@ -510,7 +522,7 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 		observed = append(observed, namedMarkerObservation{components: []string{name}, raw: markerRaw})
 	}
 	if regular[activationCompletionName] {
-		if len(state.StartAttemptIDs) == 0 || state.RecheckCompletion == nil {
+		if len(state.StartAttemptIDs) == 0 {
 			return state, fmt.Errorf("%w: activation completion has no start request", ErrIntegrity)
 		}
 		raw, err = handle.readNamedBytes(ctx, []string{activationCompletionName})
@@ -522,7 +534,7 @@ func (handle *journalHandle) readStateWithRetention(ctx context.Context, allowRe
 			return state, decodeErr
 		}
 		if value.OperationID != state.Intent.OperationID || value.PlanID != state.Intent.PlanID ||
-			value.RecheckCompletionID != state.RecheckCompletionID || value.StartAttemptID != state.StartAttemptIDs[len(state.StartAttemptIDs)-1] ||
+			!activationCompletionPrerequisiteMatches(state, value) || value.StartAttemptID != state.StartAttemptIDs[len(state.StartAttemptIDs)-1] ||
 			value.JobID != state.Intent.Plan.JobID || value.FileLayoutID != state.Intent.Plan.ExpectedFileLayoutID ||
 			value.FinalObjectIdentity != state.Intent.Plan.FinalObjectIdentity ||
 			value.ObservedAtStart.Before(state.StartAttempts[len(state.StartAttempts)-1].ObservedAtEnd) {
@@ -673,12 +685,13 @@ func (handle *journalHandle) validatePendingDestination(destination string, raw 
 		}
 	case strings.HasPrefix(destination, "start-attempt-"):
 		value, _, err := decodeAttempt(bytes.NewReader(raw))
-		if err != nil || state.RecheckCompletion == nil || value.Action != AttemptActionStart || value.Sequence != len(state.StartAttempts)+1 || destination != attemptFileName(value.Action, value.Sequence) {
+		prerequisite, _, prerequisiteErr := startPrerequisite(state)
+		if err != nil || prerequisiteErr != nil || value.Action != AttemptActionStart || value.PrerequisiteID != prerequisite || value.Sequence != len(state.StartAttempts)+1 || destination != attemptFileName(value.Action, value.Sequence) {
 			return fmt.Errorf("%w: pending start attempt is invalid", ErrIntegrity)
 		}
 	case destination == activationCompletionName:
 		value, _, err := decodeActivationCompletion(bytes.NewReader(raw))
-		if err != nil || state.RecheckCompletion == nil || len(state.StartAttemptIDs) == 0 || value.StartAttemptID != state.StartAttemptIDs[len(state.StartAttemptIDs)-1] {
+		if err != nil || len(state.StartAttemptIDs) == 0 || !activationCompletionPrerequisiteMatches(state, value) || value.StartAttemptID != state.StartAttemptIDs[len(state.StartAttemptIDs)-1] {
 			return fmt.Errorf("%w: pending activation completion is invalid", ErrIntegrity)
 		}
 	default:
@@ -692,10 +705,11 @@ func (handle *journalHandle) appendAttempt(ctx context.Context, action string, o
 	prerequisite := handle.state.Intent.Plan.AdoptionCompletionID
 	if action == AttemptActionStart {
 		attempts, ids = handle.state.StartAttempts, handle.state.StartAttemptIDs
-		if handle.state.RecheckCompletion == nil {
-			return markerWriteReceipt{}, "", fmt.Errorf("%w: start has no recheck completion", ErrPolicy)
+		var err error
+		prerequisite, _, err = startPrerequisite(handle.state)
+		if err != nil {
+			return markerWriteReceipt{}, "", err
 		}
-		prerequisite = handle.state.RecheckCompletionID.String()
 	}
 	sequence := len(attempts) + 1
 	if sequence > maximumActionAttempts {
@@ -705,10 +719,15 @@ func (handle *journalHandle) appendAttempt(ctx context.Context, action string, o
 		return markerWriteReceipt{}, "", fmt.Errorf("%w: activation attempt observations are not ordered", ErrIntegrity)
 	}
 	if action == AttemptActionStart && len(attempts) == 0 {
-		reusedCompletionObservation := observed.ledger.ObservedAtStart.Equal(handle.state.RecheckCompletion.ObservedAtStart) &&
+		_, previousEnd, prerequisiteErr := startPrerequisite(handle.state)
+		if prerequisiteErr != nil {
+			return markerWriteReceipt{}, "", prerequisiteErr
+		}
+		reusedCompletionObservation := handle.state.RecheckCompletion != nil &&
+			observed.ledger.ObservedAtStart.Equal(handle.state.RecheckCompletion.ObservedAtStart) &&
 			observed.ledger.ObservedAtEnd.Equal(handle.state.RecheckCompletion.ObservedAtEnd)
-		if !reusedCompletionObservation && observed.ledger.ObservedAtStart.Before(handle.state.RecheckCompletion.ObservedAtEnd) {
-			return markerWriteReceipt{}, "", fmt.Errorf("%w: start observation predates recheck completion", ErrIntegrity)
+		if !reusedCompletionObservation && observed.ledger.ObservedAtStart.Before(previousEnd) {
+			return markerWriteReceipt{}, "", fmt.Errorf("%w: start observation predates its reviewed prerequisite", ErrIntegrity)
 		}
 	}
 	previous := ""
@@ -737,6 +756,35 @@ func (handle *journalHandle) appendAttempt(ctx context.Context, action string, o
 		handle.state.RecheckAttemptIDs = append(handle.state.RecheckAttemptIDs, id)
 	}
 	return receipt, id, nil
+}
+
+func startPrerequisite(state journalState) (string, time.Time, error) {
+	switch state.Intent.Plan.Action {
+	case ActionRecheckThenStart:
+		if state.RecheckCompletion == nil || state.RecheckCompletionID == "" {
+			return "", time.Time{}, fmt.Errorf("%w: start has no reviewed recheck completion", ErrPolicy)
+		}
+		return state.RecheckCompletionID.String(), state.RecheckCompletion.ObservedAtEnd, nil
+	case ActionStartAfterStop:
+		if state.Intent.Plan.TerminalStop == nil || state.Intent.Plan.TerminalStop.Validate() != nil {
+			return "", time.Time{}, fmt.Errorf("%w: start has no reviewed terminal-stop completion", ErrPolicy)
+		}
+		return state.Intent.Plan.TerminalStop.CompletionID, state.Intent.Plan.TerminalStop.observedEnd(), nil
+	default:
+		return "", time.Time{}, fmt.Errorf("%w: activation action does not review start", ErrPolicy)
+	}
+}
+
+func activationCompletionPrerequisiteMatches(state journalState, completion ActivationCompletion) bool {
+	switch state.Intent.Plan.Action {
+	case ActionRecheckThenStart:
+		return state.RecheckCompletion != nil && completion.RecheckCompletionID == state.RecheckCompletionID && completion.StopCompletionID == ""
+	case ActionStartAfterStop:
+		return state.RecheckCompletion == nil && state.Intent.Plan.TerminalStop != nil && completion.RecheckCompletionID == "" &&
+			completion.StopCompletionID.String() == state.Intent.Plan.TerminalStop.CompletionID
+	default:
+		return false
+	}
 }
 
 func (handle *journalHandle) appendRecheckStarted(ctx context.Context, value RecheckStarted) (markerWriteReceipt, MarkerID, error) {

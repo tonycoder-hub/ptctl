@@ -24,6 +24,11 @@ func TestVerifyStopCompletionReadsLiveAndRetainedAuthority(t *testing.T) {
 	if !ok || public.CompletionID != fixture.completionID.String() || public.RetainedTombstone {
 		t.Fatalf("public=%#v ok=%t", public, ok)
 	}
+	startPrerequisite, ok := verified.ActivationStartPrerequisite()
+	if !ok || startPrerequisite.OperationID != fixture.operation.String() || startPrerequisite.PlanID != fixture.planID ||
+		startPrerequisite.CompletionID != fixture.completionID.String() || startPrerequisite.RetainedTombstone {
+		t.Fatalf("live start prerequisite=%#v ok=%t", startPrerequisite, ok)
+	}
 
 	if _, pruneErr := Prune(context.Background(), fixture.pruneOptions()); pruneErr != nil {
 		t.Fatal(pruneErr)
@@ -35,6 +40,10 @@ func TestVerifyStopCompletionReadsLiveAndRetainedAuthority(t *testing.T) {
 		retainedObservation.CompletionID != observation.CompletionID || retainedObservation.IntentID != observation.IntentID ||
 		retainedObservation.Assurance != "same_invocation_bound_canonical_client_stop_retention_tombstone_read_without_current_client_inference" {
 		t.Fatalf("retained=%#v observation=%#v err=%v", retained, retainedObservation, err)
+	}
+	retainedStart, ok := retained.ActivationStartPrerequisite()
+	if !ok || !retainedStart.RetainedTombstone || retainedStart.CompletionID != startPrerequisite.CompletionID {
+		t.Fatalf("retained start prerequisite=%#v ok=%t", retainedStart, ok)
 	}
 
 	raw, err := json.Marshal(struct {
@@ -56,6 +65,22 @@ func TestVerifyStopCompletionReadsLiveAndRetainedAuthority(t *testing.T) {
 	}
 	if _, ok := copied.Authority.ReconciliationStopCompletion(); ok {
 		t.Fatal("JSON round-trip exposed stop reconciliation proof")
+	}
+	if _, ok := copied.Authority.ActivationStartPrerequisite(); ok {
+		t.Fatal("JSON round-trip exposed start-after-stop proof")
+	}
+}
+
+func TestUnattributedStopCannotAuthorizeStart(t *testing.T) {
+	fixture := makeTerminalStopFixture(t, false)
+	verified, observation, err := VerifyCompletion(context.Background(), CompletionProofOptions{
+		TargetRoot: fixture.root, OperationID: fixture.operation, ExpectedPlanID: fixture.planID,
+	})
+	if err != nil || !verified.Verified() || observation.CompletionBasis != "exact_stopped_after_unknown_attempt_causality_unproven" {
+		t.Fatalf("verified=%v observation=%#v err=%v", verified != nil && verified.Verified(), observation, err)
+	}
+	if _, ok := verified.ActivationStartPrerequisite(); ok {
+		t.Fatal("unattributed terminal stop authorized a later start")
 	}
 }
 

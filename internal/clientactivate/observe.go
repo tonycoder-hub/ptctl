@@ -96,6 +96,16 @@ func (observed clientObservation) validateForPlan(authority *PreparedAuthority) 
 	return nil
 }
 
+func (observed clientObservation) validateForStoppedStartPlan(authority *PreparedAuthority, stop TerminalStopPrerequisite) error {
+	if authority == nil || stop.validate() != nil || observed.job.Hash == "" || observed.jobID != authority.expectedJobID ||
+		!completeStoppedState(observed.job.State) || observed.job.Progress != 1 || !observed.allSelected || !observed.allComplete ||
+		observed.fileLayoutID != stop.FileLayoutID || observed.completeSnapshotID != stop.CompleteFileSnapshotID ||
+		observed.ledger.ObservedAtStart.Before(stop.ObservedAtEnd) {
+		return fmt.Errorf("%w: exact job is not a fresh complete stopped continuation of the terminal stop", ErrPolicy)
+	}
+	return nil
+}
+
 func validateJobEnvelope(authority *PreparedAuthority, job downloader.Torrent, currentJobID string) error {
 	if authority == nil || currentJobID == "" || currentJobID != authority.expectedJobID || job.SizeBytes != authority.final.ContentBytes ||
 		math.IsNaN(job.Progress) || math.IsInf(job.Progress, 0) || job.Progress < 0 || job.Progress > 1 {

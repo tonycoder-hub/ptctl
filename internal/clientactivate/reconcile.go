@@ -28,7 +28,26 @@ func (verified *VerifiedCompletion) ReconciliationCompletion() (reconcile.Client
 		MaterializeOperationID: observation.MaterializeOperationID, MaterializePlanID: observation.MaterializePlanID,
 		AdoptionOperationID: plan.AdoptionOperationID, AdoptionPlanID: plan.AdoptionPlanID,
 		AdoptionCompletionID: plan.AdoptionCompletionID,
-		ClientConfigID:       observation.ClientConfigID, PathMappingID: observation.PathMappingID, JobID: observation.JobID,
+		StopOperationID: func() string {
+			if plan.TerminalStop != nil {
+				return plan.TerminalStop.OperationID
+			}
+			return ""
+		}(),
+		StopPlanID: func() string {
+			if plan.TerminalStop != nil {
+				return plan.TerminalStop.PlanID
+			}
+			return ""
+		}(),
+		StopCompletionID: observation.StopCompletionID,
+		StopCompletionBasis: func() string {
+			if plan.TerminalStop != nil {
+				return plan.TerminalStop.CompletionBasis
+			}
+			return ""
+		}(),
+		ClientConfigID: observation.ClientConfigID, PathMappingID: observation.PathMappingID, JobID: observation.JobID,
 		FinalObjectIdentity: observation.FinalObjectIdentity, ObservedAtStart: started, ObservedAtEnd: ended,
 		Assurance: observation.Assurance,
 	}, true
@@ -152,7 +171,7 @@ func (authority *CurrentUseAuthority) ReconcileCurrentAbsence(bracket reconcile.
 		return reconcile.ClientActivationCurrentAbsence{}, false
 	}
 	useID, err := currentUseID(authority.plan)
-	completeSnapshotID := authority.completion.authority.recheck.CompleteFileSnapshotID
+	completeSnapshotID := terminalCompleteSnapshotID(authority.completion)
 	if err != nil || useID != authority.useID || !canonicalSHA256ID(completeSnapshotID) {
 		return reconcile.ClientActivationCurrentAbsence{}, false
 	}
@@ -164,6 +183,19 @@ func (authority *CurrentUseAuthority) ReconcileCurrentAbsence(bracket reconcile.
 		JobsExaminedAfter: afterAssessment.JobsExamined, FinalObjectIdentity: authority.plan.FinalObjectIdentity,
 		Assurance: "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_activation_and_exact_final_with_typed_job_absence_non_atomic_without_causality_attribution",
 	}, true
+}
+
+func terminalCompleteSnapshotID(completion *VerifiedCompletion) string {
+	if completion == nil || !completion.Verified() || completion.authority == nil {
+		return ""
+	}
+	if completion.authority.activation != nil {
+		return completion.authority.activation.CompleteFileSnapshotID
+	}
+	if completion.authority.recheck != nil {
+		return completion.authority.recheck.CompleteFileSnapshotID
+	}
+	return ""
 }
 
 func reconciliationLedgerObservation(authority *CurrentUseAuthority, ledger downloader.LedgerSnapshot) (clientObservation, bool) {

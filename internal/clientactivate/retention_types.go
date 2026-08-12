@@ -20,8 +20,8 @@ type RetentionIntent struct {
 	PlanID                 string                `json:"plan_id"`
 	IntentID               MarkerID              `json:"intent_id"`
 	Intent                 Intent                `json:"intent"`
-	RecheckCompletionID    MarkerID              `json:"recheck_completion_id"`
-	RecheckCompletion      RecheckCompletion     `json:"recheck_completion"`
+	RecheckCompletionID    MarkerID              `json:"recheck_completion_id,omitempty"`
+	RecheckCompletion      *RecheckCompletion    `json:"recheck_completion,omitempty"`
 	ActivationCompletionID MarkerID              `json:"activation_completion_id,omitempty"`
 	ActivationCompletion   *ActivationCompletion `json:"activation_completion,omitempty"`
 	Markers                []RetainedMarkerLink  `json:"markers"`
@@ -30,10 +30,8 @@ type RetentionIntent struct {
 
 func (marker RetentionIntent) Validate() error {
 	if marker.Schema != RetentionIntentSchemaV1 || marker.Basis != RetentionBasisTerminal ||
-		marker.Intent.Validate() != nil || marker.RecheckCompletion.Validate() != nil ||
+		marker.Intent.Validate() != nil ||
 		marker.OperationID != marker.Intent.OperationID || marker.PlanID != marker.Intent.PlanID ||
-		marker.RecheckCompletion.OperationID != marker.OperationID || marker.RecheckCompletion.PlanID != marker.PlanID ||
-		marker.RecheckCompletion.FinalObjectIdentity != marker.Intent.Plan.FinalObjectIdentity ||
 		marker.TargetRootIdentity != marker.Intent.Plan.TargetRootIdentity || len(marker.Markers) < 3 || len(marker.Markers) > 10 {
 		return fmt.Errorf("%w: client activation retention intent is invalid", ErrIntegrity)
 	}
@@ -46,16 +44,12 @@ func (marker RetentionIntent) Validate() error {
 	if err != nil || marker.IntentID != intentID {
 		return fmt.Errorf("%w: client activation retention intent link is invalid", ErrIntegrity)
 	}
-	_, recheckID, err := encodeRecheckCompletion(marker.RecheckCompletion)
-	if err != nil || marker.RecheckCompletionID != recheckID {
-		return fmt.Errorf("%w: client activation retained recheck link is invalid", ErrIntegrity)
-	}
 	if marker.Intent.Plan.Action == ActionRecheckOnly {
-		if marker.ActivationCompletion != nil || marker.ActivationCompletionID != "" {
+		if !validRetainedRecheck(marker) || marker.ActivationCompletion != nil || marker.ActivationCompletionID != "" {
 			return fmt.Errorf("%w: recheck-only retention unexpectedly contains start completion", ErrIntegrity)
 		}
 	} else if marker.Intent.Plan.Action == ActionRecheckThenStart {
-		if marker.ActivationCompletion == nil || marker.ActivationCompletion.Validate() != nil {
+		if !validRetainedRecheck(marker) || marker.ActivationCompletion == nil || marker.ActivationCompletion.Validate() != nil {
 			return fmt.Errorf("%w: activation retention lacks its reviewed terminal start", ErrIntegrity)
 		}
 		_, activationID, encodeErr := encodeActivationCompletion(*marker.ActivationCompletion)
@@ -64,6 +58,19 @@ func (marker RetentionIntent) Validate() error {
 			marker.ActivationCompletion.RecheckCompletionID != marker.RecheckCompletionID ||
 			marker.ActivationCompletion.FinalObjectIdentity != marker.Intent.Plan.FinalObjectIdentity {
 			return fmt.Errorf("%w: retained activation completion link is invalid", ErrIntegrity)
+		}
+	} else if marker.Intent.Plan.Action == ActionStartAfterStop {
+		if marker.RecheckCompletion != nil || marker.RecheckCompletionID != "" || marker.Intent.Plan.TerminalStop == nil ||
+			marker.ActivationCompletion == nil || marker.ActivationCompletion.Validate() != nil {
+			return fmt.Errorf("%w: start-after-stop retention prerequisite is invalid", ErrIntegrity)
+		}
+		_, activationID, encodeErr := encodeActivationCompletion(*marker.ActivationCompletion)
+		if encodeErr != nil || activationID != marker.ActivationCompletionID ||
+			marker.ActivationCompletion.OperationID != marker.OperationID || marker.ActivationCompletion.PlanID != marker.PlanID ||
+			marker.ActivationCompletion.RecheckCompletionID != "" ||
+			marker.ActivationCompletion.StopCompletionID.String() != marker.Intent.Plan.TerminalStop.CompletionID ||
+			marker.ActivationCompletion.FinalObjectIdentity != marker.Intent.Plan.FinalObjectIdentity {
+			return fmt.Errorf("%w: retained start-after-stop completion link is invalid", ErrIntegrity)
 		}
 	} else {
 		return fmt.Errorf("%w: retained activation action is unsupported", ErrIntegrity)
@@ -87,10 +94,21 @@ func (marker RetentionIntent) Validate() error {
 		}
 		seen[link.Name] = true
 	}
-	if !seen[recheckCompletionFileName] || marker.Intent.Plan.Action == ActionRecheckThenStart && !seen[activationCompletionName] {
+	if (marker.Intent.Plan.Action != ActionStartAfterStop && !seen[recheckCompletionFileName]) ||
+		(marker.Intent.Plan.Action == ActionRecheckThenStart || marker.Intent.Plan.Action == ActionStartAfterStop) && !seen[activationCompletionName] {
 		return fmt.Errorf("%w: retained activation terminal marker is absent", ErrIntegrity)
 	}
 	return nil
+}
+
+func validRetainedRecheck(marker RetentionIntent) bool {
+	if marker.RecheckCompletion == nil || marker.RecheckCompletion.Validate() != nil || marker.RecheckCompletionID == "" ||
+		marker.RecheckCompletion.OperationID != marker.OperationID || marker.RecheckCompletion.PlanID != marker.PlanID ||
+		marker.RecheckCompletion.FinalObjectIdentity != marker.Intent.Plan.FinalObjectIdentity {
+		return false
+	}
+	_, id, err := encodeRecheckCompletion(*marker.RecheckCompletion)
+	return err == nil && id == marker.RecheckCompletionID
 }
 
 type RetentionComplete struct {

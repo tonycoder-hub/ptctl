@@ -12,6 +12,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
+	"github.com/tonycoder-hub/ptctl/internal/clientstop"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/transmission"
@@ -34,6 +35,8 @@ type clientActivateFlags struct {
 	materializePlanID    *string
 	adoptionOperation    *string
 	adoptionPlanID       *string
+	stopOperation        *string
+	stopPlanID           *string
 	hostRoot             *string
 	clientRoot           *string
 	clientStyle          *string
@@ -85,7 +88,9 @@ func (a *app) clientActivate(args []string) error {
 func (a *app) clientActivateHelp() {
 	fmt.Fprint(a.stdout, `Usage:
   ptctl client activate plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --adoption-operation ID --adoption-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--start-after-recheck] [--output table|json]
+  ptctl client activate plan [same non-lineage selectors] --stop-operation ID --stop-plan-id ID --password-stdin [--output table|json]
   ptctl client activate run [same selectors] --expect-activation-plan-id ID --acknowledge-client-recheck [--output table|json]
+  ptctl client activate run [terminal-stop selectors] --expect-activation-plan-id ID --acknowledge-client-start [--output table|json]
   ptctl client activate resume [same selectors] --expect-activation-plan-id ID [--acknowledge-client-recheck --acknowledge-repeat-recheck] [--acknowledge-client-start --acknowledge-repeat-start] [--output table|json] OPERATION_ID
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
   ptctl client activate prune --target PATH --expect-activation-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
@@ -103,6 +108,12 @@ explicit repeat acknowledgement. --start-after-recheck reviews an optional
 start action; a later resume still requires --acknowledge-client-start and can
 announce to trackers or transfer data. Each invocation sends at most one
 effectful client POST. No source data is retired or deleted.
+
+An attributed terminal stop may instead authorize start_after_stop. That mode
+requires one explicit stop operation/plan, re-reads its prior terminal
+activation, proves the exact complete job still stopped after that boundary,
+and journals one start request without another recheck. Stops whose request
+causality was unproven cannot authorize this lineage.
 
 Prune is local-only. It seals one terminal activation journal into an exact
 owner-private tombstone before deleting only that operation's original markers
@@ -124,6 +135,8 @@ func addClientActivateFlags(fs *flag.FlagSet, execution bool) *clientActivateFla
 	values.materializePlanID = fs.String("materialize-plan-id", "", "reviewed materialize plan ID")
 	values.adoptionOperation = fs.String("adoption-operation", "", "completed stopped-adoption operation ID")
 	values.adoptionPlanID = fs.String("adoption-plan-id", "", "reviewed stopped-adoption plan ID")
+	values.stopOperation = fs.String("stop-operation", "", "attributed terminal client-stop operation ID; replaces adoption selectors")
+	values.stopPlanID = fs.String("stop-plan-id", "", "reviewed terminal client-stop plan ID; requires --stop-operation")
 	values.hostRoot = fs.String("host-root", "", "host namespace root containing the target")
 	values.clientRoot = fs.String("client-root", "", "downloader-visible namespace root")
 	values.clientStyle = fs.String("client-style", "posix", "downloader path style: posix or windows")
@@ -143,6 +156,18 @@ func addClientActivateFlags(fs *flag.FlagSet, execution bool) *clientActivateFla
 	return values
 }
 
+func clientActivateLineageModes(fs *flag.FlagSet) (adoptionMode, stopMode bool) {
+	fs.Visit(func(current *flag.Flag) {
+		switch current.Name {
+		case "adoption-operation", "adoption-plan-id":
+			adoptionMode = true
+		case "stop-operation", "stop-plan-id":
+			stopMode = true
+		}
+	})
+	return adoptionMode, stopMode
+}
+
 func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *clientActivateFlags, command string, allowPositional bool) (preparedClientActivate, error) {
 	var result preparedClientActivate
 	if err := validateOutput(*values.output); err != nil {
@@ -154,10 +179,20 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 	if (!allowPositional && fs.NArg() != 0) || (allowPositional && fs.NArg() != 1) {
 		return result, usageError("%s has an invalid positional argument count", command)
 	}
+	adoptionMode, stopMode := clientActivateLineageModes(fs)
+	if command == "client activate plan" && stopMode && *values.startAfterRecheck {
+		return result, usageError("client activate plan --start-after-recheck cannot be combined with terminal-stop selectors")
+	}
+	if stopMode == adoptionMode {
+		return result, usageError("%s requires exactly one complete adoption selector pair or terminal-stop selector pair", command)
+	}
+	if stopMode && (*values.stopOperation == "" || *values.stopPlanID == "") || adoptionMode && (*values.adoptionOperation == "" || *values.adoptionPlanID == "") {
+		return result, usageError("%s lineage selector pairs must both be non-empty", command)
+	}
 	if *values.storeRoot == "" || *values.variantID == "" || *values.targetRoot == "" || *values.materializeOperation == "" ||
-		*values.materializePlanID == "" || *values.adoptionOperation == "" || *values.adoptionPlanID == "" ||
+		*values.materializePlanID == "" ||
 		*values.hostRoot == "" || *values.clientRoot == "" || *values.endpoint == "" || *values.username == "" {
-		return result, usageError("%s requires every metafile, materialize, adoption, mapping, and downloader selector", command)
+		return result, usageError("%s requires every metafile, materialize, lineage, mapping, and downloader selector", command)
 	}
 	if !*values.passwordStdin {
 		return result, usageError("%s requires --password-stdin", command)
@@ -176,9 +211,19 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 	if err != nil || !validMaterializePlanID(*values.materializePlanID) {
 		return result, usageError("%s requires canonical materialize operation and plan IDs", command)
 	}
-	adoptionOperation, err := clientadopt.ParseOperationID(*values.adoptionOperation)
-	if err != nil || !validMaterializePlanID(*values.adoptionPlanID) {
-		return result, usageError("%s requires canonical adoption operation and plan IDs", command)
+	var adoptionOperation clientadopt.OperationID
+	if adoptionMode {
+		adoptionOperation, err = clientadopt.ParseOperationID(*values.adoptionOperation)
+		if err != nil || !validMaterializePlanID(*values.adoptionPlanID) {
+			return result, usageError("%s requires canonical adoption operation and plan IDs", command)
+		}
+	}
+	var stopOperation clientstop.OperationID
+	if stopMode {
+		stopOperation, err = clientstop.ParseOperationID(*values.stopOperation)
+		if err != nil || !validMaterializePlanID(*values.stopPlanID) || clientstop.OperationIDForPlan(*values.stopPlanID) != stopOperation {
+			return result, usageError("%s requires matching canonical terminal-stop operation and plan IDs", command)
+		}
 	}
 	windows := *values.clientStyle == "windows"
 	if err := storage.ValidatePathMappingConfig(*values.hostRoot, *values.clientRoot, windows); err != nil {
@@ -214,18 +259,44 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 	if err != nil {
 		return result, err
 	}
-	verifiedAdoption, _, err := clientadopt.VerifyCompletion(ctx, clientadopt.CompletionProofOptions{TargetRoot: *values.targetRoot,
-		OperationID: adoptionOperation, ExpectedPlanID: *values.adoptionPlanID})
-	if errors.Is(err, clientadopt.ErrIntegrity) {
-		return result, &integrityErr{message: "stopped-adoption journal failed integrity validation"}
-	}
-	if err != nil {
-		return result, err
-	}
-	authority, err := clientactivate.PrepareAuthority(verifiedFinal, verifiedAdoption, clientactivate.AuthorityOptions{
+	authorityOptions := clientactivate.AuthorityOptions{
 		Driver: *values.driver, ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot,
 		ClientWindows: windows, FileLimits: downloader.DefaultJobFileLedgerLimits(),
-	})
+	}
+	var authority *clientactivate.PreparedAuthority
+	if adoptionMode {
+		verifiedAdoption, _, verifyErr := clientadopt.VerifyCompletion(ctx, clientadopt.CompletionProofOptions{TargetRoot: *values.targetRoot,
+			OperationID: adoptionOperation, ExpectedPlanID: *values.adoptionPlanID})
+		if errors.Is(verifyErr, clientadopt.ErrIntegrity) {
+			return result, &integrityErr{message: "stopped-adoption journal failed integrity validation"}
+		}
+		if verifyErr != nil {
+			return result, verifyErr
+		}
+		authority, err = clientactivate.PrepareAuthority(verifiedFinal, verifiedAdoption, authorityOptions)
+	} else {
+		verifiedStop, stopObservation, verifyErr := clientstop.VerifyCompletion(ctx, clientstop.CompletionProofOptions{TargetRoot: *values.targetRoot,
+			OperationID: stopOperation, ExpectedPlanID: *values.stopPlanID})
+		if errors.Is(verifyErr, clientstop.ErrIntegrity) {
+			return result, &integrityErr{message: "terminal client-stop journal failed integrity validation"}
+		}
+		if verifyErr != nil {
+			return result, verifyErr
+		}
+		priorActivation, parseErr := clientactivate.ParseOperationID(stopObservation.ActivationOperationID)
+		if parseErr != nil || !validMaterializePlanID(stopObservation.ActivationPlanID) {
+			return result, &integrityErr{message: "terminal client-stop activation lineage is invalid"}
+		}
+		verifiedActivation, _, activationErr := clientactivate.VerifyCompletion(ctx, clientactivate.CompletionProofOptions{TargetRoot: *values.targetRoot,
+			OperationID: priorActivation, ExpectedPlanID: stopObservation.ActivationPlanID})
+		if errors.Is(activationErr, clientactivate.ErrIntegrity) {
+			return result, &integrityErr{message: "terminal client-stop prior activation failed integrity validation"}
+		}
+		if activationErr != nil {
+			return result, activationErr
+		}
+		authority, err = clientactivate.PrepareStartAfterStopAuthority(verifiedFinal, verifiedActivation, verifiedStop, authorityOptions)
+	}
 	if err != nil {
 		return result, err
 	}
@@ -277,8 +348,11 @@ func (a *app) clientActivateRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return usageError("client activate run: %v", err)
 	}
-	if !validMaterializePlanID(*values.expectedPlanID) || !*values.acknowledgeRecheck || *values.repeatRecheck || *values.repeatStart || *values.acknowledgeStart {
-		return usageError("client activate run requires a reviewed plan and recheck acknowledgement; start and repeat acknowledgements are resume-only")
+	_, stopMode := clientActivateLineageModes(fs)
+	if !validMaterializePlanID(*values.expectedPlanID) || *values.repeatRecheck || *values.repeatStart ||
+		(stopMode && (!*values.acknowledgeStart || *values.acknowledgeRecheck || *values.startAfterRecheck)) ||
+		(!stopMode && (!*values.acknowledgeRecheck || *values.acknowledgeStart)) {
+		return usageError("client activate run requires the reviewed plan and exactly its recheck or start acknowledgement; repeats are resume-only")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *values.timeout)
 	defer cancel()
@@ -302,7 +376,7 @@ func (a *app) clientActivateRun(args []string) error {
 	}
 	defer session.Close()
 	report, operationErr := clientactivate.Run(ctx, clientactivate.RunOptions{Authority: prepared.authority, ExpectedPlanID: *values.expectedPlanID,
-		Session: session, StartAfterRecheck: *values.startAfterRecheck, AcknowledgeRecheck: true,
+		Session: session, StartAfterRecheck: *values.startAfterRecheck, AcknowledgeRecheck: *values.acknowledgeRecheck,
 		AcknowledgeStart: *values.acknowledgeStart})
 	return a.finishClientActivate(prepared.output, report, operationErr)
 }
@@ -316,9 +390,11 @@ func (a *app) clientActivateResume(args []string) error {
 	if fs.NArg() != 1 || !validMaterializePlanID(*values.expectedPlanID) {
 		return usageError("client activate resume requires one OPERATION_ID and canonical --expect-activation-plan-id")
 	}
+	_, stopMode := clientActivateLineageModes(fs)
 	if *values.repeatRecheck && !*values.acknowledgeRecheck || *values.repeatStart && !*values.acknowledgeStart ||
-		((*values.acknowledgeStart || *values.repeatStart) && !*values.startAfterRecheck) {
-		return usageError("repeat acknowledgements require their base acknowledgement and start flags require --start-after-recheck")
+		(stopMode && (*values.acknowledgeRecheck || *values.repeatRecheck || *values.startAfterRecheck)) ||
+		(!stopMode && ((*values.acknowledgeStart || *values.repeatStart) && !*values.startAfterRecheck)) {
+		return usageError("repeat acknowledgements require their base acknowledgement and action flags must match the selected lineage")
 	}
 	operationID, err := clientactivate.ParseOperationID(fs.Arg(0))
 	if err != nil {
@@ -333,7 +409,9 @@ func (a *app) clientActivateResume(args []string) error {
 	preflight, preflightErr := clientactivate.PreflightResume(ctx, prepared.authority, prepared.targetRoot, operationID, *values.expectedPlanID)
 	initializationIncomplete := errors.Is(preflightErr, clientactivate.ErrInitializationIncomplete)
 	wantAction := clientactivate.ActionRecheckOnly
-	if *values.startAfterRecheck {
+	if stopMode {
+		wantAction = clientactivate.ActionStartAfterStop
+	} else if *values.startAfterRecheck {
 		wantAction = clientactivate.ActionRecheckThenStart
 	}
 	if !initializationIncomplete && preflight.Plan.Action != "" && preflight.Plan.Action != wantAction {
@@ -350,8 +428,9 @@ func (a *app) clientActivateResume(args []string) error {
 	if preflightErr != nil && !initializationIncomplete {
 		return a.finishClientActivate(prepared.output, preflight, preflightErr)
 	}
-	if (initializationIncomplete || preflight.Journal.RecheckAttempts == 0) && !*values.acknowledgeRecheck {
-		preflightErr = fmt.Errorf("%w: operation has no recheck request intent; explicit acknowledgement is required", clientactivate.ErrPolicy)
+	needsInitialAck := initializationIncomplete || stopMode && preflight.Journal.StartAttempts == 0 || !stopMode && preflight.Journal.RecheckAttempts == 0
+	if needsInitialAck && (stopMode && !*values.acknowledgeStart || !stopMode && !*values.acknowledgeRecheck) {
+		preflightErr = fmt.Errorf("%w: operation has no action request intent; explicit acknowledgement is required", clientactivate.ErrPolicy)
 		report := clientactivate.FailureReport(prepared.authority, *values.expectedPlanID, "resume", 0, preflightErr)
 		return a.finishClientActivate(prepared.output, report, preflightErr)
 	}
@@ -544,6 +623,11 @@ func writeClientActivateHuman(out io.Writer, report clientactivate.Report) error
 		terminalSafe(report.Final.Status), terminalSafe(report.Final.Observation.MetafileVariantID), terminalSafe(report.Final.Observation.FinalObjectIdentity),
 		report.Final.Observation.BytesVerified, terminalSafe(report.Final.Observation.Assurance), terminalSafe(report.Adoption.Status),
 		terminalSafe(report.Adoption.Observation.OperationID), terminalSafe(report.Adoption.Observation.CompletionID), terminalSafe(report.Adoption.Observation.Assurance))
+	fmt.Fprintf(w, "\nTERMINAL STOP\nSTATUS\t%s\nOPERATION\t%s\nPLAN\t%s\nCOMPLETION\t%s\nBASIS\t%s\nAUTHORITY FORM\t%s\nRETAINED TOMBSTONE\t%t\nOBSERVED END\t%s\n",
+		terminalSafe(report.TerminalStop.Status), terminalSafe(valueOrUnknown(report.TerminalStop.OperationID)),
+		terminalSafe(valueOrUnknown(report.TerminalStop.PlanID)), terminalSafe(valueOrUnknown(report.TerminalStop.CompletionID)),
+		terminalSafe(materializeValueOr(report.TerminalStop.Basis, "not_observed")), terminalSafe(report.TerminalStop.AuthorityForm),
+		report.TerminalStop.Retained, terminalSafe(materializeValueOr(report.TerminalStop.ObservedEnd, "not_observed")))
 	fmt.Fprintf(w, "\nCLIENT\nSTATUS\t%s\nREQUESTS MADE\t%d\nLEDGER READS\t%d\nFILE LEDGER READS\t%d\nIDENTITY\t%s\nJOB ID\t%s\nJOB STATE\t%s\nJOB PROGRESS\t%.6f\nFILE LAYOUT\t%s\nALL FILES SELECTED\t%t\nALL FILES COMPLETE\t%t\nACTION ATTEMPTED\t%s\nACTION COMPLETE\t%t\nAUTOMATIC RETRIES\t%d\nREDIRECTS\t%d\nASSURANCE\t%s\n",
 		terminalSafe(report.Client.Status), report.Client.RequestsMade, report.Client.LedgerReads, report.Client.FileLedgerReads,
 		terminalSafe(report.Client.IdentityStatus), terminalSafe(materializeValueOr(report.Client.JobID, "not_observed")),

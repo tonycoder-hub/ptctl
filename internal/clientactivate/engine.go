@@ -109,7 +109,11 @@ func FailureReport(authority *PreparedAuthority, expectedPlanID, action string, 
 	report.Client.RequestsMade = requestsMade
 	switch action {
 	case "run":
-		report.Effect = append(report.Effect, "write_private_client_activation_journal", downloader.ControlEffectRecheck)
+		effect := downloader.ControlEffectRecheck
+		if authority != nil && authority.terminalStop != nil {
+			effect = downloader.ControlEffectStart
+		}
+		report.Effect = append(report.Effect, "write_private_client_activation_journal", effect)
 	case "resume":
 		report.Effect = append(report.Effect, "read_private_client_activation_journal", "write_private_client_activation_journal")
 	}
@@ -166,9 +170,13 @@ func Preview(ctx context.Context, authority *PreparedAuthority, session download
 
 func Run(ctx context.Context, options RunOptions) (Report, error) {
 	report := newReport(options.Authority, options.ExpectedPlanID)
-	report.Effect = append(report.Effect, "write_private_client_activation_journal", downloader.ControlEffectRecheck)
-	if !canonicalPlanID(options.ExpectedPlanID) || options.Authority == nil || options.Session == nil || !options.AcknowledgeRecheck ||
-		options.RepeatRecheck || options.RepeatStart || options.AcknowledgeStart {
+	effect := downloader.ControlEffectRecheck
+	if options.Authority != nil && options.Authority.terminalStop != nil {
+		effect = downloader.ControlEffectStart
+	}
+	report.Effect = append(report.Effect, "write_private_client_activation_journal", effect)
+	if !canonicalPlanID(options.ExpectedPlanID) || options.Authority == nil || options.Session == nil ||
+		!validInitialAcknowledgements(options) {
 		err := fmt.Errorf("%w: activation run acknowledgement or authority is invalid", ErrPolicy)
 		classifyFailure(&report, err)
 		report.finalize()
@@ -392,6 +400,9 @@ func continueOperation(ctx context.Context, prepared *PreparedPlan, handle *jour
 		return fmt.Errorf("%w: current client observation predates the checking observation", ErrIntegrity)
 	case len(state.RecheckAttempts) > 0 && observed.ledger.ObservedAtStart.Before(state.RecheckAttempts[len(state.RecheckAttempts)-1].ObservedAtEnd):
 		return fmt.Errorf("%w: current client observation predates the latest recheck attempt", ErrIntegrity)
+	case state.Intent.Plan.Action == ActionStartAfterStop && state.Intent.Plan.TerminalStop != nil &&
+		observed.ledger.ObservedAtStart.Before(state.Intent.Plan.TerminalStop.observedEnd()):
+		return fmt.Errorf("%w: current client observation predates the terminal stop", ErrIntegrity)
 	}
 	if state.ActivationCompletion != nil {
 		if !startedState(observed.job.State) || observed.job.Progress != 1 || !observed.allSelected || !observed.allComplete {
@@ -405,6 +416,9 @@ func continueOperation(ctx context.Context, prepared *PreparedPlan, handle *jour
 		report.Outcome = OutcomeStartedClientClaim
 		report.Operation.Status, report.Operation.Resumable = "terminal", false
 		return nil
+	}
+	if state.Intent.Plan.Action == ActionStartAfterStop {
+		return continueStartAfterStop(ctx, prepared, handle, session, options, observed, report)
 	}
 	if state.RecheckCompletion != nil {
 		if state.Intent.Plan.Action == ActionRecheckOnly {
@@ -474,6 +488,47 @@ func continueOperation(ctx context.Context, prepared *PreparedPlan, handle *jour
 	return performRecheck(ctx, prepared, handle, session, observed, report)
 }
 
+func continueStartAfterStop(ctx context.Context, prepared *PreparedPlan, handle *journalHandle,
+	session downloader.ExistingJobMutationSession, options RunOptions, observed clientObservation, report *Report) error {
+	state := handle.state
+	if state.RecheckCompletion != nil || state.RecheckStarted != nil || len(state.RecheckAttempts) != 0 || state.Intent.Plan.TerminalStop == nil {
+		return fmt.Errorf("%w: start-after-stop journal prerequisite is contradictory", ErrIntegrity)
+	}
+	if len(state.StartAttemptIDs) > 0 && startedState(observed.job.State) {
+		return completeActivation(ctx, prepared, handle, observed, report)
+	}
+	if len(state.StartAttempts) > 0 && !(options.AcknowledgeStart && options.RepeatStart) {
+		report.Outcome = OutcomeStartRequestUnknown
+		report.Operation.Status, report.Operation.Resumable = "active", true
+		return ErrRequestUnknown
+	}
+	if len(state.StartAttempts) > 0 && (!completeStoppedState(observed.job.State) || observed.job.Progress != 1 || !observed.allSelected || !observed.allComplete) {
+		report.Outcome = OutcomeStartRequestUnknown
+		report.Operation.Status, report.Operation.Resumable = "active", true
+		return ErrRequestUnknown
+	}
+	if len(state.StartAttempts) == 0 && startedState(observed.job.State) {
+		return fmt.Errorf("%w: client started without a journaled start request", ErrPolicy)
+	}
+	if !completeStoppedState(observed.job.State) || observed.job.Progress != 1 || !observed.allSelected || !observed.allComplete {
+		return fmt.Errorf("%w: current client no longer proves the exact terminal-stopped job", ErrPolicy)
+	}
+	if !options.AcknowledgeStart {
+		return fmt.Errorf("%w: explicit client start acknowledgement is required", ErrPolicy)
+	}
+	return performStart(ctx, prepared, handle, session, options, observed, report)
+}
+
+func validInitialAcknowledgements(options RunOptions) bool {
+	if options.RepeatRecheck || options.RepeatStart || options.StartAfterRecheck && options.Authority != nil && options.Authority.terminalStop != nil {
+		return false
+	}
+	if options.Authority != nil && options.Authority.terminalStop != nil {
+		return options.AcknowledgeStart && !options.AcknowledgeRecheck
+	}
+	return options.AcknowledgeRecheck && !options.AcknowledgeStart
+}
+
 func performRecheck(ctx context.Context, prepared *PreparedPlan, handle *journalHandle, session downloader.ExistingJobMutationSession, before clientObservation, report *Report) error {
 	if !stoppedState(before.job.State) || !before.allSelected || before.fileLayoutID != prepared.plan.ExpectedFileLayoutID {
 		return fmt.Errorf("%w: exact job is not safely stopped for recheck", ErrPolicy)
@@ -492,7 +547,7 @@ func performRecheck(ctx context.Context, prepared *PreparedPlan, handle *journal
 
 func performStart(ctx context.Context, prepared *PreparedPlan, handle *journalHandle, session downloader.ExistingJobMutationSession, options RunOptions, before clientObservation, report *Report) error {
 	if !options.AcknowledgeStart || !completeStoppedState(before.job.State) || before.job.Progress != 1 || !before.allSelected || !before.allComplete {
-		return fmt.Errorf("%w: exact checked job is not safely stopped for start", ErrPolicy)
+		return fmt.Errorf("%w: exact complete job is not safely stopped for start", ErrPolicy)
 	}
 	if _, err := prepared.ReverifyFinal(ctx); err != nil {
 		return err
@@ -658,8 +713,11 @@ func completeRecheck(ctx context.Context, prepared *PreparedPlan, handle *journa
 }
 
 func completeActivation(ctx context.Context, prepared *PreparedPlan, handle *journalHandle, observed clientObservation, report *Report) error {
-	if len(handle.state.StartAttemptIDs) == 0 || handle.state.RecheckCompletion == nil {
+	if len(handle.state.StartAttemptIDs) == 0 {
 		return fmt.Errorf("%w: activation completion has no durable request authority", ErrIntegrity)
+	}
+	if _, _, err := startPrerequisite(handle.state); err != nil {
+		return err
 	}
 	if !startedState(observed.job.State) || observed.job.Progress != 1 || !observed.allSelected || !observed.allComplete {
 		return fmt.Errorf("%w: client start completion is not fully observed", ErrPolicy)
@@ -672,11 +730,16 @@ func completeActivation(ctx context.Context, prepared *PreparedPlan, handle *jou
 		return err
 	}
 	value := ActivationCompletion{Schema: ActivationSchemaV1, OperationID: handle.state.Intent.OperationID, PlanID: handle.state.Intent.PlanID,
-		RecheckCompletionID: handle.state.RecheckCompletionID, StartAttemptID: handle.state.StartAttemptIDs[len(handle.state.StartAttemptIDs)-1],
+		StartAttemptID:  handle.state.StartAttemptIDs[len(handle.state.StartAttemptIDs)-1],
 		ObservedAtStart: observed.ledger.ObservedAtStart, ObservedAtEnd: observed.ledger.ObservedAtEnd, JobID: observed.jobID,
 		JobState: observed.job.State, JobProgress: observed.job.Progress, FileLayoutID: observed.fileLayoutID,
 		CompleteFileSnapshotID: observed.completeSnapshotID, FinalObjectIdentity: final.FinalObjectIdentity,
 		FinalVerificationBasis: "same_invocation_post_start_exact_reverification"}
+	if handle.state.Intent.Plan.Action == ActionStartAfterStop {
+		value.StopCompletionID = MarkerID(handle.state.Intent.Plan.TerminalStop.CompletionID)
+	} else {
+		value.RecheckCompletionID = handle.state.RecheckCompletionID
+	}
 	receipt, _, err := handle.appendActivationCompletion(ctx, value)
 	report.recordMarker(receipt)
 	if err != nil {
@@ -756,6 +819,12 @@ func reportFromState(report *Report, state journalState) {
 	report.Journal = journalReport(state)
 	report.Final = FinalReport{Status: "historical_activation_intent_current_not_observed", Observation: historicalFinal(state.Intent.Plan)}
 	report.Adoption = AdoptionReport{Status: "historical_adoption_completion_reference_current_not_observed", Observation: historicalAdoption(state.Intent.Plan)}
+	if state.Intent.Plan.TerminalStop != nil {
+		stop := state.Intent.Plan.TerminalStop
+		report.TerminalStop = TerminalStopReport{Status: "historical_terminal_stop_reference_current_not_observed",
+			OperationID: stop.OperationID, PlanID: stop.PlanID, CompletionID: stop.CompletionID, Basis: stop.CompletionBasis,
+			AuthorityForm: "historical_plan_reference", ObservedEnd: stop.ObservedAtEnd}
+	}
 }
 
 func journalReport(state journalState) JournalReport {
@@ -840,10 +909,21 @@ func validateAuthorityAgainstPlan(authority *PreparedAuthority, plan Plan) error
 		authority.final.MetafileVariantID != plan.MetafileVariantID || authority.final.InfoHashV1 != plan.InfoHashV1 || authority.final.InfoHashV2 != plan.InfoHashV2 ||
 		authority.final.TargetRootIdentity != plan.TargetRootIdentity || authority.final.FinalObjectIdentity != plan.FinalObjectIdentity ||
 		authority.final.MultiFile != plan.MultiFile || authority.final.ManifestFiles != plan.ManifestFiles || authority.final.ContentBytes != plan.ContentBytes ||
-		authority.adoption.OperationID != plan.AdoptionOperationID || authority.adoption.PlanID != plan.AdoptionPlanID || authority.adoption.CompletionID != plan.AdoptionCompletionID ||
 		authority.adoption.JobID != plan.JobID || authority.projection.PathMappingID != plan.PathMappingID || authority.projection.PathSemantics != plan.ClientPathSemantics ||
 		authority.projection.SavePathRef != plan.ExpectedSavePathRef || authority.projection.ContentPathRef != plan.ExpectedContentPathRef || authority.fileLimits != plan.FileLimits {
 		return fmt.Errorf("%w: current authority differs from the activation intent", ErrPolicy)
+	}
+	if plan.Action == ActionStartAfterStop {
+		if authority.terminalStop == nil || authority.terminalStopProof == nil || plan.TerminalStop == nil ||
+			authority.terminalStop.planLink() != *plan.TerminalStop || authority.priorPlan.Validate() != nil ||
+			authority.priorPlan.AdoptionOperationID != plan.AdoptionOperationID || authority.priorPlan.AdoptionPlanID != plan.AdoptionPlanID ||
+			authority.priorPlan.AdoptionCompletionID != plan.AdoptionCompletionID {
+			return fmt.Errorf("%w: current terminal-stop authority differs from the activation intent", ErrPolicy)
+		}
+	} else if authority.verifiedAdoption == nil || plan.TerminalStop != nil ||
+		authority.adoption.OperationID != plan.AdoptionOperationID || authority.adoption.PlanID != plan.AdoptionPlanID ||
+		authority.adoption.CompletionID != plan.AdoptionCompletionID {
+		return fmt.Errorf("%w: current adoption authority differs from the activation intent", ErrPolicy)
 	}
 	return nil
 }

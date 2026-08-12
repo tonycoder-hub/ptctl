@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 )
 
 // CompletionProofOptions selects one explicit terminal client-stop operation.
@@ -210,4 +212,32 @@ func (verified *VerifiedCompletion) Plan() Plan {
 		return Plan{}
 	}
 	return verified.authority.intent.Plan
+}
+
+// ActivationStartPrerequisite exposes only an attributed terminal stop as a
+// process-local prerequisite for a later start-only activation. A stop merely
+// observed after an unknown request cannot authorize causal restart lineage.
+func (verified *VerifiedCompletion) ActivationStartPrerequisite() (clientactivate.TerminalStopPrerequisite, bool) {
+	if !verified.Verified() || verified.authority.completion.Basis != "accepted_response_then_exact_stopped" {
+		return clientactivate.TerminalStopPrerequisite{}, false
+	}
+	value := verified.Observation()
+	started, startErr := time.Parse(time.RFC3339Nano, value.ObservedAtStart)
+	ended, endErr := time.Parse(time.RFC3339Nano, value.ObservedAtEnd)
+	if startErr != nil || endErr != nil || started.IsZero() || ended.Before(started) {
+		return clientactivate.TerminalStopPrerequisite{}, false
+	}
+	return clientactivate.TerminalStopPrerequisite{
+		Driver: value.Driver, OperationID: value.OperationID, PlanID: value.PlanID, IntentID: value.IntentID,
+		CompletionID: value.CompletionID, CompletionBasis: value.CompletionBasis, UseID: value.UseID,
+		JobID: value.JobID, FileLayoutID: value.FileLayoutID, CompleteFileSnapshotID: value.CompleteFileSnapshotID,
+		StoppedJobState: value.StoppedJobState, ClientConfigID: value.ClientConfigID, PathMappingID: value.PathMappingID,
+		ActivationOperationID: value.ActivationOperationID, ActivationPlanID: value.ActivationPlanID,
+		ActivationTerminalID: value.ActivationTerminalID, MetafileVariantID: value.MetafileVariantID,
+		InfoHashV1: value.InfoHashV1, InfoHashV2: value.InfoHashV2,
+		MaterializeOperationID: value.MaterializeOperationID, MaterializePlanID: value.MaterializePlanID,
+		TargetRootIdentity: value.TargetRootIdentity, FinalObjectIdentity: value.FinalObjectIdentity,
+		MultiFile: value.MultiFile, ManifestFiles: value.ManifestFiles, ContentBytes: value.ContentBytes,
+		ObservedAtStart: started, ObservedAtEnd: ended, RetainedTombstone: value.RetainedTombstone,
+	}, true
 }

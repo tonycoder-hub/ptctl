@@ -243,13 +243,14 @@ func Prune(ctx context.Context, options PruneOptions) (RetentionReport, error) {
 }
 
 func terminalActivationState(state journalState) bool {
-	if state.RecheckCompletion == nil || state.RecheckCompletionID == "" {
-		return false
-	}
 	if state.Intent.Plan.Action == ActionRecheckOnly {
-		return state.ActivationCompletion == nil && len(state.StartAttempts) == 0
+		return state.RecheckCompletion != nil && state.RecheckCompletionID != "" && state.ActivationCompletion == nil && len(state.StartAttempts) == 0
 	}
-	return state.Intent.Plan.Action == ActionRecheckThenStart && state.ActivationCompletion != nil && state.ActivationCompletionID != ""
+	if state.Intent.Plan.Action == ActionRecheckThenStart {
+		return state.RecheckCompletion != nil && state.RecheckCompletionID != "" && state.ActivationCompletion != nil && state.ActivationCompletionID != ""
+	}
+	return state.Intent.Plan.Action == ActionStartAfterStop && state.RecheckCompletion == nil && state.RecheckCompletionID == "" &&
+		state.ActivationCompletion != nil && state.ActivationCompletionID != ""
 }
 
 func prepareRetentionIntent(handle *journalHandle, state journalState, targetIdentity fsbind.Identity) (RetentionIntent, error) {
@@ -283,9 +284,11 @@ func prepareRetentionIntent(handle *journalHandle, state journalState, targetIde
 			return RetentionIntent{}, err
 		}
 	}
-	raw, id, err = encodeRecheckCompletion(*state.RecheckCompletion)
-	if err = add(recheckCompletionFileName, raw, id, err); err != nil {
-		return RetentionIntent{}, err
+	if state.RecheckCompletion != nil {
+		raw, id, err = encodeRecheckCompletion(*state.RecheckCompletion)
+		if err = add(recheckCompletionFileName, raw, id, err); err != nil {
+			return RetentionIntent{}, err
+		}
 	}
 	for index, attempt := range state.StartAttempts {
 		raw, id, err = encodeAttempt(attempt)
@@ -302,7 +305,7 @@ func prepareRetentionIntent(handle *journalHandle, state journalState, targetIde
 	marker := RetentionIntent{Schema: RetentionIntentSchemaV1, OperationID: state.Intent.OperationID,
 		OperationRootIdentity: handle.subtree.Identity().String(), TargetRootIdentity: targetIdentity.String(), PlanID: state.Intent.PlanID,
 		IntentID: state.IntentID, Intent: state.Intent, RecheckCompletionID: state.RecheckCompletionID,
-		RecheckCompletion: *state.RecheckCompletion, ActivationCompletionID: state.ActivationCompletionID,
+		RecheckCompletion: state.RecheckCompletion, ActivationCompletionID: state.ActivationCompletionID,
 		ActivationCompletion: state.ActivationCompletion, Markers: links, Basis: RetentionBasisTerminal}
 	if err := marker.Validate(); err != nil {
 		return RetentionIntent{}, err

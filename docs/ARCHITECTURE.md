@@ -1242,6 +1242,37 @@ acknowledgements are both present. A reviewed start is a later resume after
 the recheck-completion marker is durable, so one invocation sends at most one
 effectful client POST.
 
+A second activation entry point closes the later stop/start lifecycle without
+inventing a new downloader mutation port. `PrepareStartAfterStopAuthority`
+accepts the current `VerifiedFinal`, the exact prior
+`clientactivate.VerifiedCompletion`, and the process-local
+`clientstop.VerifiedCompletion` bridge. The stop must have the attributed
+`accepted_response_then_exact_stopped` basis and must bind the same use ID,
+typed job, file layout and complete snapshot, driver/configuration, mapping,
+prior activation marker, materialized final, and ordered observation interval.
+The public stop DTO is not accepted. Before any credential read, the CLI
+selects one explicit stop operation/plan and reloads both private journals (or
+complete tombstones). A fresh complete stopped observation then produces a
+distinct `start_after_stop` plan:
+
+```text
+prior terminal activation + attributed terminal stop + current exact final
+  -> fresh exact complete-stopped job observation
+  -> reviewed start_after_stop plan with immutable stop lineage
+  -> durable start-attempt marker
+  -> one non-retried start POST
+  -> exact started job + current final reverify
+  -> durable activation-completion marker linked to the stop completion
+```
+
+This action contains no recheck markers and forbids `--start-after-recheck`.
+Unknown start results retain the ordinary observe-first/explicit-repeat rule.
+Its terminal completion implements the same current-use, reconciliation,
+retention, stop, removal, and retirement authority ports as other started
+activations. The prior stopped-adoption IDs remain historical lineage; the new
+stop link is an additional independent prerequisite, not a replacement claim
+that the original adoption is current.
+
 For ordinary multi-file jobs, every observation includes one bounded
 driver-specific file ledger. Manifest indices must be contiguous and exact;
 effective paths, sizes,

@@ -23,7 +23,8 @@ domains and reconciles them around verifiable torrent metadata.
 > acknowledgement and irreversibly removes only that exact tombstone plus its
 > last recovery marker. Client adoption never mutates an
 > existing job; activation is limited to the reviewed exact job's recheck and
-> optional start transitions. `client adopt prune` separately seals one
+> optional start transitions, or one start-only transition authorized by an
+> attributed terminal stop of the same completed exact job. `client adopt prune` separately seals one
 > terminal completion tombstone before deleting only that operation's private
 > request journal; `client adopt forget` has a third acknowledgement and
 > irreversibly removes only that adoption tombstone plus its last recovery
@@ -1233,6 +1234,42 @@ plus a same-invocation exact final proof, not proof of a raw private variant or
 an atomic client/filesystem snapshot. Each invocation sends at most one
 effectful client POST. JSON kind is `client.activation`.
 
+After an attributed terminal stop, the same command family can review a new
+start-only activation without rechecking again. Supply the complete
+`--stop-operation` / `--stop-plan-id` pair instead of the adoption pair, omit
+`--start-after-recheck`, and acknowledge the start directly on `run`:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client activate plan \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --stop-operation sha256:STOP_OPERATION_DIGEST \
+  --stop-plan-id STOP_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin --output json
+
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client activate run \
+  [the same selectors] \
+  --expect-activation-plan-id RESTART_ACTIVATION_PLAN_ID \
+  --acknowledge-client-start --output json
+```
+
+This path accepts only a live terminal stop journal or complete retained stop
+tombstone whose completion basis is
+`accepted_response_then_exact_stopped`. It locally reloads and binds that
+stop's exact prior activation before password stdin, then freshly observes the
+same complete stopped job, layout, mapping, and final. A causality-unproven
+stop cannot authorize it. One invocation sends at most one start request; an
+unknown result is observed first on resume and requires both the base and
+repeat start acknowledgements before another request. Its terminal
+`start_after_stop` activation is ordinary downstream authority: reconciliation,
+another stop, retention pruning, current-use checks, and later source
+retirement consume it without treating serialized JSON as proof.
+
 Stop one reviewed complete started exact job without removing it or changing
 its location:
 
@@ -1829,6 +1866,11 @@ storage-content, or lexical-path evidence. Missing or unbound requested history
 is incomplete, a positive selector/configuration/final disagreement is a
 conflict, and journal corruption retains integrity exit `3` after the report.
 Serialized output cannot recreate either process-local authority.
+For `start_after_stop`, the activation completion also exposes its exact stop
+operation, plan, completion, and attributed-basis lineage as historical
+evidence; the same existing downloader bracket must still establish current
+use, and that historical stop never upgrades the independent client, path, or
+content axes.
 
 To require attribution to one canonical terminal client stop while also
 proving that the exact current job is still stopped, add the explicit stop

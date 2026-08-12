@@ -35,6 +35,7 @@ type CompletionObservation struct {
 	ObservedAtStart        string `json:"observed_at_start"`
 	ObservedAtEnd          string `json:"observed_at_end"`
 	RecheckCompletionID    string `json:"recheck_completion_id"`
+	StopCompletionID       string `json:"stop_completion_id,omitempty"`
 	ActivationCompletionID string `json:"activation_completion_id,omitempty"`
 	FinalObjectIdentity    string `json:"final_object_identity"`
 	FinalVerificationBasis string `json:"final_verification_basis"`
@@ -53,7 +54,7 @@ type verifiedCompletionAuthority struct {
 	plan         Plan
 	planID       string
 	operationID  OperationID
-	recheck      RecheckCompletion
+	recheck      *RecheckCompletion
 	recheckID    MarkerID
 	activation   *ActivationCompletion
 	activationID MarkerID
@@ -77,23 +78,29 @@ func VerifyCompletion(ctx context.Context, options CompletionProofOptions) (*Ver
 	}
 	defer handle.Close()
 	state := handle.state
-	if state.Pending != "" || state.RecheckCompletion == nil || state.RecheckCompletionID == "" ||
-		state.Retained && !state.RetentionComplete ||
+	if state.Pending != "" || state.Retained && !state.RetentionComplete ||
 		state.Intent.PlanID != options.ExpectedPlanID || state.Intent.OperationID != options.OperationID ||
-		state.RecheckCompletion.PlanID != options.ExpectedPlanID || state.RecheckCompletion.OperationID != options.OperationID {
+		state.ActivationCompletion != nil && (state.ActivationCompletion.PlanID != options.ExpectedPlanID || state.ActivationCompletion.OperationID != options.OperationID) {
 		return nil, CompletionObservation{}, fmt.Errorf("%w: terminal activation completion is unavailable or disagrees with the selector", ErrPolicy)
 	}
-	if state.Intent.Plan.Action == ActionRecheckThenStart {
+	if state.Intent.Plan.Action == ActionRecheckThenStart || state.Intent.Plan.Action == ActionStartAfterStop {
 		if state.ActivationCompletion == nil || state.ActivationCompletionID == "" ||
 			state.ActivationCompletion.PlanID != options.ExpectedPlanID || state.ActivationCompletion.OperationID != options.OperationID {
 			return nil, CompletionObservation{}, fmt.Errorf("%w: the reviewed start transition has no terminal completion", ErrPolicy)
 		}
-	} else if state.Intent.Plan.Action != ActionRecheckOnly {
+		if state.Intent.Plan.Action == ActionRecheckThenStart && (state.RecheckCompletion == nil || state.RecheckCompletionID == "") {
+			return nil, CompletionObservation{}, fmt.Errorf("%w: the reviewed start transition lacks its recheck prerequisite", ErrPolicy)
+		}
+	} else if state.Intent.Plan.Action != ActionRecheckOnly || state.RecheckCompletion == nil || state.RecheckCompletionID == "" {
 		return nil, CompletionObservation{}, fmt.Errorf("%w: activation completion action is unsupported", ErrIntegrity)
 	}
 	authority := &verifiedCompletionAuthority{
 		plan: state.Intent.Plan, planID: state.Intent.PlanID, operationID: state.Intent.OperationID,
-		recheck: *state.RecheckCompletion, recheckID: state.RecheckCompletionID, retained: state.Retained,
+		recheckID: state.RecheckCompletionID, retained: state.Retained,
+	}
+	if state.RecheckCompletion != nil {
+		value := *state.RecheckCompletion
+		authority.recheck = &value
 	}
 	if state.ActivationCompletion != nil {
 		value := *state.ActivationCompletion
@@ -111,14 +118,22 @@ func (verified *VerifiedCompletion) Verified() bool {
 		return false
 	}
 	authority := verified.authority
-	if authority.plan.Validate() != nil || authority.recheck.Validate() != nil || authority.recheckID == "" {
+	if authority.plan.Validate() != nil {
 		return false
 	}
 	if authority.plan.Action == ActionRecheckOnly {
-		return authority.activation == nil && authority.activationID == ""
+		return authority.recheck != nil && authority.recheck.Validate() == nil && authority.recheckID != "" && authority.activation == nil && authority.activationID == ""
 	}
-	return authority.plan.Action == ActionRecheckThenStart && authority.activation != nil &&
-		authority.activation.Validate() == nil && authority.activationID != ""
+	if authority.activation == nil || authority.activation.Validate() != nil || authority.activationID == "" {
+		return false
+	}
+	if authority.plan.Action == ActionRecheckThenStart {
+		return authority.recheck != nil && authority.recheck.Validate() == nil && authority.recheckID != "" &&
+			authority.activation.RecheckCompletionID == authority.recheckID && authority.activation.StopCompletionID == ""
+	}
+	return authority.plan.Action == ActionStartAfterStop && authority.recheck == nil && authority.recheckID == "" &&
+		authority.plan.TerminalStop != nil && authority.activation.RecheckCompletionID == "" &&
+		authority.activation.StopCompletionID.String() == authority.plan.TerminalStop.CompletionID
 }
 
 func (verified *VerifiedCompletion) Observation() CompletionObservation {
@@ -126,10 +141,14 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 		return CompletionObservation{}
 	}
 	authority := verified.authority
-	plan, completion := authority.plan, authority.recheck
+	plan := authority.plan
 	markerID, phase := authority.recheckID.String(), "recheck_complete_stopped"
-	jobState, finalBasis := completion.JobState, completion.FinalVerificationBasis
-	observedAtStart, observedAtEnd := completion.ObservedAtStart, completion.ObservedAtEnd
+	jobState, finalBasis := "", ""
+	var observedAtStart, observedAtEnd time.Time
+	if authority.recheck != nil {
+		jobState, finalBasis = authority.recheck.JobState, authority.recheck.FinalVerificationBasis
+		observedAtStart, observedAtEnd = authority.recheck.ObservedAtStart, authority.recheck.ObservedAtEnd
+	}
 	activationID := ""
 	if authority.activation != nil {
 		markerID, phase = authority.activationID.String(), "started_client_claim_observed"
@@ -145,6 +164,12 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 		JobState: jobState, ObservedAtStart: observedAtStart.UTC().Format(time.RFC3339Nano),
 		ObservedAtEnd:       observedAtEnd.UTC().Format(time.RFC3339Nano),
 		RecheckCompletionID: authority.recheckID.String(), ActivationCompletionID: activationID,
+		StopCompletionID: func() string {
+			if plan.TerminalStop != nil {
+				return plan.TerminalStop.CompletionID
+			}
+			return ""
+		}(),
 		FinalObjectIdentity: plan.FinalObjectIdentity, FinalVerificationBasis: finalBasis,
 		Assurance: completionAssurance(authority),
 	}

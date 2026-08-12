@@ -2,6 +2,7 @@ package clientactivate
 
 import (
 	"sort"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
@@ -66,6 +67,17 @@ type AdoptionReport struct {
 	Observation clientadopt.CompletionObservation `json:"observation"`
 }
 
+type TerminalStopReport struct {
+	Status        string `json:"status"`
+	OperationID   string `json:"operation_id,omitempty"`
+	PlanID        string `json:"plan_id,omitempty"`
+	CompletionID  string `json:"completion_id,omitempty"`
+	Basis         string `json:"basis,omitempty"`
+	AuthorityForm string `json:"authority_form"`
+	Retained      bool   `json:"retained_tombstone"`
+	ObservedEnd   string `json:"observed_at_end,omitempty"`
+}
+
 type ClientReport struct {
 	Status                 string                                `json:"status"`
 	RequestsMade           int                                   `json:"requests_made"`
@@ -111,29 +123,31 @@ type WriteReport struct {
 }
 
 type Report struct {
-	Outcome         Outcome         `json:"outcome"`
-	Effect          []string        `json:"effect"`
-	WritesPerformed int             `json:"writes_performed"`
-	WritesUncertain bool            `json:"writes_uncertain"`
-	Operation       OperationReport `json:"operation"`
-	Plan            PlanReport      `json:"plan"`
-	Final           FinalReport     `json:"materialized_final"`
-	Adoption        AdoptionReport  `json:"stopped_adoption"`
-	Client          ClientReport    `json:"client"`
-	Journal         JournalReport   `json:"journal"`
-	Writes          WriteReport     `json:"writes"`
-	Blockers        []Finding       `json:"blockers"`
-	Issues          []Finding       `json:"issues"`
-	Warnings        []string        `json:"warnings"`
+	Outcome         Outcome            `json:"outcome"`
+	Effect          []string           `json:"effect"`
+	WritesPerformed int                `json:"writes_performed"`
+	WritesUncertain bool               `json:"writes_uncertain"`
+	Operation       OperationReport    `json:"operation"`
+	Plan            PlanReport         `json:"plan"`
+	Final           FinalReport        `json:"materialized_final"`
+	Adoption        AdoptionReport     `json:"stopped_adoption"`
+	TerminalStop    TerminalStopReport `json:"terminal_stop"`
+	Client          ClientReport       `json:"client"`
+	Journal         JournalReport      `json:"journal"`
+	Writes          WriteReport        `json:"writes"`
+	Blockers        []Finding          `json:"blockers"`
+	Issues          []Finding          `json:"issues"`
+	Warnings        []string           `json:"warnings"`
 }
 
 func newReport(authority *PreparedAuthority, expectedID string) Report {
 	report := Report{
-		Outcome: OutcomeIncomplete, Effect: []string{"read_exact_materialized_final", "read_stopped_adoption", "read_downloader_control_descriptor", "read_downloader_ledger"},
+		Outcome: OutcomeIncomplete, Effect: []string{"read_exact_materialized_final", "read_downloader_control_descriptor", "read_downloader_ledger"},
 		Operation: OperationReport{Status: "not_created", PhaseBefore: "planned", PhaseAfter: "planned"},
 		Client: ClientReport{Status: "not_observed", IdentityStatus: "not_observed", Assurance: "not_observed",
 			ActionReceipt: downloader.ExistingJobMutationReceipt{RequestsAttempted: -1, AutomaticRetries: -1, RedirectsFollowed: -1}},
 		Journal: JournalReport{Status: "not_created", RetentionState: "not_requested"}, Blockers: []Finding{}, Issues: []Finding{},
+		TerminalStop: TerminalStopReport{Status: "not_requested", AuthorityForm: "not_requested"},
 		Warnings: []string{
 			"downloader state, progress, and per-file completion remain untrusted bracketed client claims",
 			"a successful recheck observation does not reveal the raw private metafile variant",
@@ -144,7 +158,20 @@ func newReport(authority *PreparedAuthority, expectedID string) Report {
 	}
 	if authority != nil {
 		report.Final = FinalReport{Status: "process_authority_available_current_not_reverified", Observation: authority.final}
-		report.Adoption = AdoptionReport{Status: "canonical_completion_authority_available", Observation: authority.adoption}
+		if authority.terminalStop != nil {
+			report.addEffect("read_terminal_client_stop")
+			report.addEffect("read_prior_terminal_client_activation")
+			report.Adoption = AdoptionReport{Status: "historical_prior_adoption_lineage_from_activation", Observation: authority.adoption}
+			stop := authority.terminalStop
+			report.TerminalStop = TerminalStopReport{Status: "canonical_attributed_completion_authority_available",
+				OperationID: stop.OperationID, PlanID: stop.PlanID, CompletionID: stop.CompletionID,
+				Basis: stop.CompletionBasis, AuthorityForm: map[bool]string{true: "retained_tombstone", false: "live_journal"}[stop.RetainedTombstone],
+				Retained:    stop.RetainedTombstone,
+				ObservedEnd: stop.ObservedAtEnd.UTC().Format(time.RFC3339Nano)}
+		} else {
+			report.addEffect("read_stopped_adoption")
+			report.Adoption = AdoptionReport{Status: "canonical_completion_authority_available", Observation: authority.adoption}
+		}
 	}
 	report.Plan.ExpectedID = expectedID
 	return report

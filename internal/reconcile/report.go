@@ -536,6 +536,10 @@ type ClientActivationCompletion struct {
 	AdoptionOperationID    string    `json:"adoption_operation_id"`
 	AdoptionPlanID         string    `json:"adoption_plan_id"`
 	AdoptionCompletionID   string    `json:"adoption_completion_id"`
+	StopOperationID        string    `json:"stop_operation_id,omitempty"`
+	StopPlanID             string    `json:"stop_plan_id,omitempty"`
+	StopCompletionID       string    `json:"stop_completion_id,omitempty"`
+	StopCompletionBasis    string    `json:"stop_completion_basis,omitempty"`
 	ClientConfigID         string    `json:"client_config_id"`
 	PathMappingID          string    `json:"path_mapping_id"`
 	JobID                  string    `json:"job_id"`
@@ -1980,8 +1984,20 @@ func validClientActivationCompletion(value ClientActivationCompletion) bool {
 		if value.TerminalPhase != "recheck_complete_stopped" || !activationStoppedCompleteState(value.TerminalJobState) {
 			return false
 		}
+		if value.StopOperationID != "" || value.StopPlanID != "" || value.StopCompletionID != "" || value.StopCompletionBasis != "" {
+			return false
+		}
 	} else if value.Action == "recheck_then_start" {
 		if value.TerminalPhase != "started_client_claim_observed" || !activationStartedState(value.TerminalJobState) {
+			return false
+		}
+		if value.StopOperationID != "" || value.StopPlanID != "" || value.StopCompletionID != "" || value.StopCompletionBasis != "" {
+			return false
+		}
+	} else if value.Action == "start_after_stop" {
+		if value.TerminalPhase != "started_client_claim_observed" || !activationStartedState(value.TerminalJobState) ||
+			!validStopOperationForPlan(value.StopOperationID, value.StopPlanID) || !validSHA256ID(value.StopCompletionID) ||
+			value.StopCompletionBasis != "accepted_response_then_exact_stopped" {
 			return false
 		}
 	} else {

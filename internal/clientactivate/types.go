@@ -27,6 +27,7 @@ const (
 	DriverTransmission            = downloader.DriverTransmission
 	ActionRecheckOnly             = "recheck_only"
 	ActionRecheckThenStart        = "recheck_then_start"
+	ActionStartAfterStop          = "start_after_stop"
 	AttemptActionRecheck          = "recheck"
 	AttemptActionStart            = "start"
 	maximumActionAttempts         = 3
@@ -61,6 +62,7 @@ type Plan struct {
 	AdoptionOperationID    string                                  `json:"adoption_operation_id"`
 	AdoptionPlanID         string                                  `json:"adoption_plan_id"`
 	AdoptionCompletionID   string                                  `json:"adoption_completion_id"`
+	TerminalStop           *TerminalStopLink                       `json:"terminal_stop,omitempty"`
 	TargetRootIdentity     string                                  `json:"target_root_identity"`
 	FinalObjectIdentity    string                                  `json:"final_object_identity"`
 	MultiFile              bool                                    `json:"multi_file"`
@@ -71,7 +73,7 @@ type Plan struct {
 
 func (plan Plan) Validate() error {
 	if plan.Schema != PlanSchemaV1 ||
-		(plan.Action != ActionRecheckOnly && plan.Action != ActionRecheckThenStart) ||
+		(plan.Action != ActionRecheckOnly && plan.Action != ActionRecheckThenStart && plan.Action != ActionStartAfterStop) ||
 		!canonicalSHA256ID(plan.ClientConfigID) || !canonicalSHA256ID(plan.PathMappingID) ||
 		!canonicalSHA256ID(plan.ExpectedSavePathRef) || !canonicalSHA256ID(plan.ExpectedContentPathRef) ||
 		!canonicalSHA256ID(plan.ExpectedFileLayoutID) || !canonicalSHA256ID(plan.JobID) ||
@@ -82,6 +84,13 @@ func (plan Plan) Validate() error {
 		plan.ManifestFiles <= 0 || plan.ContentBytes < 0 || plan.FileLimits.Validate() != nil ||
 		plan.Control.Validate() != nil {
 		return fmt.Errorf("%w: client activation plan is invalid", ErrPolicy)
+	}
+	if plan.Action == ActionStartAfterStop {
+		if plan.TerminalStop == nil || plan.TerminalStop.Validate() != nil {
+			return fmt.Errorf("%w: client activation terminal-stop lineage is invalid", ErrPolicy)
+		}
+	} else if plan.TerminalStop != nil {
+		return fmt.Errorf("%w: recheck activation unexpectedly contains terminal-stop lineage", ErrPolicy)
 	}
 	identity := downloader.TypedIdentity{InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2}
 	policy, supported := downloader.DescribeExistingJobControlDriver(plan.Driver)
@@ -267,7 +276,8 @@ type ActivationCompletion struct {
 	Schema                 string      `json:"schema"`
 	OperationID            OperationID `json:"operation_id"`
 	PlanID                 string      `json:"plan_id"`
-	RecheckCompletionID    MarkerID    `json:"recheck_completion_id"`
+	RecheckCompletionID    MarkerID    `json:"recheck_completion_id,omitempty"`
+	StopCompletionID       MarkerID    `json:"stop_completion_id,omitempty"`
 	StartAttemptID         MarkerID    `json:"start_attempt_id"`
 	ObservedAtStart        time.Time   `json:"observed_at_start"`
 	ObservedAtEnd          time.Time   `json:"observed_at_end"`
@@ -291,8 +301,20 @@ func (completion ActivationCompletion) Validate() error {
 	if _, err := ParseOperationID(completion.OperationID.String()); err != nil {
 		return fmt.Errorf("%w: activation completion operation is invalid", ErrIntegrity)
 	}
-	if _, err := parseMarkerID(completion.RecheckCompletionID.String()); err != nil {
-		return fmt.Errorf("%w: activation completion recheck authority is invalid", ErrIntegrity)
+	hasRecheckPrerequisite := completion.RecheckCompletionID != ""
+	hasStopPrerequisite := completion.StopCompletionID != ""
+	if hasRecheckPrerequisite == hasStopPrerequisite {
+		return fmt.Errorf("%w: activation completion prerequisite is ambiguous", ErrIntegrity)
+	}
+	if completion.RecheckCompletionID != "" {
+		if _, err := parseMarkerID(completion.RecheckCompletionID.String()); err != nil {
+			return fmt.Errorf("%w: activation completion recheck authority is invalid", ErrIntegrity)
+		}
+	}
+	if completion.StopCompletionID != "" {
+		if _, err := parseMarkerID(completion.StopCompletionID.String()); err != nil {
+			return fmt.Errorf("%w: activation completion stop authority is invalid", ErrIntegrity)
+		}
 	}
 	if _, err := parseMarkerID(completion.StartAttemptID.String()); err != nil {
 		return fmt.Errorf("%w: activation completion request is invalid", ErrIntegrity)

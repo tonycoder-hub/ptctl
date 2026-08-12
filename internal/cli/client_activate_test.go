@@ -13,7 +13,10 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
+	"github.com/tonycoder-hub/ptctl/internal/clientstop"
+	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/reconcile"
 )
 
 type clientActivateJSONEnvelope struct {
@@ -214,6 +217,152 @@ func TestClientActivatePlanRunResumeStatusAndPrivacy(t *testing.T) {
 	}
 }
 
+func TestClientActivateStartsOnlyFromAttributedTerminalStop(t *testing.T) {
+	fixture := prepareClientStopCLIFixture(t)
+	stopBase := clientStopBaseArgs(fixture)
+	stopPlan := runClientStopJSON(t, append([]string{"client", "stop", "plan"}, stopBase...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	stopRun := append([]string{"client", "stop", "run"}, stopBase...)
+	stopRun = append(stopRun, "--expect-stop-plan-id", stopPlan.Data.Plan.ID, "--acknowledge-client-stop")
+	stopped := runClientStopJSON(t, stopRun, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if stopped.Data.Outcome != clientstop.OutcomeStopped || fixture.server.stop.Load() != 1 {
+		t.Fatalf("terminal stop=%#v", stopped.Data)
+	}
+
+	base := clientActivateAfterStopBaseArgs(fixture, stopped.Data.Operation.ID, stopPlan.Data.Plan.ID)
+	requestsBefore := fixture.server.totalRequests()
+	reader := &trackingReader{}
+	var out, errOut bytes.Buffer
+	badSelectorArgs := append([]string{"client", "activate", "plan"}, base...)
+	badSelectorArgs = append(badSelectorArgs, "--adoption-operation=")
+	if code := Run(badSelectorArgs, reader, &out, &errOut); code != 2 || reader.read || fixture.server.totalRequests() != requestsBefore {
+		t.Fatalf("explicit empty lineage selector code=%d read=%t requests=%d stdout=%q stderr=%q", code, reader.read,
+			fixture.server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+
+	requestsBefore = fixture.server.totalRequests()
+	planned := runClientActivateJSON(t, append([]string{"client", "activate", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if planned.Data.Outcome != clientactivate.OutcomeReady || planned.Data.Plan.Action != clientactivate.ActionStartAfterStop ||
+		planned.Data.TerminalStop.Status != "canonical_attributed_completion_authority_available" ||
+		planned.Data.TerminalStop.OperationID != stopped.Data.Operation.ID || planned.Data.TerminalStop.PlanID != stopPlan.Data.Plan.ID ||
+		planned.Data.TerminalStop.Basis != "accepted_response_then_exact_stopped" || planned.Data.TerminalStop.AuthorityForm != "live_journal" ||
+		planned.Data.Adoption.Status != "historical_prior_adoption_lineage_from_activation" ||
+		planned.Data.WritesPerformed != 0 || fixture.server.totalRequests()-requestsBefore != 3 {
+		t.Fatalf("start-after-stop plan=%#v", planned.Data)
+	}
+	assertClientActivatePrivate(t, mustJSON(t, planned), fixture.materialized, fixture.server.server.URL)
+
+	requestsBefore = fixture.server.totalRequests()
+	runArgs := append([]string{"client", "activate", "run"}, base...)
+	runArgs = append(runArgs, "--expect-activation-plan-id", planned.Data.Plan.ID, "--acknowledge-client-start")
+	started := runClientActivateJSON(t, runArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if started.Data.Outcome != clientactivate.OutcomeStartedClientClaim || started.Data.Operation.Resumable ||
+		started.Data.Plan.Action != clientactivate.ActionStartAfterStop || started.Data.Journal.RecheckAttempts != 0 ||
+		started.Data.Journal.RecheckCompletionDurable || started.Data.Journal.StartAttempts != 1 ||
+		!started.Data.Journal.ActivationCompletionDurable || started.Data.Client.ActionAttempted != "start" ||
+		started.Data.Client.ActionReceipt.Effect != downloader.ControlEffectStart || fixture.server.recheck.Load() != 1 ||
+		fixture.server.start.Load() != 1 || fixture.server.totalRequests()-requestsBefore != 5 {
+		t.Fatalf("start-after-stop run=%#v", started.Data)
+	}
+	assertClientActivatePrivate(t, mustJSON(t, started), fixture.materialized, fixture.server.server.URL)
+
+	requestsBefore = fixture.server.totalRequests()
+	status := runClientActivateJSON(t, []string{"client", "activate", "status", "--target", fixture.materialized.materialize.targetRoot,
+		"--output", "json", started.Data.Operation.ID}, &trackingReader{}, 0)
+	if status.Data.Outcome != clientactivate.OutcomeHistoricalStarted || status.Data.Plan.Action != clientactivate.ActionStartAfterStop ||
+		status.Data.TerminalStop.Status != "historical_terminal_stop_reference_current_not_observed" ||
+		status.Data.TerminalStop.AuthorityForm != "historical_plan_reference" || fixture.server.totalRequests() != requestsBefore {
+		t.Fatalf("start-after-stop status=%#v", status.Data)
+	}
+
+	reconcileArgs := clientReconcileBaseArgsForActivation(fixture, started.Data.Operation.ID, planned.Data.Plan.ID)
+	requestsBefore = fixture.server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(reconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("start-after-stop reconcile code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := fixture.server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("start-after-stop reconcile requests=%d", delta)
+	}
+	var reconciled struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	activation := reconciled.Data.Ledgers.Activation
+	if reconciled.Data.Outcome != "consistent" || !reconciled.Data.Scope.ClientActivationRequested ||
+		activation.Status != "historical_completion_current_job_bound" || !activation.ProcessLocalCompletionProof ||
+		!activation.ProcessLocalCurrentUseProof || activation.Completion == nil || activation.CurrentUse == nil ||
+		activation.Completion.Action != clientactivate.ActionStartAfterStop ||
+		activation.Completion.StopOperationID != stopped.Data.Operation.ID || activation.Completion.StopPlanID != stopPlan.Data.Plan.ID ||
+		activation.Completion.StopCompletionID == "" || activation.Completion.StopCompletionBasis != "accepted_response_then_exact_stopped" ||
+		activation.CurrentUse.JobState != "uploading" {
+		t.Fatalf("start-after-stop reconcile=%s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(),
+		fixture.materialized.materialize.targetRoot, fixture.materialized.materialize.sourceRoot,
+		fixture.materialized.materialize.sourcePath, fixture.materialized.materialize.finalPath,
+		fixture.materialized.materialize.torrentPath, fixture.materialized.storeRoot,
+		clientAdoptRoot, clientAdoptRoot+"/"+materializeFinalName,
+		fixture.server.server.URL, clientAdoptUser, clientAdoptPassword, clientAdoptJobKey,
+		"magnet:?xt=urn:btih:"+fixture.materialized.meta.InfoHashV1)
+
+	secondStopBase := clientStopBaseArgsForActivation(fixture, started.Data.Operation.ID, planned.Data.Plan.ID)
+	requestsBefore = fixture.server.totalRequests()
+	secondStopPlan := runClientStopJSON(t, append([]string{"client", "stop", "plan"}, secondStopBase...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if fixture.server.totalRequests()-requestsBefore != 3 || secondStopPlan.Data.Plan.Data.ActivationOperationID != started.Data.Operation.ID ||
+		secondStopPlan.Data.Plan.Data.ActivationPlanID != planned.Data.Plan.ID {
+		t.Fatalf("second stop plan=%#v requests=%d", secondStopPlan.Data, fixture.server.totalRequests()-requestsBefore)
+	}
+	requestsBefore = fixture.server.totalRequests()
+	secondStopArgs := append([]string{"client", "stop", "run"}, secondStopBase...)
+	secondStopArgs = append(secondStopArgs, "--expect-stop-plan-id", secondStopPlan.Data.Plan.ID, "--acknowledge-client-stop")
+	secondStopped := runClientStopJSON(t, secondStopArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if secondStopped.Data.Outcome != clientstop.OutcomeStopped || fixture.server.stop.Load() != 2 ||
+		fixture.server.start.Load() != 1 || fixture.server.totalRequests()-requestsBefore != 6 {
+		t.Fatalf("second stop=%#v requests=%d", secondStopped.Data, fixture.server.totalRequests()-requestsBefore)
+	}
+
+	pruneArgs := []string{"client", "activate", "prune", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-activation-plan-id", planned.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", started.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(pruneArgs, &trackingReader{}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("start-after-stop prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retained := decodeClientActivateRetentionReport(t, out.Bytes())
+	if retained.Data.Outcome != clientactivate.RetentionOutcomePruned || !retained.Data.Markers.ExactTombstone ||
+		retained.Data.Plan.Action != clientactivate.ActionStartAfterStop {
+		t.Fatalf("start-after-stop retention=%#v", retained.Data)
+	}
+	stopPruneArgs := []string{"client", "stop", "prune", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-stop-plan-id", secondStopPlan.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json",
+		secondStopped.Data.Operation.ID}
+	var stopPruneOut, stopPruneErr bytes.Buffer
+	if code := Run(stopPruneArgs, &trackingReader{}, &stopPruneOut, &stopPruneErr); code != 0 || stopPruneErr.Len() != 0 {
+		t.Fatalf("second stop prune code=%d stdout=%q stderr=%q", code, stopPruneOut.String(), stopPruneErr.String())
+	}
+	var retainedStop clientStopRetentionJSONEnvelope
+	if err := json.Unmarshal(stopPruneOut.Bytes(), &retainedStop); err != nil {
+		t.Fatal(err)
+	}
+	if retainedStop.Data.Outcome != clientstop.RetentionOutcomePruned || !retainedStop.Data.Markers.ExactTombstone {
+		t.Fatalf("second stop retention=%#v", retainedStop.Data)
+	}
+
+	requestsBefore = fixture.server.totalRequests()
+	nextBase := clientActivateAfterStopBaseArgs(fixture, secondStopped.Data.Operation.ID, secondStopPlan.Data.Plan.ID)
+	next := runClientActivateJSON(t, append([]string{"client", "activate", "plan"}, nextBase...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if next.Data.Outcome != clientactivate.OutcomeReady || next.Data.Plan.Action != clientactivate.ActionStartAfterStop ||
+		next.Data.TerminalStop.OperationID != secondStopped.Data.Operation.ID || next.Data.TerminalStop.PlanID != secondStopPlan.Data.Plan.ID ||
+		next.Data.TerminalStop.AuthorityForm != "retained_tombstone" || !next.Data.TerminalStop.Retained ||
+		fixture.server.totalRequests()-requestsBefore != 3 ||
+		fixture.server.start.Load() != 1 || fixture.server.stop.Load() != 2 {
+		t.Fatalf("next start-after-stop plan=%#v requests=%d", next.Data, fixture.server.totalRequests()-requestsBefore)
+	}
+}
+
 func TestTransmissionClientActivatePlanRunAndResume(t *testing.T) {
 	fixture := newClientAdoptCLIFixture(t)
 	server := newTransmissionAdoptServer(t, fixture.meta, fixture.raw)
@@ -337,6 +486,8 @@ func TestClientActivateBadUsageDoesNotReadPassword(t *testing.T) {
 		{"client", "activate", "run", "--password-stdin", "--expect-activation-plan-id", planID, "--acknowledge-client-recheck"},
 		{"client", "activate", "prune", "--target", `C:\not-opened`, "--expect-activation-plan-id", planID, operationID},
 		{"client", "activate", "forget", "--target", `C:\not-opened`, "--expect-activation-plan-id", planID, operationID},
+		{"client", "activate", "plan", "--stop-operation", "sha256:" + strings.Repeat("a", 64), "--stop-plan-id", planID,
+			"--start-after-recheck", "--password-stdin"},
 	} {
 		reader := &trackingReader{}
 		var out, errOut bytes.Buffer
@@ -345,6 +496,51 @@ func TestClientActivateBadUsageDoesNotReadPassword(t *testing.T) {
 			t.Fatalf("args=%v code=%d read=%t stdout=%q stderr=%q", args, code, reader.read, out.String(), errOut.String())
 		}
 	}
+}
+
+func clientActivateAfterStopBaseArgs(fixture clientRemoveCLIFixture, stopOperation, stopPlanID string) []string {
+	return []string{
+		"--metafile-store", fixture.materialized.storeRoot, "--metafile-variant", fixture.materialized.variantID,
+		"--target", fixture.materialized.materialize.targetRoot, "--materialize-operation", fixture.materialized.operation,
+		"--materialize-plan-id", fixture.materialized.materialize.planID, "--stop-operation", stopOperation,
+		"--stop-plan-id", stopPlanID, "--host-root", fixture.materialized.materialize.targetRoot,
+		"--client-root", clientAdoptRoot, "--client-style", "posix", "--driver", "qbittorrent",
+		"--url", fixture.server.server.URL, "--username", clientAdoptUser, "--password-stdin", "--timeout", "1m", "--output", "json",
+	}
+}
+
+func clientStopBaseArgsForActivation(fixture clientRemoveCLIFixture, activationOperation, activationPlanID string) []string {
+	args := append([]string(nil), clientStopBaseArgs(fixture)...)
+	for index := 0; index+1 < len(args); index++ {
+		switch args[index] {
+		case "--activation-operation":
+			args[index+1] = activationOperation
+		case "--activation-plan-id":
+			args[index+1] = activationPlanID
+		}
+	}
+	return args
+}
+
+func clientReconcileBaseArgsForActivation(fixture clientRemoveCLIFixture, activationOperation, activationPlanID string) []string {
+	return []string{
+		"reconcile", "report", "--metafile-store", fixture.materialized.storeRoot,
+		"--metafile-variant", fixture.materialized.variantID, "--target", fixture.materialized.materialize.targetRoot,
+		"--materialize-operation", fixture.materialized.operation, "--materialize-plan-id", fixture.materialized.materialize.planID,
+		"--activation-operation", activationOperation, "--activation-plan-id", activationPlanID,
+		"--host-root", fixture.materialized.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--driver", "qbittorrent", "--url", fixture.server.server.URL, "--username", clientAdoptUser,
+		"--password-stdin", "--timeout", "1m", "--output", "json",
+	}
+}
+
+func runClientActivateJSON(t *testing.T, args []string, stdin ioReader, expectedCode int) clientActivateJSONEnvelope {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	if code := Run(args, stdin, &out, &errOut); code != expectedCode {
+		t.Fatalf("command=%v code=%d want=%d stdout=%q stderr=%q", args[:3], code, expectedCode, out.String(), errOut.String())
+	}
+	return decodeClientActivateReport(t, out.Bytes())
 }
 
 func newClientActivateServer(t *testing.T, meta *metafile.MetaInfo, raw []byte) *clientActivateServer {
