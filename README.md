@@ -1830,6 +1830,53 @@ is incomplete, a positive selector/configuration/final disagreement is a
 conflict, and journal corruption retains integrity exit `3` after the report.
 Serialized output cannot recreate either process-local authority.
 
+To require attribution to one canonical terminal client stop while also
+proving that the exact current job is still stopped, add the explicit stop
+operation and its reviewed plan ID to the same activation reconciliation:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
+  --metafile-store .ptctl-private \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\Seed" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --stop-operation sha256:STOP_OPERATION_DIGEST \
+  --stop-plan-id STOP_PLAN_ID \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --host-root 'D:\Seed' \
+  --client-root /downloads \
+  --client-style posix \
+  --output json
+```
+
+Both stop flags are required together and require the complete activation,
+materialized-final, downloader, mapping, and default automatic file-layout
+selectors. Before password stdin or network access, the command reads exactly
+that live terminal stop journal or complete retained tombstone and checks its
+metafile, final, activation, driver/configuration, mapping, job, and layout
+lineage. Only `accepted_response_then_exact_stopped` is attributed to the
+reviewed stop. A stopped state observed after an unknown response remains
+`historical_stop_causality_unproven`, prevents consistency, and does not consume
+the downloader credential.
+
+Attributed history is then combined with the existing two-read downloader
+bracket and current exact final proof. Both current snapshots must still expose
+the same complete exact job in a supported stopped state; no additional request
+or mutation is sent. The additive `client_stop` ledger keeps historical
+completion proof and the process-local current-stopped bridge separate, while
+the five relation axes remain unchanged. A complete retained tombstone can
+recreate the historical capability through a fresh bound read; public JSON
+cannot. Even a consistent result is sequential and non-atomic and cannot prove
+remote job incarnation, continued stopped state after return, or a raw private
+metafile match. Stop and keep-data removal selectors are mutually exclusive.
+Corrupt stop evidence produces a full report followed by integrity exit `3`.
+
 To reconcile a completed keep-data client removal instead of current client
 use, add the activation lineage plus one explicit removal operation and its
 reviewed plan ID:
@@ -2026,6 +2073,7 @@ Run `ptctl help`, `ptctl metafile store`, `ptctl site metafile fetch --help`,
 `ptctl site metafile binding --help`,
 `ptctl storage profile`, `ptctl storage index`, `ptctl seed discover --help`,
 `ptctl seed materialize --help`, `ptctl client activate --help`,
+`ptctl client stop --help`,
 `ptctl client remove --help`,
 `ptctl seed retire --help`, or
 `ptctl reconcile report --help` for the

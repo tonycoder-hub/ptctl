@@ -370,6 +370,32 @@ history that remains unbound prevents consistency; two independently valid but
 disagreeing selectors/configurations are reported as conflict rather than
 journal corruption.
 
+Explicit stop reconciliation is a separate historical gate, not a stop
+mutation and not a history lookup. The full stop operation ID and reviewed plan
+ID select exactly one bound terminal journal or complete retention tombstone.
+Before secret stdin or client I/O, the record must agree with the requested
+metafile, materialized final, terminal activation marker, driver/configuration,
+mapping, typed job, file-layout, and complete snapshot. Its opaque
+`VerifiedCompletion` authority is process-local; public normalized fields and a
+JSON round trip cannot reconstruct it. Only a completion linked to one accepted
+stop response and a later exact stopped observation is attributed. An unknown
+response followed by stopped observation is retained as causality-unproven
+history, blocks consistency, and causes no credential read or client request.
+
+The current-state half reuses activation's already established exact current-use
+capability from the ordinary Before/After downloader bracket. It requires the
+same job/layout/final IDs, progress 1, a supported stopped state, and observation
+time after the historical completion. It sends no request and never calls the
+stop route. A consistent result therefore combines three independent sequential
+observations: historical attributed stop, current typed stopped-job claims, and
+current exact local content. It does not prove an immutable remote job
+incarnation, continued stopped state after return, atomicity, private-metafile
+variant equality, or which inode a remote process has open. The five relation
+axes remain unchanged; stop evidence appears only in its additive ledger. Stop
+and keep-data removal selectors are mutually exclusive. Corrupt stop evidence
+is reported before integrity exit `3`; a complete retained tombstone can restore
+historical authority only through another fresh bound read.
+
 Explicit keep-data removal reconciliation is also a credential-free historical
 gate. The full operation ID and reviewed plan ID must select one bound terminal
 removal journal or retained tombstone whose metafile, materialize, activation,

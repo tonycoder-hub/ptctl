@@ -57,6 +57,7 @@ type BuildInput struct {
 	MaterializedFinal MaterializedFinalSelection
 	ClientAdoption    ClientAdoptionSelection
 	ClientActivation  ClientActivationSelection
+	ClientStop        ClientStopSelection
 	ClientRemoval     ClientRemovalSelection
 	SourceRetirement  SourceRetirementSelection
 	ParentCleanup     ParentCleanupSelection
@@ -111,6 +112,26 @@ type ClientActivationSelection struct {
 	CurrentUse     ClientActivationCurrentUseProof
 	CurrentAbsence ClientActivationCurrentAbsenceProof
 	StopReason     string
+}
+
+// ClientStopCompletionProof is implemented only by a process-local read of
+// one canonical terminal client-stop journal or retained tombstone.
+type ClientStopCompletionProof interface {
+	ReconciliationStopCompletion() (ClientStopCompletion, bool)
+}
+
+// ClientStopCurrentJobProof binds the process-local stop completion to the
+// already established activation current-use proof without another request.
+type ClientStopCurrentJobProof interface {
+	ReconcileCurrentStopped(ClientActivationCurrentUse) (ClientStopCurrentJob, bool)
+}
+
+type ClientStopSelection struct {
+	Requested           bool
+	CompletionAttempted bool
+	Completion          ClientStopCompletionProof
+	CurrentStopped      ClientStopCurrentJobProof
+	StopReason          string
 }
 
 // ClientRemovalCompletionProof is implemented only by a process-local read of
@@ -231,6 +252,7 @@ type ReportScope struct {
 	MaterializedFinalRequested bool   `json:"materialized_final_requested"`
 	ClientAdoptionRequested    bool   `json:"client_adoption_requested"`
 	ClientActivationRequested  bool   `json:"client_activation_requested"`
+	ClientStopRequested        bool   `json:"client_stop_requested"`
 	ClientRemovalRequested     bool   `json:"client_removal_requested"`
 	SourceRetirementRequested  bool   `json:"source_retirement_requested"`
 	ParentCleanupRequested     bool   `json:"parent_cleanup_requested"`
@@ -244,6 +266,7 @@ type ReportLedgers struct {
 	Downloader    DownloaderLedger       `json:"downloader"`
 	Adoption      ClientAdoptionLedger   `json:"client_adoption"`
 	Activation    ClientActivationLedger `json:"client_activation"`
+	Stop          ClientStopLedger       `json:"client_stop"`
 	Removal       ClientRemovalLedger    `json:"client_removal"`
 	Retirement    SourceRetirementLedger `json:"source_retirement"`
 	ParentCleanup ParentCleanupLedger    `json:"parent_cleanup"`
@@ -311,6 +334,63 @@ type ClientRemovalLedger struct {
 	ProcessLocalCompletionProof bool                     `json:"process_local_completion_proof"`
 	Historical                  bool                     `json:"historical"`
 	StopReason                  string                   `json:"stop_reason,omitempty"`
+}
+
+type ClientStopLedger struct {
+	Status                      string                `json:"status"`
+	Completion                  *ClientStopCompletion `json:"completion,omitempty"`
+	CurrentStopped              *ClientStopCurrentJob `json:"current_stopped,omitempty"`
+	ProcessLocalCompletionProof bool                  `json:"process_local_completion_proof"`
+	ProcessLocalCurrentProof    bool                  `json:"process_local_current_stopped_proof"`
+	Historical                  bool                  `json:"historical"`
+	StopReason                  string                `json:"stop_reason,omitempty"`
+}
+
+type ClientStopCompletion struct {
+	Driver                 string    `json:"driver"`
+	OperationID            string    `json:"operation_id"`
+	PlanID                 string    `json:"plan_id"`
+	IntentID               string    `json:"intent_id"`
+	CompletionID           string    `json:"completion_id"`
+	CompletionBasis        string    `json:"completion_basis"`
+	UseID                  string    `json:"use_id"`
+	JobID                  string    `json:"job_id"`
+	FileLayoutID           string    `json:"file_layout_id"`
+	CompleteSnapshotID     string    `json:"complete_file_snapshot_id"`
+	StoppedJobState        string    `json:"stopped_job_state"`
+	ClientConfigID         string    `json:"client_config_id"`
+	PathMappingID          string    `json:"path_mapping_id"`
+	ActivationOperationID  string    `json:"activation_operation_id"`
+	ActivationPlanID       string    `json:"activation_plan_id"`
+	ActivationTerminalID   string    `json:"activation_terminal_id"`
+	MetafileVariantID      string    `json:"metafile_variant_id"`
+	InfoHashV1             string    `json:"info_hash_v1,omitempty"`
+	InfoHashV2             string    `json:"info_hash_v2,omitempty"`
+	MaterializeOperationID string    `json:"materialize_operation_id"`
+	MaterializePlanID      string    `json:"materialize_plan_id"`
+	TargetRootIdentity     string    `json:"target_root_identity"`
+	FinalObjectIdentity    string    `json:"final_object_identity"`
+	MultiFile              bool      `json:"multi_file"`
+	ManifestFiles          int       `json:"manifest_files"`
+	ContentBytes           int64     `json:"content_bytes"`
+	ObservedAtStart        time.Time `json:"observed_at_start"`
+	ObservedAtEnd          time.Time `json:"observed_at_end"`
+	RetainedTombstone      bool      `json:"retained_tombstone"`
+	Assurance              string    `json:"assurance"`
+}
+
+type ClientStopCurrentJob struct {
+	Driver              string    `json:"driver"`
+	UseID               string    `json:"use_id"`
+	JobID               string    `json:"job_id"`
+	FileLayoutID        string    `json:"file_layout_id"`
+	CompleteSnapshotID  string    `json:"complete_file_snapshot_id"`
+	JobState            string    `json:"job_state"`
+	JobProgress         float64   `json:"job_progress"`
+	ObservedAtStart     time.Time `json:"observed_at_start"`
+	ObservedAtEnd       time.Time `json:"observed_at_end"`
+	FinalObjectIdentity string    `json:"final_object_identity"`
+	Assurance           string    `json:"assurance"`
 }
 
 type ClientRemovalCompletion struct {
@@ -661,6 +741,7 @@ func Build(input BuildInput) (Report, error) {
 			MaterializedFinalRequested: input.MaterializedFinal.Requested,
 			ClientAdoptionRequested:    input.ClientAdoption.Requested,
 			ClientActivationRequested:  input.ClientActivation.Requested,
+			ClientStopRequested:        input.ClientStop.Requested,
 			ClientRemovalRequested:     input.ClientRemoval.Requested,
 			SourceRetirementRequested:  input.SourceRetirement.Requested,
 			ParentCleanupRequested:     input.ParentCleanup.Requested,
@@ -681,6 +762,9 @@ func Build(input BuildInput) (Report, error) {
 	}
 	if input.ClientActivation.Requested {
 		report.Effect = append(report.Effect, "read_client_activation_operation_state")
+	}
+	if input.ClientStop.CompletionAttempted {
+		report.Effect = append(report.Effect, "read_client_stop_operation_state")
 	}
 	if input.ClientRemoval.CompletionAttempted {
 		report.Effect = append(report.Effect, "read_client_removal_operation_state")
@@ -937,6 +1021,12 @@ func Build(input BuildInput) (Report, error) {
 	report.Ledgers.Activation = activationLedger
 	report.Blockers = append(report.Blockers, activationBlockers...)
 	report.Warnings = append(report.Warnings, activationWarnings...)
+	stopLedger, stopBlockers, stopWarnings := assessClientStop(
+		meta, input.ClientStop, materializedLedger, activationLedger,
+	)
+	report.Ledgers.Stop = stopLedger
+	report.Blockers = append(report.Blockers, stopBlockers...)
+	report.Warnings = append(report.Warnings, stopWarnings...)
 	removalLedger, removalBlockers, removalWarnings := assessClientRemoval(
 		meta, input.ClientRemoval, materializedLedger, activationLedger,
 	)
@@ -972,10 +1062,11 @@ func Build(input BuildInput) (Report, error) {
 	if client.active {
 		report.Warnings = append(report.Warnings, "the matching downloader job is active; lexical path agreement does not prove which bytes the client is currently reading")
 	}
-	report.Outcome = overallOutcome(siteRelation.Status, input.SiteBinding.Requested, siteDetailLedger.Status, input.SiteDetail.Requested,
+	report.Outcome = overallOutcomeWithStop(siteRelation.Status, input.SiteBinding.Requested, siteDetailLedger.Status, input.SiteDetail.Requested,
 		storageRelation.Status, storageLedger.ProcessLocalProof, client.relation.Status, pathRelation.Status, input.Client.Requested,
 		adoptionLedger.Status, input.ClientAdoption.Requested || adoptionLedger.Status != "not_requested",
 		activationLedger.Status, input.ClientActivation.Requested || activationLedger.Status != "not_requested",
+		stopLedger.Status, input.ClientStop.Requested || stopLedger.Status != "not_requested",
 		removalLedger.Status, input.ClientRemoval.Requested || removalLedger.Status != "not_requested",
 		retirementLedger.Status, input.SourceRetirement.Requested || retirementLedger.Status != "not_requested",
 		parentCleanupLedger.Status, input.ParentCleanup.Requested || parentCleanupLedger.Status != "not_requested")
@@ -1005,6 +1096,9 @@ func Build(input BuildInput) (Report, error) {
 		}
 		if activationLedger.Status == "historical_completion_current_job_absent" {
 			report.Assurance += "_plus_canonical_historical_client_activation_bound_to_current_typed_job_absence"
+		}
+		if stopLedger.Status == "historical_stop_current_job_stopped" {
+			report.Assurance += "_plus_canonical_historical_client_stop_bound_to_current_exact_stopped_job"
 		}
 		if retirementLedger.Status == "historical_completion_current_absence_observed" {
 			report.Assurance += "_plus_canonical_historical_source_retirement_with_current_bound_name_absence"
@@ -1328,6 +1422,100 @@ func assessClientActivation(meta *metafile.MetaInfo, selection ClientActivationS
 	ledger.ProcessLocalCurrentUseProof = true
 	ledger.StopReason = ""
 	warnings = append(warnings, "activation attribution, current downloader claims, and local content proof are separate sequential non-atomic observations")
+	return ledger, blockers, warnings
+}
+
+func assessClientStop(meta *metafile.MetaInfo, selection ClientStopSelection, materialized MaterializedFinalLedger,
+	activation ClientActivationLedger) (ClientStopLedger, []ReportFinding, []string) {
+	ledger := ClientStopLedger{Status: "not_requested"}
+	blockers := []ReportFinding{}
+	warnings := []string{}
+	hasActivity := selection.CompletionAttempted || selection.Completion != nil || selection.CurrentStopped != nil || selection.StopReason != ""
+	if !selection.Requested {
+		if !hasActivity {
+			return ledger, blockers, warnings
+		}
+		ledger.Status = "incomplete"
+		ledger.StopReason = "stop_unexpected_activity"
+		blockers = append(blockers, ReportFinding{Code: "stop.input_inconsistent", Message: "client-stop proof values were supplied without an explicit stop request"})
+		return ledger, blockers, warnings
+	}
+
+	ledger.Status = "incomplete"
+	ledger.StopReason = safeClientStopCompletionReason(selection.StopReason)
+	if ledger.StopReason == "stop_completion_integrity_failed" {
+		ledger.Status = "integrity_failed"
+	}
+	if ledger.StopReason == "stop_completion_selector_mismatch" {
+		ledger.Status = "selected_stop_mismatch"
+	}
+	if !selection.CompletionAttempted || selection.Completion == nil {
+		blockers = append(blockers, ReportFinding{Code: "stop.completion_proof_unavailable", Message: "the explicit terminal client-stop journal could not be verified in this invocation"})
+		return ledger, blockers, warnings
+	}
+	completion, ok := selection.Completion.ReconciliationStopCompletion()
+	if !ok || !validClientStopCompletion(completion) {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "stop_completion_load_failed"
+		}
+		blockers = append(blockers, ReportFinding{Code: "stop.completion_proof_unavailable", Message: "the terminal client-stop capability is unavailable or invalid"})
+		return ledger, blockers, warnings
+	}
+	ledger.Completion = &completion
+	ledger.ProcessLocalCompletionProof = true
+	ledger.Historical = true
+	warnings = append(warnings, "the terminal client-stop record is historical evidence and does not by itself prove that the downloader job is still stopped")
+
+	if meta == nil || materialized.Observation == nil || !materialized.ProcessLocalFinalProof ||
+		activation.Completion == nil || !activation.ProcessLocalCompletionProof ||
+		completion.MetafileVariantID != meta.MetafileVariantID ||
+		completion.InfoHashV1 != meta.InfoHashV1 || completion.InfoHashV2 != meta.InfoHashV2 ||
+		completion.MaterializeOperationID != materialized.Observation.OperationID ||
+		completion.MaterializePlanID != materialized.Observation.MaterializePlanID ||
+		completion.TargetRootIdentity != materialized.Observation.TargetRootIdentity ||
+		completion.FinalObjectIdentity != materialized.Observation.FinalObjectIdentity ||
+		completion.MultiFile != materialized.Observation.MultiFile || completion.ManifestFiles != materialized.Observation.ManifestFiles ||
+		completion.ContentBytes != materialized.Observation.ContentBytes ||
+		completion.Driver != activation.Completion.Driver || completion.ClientConfigID != activation.Completion.ClientConfigID ||
+		completion.PathMappingID != activation.Completion.PathMappingID ||
+		completion.ActivationOperationID != activation.Completion.OperationID ||
+		completion.ActivationPlanID != activation.Completion.PlanID ||
+		completion.ActivationTerminalID != activation.Completion.TerminalMarkerID ||
+		completion.JobID != activation.Completion.JobID || completion.ObservedAtStart.Before(activation.Completion.ObservedAtEnd) {
+		ledger.Status = "selected_stop_mismatch"
+		ledger.StopReason = "stop_completion_selector_mismatch"
+		blockers = append(blockers, ReportFinding{Code: "stop.selection_mismatch", Message: "the selected terminal client stop does not belong to the requested metafile, materialized final, or activation lineage"})
+		return ledger, blockers, warnings
+	}
+	if completion.CompletionBasis != "accepted_response_then_exact_stopped" {
+		ledger.Status = "historical_stop_causality_unproven"
+		ledger.StopReason = "stop_causality_unproven"
+		blockers = append(blockers, ReportFinding{Code: "stop.causality_unproven", Message: "the historical stopped observation followed an unknown request result and cannot be attributed to the reviewed client stop"})
+		return ledger, blockers, warnings
+	}
+	if selection.StopReason != "" || selection.CurrentStopped == nil ||
+		activation.Status != "historical_completion_current_job_bound" || activation.CurrentUse == nil ||
+		!activation.ProcessLocalCurrentUseProof {
+		if ledger.StopReason == "" {
+			ledger.StopReason = "stop_current_stopped_unavailable"
+		}
+		blockers = append(blockers, ReportFinding{Code: "stop.current_stopped_unavailable", Message: "the terminal client stop could not be combined with current exact stopped-job and final proof"})
+		return ledger, blockers, warnings
+	}
+	current, ok := selection.CurrentStopped.ReconcileCurrentStopped(*activation.CurrentUse)
+	if !ok || !validClientStopCurrentJob(current) || current.Driver != completion.Driver ||
+		current.UseID != completion.UseID || current.JobID != completion.JobID ||
+		current.FileLayoutID != completion.FileLayoutID || current.CompleteSnapshotID != completion.CompleteSnapshotID ||
+		current.FinalObjectIdentity != completion.FinalObjectIdentity || current.ObservedAtStart.Before(completion.ObservedAtEnd) {
+		ledger.StopReason = "stop_current_stopped_bridge_failed"
+		blockers = append(blockers, ReportFinding{Code: "stop.current_stopped_unavailable", Message: "the process-local stop bridge does not match this reconciliation's stopped downloader bracket"})
+		return ledger, blockers, warnings
+	}
+	ledger.Status = "historical_stop_current_job_stopped"
+	ledger.CurrentStopped = &current
+	ledger.ProcessLocalCurrentProof = true
+	ledger.StopReason = ""
+	warnings = append(warnings, "stop attribution, current downloader stopped claims, and current exact local content are separate sequential non-atomic observations; downloader job incarnation is unobservable")
 	return ledger, blockers, warnings
 }
 
@@ -1863,6 +2051,64 @@ func validClientRemovalCompletion(value ClientRemovalCompletion) bool {
 		return value.Assurance == "same_invocation_bound_canonical_client_removal_retention_tombstone_read_without_current_queue_inference"
 	}
 	return value.Assurance == "same_invocation_bound_canonical_terminal_client_removal_journal_read_without_current_queue_inference"
+}
+
+func validClientStopCompletion(value ClientStopCompletion) bool {
+	identity := downloader.TypedIdentity{InfoHashV1: value.InfoHashV1, InfoHashV2: value.InfoHashV2}
+	policy, supported := downloader.DescribeExistingJobStopDriver(value.Driver)
+	if !supported || !policy.SupportsIdentity(identity) || !validStopOperationForPlan(value.OperationID, value.PlanID) ||
+		!validSHA256ID(value.IntentID) || !validSHA256ID(value.CompletionID) || !validSHA256ID(value.UseID) ||
+		!validSHA256ID(value.JobID) || !validSHA256ID(value.FileLayoutID) || !validSHA256ID(value.CompleteSnapshotID) ||
+		!validSHA256ID(value.ClientConfigID) || !validSHA256ID(value.PathMappingID) ||
+		!validSHA256ID(value.ActivationOperationID) || !validPlanID(value.ActivationPlanID) ||
+		!validSHA256ID(value.ActivationTerminalID) || !validSHA256ID(value.MetafileVariantID) ||
+		!validSHA256ID(value.MaterializeOperationID) || !validPlanID(value.MaterializePlanID) ||
+		value.TargetRootIdentity == "" || len(value.TargetRootIdentity) > 512 ||
+		value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 || value.ManifestFiles <= 0 ||
+		value.ManifestFiles > 49_999 || value.ContentBytes < 0 || value.ContentBytes > 1<<50 ||
+		value.ObservedAtStart.IsZero() || value.ObservedAtEnd.Before(value.ObservedAtStart) ||
+		!activationStoppedCompleteState(value.StoppedJobState) {
+		return false
+	}
+	if value.CompletionBasis != "accepted_response_then_exact_stopped" && value.CompletionBasis != "exact_stopped_after_unknown_attempt_causality_unproven" {
+		return false
+	}
+	if value.RetainedTombstone {
+		return value.Assurance == "same_invocation_bound_canonical_client_stop_retention_tombstone_read_without_current_client_inference"
+	}
+	return value.Assurance == "same_invocation_bound_canonical_terminal_client_stop_journal_read_without_current_client_inference"
+}
+
+func validStopOperationForPlan(operationID, planID string) bool {
+	if !validSHA256ID(operationID) || !validPlanID(planID) {
+		return false
+	}
+	digest := sha256.Sum256([]byte("ptctl-client-stop-operation-v1\x00" + planID))
+	return operationID == "sha256:"+hex.EncodeToString(digest[:])
+}
+
+func validClientStopCurrentJob(value ClientStopCurrentJob) bool {
+	if _, ok := downloader.DescribeLedgerDriver(value.Driver); !ok || !validSHA256ID(value.UseID) || !validSHA256ID(value.JobID) ||
+		!validSHA256ID(value.FileLayoutID) || !validSHA256ID(value.CompleteSnapshotID) ||
+		value.FinalObjectIdentity == "" || len(value.FinalObjectIdentity) > 512 || value.JobProgress != 1 ||
+		value.ObservedAtStart.IsZero() || value.ObservedAtEnd.Before(value.ObservedAtStart) ||
+		!activationStoppedCompleteState(value.JobState) {
+		return false
+	}
+	return value.Assurance == "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_client_stop_and_exact_final_with_current_stopped_typed_job_claim_non_atomic_without_job_incarnation_proof"
+}
+
+func safeClientStopCompletionReason(value string) string {
+	switch value {
+	case "stop_context_cancelled", "stop_completion_integrity_failed", "stop_completion_load_failed",
+		"stop_completion_selector_mismatch", "stop_causality_unproven", "stop_current_stopped_unavailable",
+		"stop_current_stopped_bridge_failed", "stop_prerequisite_unavailable", "stop_unexpected_activity":
+		return value
+	case "":
+		return ""
+	default:
+		return "stop_completion_load_failed"
+	}
 }
 
 func activationStoppedCompleteState(value string) bool {
@@ -2508,9 +2754,23 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 	removalStatus string, removalRequested bool,
 	retirementStatus string, retirementRequested bool,
 	parentCleanupStatus string, parentCleanupRequested bool) string {
+	return overallOutcomeWithStop(siteStatus, siteBindingRequested, siteDetailStatus, siteDetailRequested, storageStatus, processProof,
+		clientStatus, pathStatus, clientRequested, adoptionStatus, adoptionRequested, activationStatus, activationRequested,
+		"not_requested", false, removalStatus, removalRequested, retirementStatus, retirementRequested,
+		parentCleanupStatus, parentCleanupRequested)
+}
+
+func overallOutcomeWithStop(siteStatus string, siteBindingRequested bool, siteDetailStatus string, siteDetailRequested bool, storageStatus string, processProof bool,
+	clientStatus, pathStatus string, clientRequested bool, adoptionStatus string, adoptionRequested bool,
+	activationStatus string, activationRequested bool,
+	stopStatus string, stopRequested bool,
+	removalStatus string, removalRequested bool,
+	retirementStatus string, retirementRequested bool,
+	parentCleanupStatus string, parentCleanupRequested bool) string {
 	if (siteBindingRequested && siteStatus == "integrity_failed") || storageStatus == "integrity_failed" ||
 		(adoptionRequested && adoptionStatus == "integrity_failed") ||
 		(activationRequested && activationStatus == "integrity_failed") ||
+		(stopRequested && stopStatus == "integrity_failed") ||
 		(removalRequested && removalStatus == "integrity_failed") ||
 		(retirementRequested && retirementStatus == "integrity_failed") ||
 		(parentCleanupRequested && parentCleanupStatus == "integrity_failed") {
@@ -2519,6 +2779,7 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 	if (siteBindingRequested && siteStatus == "selected_binding_mismatch") ||
 		(adoptionRequested && adoptionStatus == "selected_adoption_mismatch") ||
 		(activationRequested && activationStatus == "selected_activation_mismatch") ||
+		(stopRequested && stopStatus == "selected_stop_mismatch") ||
 		(removalRequested && removalStatus == "selected_removal_mismatch") ||
 		(retirementRequested && (retirementStatus == "selected_retirement_mismatch" || retirementStatus == "source_name_reappeared")) ||
 		(parentCleanupRequested && (parentCleanupStatus == "selected_parent_cleanup_mismatch" || parentCleanupStatus == "removed_parent_reappeared")) ||
@@ -2532,6 +2793,7 @@ func overallOutcome(siteStatus string, siteBindingRequested bool, siteDetailStat
 		(siteDetailRequested && siteDetailStatus != "observed_current_ref") ||
 		(adoptionRequested && adoptionStatus != "historical_completion_current_job_bound") ||
 		(activationRequested && activationStatus != "historical_completion_current_job_bound" && activationStatus != "historical_completion_current_job_absent") ||
+		(stopRequested && stopStatus != "historical_stop_current_job_stopped") ||
 		(removalRequested && removalStatus != "historical_keep_data_removal_current_job_absent") ||
 		(retirementRequested && retirementStatus != "historical_completion_current_absence_observed") ||
 		(parentCleanupRequested && parentCleanupStatus != "historical_completion_current_absence_observed") ||

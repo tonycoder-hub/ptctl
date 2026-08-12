@@ -122,6 +122,32 @@ consistency; a positive selector/configuration/final mismatch is a conflict.
 Public JSON retains only normalized IDs, times, states, and assurances and
 cannot recreate either process-local capability.
 
+An optional explicit `--stop-operation/--stop-plan-id` pair extends activation
+reconciliation without adding a mutation or downloader request. It is available
+only with materialized-final mode, the terminal activation selectors, the full
+downloader group, one host/client mapping, automatic file-layout observation,
+and the fixed default file limits. Before credential input, a bound read of one
+canonical terminal stop journal or complete retention tombstone creates opaque
+`clientstop.VerifiedCompletion` authority. The selected stop must reproduce the
+metafile, final, activation terminal marker, driver/configuration, mapping,
+typed job, file-layout, and complete-snapshot lineage. Only an accepted response
+followed by exact stopped observation is attributed; a stopped observation
+after an unknown response remains historical causality-unproven evidence and
+prevents overall consistency without reading the password.
+
+After the exact final and activation current-use bridge have been established
+inside the ordinary Before/After client bracket, `ReconcileCurrentStopped`
+checks that the same exact job, layout snapshot, final identity, progress 1,
+and supported stopped state are still present. This consumes the existing
+bracket and sends no extra request. The additive `client_stop` ledger records
+historical completion proof and current-stopped bridge proof separately; the
+five relations and their evidence levels do not change. A retained tombstone
+can recreate only the historical capability through a fresh bound read, and
+serialized output recreates neither capability. Even success is sequential
+bracketed non-atomic and cannot prove downloader job incarnation or continued
+stopped state after return. Stop and keep-data removal selectors are mutually
+exclusive because they require current exact presence versus absence.
+
 An optional explicit `--removal-operation/--removal-plan-id` pair switches the
 activation bridge from current use to current absence. It requires the same
 materialized-final, terminal activation, downloader, and mapping selectors and

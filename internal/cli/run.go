@@ -191,7 +191,7 @@ Usage:
   ptctl client remove prune --target PATH --expect-removal-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client remove forget --target PATH --expect-removal-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
-  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [--output table|json]
+  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--stop-operation ID --stop-plan-id ID] [--removal-operation ID --removal-plan-id ID | --retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [--output table|json]
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
@@ -231,6 +231,7 @@ Safety defaults:
   * Client removal targets one reviewed typed-identity job, explicitly keeps local data, journals intent before one non-retried request, and requires exact queue absence plus final filesystem re-verification before completion.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
+  * Explicit stop reconciliation reads one canonical terminal stop journal or complete retention tombstone before credentials, then binds only attributed stop history to the existing current stopped-job bracket without another request. Historical stop evidence never proves current job incarnation.
 `)
 }
 
@@ -371,9 +372,9 @@ func (a *app) reconcileReport(args []string) error {
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--removal-operation ID --removal-plan-id ID | --retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [flags]")
+		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--stop-operation ID --stop-plan-id ID] [--removal-operation ID --removal-plan-id ID | --retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [flags]")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. Optional adoption selectors read one canonical terminal client-adoption journal or retained tombstone—whether created by stopped add or observation-only existing-job adoption—and bind its historical completion to the already requested current exact typed job claim without another client request; downloader job incarnation remains unobservable. Optional activation selectors similarly bind one canonical terminal activation journal to the current bracket and, when adoption is also selected, must share that adoption lineage. Optional removal selectors instead require activation, read one canonical terminal keep-data removal journal or retained tombstone, and bind its attributed completion to typed job absence in the existing two-read client bracket. Optional retirement selectors read one canonical terminal source-retirement journal and twice reobserve its exact retired names absent under explicit source roots. Optional parent-cleanup selectors additionally require that retirement proof, read one canonical terminal cleanup journal, and twice reobserve the exact removed parent names absent; a retained cleanup tombstone is historical only and cannot restore path authority. Adoption and removal are mutually exclusive because their current-job predicates conflict; removal and source-retirement terminal modes are also mutually exclusive in this slice. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
+		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. Optional adoption selectors read one canonical terminal client-adoption journal or retained tombstone—whether created by stopped add or observation-only existing-job adoption—and bind its historical completion to the already requested current exact typed job claim without another client request; downloader job incarnation remains unobservable. Optional activation selectors similarly bind one canonical terminal activation journal to the current bracket and, when adoption is also selected, must share that adoption lineage. Optional stop selectors require that activation lineage, read one canonical attributed terminal stop journal or complete retention tombstone before credentials, and bind it to a current exact stopped job in the same bracket without another request; an unknown stop response remains causality-unproven. Optional removal selectors instead require activation, read one canonical terminal keep-data removal journal or retained tombstone, and bind its attributed completion to typed job absence in the existing two-read client bracket. Optional retirement selectors read one canonical terminal source-retirement journal and twice reobserve its exact retired names absent under explicit source roots. Optional parent-cleanup selectors additionally require that retirement proof, read one canonical terminal cleanup journal, and twice reobserve the exact removed parent names absent; a retained cleanup tombstone is historical only and cannot restore path authority. Adoption and removal are mutually exclusive because their current-job predicates conflict; stop and removal are mutually exclusive because their predicates require current presence versus absence; removal and source-retirement terminal modes are also mutually exclusive in this slice. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. Exact stopped adoption and reviewed existing-job recheck/start support both built-in drivers; Transmission mutation authority is v1-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
@@ -393,6 +394,8 @@ func (a *app) reconcileReport(args []string) error {
 	adoptionPlanID := fs.String("adoption-plan-id", "", "reviewed stopped-adoption plan ID; requires --adoption-operation")
 	activationOperationValue := fs.String("activation-operation", "", "explicit terminal client-activation operation ID; requires materialized-final, client, and mapping selectors")
 	activationPlanID := fs.String("activation-plan-id", "", "reviewed client-activation plan ID; requires --activation-operation")
+	stopOperationValue := fs.String("stop-operation", "", "explicit terminal client-stop operation ID; requires activation and materialized-final selectors")
+	stopPlanID := fs.String("stop-plan-id", "", "reviewed client-stop plan ID; requires --stop-operation")
 	removalOperationValue := fs.String("removal-operation", "", "explicit terminal keep-data client-removal operation ID; requires activation and materialized-final selectors")
 	removalPlanID := fs.String("removal-plan-id", "", "reviewed client-removal plan ID; requires --removal-operation")
 	retirementOperationValue := fs.String("retirement-operation", "", "explicit terminal source-retirement operation ID; requires activation and materialized-final selectors")
@@ -466,6 +469,7 @@ func (a *app) reconcileReport(args []string) error {
 	materializedRequested := explicit["target"] || explicit["materialize-operation"] || explicit["materialize-plan-id"]
 	adoptionRequested := explicit["adoption-operation"] || explicit["adoption-plan-id"]
 	activationRequested := explicit["activation-operation"] || explicit["activation-plan-id"]
+	stopRequested := explicit["stop-operation"] || explicit["stop-plan-id"]
 	removalRequested := explicit["removal-operation"] || explicit["removal-plan-id"]
 	retirementRequested := explicit["retirement-operation"] || explicit["retirement-plan-id"] || explicit["retirement-search-root"] || explicit["retirement-allow-network"]
 	parentCleanupRequested := explicit["parent-cleanup-operation"] || explicit["parent-cleanup-plan-id"] || explicit["parent-cleanup-search-root"] || explicit["parent-cleanup-allow-network"]
@@ -481,11 +485,17 @@ func (a *app) reconcileReport(args []string) error {
 	if activationRequested && (!explicit["activation-operation"] || !explicit["activation-plan-id"] || *activationOperationValue == "" || *activationPlanID == "") {
 		return usageError("client-activation mode requires non-empty --activation-operation and --activation-plan-id")
 	}
+	if stopRequested && (!explicit["stop-operation"] || !explicit["stop-plan-id"] || *stopOperationValue == "" || *stopPlanID == "") {
+		return usageError("client-stop mode requires non-empty --stop-operation and --stop-plan-id")
+	}
 	if removalRequested && (!explicit["removal-operation"] || !explicit["removal-plan-id"] || *removalOperationValue == "" || *removalPlanID == "") {
 		return usageError("client-removal mode requires non-empty --removal-operation and --removal-plan-id")
 	}
 	if removalRequested && retirementRequested {
 		return usageError("client-removal and source-retirement reconciliation modes are mutually exclusive")
+	}
+	if stopRequested && removalRequested {
+		return usageError("client-stop and client-removal reconciliation modes are mutually exclusive")
 	}
 	if adoptionRequested && removalRequested {
 		return usageError("client-adoption and client-removal reconciliation modes are mutually exclusive")
@@ -576,6 +586,20 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("--activation-plan-id requires a canonical reviewed plan ID")
 		}
 		activationOperation = parsedOperation
+	}
+	var stopOperation clientstop.OperationID
+	if stopRequested {
+		parsedOperation, parseErr := clientstop.ParseOperationID(*stopOperationValue)
+		if parseErr != nil {
+			return usageError("--stop-operation requires a canonical operation ID")
+		}
+		if !validMaterializePlanID(*stopPlanID) {
+			return usageError("--stop-plan-id requires a canonical reviewed plan ID")
+		}
+		if clientstop.OperationIDForPlan(*stopPlanID) != parsedOperation {
+			return usageError("--stop-operation does not match --stop-plan-id")
+		}
+		stopOperation = parsedOperation
 	}
 	var removalOperation clientremove.OperationID
 	if removalRequested {
@@ -779,6 +803,14 @@ func (a *app) reconcileReport(args []string) error {
 			return usageError("client-removal reconciliation requires --client-file-layout=auto and the default bounded client file limits")
 		}
 	}
+	if stopRequested {
+		if !activationRequested || !materializedRequested || !clientRequested || !mappingRootsRequested {
+			return usageError("client-stop reconciliation requires the complete activation, materialized-final, client, and host/client mapping selectors")
+		}
+		if *clientFileLayout != "auto" || clientFileLimits != downloader.DefaultJobFileLedgerLimits() {
+			return usageError("client-stop reconciliation requires --client-file-layout=auto and the default bounded client file limits")
+		}
+	}
 	if retirementRequested {
 		if !activationRequested || !materializedRequested || !clientRequested || !mappingRootsRequested {
 			return usageError("source-retirement reconciliation requires the complete activation, materialized-final, client, and host/client mapping selectors")
@@ -913,6 +945,45 @@ func (a *app) reconcileReport(args []string) error {
 			} else {
 				verifiedActivation = verified
 				activationSelection.Completion = verified
+			}
+		}
+	}
+	stopSelection := reconcile.ClientStopSelection{Requested: stopRequested}
+	stopGateFailed := false
+	stopIntegrityFailed := false
+	if stopRequested {
+		if activationGateFailed || verifiedActivation == nil {
+			stopSelection.StopReason = "stop_prerequisite_unavailable"
+			stopGateFailed = true
+		} else {
+			stopSelection.CompletionAttempted = true
+			verified, observation, completionErr := clientstop.VerifyCompletion(ctx, clientstop.CompletionProofOptions{
+				TargetRoot: *materializeTarget, OperationID: stopOperation, ExpectedPlanID: *stopPlanID,
+			})
+			if completionErr != nil {
+				stopSelection.StopReason = reconciliationStopCompletionReason(ctx, completionErr)
+				stopGateFailed = true
+				stopIntegrityFailed = stopSelection.StopReason == "stop_completion_integrity_failed"
+			} else {
+				stopSelection.Completion = verified
+				plan := verified.Plan()
+				activationObservation := verifiedActivation.Observation()
+				mappingID := reconcile.PathMappingFingerprint(reconcile.PathMappingOptions{
+					HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows",
+				})
+				if observation.MetafileVariantID != meta.MetafileVariantID || plan.Driver != *driverName ||
+					plan.ClientConfigID != clientConfigID || plan.PathMappingID != mappingID || plan.FileLimits != clientFileLimits ||
+					plan.MaterializeOperationID != materializeOperation.String() || plan.MaterializePlanID != *materializePlanID ||
+					plan.ActivationOperationID != activationOperation.String() || plan.ActivationPlanID != *activationPlanID ||
+					plan.ActivationTerminalID != activationObservation.TerminalMarkerID {
+					stopSelection.StopReason = "stop_completion_selector_mismatch"
+					stopGateFailed = true
+				} else if observation.CompletionBasis != "accepted_response_then_exact_stopped" {
+					stopSelection.StopReason = "stop_causality_unproven"
+					stopGateFailed = true
+				} else {
+					stopSelection.CurrentStopped = verified
+				}
 			}
 		}
 	}
@@ -1118,7 +1189,7 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	var siteCredential site.Credential
 	var clientCredential downloader.Credential
-	if !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !removalGateFailed && !retirementGateFailed && !parentCleanupGateFailed {
+	if !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed && !parentCleanupGateFailed {
 		switch {
 		case siteDetailRequested && clientRequested:
 			siteCredential, clientCredential, err = readReconciliationCredentialBundle(a.stdin, *username)
@@ -1135,7 +1206,7 @@ func (a *app) reconcileReport(args []string) error {
 	if siteDetailRequested {
 		if siteBindingGateFailed {
 			siteDetailSelection.StopReason = "site_detail_skipped_by_binding_gate"
-		} else if adoptionGateFailed || activationGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed {
+		} else if adoptionGateFailed || activationGateFailed || stopGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed {
 			siteDetailSelection.StopReason = "site_detail_skipped_by_prerequisite_gate"
 		} else {
 			siteDetailSelection = readReconciliationSiteDetail(ctx, siteDetailReader, siteDetailConfig, *siteRef, siteCredential)
@@ -1147,13 +1218,13 @@ func (a *app) reconcileReport(args []string) error {
 		FileLayoutMode: *clientFileLayout,
 		FileLimits:     clientFileLimits,
 	}
-	if clientRequested && (siteBindingGateFailed || adoptionGateFailed || activationGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed) {
+	if clientRequested && (siteBindingGateFailed || adoptionGateFailed || activationGateFailed || stopGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed) {
 		bracket.StopReason = "client_snapshot_incomplete"
 	}
 	var session downloader.LedgerSession
 	var fileJobKey string
 	fileBeforeComplete := false
-	if clientRequested && !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !removalGateFailed && !retirementGateFailed {
+	if clientRequested && !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed {
 		session, err = clientAdapter.OpenReadSession(ctx, clientCredential)
 		if err != nil {
 			session = nil
@@ -1311,6 +1382,7 @@ func (a *app) reconcileReport(args []string) error {
 		MaterializedFinal: materializedSelection,
 		ClientAdoption:    adoptionSelection,
 		ClientActivation:  activationSelection,
+		ClientStop:        stopSelection,
 		ClientRemoval:     removalSelection,
 		SourceRetirement:  retirementSelection,
 		ParentCleanup:     parentCleanupSelection,
@@ -1339,6 +1411,9 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if activationIntegrityFailed {
 		return &integrityErr{message: "the explicit terminal client-activation journal failed integrity verification"}
+	}
+	if stopIntegrityFailed {
+		return &integrityErr{message: "the explicit terminal client-stop journal failed integrity verification"}
 	}
 	if removalIntegrityFailed {
 		return &integrityErr{message: "the explicit terminal keep-data client-removal journal failed integrity verification"}
@@ -1424,6 +1499,19 @@ func reconciliationRemovalStopReason(ctx context.Context, err error) string {
 		return "removal_completion_load_failed"
 	default:
 		return "removal_completion_load_failed"
+	}
+}
+
+func reconciliationStopCompletionReason(ctx context.Context, err error) string {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil:
+		return "stop_context_cancelled"
+	case errors.Is(err, clientstop.ErrIntegrity):
+		return "stop_completion_integrity_failed"
+	case errors.Is(err, clientstop.ErrPolicy), errors.Is(err, clientstop.ErrOperationNotFound):
+		return "stop_completion_load_failed"
+	default:
+		return "stop_completion_load_failed"
 	}
 }
 
@@ -2607,6 +2695,33 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(activation.StopReason))
 	}
 
+	stop := report.Ledgers.Stop
+	stopOperation, stopPlan, stopCompletion, stopBasis, stoppedState := "-", "-", "-", "-", "-"
+	stopStart, stopEnd, currentStoppedStart, currentStoppedEnd := "-", "-", "-", "-"
+	stopRetained := false
+	if stop.Completion != nil {
+		stopOperation = shortID(stop.Completion.OperationID)
+		stopPlan = stop.Completion.PlanID
+		stopCompletion = shortID(stop.Completion.CompletionID)
+		stopBasis = stop.Completion.CompletionBasis
+		stopStart = stop.Completion.ObservedAtStart.Format(time.RFC3339Nano)
+		stopEnd = stop.Completion.ObservedAtEnd.Format(time.RFC3339Nano)
+		stopRetained = stop.Completion.RetainedTombstone
+	}
+	if stop.CurrentStopped != nil {
+		stoppedState = stop.CurrentStopped.JobState
+		currentStoppedStart = stop.CurrentStopped.ObservedAtStart.Format(time.RFC3339Nano)
+		currentStoppedEnd = stop.CurrentStopped.ObservedAtEnd.Format(time.RFC3339Nano)
+	}
+	fmt.Fprintf(w, "\nCLIENT STOP\nREQUESTED\t%t\nSTATUS\t%s\nOPERATION\t%s\nPLAN\t%s\nCOMPLETION\t%s\nCOMPLETION BASIS\t%s\nHISTORICAL\t%t\nRETAINED TOMBSTONE\t%t\nPROCESS-LOCAL COMPLETION PROOF\t%t\nPROCESS-LOCAL CURRENT-STOPPED BRIDGE\t%t\nCURRENT JOB STATE\t%s\nHISTORICAL OBSERVED START\t%s\nHISTORICAL OBSERVED END\t%s\nCURRENT OBSERVED START\t%s\nCURRENT OBSERVED END\t%s\n",
+		report.Scope.ClientStopRequested, terminalSafe(stop.Status), terminalSafe(stopOperation), terminalSafe(stopPlan),
+		terminalSafe(stopCompletion), terminalSafe(stopBasis), stop.Historical, stopRetained,
+		stop.ProcessLocalCompletionProof, stop.ProcessLocalCurrentProof, terminalSafe(stoppedState),
+		terminalSafe(stopStart), terminalSafe(stopEnd), terminalSafe(currentStoppedStart), terminalSafe(currentStoppedEnd))
+	if stop.StopReason != "" {
+		fmt.Fprintf(w, "STOP REASON\t%s\n", terminalSafe(stop.StopReason))
+	}
+
 	removal := report.Ledgers.Removal
 	removalOperation, removalPlan, removalCompletion, removalBasis := "-", "-", "-", "-"
 	removalStart, removalEnd := "-", "-"
@@ -2731,6 +2846,16 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 		activationSummary = "explicit terminal activation could not be verified"
 	}
 	fmt.Fprintf(w, "client activation\t%s\t%s\t%s\n", terminalSafe(activation.Status), terminalSafe(activationID), terminalSafe(activationSummary))
+	stopSummary := "not requested"
+	stopID := "-"
+	if stop.Completion != nil {
+		stopID = shortID(stop.Completion.OperationID)
+		stopSummary = fmt.Sprintf("historical=%t; retained=%t; current-stopped bridge=%t; basis=%s", stop.Historical,
+			stop.Completion.RetainedTombstone, stop.ProcessLocalCurrentProof, stop.Completion.CompletionBasis)
+	} else if report.Scope.ClientStopRequested {
+		stopSummary = "explicit terminal client stop could not be verified"
+	}
+	fmt.Fprintf(w, "client stop\t%s\t%s\t%s\n", terminalSafe(stop.Status), terminalSafe(stopID), terminalSafe(stopSummary))
 	removalSummary := "not requested"
 	removalID := "-"
 	if removal.Completion != nil {
