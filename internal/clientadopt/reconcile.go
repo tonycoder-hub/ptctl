@@ -35,6 +35,8 @@ func (verified *VerifiedCompletion) ReconciliationAdoptionCompletion() (reconcil
 		FinalObjectIdentity: observation.FinalObjectIdentity, MultiFile: observation.MultiFile,
 		ManifestFiles: observation.ManifestFiles, ContentBytes: observation.ContentBytes,
 		ObservedAtStart: started, ObservedAtEnd: ended, RetainedTombstone: observation.RetainedTombstone,
+		RemovalOperationID: observation.RemovalOperationID, RemovalPlanID: observation.RemovalPlanID,
+		RemovalCompletionID: observation.RemovalCompletionID, RemovalCompletionBasis: observation.RemovalCompletionBasis,
 		Assurance: observation.Assurance,
 	}, true
 }

@@ -2,6 +2,7 @@ package clientadopt
 
 import (
 	"sort"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
@@ -36,19 +37,30 @@ type OperationReport struct {
 }
 
 type PlanReport struct {
-	ID                        string `json:"id"`
-	ExpectedID                string `json:"expected_id,omitempty"`
-	Matches                   bool   `json:"matches"`
-	Action                    string `json:"action"`
-	Driver                    string `json:"driver"`
-	ClientConfigID            string `json:"client_config_id"`
-	PathMappingID             string `json:"path_mapping_id"`
-	ClientPathSemantics       string `json:"client_path_semantics"`
-	ExpectedSavePathRef       string `json:"expected_save_path_ref"`
-	ExpectedContentPathRef    string `json:"expected_content_path_ref"`
-	PriorAdoptionOperationID  string `json:"prior_adoption_operation_id,omitempty"`
-	PriorAdoptionPlanID       string `json:"prior_adoption_plan_id,omitempty"`
-	PriorAdoptionCompletionID string `json:"prior_adoption_completion_id,omitempty"`
+	ID                        string               `json:"id"`
+	ExpectedID                string               `json:"expected_id,omitempty"`
+	Matches                   bool                 `json:"matches"`
+	Action                    string               `json:"action"`
+	Driver                    string               `json:"driver"`
+	ClientConfigID            string               `json:"client_config_id"`
+	PathMappingID             string               `json:"path_mapping_id"`
+	ClientPathSemantics       string               `json:"client_path_semantics"`
+	ExpectedSavePathRef       string               `json:"expected_save_path_ref"`
+	ExpectedContentPathRef    string               `json:"expected_content_path_ref"`
+	PriorAdoptionOperationID  string               `json:"prior_adoption_operation_id,omitempty"`
+	PriorAdoptionPlanID       string               `json:"prior_adoption_plan_id,omitempty"`
+	PriorAdoptionCompletionID string               `json:"prior_adoption_completion_id,omitempty"`
+	TerminalRemoval           *TerminalRemovalLink `json:"terminal_removal,omitempty"`
+}
+
+type TerminalRemovalReport struct {
+	Status        string `json:"status"`
+	OperationID   string `json:"operation_id"`
+	PlanID        string `json:"plan_id"`
+	CompletionID  string `json:"completion_id"`
+	Basis         string `json:"basis"`
+	AuthorityForm string `json:"authority_form"`
+	ObservedEnd   string `json:"observed_at_end"`
 }
 
 type FinalReport struct {
@@ -65,6 +77,7 @@ func planReport(plan Plan, id, expected string) PlanReport {
 		ExpectedSavePathRef: plan.ExpectedSavePathRef, ExpectedContentPathRef: plan.ExpectedContentPathRef,
 		PriorAdoptionOperationID: plan.PriorAdoptionOperationID, PriorAdoptionPlanID: plan.PriorAdoptionPlanID,
 		PriorAdoptionCompletionID: plan.PriorAdoptionCompletionID,
+		TerminalRemoval:           copyTerminalRemovalLink(plan.TerminalRemoval),
 	}
 }
 
@@ -108,19 +121,20 @@ type WriteReport struct {
 }
 
 type Report struct {
-	Outcome         Outcome         `json:"outcome"`
-	Effect          []string        `json:"effect"`
-	WritesPerformed int             `json:"writes_performed"`
-	WritesUncertain bool            `json:"writes_uncertain"`
-	Operation       OperationReport `json:"operation"`
-	Plan            PlanReport      `json:"plan"`
-	Final           FinalReport     `json:"materialized_final"`
-	Client          ClientReport    `json:"client"`
-	Journal         JournalReport   `json:"journal"`
-	Writes          WriteReport     `json:"writes"`
-	Blockers        []Finding       `json:"blockers"`
-	Issues          []Finding       `json:"issues"`
-	Warnings        []string        `json:"warnings"`
+	Outcome         Outcome                `json:"outcome"`
+	Effect          []string               `json:"effect"`
+	WritesPerformed int                    `json:"writes_performed"`
+	WritesUncertain bool                   `json:"writes_uncertain"`
+	Operation       OperationReport        `json:"operation"`
+	Plan            PlanReport             `json:"plan"`
+	TerminalRemoval *TerminalRemovalReport `json:"terminal_removal,omitempty"`
+	Final           FinalReport            `json:"materialized_final"`
+	Client          ClientReport           `json:"client"`
+	Journal         JournalReport          `json:"journal"`
+	Writes          WriteReport            `json:"writes"`
+	Blockers        []Finding              `json:"blockers"`
+	Issues          []Finding              `json:"issues"`
+	Warnings        []string               `json:"warnings"`
 }
 
 func newReport(prepared *PreparedPlan, expectedID string) Report {
@@ -166,7 +180,39 @@ func newReport(prepared *PreparedPlan, expectedID string) Report {
 		report.Warnings = append(report.Warnings,
 			"re-adoption is authorized by one explicit historical completion and a fresh complete queue-absence observation; it does not infer why the prior job disappeared")
 	}
+	if prepared != nil && prepared.removal != nil {
+		value := prepared.removal
+		report.Effect = append(report.Effect, "read_terminal_client_removal")
+		report.TerminalRemoval = &TerminalRemovalReport{
+			Status: "canonical_attributed_completion_authority_available", OperationID: value.OperationID,
+			PlanID: value.PlanID, CompletionID: value.CompletionID, Basis: value.CompletionBasis,
+			AuthorityForm: map[bool]string{true: "retained_tombstone", false: "live_journal"}[value.RetainedTombstone],
+			ObservedEnd:   value.ObservedAtEnd.UTC().Format(time.RFC3339Nano),
+		}
+		report.Warnings = append(report.Warnings,
+			"the stopped re-add is bound to an attributed terminal keep-data removal and a fresh complete queue-absence observation; downloader and filesystem observations remain non-atomic")
+	}
 	return report
+}
+
+func copyTerminalRemovalLink(value *TerminalRemovalLink) *TerminalRemovalLink {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func applyHistoricalTerminalRemoval(report *Report, plan Plan) {
+	if report == nil || plan.TerminalRemoval == nil {
+		return
+	}
+	link := plan.TerminalRemoval
+	report.TerminalRemoval = &TerminalRemovalReport{
+		Status: "historical_terminal_removal_reference_current_not_observed", OperationID: link.OperationID,
+		PlanID: link.PlanID, CompletionID: link.CompletionID, Basis: link.CompletionBasis,
+		AuthorityForm: "historical_plan_reference", ObservedEnd: link.ObservedAtEnd,
+	}
 }
 
 func (report *Report) addBlocker(code, message string) {

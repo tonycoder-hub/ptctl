@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 )
 
 // CompletionProofOptions selects one explicit terminal client-removal
@@ -35,6 +37,8 @@ type CompletionObservation struct {
 	ActivationPlanID       string `json:"activation_plan_id"`
 	ActivationTerminalID   string `json:"activation_terminal_id"`
 	MetafileVariantID      string `json:"metafile_variant_id"`
+	InfoHashV1             string `json:"info_hash_v1,omitempty"`
+	InfoHashV2             string `json:"info_hash_v2,omitempty"`
 	MaterializeOperationID string `json:"materialize_operation_id"`
 	MaterializePlanID      string `json:"materialize_plan_id"`
 	TargetRootIdentity     string `json:"target_root_identity"`
@@ -179,6 +183,7 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 		CompleteFileSnapshotID: plan.CompleteFileSnapshotID, ClientConfigID: plan.ClientConfigID, PathMappingID: plan.PathMappingID,
 		ActivationOperationID: plan.ActivationOperationID, ActivationPlanID: plan.ActivationPlanID,
 		ActivationTerminalID: plan.ActivationTerminalID, MetafileVariantID: plan.MetafileVariantID,
+		InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2,
 		MaterializeOperationID: plan.MaterializeOperationID, MaterializePlanID: plan.MaterializePlanID,
 		TargetRootIdentity: plan.TargetRootIdentity, FinalObjectIdentity: plan.FinalObjectIdentity,
 		MultiFile: plan.MultiFile, ManifestFiles: plan.ManifestFiles, ContentBytes: plan.ContentBytes,
@@ -206,4 +211,34 @@ func (verified *VerifiedCompletion) Plan() Plan {
 		return Plan{}
 	}
 	return verified.authority.intent.Plan
+}
+
+// AdoptionReAddPrerequisite exposes only an attributed terminal keep-data
+// removal as process-local authority for a later stopped re-add. A completion
+// that merely observed absence after an unknown request cannot establish that
+// causal lineage, and serialized public observations cannot implement this
+// method with the bound journal authority.
+func (verified *VerifiedCompletion) AdoptionReAddPrerequisite() (clientadopt.TerminalRemovalPrerequisite, bool) {
+	if !verified.Verified() || verified.authority.completion.Basis != "accepted_response_then_exact_absence" {
+		return clientadopt.TerminalRemovalPrerequisite{}, false
+	}
+	value := verified.Observation()
+	started, startErr := time.Parse(time.RFC3339Nano, value.ObservedAtStart)
+	ended, endErr := time.Parse(time.RFC3339Nano, value.ObservedAtEnd)
+	if startErr != nil || endErr != nil || started.IsZero() || ended.Before(started) {
+		return clientadopt.TerminalRemovalPrerequisite{}, false
+	}
+	return clientadopt.TerminalRemovalPrerequisite{
+		Driver: value.Driver, OperationID: value.OperationID, PlanID: value.PlanID, IntentID: value.IntentID,
+		CompletionID: value.CompletionID, CompletionBasis: value.CompletionBasis, UseID: value.UseID,
+		JobID: value.JobID, FileLayoutID: value.FileLayoutID, CompleteFileSnapshotID: value.CompleteFileSnapshotID,
+		ClientConfigID: value.ClientConfigID, PathMappingID: value.PathMappingID,
+		ActivationOperationID: value.ActivationOperationID, ActivationPlanID: value.ActivationPlanID,
+		ActivationTerminalID: value.ActivationTerminalID, MetafileVariantID: value.MetafileVariantID,
+		InfoHashV1: value.InfoHashV1, InfoHashV2: value.InfoHashV2,
+		MaterializeOperationID: value.MaterializeOperationID, MaterializePlanID: value.MaterializePlanID,
+		TargetRootIdentity: value.TargetRootIdentity, FinalObjectIdentity: value.FinalObjectIdentity,
+		MultiFile: value.MultiFile, ManifestFiles: value.ManifestFiles, ContentBytes: value.ContentBytes,
+		ObservedAtStart: started, ObservedAtEnd: ended, RetainedTombstone: value.RetainedTombstone,
+	}, true
 }

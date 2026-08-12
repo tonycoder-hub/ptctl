@@ -13,8 +13,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
+	"github.com/tonycoder-hub/ptctl/internal/clientremove"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/reconcile"
 )
 
 const (
@@ -410,6 +413,164 @@ func TestClientReAdoptionPreservesPriorCompletionAndRequiresFreshAbsence(t *test
 	if code := Run(append([]string{"client", "adopt", "plan"}, wrongPrior...), reader, &out, &errOut); code != 4 || reader.read ||
 		server.login.Load()+server.ledger.Load()+server.add.Load() != requestsBefore {
 		t.Fatalf("wrong prior code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+}
+
+func TestClientReAddAfterAttributedRemovalUsesDedicatedLineageAndRetainedAuthority(t *testing.T) {
+	fixture := prepareClientRemoveCLIFixture(t)
+	removeBase := clientRemoveBaseArgs(fixture)
+	removePlan := runClientRemoveJSON(t, append([]string{"client", "remove", "plan"}, removeBase...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	removeRun := append([]string{"client", "remove", "run"}, removeBase...)
+	removeRun = append(removeRun, "--expect-removal-plan-id", removePlan.Data.Plan.ID, "--acknowledge-client-removal")
+	removed := runClientRemoveJSON(t, removeRun, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if removed.Data.Outcome != clientremove.OutcomeRemovedKeepData || removed.Data.Assurance.CompletionBasis != "accepted_response_then_exact_absence" {
+		t.Fatalf("removal=%#v", removed.Data)
+	}
+
+	base := clientAdoptBaseArgs(fixture.materialized, fixture.server.server.URL)
+	reBase := append(append([]string(nil), base...), "--prior-removal-operation", removed.Data.Operation.ID,
+		"--prior-removal-plan-id", removePlan.Data.Plan.ID)
+	requestsBefore := fixture.server.totalRequests()
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, reBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("re-add plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	planned := decodeClientAdoptReport(t, out.Bytes())
+	if planned.Data.Outcome != clientadopt.OutcomeReady || planned.Data.Plan.Action != clientadopt.ActionReAddAfterRemoval ||
+		planned.Data.TerminalRemoval == nil || planned.Data.TerminalRemoval.OperationID != removed.Data.Operation.ID ||
+		planned.Data.TerminalRemoval.PlanID != removePlan.Data.Plan.ID || planned.Data.TerminalRemoval.AuthorityForm != "live_journal" ||
+		planned.Data.TerminalRemoval.Basis != "accepted_response_then_exact_absence" || fixture.server.totalRequests()-requestsBefore != 2 {
+		t.Fatalf("planned=%#v", planned.Data)
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture.materialized, fixture.server.server.URL)
+
+	// Selector/ack mismatches are rejected before credential reads or network.
+	reader := &trackingReader{}
+	requestsBefore = fixture.server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	missingAck := append(append([]string{"client", "adopt", "run"}, reBase...),
+		"--expect-adoption-plan-id", planned.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(missingAck, reader, &out, &errOut); code != 2 || reader.read || fixture.server.totalRequests() != requestsBefore {
+		t.Fatalf("missing ack code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	mixed := append(append([]string{"client", "adopt", "plan"}, reBase...),
+		"--prior-adoption-operation", fixture.activation.Operation.ID, "--prior-adoption-plan-id", fixture.activation.Plan.ID)
+	if code := Run(mixed, reader, &out, &errOut); code != 2 || reader.read || fixture.server.totalRequests() != requestsBefore {
+		t.Fatalf("mixed selectors code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+
+	// Pruning changes only authority storage form; the reviewed plan ID remains
+	// identical and the retained terminal-removal tombstone still authorizes it.
+	out.Reset()
+	errOut.Reset()
+	pruneArgs := []string{"client", "remove", "prune", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-removal-plan-id", removePlan.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", removed.Data.Operation.ID}
+	if code := Run(pruneArgs, &trackingReader{}, &out, &errOut); code != 0 {
+		t.Fatalf("prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "adopt", "plan"}, reBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("retained re-add plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retainedPlan := decodeClientAdoptReport(t, out.Bytes())
+	if retainedPlan.Data.Plan.ID != planned.Data.Plan.ID || retainedPlan.Data.TerminalRemoval == nil ||
+		retainedPlan.Data.TerminalRemoval.AuthorityForm != "retained_tombstone" {
+		t.Fatalf("retained plan=%#v", retainedPlan.Data)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	runArgs := append(append([]string(nil), missingAck...), "--acknowledge-client-re-add-after-removal")
+	requestsBefore = fixture.server.totalRequests()
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("re-add run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	reAdded := decodeClientAdoptReport(t, out.Bytes())
+	if reAdded.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck || reAdded.Data.Plan.Action != clientadopt.ActionReAddAfterRemoval ||
+		reAdded.Data.TerminalRemoval == nil || reAdded.Data.TerminalRemoval.AuthorityForm != "retained_tombstone" ||
+		!reAdded.Data.Journal.CompletionDurable || reAdded.Data.Client.BeforeIdentity != "absent" ||
+		reAdded.Data.Client.AfterIdentity != "exact_unique" || fixture.server.totalRequests()-requestsBefore != 4 {
+		t.Fatalf("re-added=%#v", reAdded.Data)
+	}
+	assertClientAdoptPrivate(t, out.Bytes(), fixture.materialized, fixture.server.server.URL)
+
+	requestsBefore = fixture.server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"client", "adopt", "status", "--target", fixture.materialized.materialize.targetRoot,
+		"--output", "json", reAdded.Data.Operation.ID}, &trackingReader{}, &out, &errOut); code != 0 {
+		t.Fatalf("status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeClientAdoptReport(t, out.Bytes())
+	if status.Data.TerminalRemoval == nil || status.Data.TerminalRemoval.AuthorityForm != "historical_plan_reference" ||
+		status.Data.TerminalRemoval.OperationID != removed.Data.Operation.ID || fixture.server.totalRequests() != requestsBefore {
+		t.Fatalf("status=%#v", status.Data)
+	}
+
+	// The new adoption completion retains its removal lineage across pruning,
+	// and the retained completion remains valid input to the ordinary activation
+	// workflow. No special bypass is needed downstream.
+	out.Reset()
+	errOut.Reset()
+	adoptionPrune := []string{"client", "adopt", "prune", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-adoption-plan-id", reAdded.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", reAdded.Data.Operation.ID}
+	if code := Run(adoptionPrune, &trackingReader{}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("adoption prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retainedAdoption := decodeClientAdoptRetentionReport(t, out.Bytes())
+	if retainedAdoption.Data.Outcome != clientadopt.RetentionOutcomePruned || !retainedAdoption.Data.Markers.ExactTombstone {
+		t.Fatalf("retained re-add=%#v", retainedAdoption.Data)
+	}
+
+	reconcileArgs := []string{
+		"reconcile", "report", "--metafile-store", fixture.materialized.storeRoot,
+		"--metafile-variant", fixture.materialized.variantID, "--target", fixture.materialized.materialize.targetRoot,
+		"--materialize-operation", fixture.materialized.operation, "--materialize-plan-id", fixture.materialized.materialize.planID,
+		"--adoption-operation", reAdded.Data.Operation.ID, "--adoption-plan-id", reAdded.Data.Plan.ID,
+		"--host-root", fixture.materialized.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--driver", "qbittorrent", "--url", fixture.server.server.URL, "--username", clientAdoptUser,
+		"--password-stdin", "--timeout", "1m", "--output", "json",
+	}
+	requestsBefore = fixture.server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(reconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("reconcile retained re-add code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var reconciled struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	adoptionLedger := reconciled.Data.Ledgers.Adoption
+	if reconciled.Data.Outcome != "consistent" || adoptionLedger.Status != "historical_completion_current_job_bound" ||
+		!adoptionLedger.ProcessLocalCompletionProof || !adoptionLedger.ProcessLocalCurrentJobProof ||
+		adoptionLedger.Completion == nil || adoptionLedger.Completion.Action != clientadopt.ActionReAddAfterRemoval ||
+		adoptionLedger.Completion.RemovalOperationID != removed.Data.Operation.ID ||
+		adoptionLedger.Completion.RemovalCompletionBasis != "accepted_response_then_exact_absence" ||
+		fixture.server.totalRequests()-requestsBefore != 3 {
+		t.Fatalf("reconciled retained re-add=%#v", reconciled.Data)
+	}
+
+	activationBase := clientActivateBaseArgs(fixture.materialized, fixture.server.server.URL,
+		reAdded.Data.Operation.ID, reAdded.Data.Plan.ID)
+	activationPlan := runClientActivateJSON(t, append([]string{"client", "activate", "plan"}, activationBase...),
+		strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if activationPlan.Data.Outcome != clientactivate.OutcomeReady || activationPlan.Data.Plan.Action != clientactivate.ActionRecheckOnly {
+		t.Fatalf("activation after retained re-add=%#v", activationPlan.Data)
+	}
+	activationRun := append([]string{"client", "activate", "run"}, activationBase...)
+	activationRun = append(activationRun, "--expect-activation-plan-id", activationPlan.Data.Plan.ID, "--acknowledge-client-recheck")
+	activated := runClientActivateJSON(t, activationRun, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if activated.Data.Outcome != clientactivate.OutcomeRecheckInProgress || activated.Data.Client.ActionAttempted != "recheck" ||
+		!activated.Data.Client.ActionReceipt.Complete {
+		t.Fatalf("activation run after retained re-add=%#v", activated.Data)
 	}
 }
 

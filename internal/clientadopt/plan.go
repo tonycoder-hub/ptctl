@@ -15,18 +15,21 @@ type PlanOptions struct {
 	ClientWindows        bool
 	AdoptExistingStopped bool
 	PriorCompletion      *VerifiedCompletion
+	PriorRemoval         TerminalRemovalReAddProof
 }
 
 // PreparedPlan retains the exact-final authority and raw projected client
 // paths only in memory. Public Plan contains one-way references instead.
 type PreparedPlan struct {
-	plan       Plan
-	planID     string
-	operation  OperationID
-	verified   *materialize.VerifiedFinal
-	projection materialize.FinalClientProjection
-	windows    bool
-	prior      *VerifiedCompletion
+	plan         Plan
+	planID       string
+	operation    OperationID
+	verified     *materialize.VerifiedFinal
+	projection   materialize.FinalClientProjection
+	windows      bool
+	prior        *VerifiedCompletion
+	removalProof TerminalRemovalReAddProof
+	removal      *TerminalRemovalPrerequisite
 }
 
 func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*PreparedPlan, error) {
@@ -52,6 +55,21 @@ func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*Prepa
 	if options.AdoptExistingStopped {
 		action = ActionAdoptExistingStopped
 	}
+	if options.PriorCompletion != nil && options.PriorRemoval != nil {
+		return nil, fmt.Errorf("%w: prior adoption and terminal-removal lineages are mutually exclusive", ErrPolicy)
+	}
+	var removal *TerminalRemovalPrerequisite
+	if options.PriorRemoval != nil {
+		if options.AdoptExistingStopped {
+			return nil, fmt.Errorf("%w: observation-only adoption cannot consume terminal-removal lineage", ErrPolicy)
+		}
+		value, ok := options.PriorRemoval.AdoptionReAddPrerequisite()
+		if !ok || value.validate() != nil {
+			return nil, fmt.Errorf("%w: attributed terminal-removal authority is unavailable", ErrPolicy)
+		}
+		action = ActionReAddAfterRemoval
+		removal = &value
+	}
 	plan := Plan{
 		Schema: PlanSchemaV1, Action: action, Driver: driver,
 		ClientConfigID: options.ClientConfigID, PathMappingID: projection.PathMappingID,
@@ -61,6 +79,17 @@ func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*Prepa
 		MaterializeOperationID: observation.OperationID, MaterializePlanID: observation.MaterializePlanID,
 		TargetRootIdentity: observation.TargetRootIdentity, FinalObjectIdentity: observation.FinalObjectIdentity,
 		MultiFile: observation.MultiFile, ManifestFiles: observation.ManifestFiles, ContentBytes: observation.ContentBytes,
+	}
+	if removal != nil {
+		if removal.Driver != plan.Driver || removal.ClientConfigID != plan.ClientConfigID || removal.PathMappingID != plan.PathMappingID ||
+			removal.MetafileVariantID != plan.MetafileVariantID || removal.InfoHashV1 != plan.InfoHashV1 || removal.InfoHashV2 != plan.InfoHashV2 ||
+			removal.MaterializeOperationID != plan.MaterializeOperationID || removal.MaterializePlanID != plan.MaterializePlanID ||
+			removal.TargetRootIdentity != plan.TargetRootIdentity || removal.FinalObjectIdentity != plan.FinalObjectIdentity ||
+			removal.MultiFile != plan.MultiFile || removal.ManifestFiles != plan.ManifestFiles || removal.ContentBytes != plan.ContentBytes {
+			return nil, fmt.Errorf("%w: terminal removal belongs to a different final or client configuration", ErrPolicy)
+		}
+		link := removal.planLink()
+		plan.TerminalRemoval = &link
 	}
 	if options.PriorCompletion != nil {
 		if options.AdoptExistingStopped {
@@ -93,6 +122,7 @@ func BuildPlan(verified *materialize.VerifiedFinal, options PlanOptions) (*Prepa
 	return &PreparedPlan{
 		plan: plan, planID: planID, operation: OperationIDForPlan(planID), verified: verified,
 		projection: projection, windows: options.ClientWindows, prior: options.PriorCompletion,
+		removalProof: options.PriorRemoval, removal: removal,
 	}, nil
 }
 

@@ -563,7 +563,7 @@ tombstone is a separate `forget` operation requiring the same explicit full
 selectors plus `--acknowledge-historical-evidence-deletion`; it cannot select
 latest/by-age state or touch content.
 
-Client adoption has a separate authority boundary with two explicit plan
+Client adoption has a separate authority boundary with three explicit plan
 actions. The default action is a downloader-write boundary: `plan` performs one
 complete typed ledger observation but writes nothing, `run` requires
 `--acknowledge-client-add`, and a repeat after an unknown result additionally
@@ -609,6 +609,30 @@ job currently exists, and execution requires the additional
 and produces a distinct operation. ptctl never selects latest/by-age history,
 never infers why the old job disappeared, and never prunes, forgets, or mutates
 the prior evidence as part of re-adoption.
+
+A ptctl-attributed terminal keep-data removal can authorize only the distinct
+`readd_stopped_after_removal` action. Its full operation/plan selector is
+validated before password stdin or client I/O and must yield process-local
+authority from a canonical live removal journal or exact retention tombstone.
+The removal must contain an accepted response followed by exact typed absence;
+an unknown-response absence, public observation, serialized DTO, partial
+selector, or generic prior-adoption lineage is insufficient. The removal
+authority must match the same driver, client configuration, mapping, typed
+identity, activation terminal, and exact materialized final. A new complete
+ledger interval starting after that removal must independently prove current
+absence.
+
+The immutable removal lineage is committed to the new deterministic plan, but
+its live-versus-retained storage form is not. Run/resume require the ordinary
+add acknowledgement plus
+`--acknowledge-client-re-add-after-removal`; supplying that acknowledgement
+without the matching lineage, mixing removal and prior-adoption selectors, or
+using observation-only mode fails before credentials, network access, or
+journal writes. The authority permits one stopped add only. It does not permit
+deleting data, repeating an unknown request without the existing repeat gate,
+choosing a latest record, or treating historical removal evidence as current
+client state. Reconciliation and activation must still establish their normal
+fresh typed-job, path, per-file, and exact-final observations.
 
 One complete before-ledger must prove typed identity absence. A generic job
 hash, name, size, path, progress, or state never selects identity; unavailable,

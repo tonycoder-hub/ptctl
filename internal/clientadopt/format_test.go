@@ -80,7 +80,7 @@ func TestPlanPriorAdoptionLineageIsAllOrNothingAndLegacyCanonicalBytesStayStable
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(raw, []byte("prior_adoption")) {
+	if bytes.Contains(raw, []byte("prior_adoption")) || bytes.Contains(raw, []byte("terminal_removal")) {
 		t.Fatalf("legacy plan unexpectedly serialized empty lineage: %s", raw)
 	}
 	base.PriorAdoptionPlanID = strings.Repeat("c", 24)

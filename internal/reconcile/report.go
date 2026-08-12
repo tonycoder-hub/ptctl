@@ -309,6 +309,10 @@ type ClientAdoptionCompletion struct {
 	ObservedAtStart        time.Time `json:"observed_at_start"`
 	ObservedAtEnd          time.Time `json:"observed_at_end"`
 	RetainedTombstone      bool      `json:"retained_tombstone"`
+	RemovalOperationID     string    `json:"removal_operation_id,omitempty"`
+	RemovalPlanID          string    `json:"removal_plan_id,omitempty"`
+	RemovalCompletionID    string    `json:"removal_completion_id,omitempty"`
+	RemovalCompletionBasis string    `json:"removal_completion_basis,omitempty"`
 	Assurance              string    `json:"assurance"`
 }
 
@@ -1260,6 +1264,8 @@ func assessClientAdoption(meta *metafile.MetaInfo, selection ClientAdoptionSelec
 	warnings = append(warnings, "the terminal client-adoption record is historical evidence and does not by itself prove current downloader state")
 	if completion.Action == "adopt_existing_stopped" {
 		warnings = append(warnings, "the observation-only adoption did not submit or prove the downloader job's private metafile wrapper")
+	} else if completion.Action == "readd_stopped_after_removal" {
+		warnings = append(warnings, "the stopped re-add records one attributed historical keep-data removal, but current downloader identity and path claims still require this reconciliation's fresh bracket")
 	}
 
 	if meta == nil || materialized.Observation == nil || !materialized.ProcessLocalFinalProof ||
@@ -1884,7 +1890,7 @@ func validClientAdoptionCompletion(value ClientAdoptionCompletion) bool {
 	identity := downloader.TypedIdentity{InfoHashV1: value.InfoHashV1, InfoHashV2: value.InfoHashV2}
 	identitySupported := false
 	switch value.Action {
-	case "add_stopped":
+	case "add_stopped", "readd_stopped_after_removal":
 		descriptor, ok := downloader.DescribeStoppedAddDriver(value.Driver)
 		identitySupported = ok && descriptor.SupportsIdentity(identity)
 	case "adopt_existing_stopped":
@@ -1905,6 +1911,14 @@ func validClientAdoptionCompletion(value ClientAdoptionCompletion) bool {
 	if value.ClientPathSemantics != "posix_exact" && value.ClientPathSemantics != "windows_exact" {
 		return false
 	}
+	if value.Action == "readd_stopped_after_removal" {
+		if !validRemovalOperationForAdoption(value.RemovalOperationID, value.RemovalPlanID) ||
+			!validSHA256ID(value.RemovalCompletionID) || value.RemovalCompletionBasis != "accepted_response_then_exact_absence" {
+			return false
+		}
+	} else if value.RemovalOperationID != "" || value.RemovalPlanID != "" || value.RemovalCompletionID != "" || value.RemovalCompletionBasis != "" {
+		return false
+	}
 	if value.Action == "adopt_existing_stopped" {
 		if value.RetainedTombstone {
 			return value.Assurance == "same_invocation_bound_canonical_existing_stopped_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation"
@@ -1915,6 +1929,14 @@ func validClientAdoptionCompletion(value ClientAdoptionCompletion) bool {
 		return value.Assurance == "same_invocation_bound_canonical_adoption_retention_tombstone_read_without_durability_refresh_or_current_client_observation"
 	}
 	return value.Assurance == "same_invocation_bound_canonical_adoption_completion_read_without_durability_refresh"
+}
+
+func validRemovalOperationForAdoption(operationID, planID string) bool {
+	if !validSHA256ID(operationID) || !validPlanID(planID) {
+		return false
+	}
+	digest := sha256.Sum256([]byte("ptctl-client-removal-operation-v1\x00" + planID))
+	return operationID == "sha256:"+hex.EncodeToString(digest[:])
 }
 
 func validAdoptionOperationForPlan(operationID, planID string) bool {

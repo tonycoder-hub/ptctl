@@ -1,9 +1,9 @@
 // Package clientadopt coordinates one exact, already-materialized layout with
-// a downloader. One action adds an absent built-in downloader job in stopped
-// mode. A second, observation-only action adopts one already-existing stopped
-// job only after two exact typed/path observations bracket another exact final
-// verification. Neither action changes an existing job, rechecks, moves,
-// deletes, or retires data.
+// a downloader. It can add a newly absent job in stopped mode, add it again
+// after one explicitly attributed terminal keep-data removal, or record an
+// observation-only adoption of one already-existing stopped job. Every action
+// requires fresh typed/path observation and another exact-final verification.
+// The package never rechecks, moves, deletes, or retires data.
 package clientadopt
 
 import (
@@ -26,6 +26,7 @@ const (
 	CompletionSchemaV1         = "ptctl.client-adopt-completion/v1"
 	ActionAddStopped           = "add_stopped"
 	ActionAdoptExistingStopped = "adopt_existing_stopped"
+	ActionReAddAfterRemoval    = "readd_stopped_after_removal"
 	DriverQBittorrent          = "qbittorrent"
 	DriverTransmission         = "transmission"
 
@@ -43,32 +44,33 @@ var (
 )
 
 type Plan struct {
-	Schema                    string `json:"schema"`
-	Action                    string `json:"action"`
-	Driver                    string `json:"driver"`
-	ClientConfigID            string `json:"client_config_id"`
-	PathMappingID             string `json:"path_mapping_id"`
-	ClientPathSemantics       string `json:"client_path_semantics"`
-	ExpectedSavePathRef       string `json:"expected_save_path_ref"`
-	ExpectedContentPathRef    string `json:"expected_content_path_ref"`
-	MetafileVariantID         string `json:"metafile_variant_id"`
-	MetafileBytes             int64  `json:"metafile_bytes"`
-	InfoHashV1                string `json:"info_hash_v1,omitempty"`
-	InfoHashV2                string `json:"info_hash_v2,omitempty"`
-	MaterializeOperationID    string `json:"materialize_operation_id"`
-	MaterializePlanID         string `json:"materialize_plan_id"`
-	TargetRootIdentity        string `json:"target_root_identity"`
-	FinalObjectIdentity       string `json:"final_object_identity"`
-	MultiFile                 bool   `json:"multi_file"`
-	ManifestFiles             int    `json:"manifest_files"`
-	ContentBytes              int64  `json:"content_bytes"`
-	PriorAdoptionOperationID  string `json:"prior_adoption_operation_id,omitempty"`
-	PriorAdoptionPlanID       string `json:"prior_adoption_plan_id,omitempty"`
-	PriorAdoptionCompletionID string `json:"prior_adoption_completion_id,omitempty"`
+	Schema                    string               `json:"schema"`
+	Action                    string               `json:"action"`
+	Driver                    string               `json:"driver"`
+	ClientConfigID            string               `json:"client_config_id"`
+	PathMappingID             string               `json:"path_mapping_id"`
+	ClientPathSemantics       string               `json:"client_path_semantics"`
+	ExpectedSavePathRef       string               `json:"expected_save_path_ref"`
+	ExpectedContentPathRef    string               `json:"expected_content_path_ref"`
+	MetafileVariantID         string               `json:"metafile_variant_id"`
+	MetafileBytes             int64                `json:"metafile_bytes"`
+	InfoHashV1                string               `json:"info_hash_v1,omitempty"`
+	InfoHashV2                string               `json:"info_hash_v2,omitempty"`
+	MaterializeOperationID    string               `json:"materialize_operation_id"`
+	MaterializePlanID         string               `json:"materialize_plan_id"`
+	TargetRootIdentity        string               `json:"target_root_identity"`
+	FinalObjectIdentity       string               `json:"final_object_identity"`
+	MultiFile                 bool                 `json:"multi_file"`
+	ManifestFiles             int                  `json:"manifest_files"`
+	ContentBytes              int64                `json:"content_bytes"`
+	PriorAdoptionOperationID  string               `json:"prior_adoption_operation_id,omitempty"`
+	PriorAdoptionPlanID       string               `json:"prior_adoption_plan_id,omitempty"`
+	PriorAdoptionCompletionID string               `json:"prior_adoption_completion_id,omitempty"`
+	TerminalRemoval           *TerminalRemovalLink `json:"terminal_removal,omitempty"`
 }
 
 func (plan Plan) Validate() error {
-	if plan.Schema != PlanSchemaV1 || (plan.Action != ActionAddStopped && plan.Action != ActionAdoptExistingStopped) ||
+	if plan.Schema != PlanSchemaV1 || (plan.Action != ActionAddStopped && plan.Action != ActionAdoptExistingStopped && plan.Action != ActionReAddAfterRemoval) ||
 		!canonicalSHA256ID(plan.ClientConfigID) || !canonicalSHA256ID(plan.PathMappingID) ||
 		!canonicalSHA256ID(plan.ExpectedSavePathRef) || !canonicalSHA256ID(plan.ExpectedContentPathRef) ||
 		!canonicalSHA256ID(plan.MetafileVariantID) || plan.MetafileBytes <= 0 || plan.MetafileBytes > 32<<20 ||
@@ -87,7 +89,7 @@ func (plan Plan) Validate() error {
 	if !downloader.LedgerDriverSupportsIdentity(plan.Driver, typedIdentity) {
 		return fmt.Errorf("%w: adoption driver cannot prove the required typed identity", ErrPolicy)
 	}
-	if plan.Action == ActionAddStopped {
+	if isStoppedAddAction(plan.Action) {
 		descriptor, ok := downloader.DescribeStoppedAddDriver(plan.Driver)
 		if !ok || !descriptor.SupportsIdentity(typedIdentity) {
 			return fmt.Errorf("%w: adoption driver cannot submit the required typed identity", ErrPolicy)
@@ -112,7 +114,7 @@ func (plan Plan) Validate() error {
 		return fmt.Errorf("%w: prior adoption lineage is incomplete", ErrPolicy)
 	}
 	if plan.Action != ActionAddStopped && priorFields != 0 {
-		return fmt.Errorf("%w: observation-only adoption cannot consume prior adoption lineage", ErrPolicy)
+		return fmt.Errorf("%w: only ordinary stopped-add re-adoption can consume prior adoption lineage", ErrPolicy)
 	}
 	if priorFields == 3 {
 		priorOperation, err := ParseOperationID(plan.PriorAdoptionOperationID)
@@ -122,6 +124,13 @@ func (plan Plan) Validate() error {
 		if _, err := parseMarkerID(plan.PriorAdoptionCompletionID); err != nil {
 			return fmt.Errorf("%w: prior adoption completion is invalid", ErrPolicy)
 		}
+	}
+	if plan.Action == ActionReAddAfterRemoval {
+		if plan.TerminalRemoval == nil || plan.TerminalRemoval.Validate() != nil || priorFields != 0 {
+			return fmt.Errorf("%w: removal-authorized re-add lineage is invalid", ErrPolicy)
+		}
+	} else if plan.TerminalRemoval != nil {
+		return fmt.Errorf("%w: adoption plan unexpectedly contains terminal-removal lineage", ErrPolicy)
 	}
 	return nil
 }
@@ -319,7 +328,7 @@ func attemptMatchesPlan(attempt Attempt, plan Plan) bool {
 		return false
 	}
 	switch plan.Action {
-	case ActionAddStopped:
+	case ActionAddStopped, ActionReAddAfterRemoval:
 		return attempt.BeforeStatus == string(downloader.LedgerIdentityAbsent)
 	case ActionAdoptExistingStopped:
 		return attempt.BeforeStatus == string(downloader.LedgerIdentityExactUnique) &&
@@ -334,7 +343,7 @@ func completionMatchesPlan(completion Completion, plan Plan, attempt Attempt) bo
 		return false
 	}
 	switch plan.Action {
-	case ActionAddStopped:
+	case ActionAddStopped, ActionReAddAfterRemoval:
 		return completion.FinalVerificationBasis == "same_invocation_post_add_exact_reverification"
 	case ActionAdoptExistingStopped:
 		return completion.FinalVerificationBasis == "same_invocation_existing_stopped_job_bracket_and_exact_reverification" &&
@@ -343,4 +352,8 @@ func completionMatchesPlan(completion Completion, plan Plan, attempt Attempt) bo
 	default:
 		return false
 	}
+}
+
+func isStoppedAddAction(action string) bool {
+	return action == ActionAddStopped || action == ActionReAddAfterRemoval
 }

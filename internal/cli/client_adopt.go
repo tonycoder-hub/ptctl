@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
+	"github.com/tonycoder-hub/ptctl/internal/clientremove"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/transmission"
@@ -25,28 +26,31 @@ const (
 )
 
 type clientAdoptFlags struct {
-	output                 *string
-	storeRoot              *string
-	variantID              *string
-	targetRoot             *string
-	materializeOperation   *string
-	materializePlanID      *string
-	hostRoot               *string
-	clientRoot             *string
-	clientStyle            *string
-	driver                 *string
-	endpoint               *string
-	username               *string
-	passwordStdin          *bool
-	adoptExistingStopped   *bool
-	priorAdoptionOperation *string
-	priorAdoptionPlanID    *string
-	timeout                *time.Duration
-	expectedAdoptionPlan   *string
-	acknowledgeAdd         *bool
-	acknowledgeExisting    *bool
-	acknowledgeReAdoption  *bool
-	repeatAdd              *bool
+	output                  *string
+	storeRoot               *string
+	variantID               *string
+	targetRoot              *string
+	materializeOperation    *string
+	materializePlanID       *string
+	hostRoot                *string
+	clientRoot              *string
+	clientStyle             *string
+	driver                  *string
+	endpoint                *string
+	username                *string
+	passwordStdin           *bool
+	adoptExistingStopped    *bool
+	priorAdoptionOperation  *string
+	priorAdoptionPlanID     *string
+	priorRemovalOperation   *string
+	priorRemovalPlanID      *string
+	timeout                 *time.Duration
+	expectedAdoptionPlan    *string
+	acknowledgeAdd          *bool
+	acknowledgeExisting     *bool
+	acknowledgeReAdoption   *bool
+	acknowledgeRemovalReAdd *bool
+	repeatAdd               *bool
 }
 
 type preparedClientAdopt struct {
@@ -83,9 +87,9 @@ func (a *app) clientAdopt(args []string) error {
 
 func (a *app) clientAdoptHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--adopt-existing-stopped | --prior-adoption-operation ID --prior-adoption-plan-id ID] [--output table|json]
-  ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID (--acknowledge-client-add [--acknowledge-client-re-adoption] | --adopt-existing-stopped --acknowledge-existing-stopped-adoption) [--output table|json]
-  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID ([--acknowledge-client-add --acknowledge-repeat-add] [--acknowledge-client-re-adoption] | --adopt-existing-stopped --acknowledge-existing-stopped-adoption) [--output table|json] OPERATION_ID
+  ptctl client adopt plan --metafile-store DIR --metafile-variant ID --target PATH --materialize-operation ID --materialize-plan-id ID --host-root PATH --client-root PATH --client-style posix|windows --driver qbittorrent|transmission --url URL --username USER --password-stdin [--adopt-existing-stopped | --prior-adoption-operation ID --prior-adoption-plan-id ID | --prior-removal-operation ID --prior-removal-plan-id ID] [--output table|json]
+  ptctl client adopt run  [same selectors] --expect-adoption-plan-id ID (--acknowledge-client-add [--acknowledge-client-re-adoption | --acknowledge-client-re-add-after-removal] | --adopt-existing-stopped --acknowledge-existing-stopped-adoption) [--output table|json]
+  ptctl client adopt resume [same selectors] --expect-adoption-plan-id ID ([--acknowledge-client-add --acknowledge-repeat-add] [--acknowledge-client-re-adoption | --acknowledge-client-re-add-after-removal] | --adopt-existing-stopped --acknowledge-existing-stopped-adoption) [--output table|json] OPERATION_ID
   ptctl client adopt status --target PATH [--output table|json] OPERATION_ID
   ptctl client adopt prune --target PATH --expect-adoption-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client adopt forget --target PATH --expect-adoption-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
@@ -108,6 +112,14 @@ completion is read locally, the current complete queue must again prove exact
 absence, and run/resume additionally require
 --acknowledge-client-re-adoption. Prior evidence is retained; no latest
 operation is inferred or forgotten automatically.
+
+When disappearance was caused by ptctl's own attributed terminal keep-data
+removal, --prior-removal-operation/--prior-removal-plan-id instead creates the
+distinct readd_stopped_after_removal action. It accepts only a canonical
+accepted-response-then-exact-absence completion, still requires a fresh queue
+absence after that completion, and uses the dedicated
+--acknowledge-client-re-add-after-removal. A public JSON report or an
+unattributed unknown-request absence cannot authorize this action.
 
 Run records a durable target-root-local request intent before its one add POST.
 If the response is lost, resume first observes the queue and never repeats the
@@ -146,12 +158,15 @@ func addClientAdoptFlags(fs *flag.FlagSet, execution bool) *clientAdoptFlags {
 	values.adoptExistingStopped = fs.Bool("adopt-existing-stopped", false, "observe and adopt one existing exact stopped job without submitting a metafile or mutating the downloader")
 	values.priorAdoptionOperation = fs.String("prior-adoption-operation", "", "explicit terminal prior adoption operation authorizing re-adoption; pair with --prior-adoption-plan-id")
 	values.priorAdoptionPlanID = fs.String("prior-adoption-plan-id", "", "reviewed prior adoption plan ID; pair with --prior-adoption-operation")
+	values.priorRemovalOperation = fs.String("prior-removal-operation", "", "attributed terminal keep-data removal authorizing stopped re-add; pair with --prior-removal-plan-id")
+	values.priorRemovalPlanID = fs.String("prior-removal-plan-id", "", "reviewed terminal removal plan ID; pair with --prior-removal-operation")
 	values.timeout = fs.Duration("timeout", clientAdoptDefaultTimeout, "shared final-proof and client wall-clock budget")
 	if execution {
 		values.expectedAdoptionPlan = fs.String("expect-adoption-plan-id", "", "reviewed 24-hex client adoption plan ID")
 		values.acknowledgeAdd = fs.Bool("acknowledge-client-add", false, "acknowledge one stopped downloader add request")
 		values.acknowledgeExisting = fs.Bool("acknowledge-existing-stopped-adoption", false, "acknowledge recording an observation-only lineage for one existing exact stopped job")
 		values.acknowledgeReAdoption = fs.Bool("acknowledge-client-re-adoption", false, "acknowledge a new stopped add lineage after the explicit prior terminal job disappeared")
+		values.acknowledgeRemovalReAdd = fs.Bool("acknowledge-client-re-add-after-removal", false, "acknowledge one new stopped add after the attributed terminal keep-data removal")
 		values.repeatAdd = fs.Bool("acknowledge-repeat-add", false, "acknowledge repeating a prior request whose result remains unknown")
 	}
 	return values
@@ -203,13 +218,25 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	}
 	priorOperationSet := flagWasSet(fs, "prior-adoption-operation")
 	priorPlanSet := flagWasSet(fs, "prior-adoption-plan-id")
+	removalOperationSet := flagWasSet(fs, "prior-removal-operation")
+	removalPlanSet := flagWasSet(fs, "prior-removal-plan-id")
 	if priorOperationSet != priorPlanSet || priorOperationSet && (*values.priorAdoptionOperation == "" || *values.priorAdoptionPlanID == "") {
 		return result, usageError("%s requires --prior-adoption-operation and --prior-adoption-plan-id together", command)
 	}
 	if *values.adoptExistingStopped && priorOperationSet {
 		return result, usageError("%s observation-only adoption cannot consume prior adoption-lineage selectors", command)
 	}
+	if removalOperationSet != removalPlanSet || removalOperationSet && (*values.priorRemovalOperation == "" || *values.priorRemovalPlanID == "") {
+		return result, usageError("%s requires --prior-removal-operation and --prior-removal-plan-id together", command)
+	}
+	if priorOperationSet && removalOperationSet {
+		return result, usageError("%s prior adoption and terminal-removal lineages are mutually exclusive", command)
+	}
+	if *values.adoptExistingStopped && removalOperationSet {
+		return result, usageError("%s observation-only adoption cannot consume terminal-removal selectors", command)
+	}
 	var priorCompletion *clientadopt.VerifiedCompletion
+	var priorRemoval clientadopt.TerminalRemovalReAddProof
 	if priorOperationSet {
 		priorOperation, parseErr := clientadopt.ParseOperationID(*values.priorAdoptionOperation)
 		if parseErr != nil || !validMaterializePlanID(*values.priorAdoptionPlanID) {
@@ -225,6 +252,25 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 			return result, &inconclusiveErr{message: "prior client adoption completion is unavailable"}
 		}
 		priorCompletion = verifiedPrior
+	}
+	if removalOperationSet {
+		removalOperation, parseErr := clientremove.ParseOperationID(*values.priorRemovalOperation)
+		if parseErr != nil || !validMaterializePlanID(*values.priorRemovalPlanID) {
+			return result, usageError("%s requires canonical prior removal operation and plan IDs", command)
+		}
+		verifiedRemoval, _, verifyErr := clientremove.VerifyCompletion(ctx, clientremove.CompletionProofOptions{
+			TargetRoot: *values.targetRoot, OperationID: removalOperation, ExpectedPlanID: *values.priorRemovalPlanID,
+		})
+		if errors.Is(verifyErr, clientremove.ErrIntegrity) {
+			return result, &integrityErr{message: "terminal client removal completion failed integrity validation"}
+		}
+		if verifyErr != nil {
+			return result, &inconclusiveErr{message: "terminal client removal completion is unavailable"}
+		}
+		if _, ok := verifiedRemoval.AdoptionReAddPrerequisite(); !ok {
+			return result, &inconclusiveErr{message: "terminal client removal is not attributed to an accepted keep-data request"}
+		}
+		priorRemoval = verifiedRemoval
 	}
 	store, err := metastore.Open(*values.storeRoot)
 	if err != nil {
@@ -252,7 +298,7 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	}
 	prepared, err := clientadopt.BuildPlan(verified, clientadopt.PlanOptions{
 		Driver: *values.driver, ClientConfigID: clientConfigID, HostRoot: *values.hostRoot, ClientRoot: *values.clientRoot, ClientWindows: windows,
-		PriorCompletion: priorCompletion, AdoptExistingStopped: *values.adoptExistingStopped,
+		PriorCompletion: priorCompletion, PriorRemoval: priorRemoval, AdoptExistingStopped: *values.adoptExistingStopped,
 	})
 	if err != nil {
 		return result, err
@@ -325,14 +371,17 @@ func (a *app) clientAdoptRun(args []string) error {
 		return usageError("client adopt run requires --expect-adoption-plan-id; repeat acknowledgement is resume-only")
 	}
 	priorRequested := flagWasSet(fs, "prior-adoption-operation") || flagWasSet(fs, "prior-adoption-plan-id")
+	removalRequested := flagWasSet(fs, "prior-removal-operation") || flagWasSet(fs, "prior-removal-plan-id")
 	if *values.adoptExistingStopped {
-		if !*values.acknowledgeExisting || *values.acknowledgeAdd || *values.acknowledgeReAdoption || priorRequested {
+		if !*values.acknowledgeExisting || *values.acknowledgeAdd || *values.acknowledgeReAdoption || *values.acknowledgeRemovalReAdd || priorRequested || removalRequested {
 			return usageError("client adopt run observation mode requires --adopt-existing-stopped and --acknowledge-existing-stopped-adoption, and forbids add/re-adoption flags")
 		}
 	} else if *values.acknowledgeExisting || !*values.acknowledgeAdd {
 		return usageError("client adopt run add mode requires --acknowledge-client-add and forbids --acknowledge-existing-stopped-adoption")
 	} else if priorRequested != *values.acknowledgeReAdoption {
 		return usageError("client adopt run requires --acknowledge-client-re-adoption exactly when prior adoption selectors are supplied")
+	} else if removalRequested != *values.acknowledgeRemovalReAdd {
+		return usageError("client adopt run requires --acknowledge-client-re-add-after-removal exactly when prior removal selectors are supplied")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *values.timeout)
 	defer cancel()
@@ -363,7 +412,8 @@ func (a *app) clientAdoptRun(args []string) error {
 	report, operationErr := clientadopt.Run(ctx, clientadopt.RunOptions{
 		Prepared: prepared.prepared, ExpectedPlanID: *values.expectedAdoptionPlan, Metafile: prepared.payload,
 		Session: session, AcknowledgeAdd: *values.acknowledgeAdd, AcknowledgeExistingStopped: *values.acknowledgeExisting,
-		AcknowledgeReAdoption: *values.acknowledgeReAdoption,
+		AcknowledgeReAdoption:   *values.acknowledgeReAdoption,
+		AcknowledgeRemovalReAdd: *values.acknowledgeRemovalReAdd,
 	})
 	return a.finishClientAdopt(prepared.output, report, operationErr)
 }
@@ -381,14 +431,17 @@ func (a *app) clientAdoptResume(args []string) error {
 		return usageError("--acknowledge-repeat-add also requires --acknowledge-client-add")
 	}
 	priorRequested := flagWasSet(fs, "prior-adoption-operation") || flagWasSet(fs, "prior-adoption-plan-id")
+	removalRequested := flagWasSet(fs, "prior-removal-operation") || flagWasSet(fs, "prior-removal-plan-id")
 	if *values.adoptExistingStopped {
-		if !*values.acknowledgeExisting || *values.acknowledgeAdd || *values.repeatAdd || *values.acknowledgeReAdoption || priorRequested {
+		if !*values.acknowledgeExisting || *values.acknowledgeAdd || *values.repeatAdd || *values.acknowledgeReAdoption || *values.acknowledgeRemovalReAdd || priorRequested || removalRequested {
 			return usageError("client adopt resume observation mode requires --adopt-existing-stopped and --acknowledge-existing-stopped-adoption, and forbids add/repeat/re-adoption flags")
 		}
 	} else if *values.acknowledgeExisting {
 		return usageError("client adopt resume add mode forbids --acknowledge-existing-stopped-adoption")
 	} else if priorRequested != *values.acknowledgeReAdoption {
 		return usageError("client adopt resume requires --acknowledge-client-re-adoption exactly when prior adoption selectors are supplied")
+	} else if removalRequested != *values.acknowledgeRemovalReAdd {
+		return usageError("client adopt resume requires --acknowledge-client-re-add-after-removal exactly when prior removal selectors are supplied")
 	}
 	operationID, err := clientadopt.ParseOperationID(fs.Arg(0))
 	if err != nil {
@@ -451,8 +504,9 @@ func (a *app) clientAdoptResume(args []string) error {
 	report, operationErr := clientadopt.Resume(ctx, operationID, clientadopt.RunOptions{
 		Prepared: prepared.prepared, ExpectedPlanID: *values.expectedAdoptionPlan, Metafile: prepared.payload,
 		Session: session, AcknowledgeAdd: *values.acknowledgeAdd, AcknowledgeExistingStopped: *values.acknowledgeExisting,
-		AcknowledgeReAdoption: *values.acknowledgeReAdoption,
-		RepeatAdd:             *values.repeatAdd,
+		AcknowledgeReAdoption:   *values.acknowledgeReAdoption,
+		AcknowledgeRemovalReAdd: *values.acknowledgeRemovalReAdd,
+		RepeatAdd:               *values.repeatAdd,
 	})
 	return a.finishClientAdopt(prepared.output, report, operationErr)
 }
@@ -622,6 +676,13 @@ func writeClientAdoptHuman(out io.Writer, report clientadopt.Report) error {
 	if report.Plan.PriorAdoptionOperationID != "" {
 		fmt.Fprintf(w, "PRIOR ADOPTION OPERATION\t%s\nPRIOR ADOPTION PLAN\t%s\nPRIOR COMPLETION\t%s\n",
 			terminalSafe(report.Plan.PriorAdoptionOperationID), terminalSafe(report.Plan.PriorAdoptionPlanID), terminalSafe(report.Plan.PriorAdoptionCompletionID))
+	}
+	if report.TerminalRemoval != nil {
+		fmt.Fprintf(w, "\nTERMINAL REMOVAL\nSTATUS\t%s\nOPERATION\t%s\nPLAN\t%s\nCOMPLETION\t%s\nBASIS\t%s\nAUTHORITY\t%s\nOBSERVED END\t%s\n",
+			terminalSafe(report.TerminalRemoval.Status), terminalSafe(report.TerminalRemoval.OperationID),
+			terminalSafe(report.TerminalRemoval.PlanID), terminalSafe(report.TerminalRemoval.CompletionID),
+			terminalSafe(report.TerminalRemoval.Basis), terminalSafe(report.TerminalRemoval.AuthorityForm),
+			terminalSafe(report.TerminalRemoval.ObservedEnd))
 	}
 	fmt.Fprintf(w, "\nMATERIALIZED FINAL\nSTATUS\t%s\nVARIANT\t%s\nMATERIALIZE OPERATION\t%s\nMATERIALIZE PLAN\t%s\nROOT IDENTITY\t%s\nFINAL IDENTITY\t%s\nBYTES VERIFIED\t%d\nASSURANCE\t%s\n",
 		terminalSafe(report.Final.Status), terminalSafe(report.Final.Observation.MetafileVariantID), terminalSafe(report.Final.Observation.OperationID),

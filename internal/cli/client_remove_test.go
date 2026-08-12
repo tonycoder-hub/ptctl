@@ -198,6 +198,21 @@ func TestClientRemoveAcceptedResponseCannotHideFinalContentDamage(t *testing.T) 
 		t.Fatalf("damaged final was not kept separate from removal response: %#v", report.Data)
 	}
 	assertClientRemovePrivate(t, mustJSON(t, report), fixture)
+
+	// An exact absence after an unknown request is historical evidence, but it
+	// cannot authorize the distinct attributed re-add. This fails before stdin
+	// or any new downloader request.
+	adoptionBase := clientAdoptBaseArgs(fixture.materialized, fixture.server.server.URL)
+	adoptionBase = append(adoptionBase, "--prior-removal-operation", report.Data.Operation.ID,
+		"--prior-removal-plan-id", planned.Data.Plan.ID)
+	reader := &trackingReader{}
+	requestsBefore := fixture.server.totalRequests()
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, adoptionBase...), reader, &out, &errOut); code != 4 ||
+		reader.read || fixture.server.totalRequests() != requestsBefore {
+		t.Fatalf("unattributed re-add code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	assertClientAdoptErrorPrivate(t, errOut.String(), fixture.materialized, fixture.server.server.URL)
 }
 
 func TestClientRemovePruneAndForgetAreCredentialFreeLocalTransitions(t *testing.T) {

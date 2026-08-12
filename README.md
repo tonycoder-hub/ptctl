@@ -9,8 +9,9 @@ domains and reconciles them around verifiable torrent metadata.
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`
-> workflow, reviewed `client adopt run|resume|prune|forget` stopped-add or
-> observation-only existing-stopped operations,
+> workflow, reviewed `client adopt run|resume|prune|forget` stopped-add,
+> attributed post-removal stopped re-add, or observation-only existing-stopped
+> operations,
 > explicit `client activate run|resume|prune|forget` recheck/start operations,
 > acknowledged `client stop run|resume|prune|forget` exact-job stopped transitions,
 > acknowledged `client remove run|resume|prune|forget` exact-job removal that always
@@ -1015,6 +1016,39 @@ execution additionally requires `--acknowledge-client-re-adoption` alongside
 This flow does not infer why the job disappeared, attribute a removal, or
 authorize mutation of any remaining job. A forgotten prior completion cannot
 authorize re-adoption.
+
+When the disappearance was caused by ptctl's own completed keep-data removal,
+use the distinct removal-attributed lineage instead:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl client adopt run \
+  --metafile-store PRIVATE_STORE \
+  --metafile-variant sha256:WHOLE_METAFILE_DIGEST \
+  --target "D:\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --host-root 'D:\' --client-root /downloads --client-style posix \
+  --driver qbittorrent --url https://seedbox.example --username admin \
+  --password-stdin \
+  --prior-removal-operation sha256:REMOVAL_OPERATION_DIGEST \
+  --prior-removal-plan-id REMOVAL_PLAN_ID \
+  --expect-adoption-plan-id ADOPTION_PLAN_ID \
+  --acknowledge-client-add \
+  --acknowledge-client-re-add-after-removal \
+  --output json
+```
+
+This creates the separate `readd_stopped_after_removal` action. Before stdin
+or client I/O, the explicit removal selector must rebind a live journal or
+exact retention tombstone whose completion basis is
+`accepted_response_then_exact_absence`. An unattributed unknown-request
+absence, public JSON, a partial selector, or a generic prior-adoption selector
+cannot authorize this action. A fresh complete queue observation after the
+removal completion must still prove absence. The reviewed plan binds the
+removal operation, plan, intent, completion, use, job, file-layout, activation,
+and observation-time lineage; changing only live-versus-retained storage form
+does not change the plan ID. The resulting adoption completion remains a normal
+stopped-job authority for reconciliation and activation.
 
 Transmission accepts only an explicit `torrent_added` response; its documented
 `torrent_duplicate` success envelope is treated as a rejected adoption, not as

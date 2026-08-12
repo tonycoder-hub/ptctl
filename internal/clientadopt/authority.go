@@ -39,6 +39,10 @@ type CompletionObservation struct {
 	ObservedAtStart        string `json:"observed_at_start"`
 	ObservedAtEnd          string `json:"observed_at_end"`
 	RetainedTombstone      bool   `json:"retained_tombstone"`
+	RemovalOperationID     string `json:"removal_operation_id,omitempty"`
+	RemovalPlanID          string `json:"removal_plan_id,omitempty"`
+	RemovalCompletionID    string `json:"removal_completion_id,omitempty"`
+	RemovalCompletionBasis string `json:"removal_completion_basis,omitempty"`
 	Assurance              string `json:"assurance"`
 }
 
@@ -120,7 +124,7 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 	}
 	authority := verified.authority
 	plan, completion := authority.plan, authority.completion
-	return CompletionObservation{
+	observation := CompletionObservation{
 		Driver: plan.Driver, Action: plan.Action, OperationID: authority.operationID.String(), PlanID: authority.planID, CompletionID: authority.completionID.String(),
 		MetafileVariantID: plan.MetafileVariantID, MetafileBytes: plan.MetafileBytes,
 		InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2,
@@ -134,6 +138,13 @@ func (verified *VerifiedCompletion) Observation() CompletionObservation {
 		ObservedAtEnd:     completion.ObservedAtEnd.UTC().Format(time.RFC3339Nano),
 		RetainedTombstone: authority.retained, Assurance: completionAssurance(authority),
 	}
+	if plan.TerminalRemoval != nil {
+		observation.RemovalOperationID = plan.TerminalRemoval.OperationID
+		observation.RemovalPlanID = plan.TerminalRemoval.PlanID
+		observation.RemovalCompletionID = plan.TerminalRemoval.CompletionID
+		observation.RemovalCompletionBasis = plan.TerminalRemoval.CompletionBasis
+	}
+	return observation
 }
 
 func completionAssurance(authority *verifiedCompletionAuthority) string {

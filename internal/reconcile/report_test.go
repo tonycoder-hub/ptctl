@@ -253,6 +253,35 @@ func TestClientAdoptionAssessmentBindsHistoricalCompletionToExistingBracket(t *t
 		!containsWarning(existingWarnings, "did not submit or prove") {
 		t.Fatalf("existing ledger=%#v blockers=%#v warnings=%#v", existingLedger, existingBlockers, existingWarnings)
 	}
+	removalPlanID := strings.Repeat("1", 24)
+	removalOperationDigest := sha256.Sum256([]byte("ptctl-client-removal-operation-v1\x00" + removalPlanID))
+	removalAuthorized := completion
+	removalAuthorized.Action = "readd_stopped_after_removal"
+	removalAuthorized.RemovalOperationID = "sha256:" + hex.EncodeToString(removalOperationDigest[:])
+	removalAuthorized.RemovalPlanID = removalPlanID
+	removalAuthorized.RemovalCompletionID = "sha256:" + strings.Repeat("2", 64)
+	removalAuthorized.RemovalCompletionBasis = "accepted_response_then_exact_absence"
+	removalLedger, removalBlockers, removalWarnings := assessClientAdoption(meta,
+		ClientAdoptionSelection{Requested: true, CompletionAttempted: true,
+			Completion: adoptionCompletionStub{value: removalAuthorized}, CurrentJob: adoptionCurrentJobStub{value: current}},
+		materialized, ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, client, other)
+	if removalLedger.Status != "historical_completion_current_job_bound" || removalLedger.Completion == nil ||
+		removalLedger.Completion.Action != "readd_stopped_after_removal" ||
+		removalLedger.Completion.RemovalOperationID != removalAuthorized.RemovalOperationID ||
+		len(removalBlockers) != 0 || len(removalWarnings) < 2 {
+		t.Fatalf("removal-authorized ledger=%#v blockers=%#v warnings=%#v", removalLedger, removalBlockers, removalWarnings)
+	}
+	invalidRemoval := removalAuthorized
+	invalidRemoval.RemovalCompletionBasis = "exact_absence_after_unknown_attempt_causality_unproven"
+	invalidLedger, invalidBlockers, _ := assessClientAdoption(meta,
+		ClientAdoptionSelection{Requested: true, CompletionAttempted: true,
+			Completion: adoptionCompletionStub{value: invalidRemoval}, CurrentJob: adoptionCurrentJobStub{value: current}},
+		materialized, ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, client, other)
+	if invalidLedger.Status != "incomplete" || invalidLedger.ProcessLocalCompletionProof ||
+		invalidLedger.StopReason != "adoption_completion_load_failed" ||
+		!containsFinding(invalidBlockers, "adoption.completion_proof_unavailable") {
+		t.Fatalf("invalid removal lineage ledger=%#v blockers=%#v", invalidLedger, invalidBlockers)
+	}
 	if got := overallOutcome("not_requested", false, "not_requested", false, "verified_materialized_final", true,
 		"exact_unique", "same_location", true, ledger.Status, true, "not_requested", false, "not_requested", false, "not_requested", false, "not_requested", false); got != "consistent" {
 		t.Fatalf("bound adoption did not preserve ordinary consistent lattice: %q", got)

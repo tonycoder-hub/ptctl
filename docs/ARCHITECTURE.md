@@ -1008,7 +1008,7 @@ once its last marker is absent, unattributed absence is operational exit `1`.
 
 `client adopt` is downstream of a committed copy-only materialize operation and
 deliberately stops before client verification or a transfer-state transition.
-Its reviewed plan selects exactly one of two actions:
+Its reviewed plan selects exactly one of three actions:
 
 ```text
 default stopped add:
@@ -1025,6 +1025,13 @@ observation-only existing stopped job:
     -> exact final reverify
     -> later complete typed observation of the same opaque stopped job
     -> durable existing-adopted-pending-recheck marker
+
+attributed stopped re-add after terminal keep-data removal:
+  bound terminal removal journal/tombstone with accepted-response attribution
+    + same current exact final + later complete typed queue absence
+    -> deterministic plan containing the exact removal/activation lineage
+    -> dedicated removal-re-add acknowledgement plus ordinary add acknowledgement
+    -> the ordinary stopped-add request and completion sequence
 ```
 
 The process-local `materialize.VerifiedFinal` is the only bridge from a
@@ -1100,6 +1107,29 @@ acknowledgement. No latest/by-age enumeration occurs, the prior operation or
 tombstone is not deleted or rewritten, and public JSON cannot recreate the
 process-local completion authority. The same rule applies to qBittorrent and
 v1-only Transmission adoption.
+
+An attributed terminal keep-data removal is a separate, stronger historical
+input and therefore produces the distinct `readd_stopped_after_removal` action.
+The caller supplies one exact removal operation and plan ID. Before credentials
+or network access, `clientremove.VerifyCompletion` must rebind either the live
+canonical journal or its exact retention tombstone and prove the completion
+basis `accepted_response_then_exact_absence`. The process-local projection
+binds the removed job/use/file-layout, activation terminal, client
+configuration, path mapping, typed hashes, materialized final identities, and
+removal observation interval. Public reports and JSON round trips cannot
+recreate that authority, and an absence after an unknown removal response is
+ineligible.
+
+Planning additionally requires the removal lineage to describe the same
+current exact final and mapping. Preview/run/resume take a fresh complete queue
+snapshot whose interval starts after the removal completion and require exact
+typed absence. Execution needs both `--acknowledge-client-add` and
+`--acknowledge-client-re-add-after-removal`; generic prior-adoption and
+terminal-removal selectors are mutually exclusive. The plan commits only
+immutable lineage, so pruning the removal journal to its tombstone does not
+change its deterministic ID. The new adoption completion carries the removal
+IDs and attributed basis into reconciliation, retention, and the ordinary
+activation handoff without upgrading any client or filesystem claim.
 
 The deterministic operation directory is reserved by the materialize layout
 validator and contains canonical no-clobber intent, bounded adoption-attempt,

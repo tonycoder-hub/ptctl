@@ -23,6 +23,7 @@ type RunOptions struct {
 	AcknowledgeAdd             bool
 	AcknowledgeExistingStopped bool
 	AcknowledgeReAdoption      bool
+	AcknowledgeRemovalReAdd    bool
 	RepeatAdd                  bool
 }
 
@@ -35,7 +36,7 @@ func FailureReport(prepared *PreparedPlan, expectedPlanID, operation string, req
 	report := newReport(prepared, expectedPlanID)
 	if operation == "run" || operation == "resume" {
 		report.Effect = append(report.Effect, "write_private_client_adoption_journal")
-		if prepared != nil && prepared.plan.Action == ActionAddStopped {
+		if prepared != nil && isStoppedAddAction(prepared.plan.Action) {
 			report.Effect = append(report.Effect, "submit_exact_metafile_stopped")
 		}
 	}
@@ -117,7 +118,7 @@ func PreflightRun(ctx context.Context, prepared *PreparedPlan, expectedPlanID st
 	if err := validatePrepared(prepared, expectedPlanID, payload); err != nil {
 		return err
 	}
-	if prepared.plan.Action == ActionAddStopped {
+	if isStoppedAddAction(prepared.plan.Action) {
 		if err := validateMetafilePayload(prepared, payload); err != nil {
 			return err
 		}
@@ -153,7 +154,7 @@ func PreflightRun(ctx context.Context, prepared *PreparedPlan, expectedPlanID st
 func Run(ctx context.Context, options RunOptions) (Report, error) {
 	report := newReport(options.Prepared, options.ExpectedPlanID)
 	report.Effect = append(report.Effect, "write_private_client_adoption_journal")
-	if options.Prepared != nil && options.Prepared.plan.Action == ActionAddStopped {
+	if options.Prepared != nil && isStoppedAddAction(options.Prepared.plan.Action) {
 		report.Effect = append(report.Effect, "submit_exact_metafile_stopped")
 	}
 	if err := validatePrepared(options.Prepared, options.ExpectedPlanID, options.Metafile); err != nil {
@@ -161,7 +162,7 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		report.finalize()
 		return report, err
 	}
-	if options.Prepared.plan.Action == ActionAddStopped {
+	if isStoppedAddAction(options.Prepared.plan.Action) {
 		if err := validateMetafilePayload(options.Prepared, options.Metafile); err != nil {
 			classifyFailure(&report, err)
 			report.finalize()
@@ -174,7 +175,7 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 			report.finalize()
 			return report, err
 		}
-	} else if options.Metafile != nil || options.AcknowledgeAdd || options.RepeatAdd || options.AcknowledgeReAdoption || !options.AcknowledgeExistingStopped {
+	} else if options.Metafile != nil || options.AcknowledgeAdd || options.RepeatAdd || options.AcknowledgeReAdoption || options.AcknowledgeRemovalReAdd || !options.AcknowledgeExistingStopped {
 		err := fmt.Errorf("%w: explicit observation-only existing-job adoption acknowledgement is required", ErrPolicy)
 		report.addBlocker("acknowledgement.existing_stopped_adoption_required", "observation-only adoption requires its dedicated acknowledgement and cannot use add or re-adoption authority")
 		classifyFailure(&report, err)
@@ -184,6 +185,21 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 	if options.Prepared.prior != nil && !options.AcknowledgeReAdoption {
 		err := fmt.Errorf("%w: explicit re-adoption acknowledgement is required", ErrPolicy)
 		report.addBlocker("acknowledgement.client_re_adoption_required", "re-adoption after a prior terminal job disappeared requires its dedicated acknowledgement")
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	if options.Prepared.removal != nil && !options.AcknowledgeRemovalReAdd {
+		err := fmt.Errorf("%w: explicit removal-authorized re-add acknowledgement is required", ErrPolicy)
+		report.addBlocker("acknowledgement.client_re_add_after_removal_required", "a new stopped add after an attributed terminal removal requires its dedicated acknowledgement")
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	if (options.Prepared.removal == nil && options.AcknowledgeRemovalReAdd) ||
+		(options.Prepared.prior == nil && options.AcknowledgeReAdoption) {
+		err := fmt.Errorf("%w: lineage acknowledgement does not match the reviewed adoption plan", ErrPolicy)
+		report.addBlocker("acknowledgement.lineage_mismatch", "the supplied re-adoption acknowledgement does not match the plan's bound historical lineage")
 		classifyFailure(&report, err)
 		report.finalize()
 		return report, err
@@ -209,7 +225,7 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 		report.finalize()
 		return report, err
 	}
-	if options.Prepared.plan.Action == ActionAddStopped {
+	if isStoppedAddAction(options.Prepared.plan.Action) {
 		if assessment.status != downloader.LedgerIdentityAbsent {
 			err = identityGateError(&report, assessment, true)
 			classifyFailure(&report, err)
@@ -266,7 +282,7 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 func Resume(ctx context.Context, operationID OperationID, options RunOptions) (Report, error) {
 	report := newReport(options.Prepared, options.ExpectedPlanID)
 	report.Effect = append(report.Effect, "read_private_client_adoption_journal", "write_private_client_adoption_journal")
-	if options.Prepared != nil && options.Prepared.plan.Action == ActionAddStopped {
+	if options.Prepared != nil && isStoppedAddAction(options.Prepared.plan.Action) {
 		report.Effect = append(report.Effect, "submit_exact_metafile_stopped")
 	}
 	if err := validatePrepared(options.Prepared, options.ExpectedPlanID, options.Metafile); err != nil {
@@ -274,14 +290,14 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 		report.finalize()
 		return report, err
 	}
-	if options.Prepared.plan.Action == ActionAddStopped {
+	if isStoppedAddAction(options.Prepared.plan.Action) {
 		if options.AcknowledgeExistingStopped {
 			err := fmt.Errorf("%w: stopped-add resume cannot use observation-only acknowledgement", ErrPolicy)
 			classifyFailure(&report, err)
 			report.finalize()
 			return report, err
 		}
-	} else if options.Metafile != nil || options.AcknowledgeAdd || options.RepeatAdd || options.AcknowledgeReAdoption || !options.AcknowledgeExistingStopped {
+	} else if options.Metafile != nil || options.AcknowledgeAdd || options.RepeatAdd || options.AcknowledgeReAdoption || options.AcknowledgeRemovalReAdd || !options.AcknowledgeExistingStopped {
 		err := fmt.Errorf("%w: observation-only resume requires its dedicated acknowledgement and no add authority", ErrPolicy)
 		report.addBlocker("acknowledgement.existing_stopped_adoption_required", "observation-only adoption resume requires its dedicated acknowledgement and cannot repeat an add")
 		classifyFailure(&report, err)
@@ -442,6 +458,21 @@ func Resume(ctx context.Context, operationID OperationID, options RunOptions) (R
 		report.finalize()
 		return report, err
 	}
+	if options.Prepared.removal != nil && !options.AcknowledgeRemovalReAdd {
+		err = fmt.Errorf("%w: explicit removal-authorized re-add acknowledgement is required", ErrPolicy)
+		report.addBlocker("acknowledgement.client_re_add_after_removal_required", "a new stopped add after an attributed terminal removal requires its dedicated acknowledgement")
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
+	if (options.Prepared.removal == nil && options.AcknowledgeRemovalReAdd) ||
+		(options.Prepared.prior == nil && options.AcknowledgeReAdoption) {
+		err = fmt.Errorf("%w: lineage acknowledgement does not match the reviewed adoption plan", ErrPolicy)
+		report.addBlocker("acknowledgement.lineage_mismatch", "the supplied re-adoption acknowledgement does not match the plan's bound historical lineage")
+		classifyFailure(&report, err)
+		report.finalize()
+		return report, err
+	}
 	if !options.AcknowledgeAdd {
 		err = fmt.Errorf("%w: explicit downloader-add acknowledgement is required", ErrPolicy)
 		report.addBlocker("acknowledgement.client_add_required", "client adoption requires explicit acknowledgement of the stopped add request")
@@ -489,6 +520,7 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 	}
 	plan := handle.state.Intent.Plan
 	report.Plan = planReport(plan, handle.state.Intent.PlanID, "")
+	applyHistoricalTerminalRemoval(&report, plan)
 	report.Final.Observation = historicalFinalObservation(plan)
 	report.Journal = journalReport(handle.state)
 	report.Warnings = append(report.Warnings, "read-only status observes canonical journal markers but does not refresh directory durability")
@@ -806,6 +838,9 @@ func readIdentityLedger(ctx context.Context, session downloader.LedgerSession, p
 	}
 	assessment, err := downloader.AssessLedgerIdentity(snapshot, prepared.typedIdentity())
 	result = downloaderAssessment{status: assessment.Status, started: snapshot.ObservedAtStart, ended: snapshot.ObservedAtEnd, result: assessment}
+	if prepared.removal != nil && snapshot.ObservedAtStart.Before(prepared.removal.ObservedAtEnd) {
+		return result, fmt.Errorf("%w: downloader absence observation predates the attributed terminal removal", ErrIntegrity)
+	}
 	return result, err
 }
 
@@ -929,6 +964,16 @@ func validatePrepared(prepared *PreparedPlan, expectedPlanID string, payload *me
 		if observation.OperationID != prepared.plan.PriorAdoptionOperationID || observation.PlanID != prepared.plan.PriorAdoptionPlanID ||
 			observation.CompletionID != prepared.plan.PriorAdoptionCompletionID {
 			return fmt.Errorf("%w: prepared prior adoption authority differs from the reviewed lineage", ErrIntegrity)
+		}
+	}
+	hasRemoval := prepared.plan.TerminalRemoval != nil
+	if hasRemoval != (prepared.removal != nil && prepared.removalProof != nil) {
+		return fmt.Errorf("%w: prepared terminal-removal authority is unavailable", ErrPolicy)
+	}
+	if hasRemoval {
+		value, ok := prepared.removalProof.AdoptionReAddPrerequisite()
+		if !ok || value.validate() != nil || value != *prepared.removal || value.planLink() != *prepared.plan.TerminalRemoval {
+			return fmt.Errorf("%w: prepared terminal-removal authority differs from the reviewed lineage", ErrIntegrity)
 		}
 	}
 	if prepared.plan.Action == ActionAdoptExistingStopped && payload != nil {
@@ -1077,6 +1122,7 @@ func applyRetainedJournalReport(report *Report, state journalState) {
 		plan := state.Intent.Plan
 		expected := report.Plan.ExpectedID
 		report.Plan = planReport(plan, state.Intent.PlanID, expected)
+		applyHistoricalTerminalRemoval(report, plan)
 		report.Final.Observation = historicalFinalObservation(plan)
 	}
 	switch {
