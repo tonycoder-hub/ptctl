@@ -71,6 +71,9 @@ type readSession struct {
 	closed                     bool
 	controlAttempted           bool
 	controlDescriptor          downloader.ExistingJobControlDescriptor
+	stopDescriptorAttempted    bool
+	stopDescriptor             downloader.ExistingJobStopDescriptor
+	stopAttempted              bool
 	removalDescriptorAttempted bool
 	removalDescriptor          downloader.ExistingJobRemovalDescriptor
 	removeAttempted            bool
@@ -206,6 +209,8 @@ var (
 	_ downloader.LedgerSession              = (*readSession)(nil)
 	_ downloader.MutationSession            = (*readSession)(nil)
 	_ downloader.ExistingJobMutationSession = (*readSession)(nil)
+	_ downloader.ExistingJobStopDriver      = (*Adapter)(nil)
+	_ downloader.ExistingJobStopSession     = (*readSession)(nil)
 	_ downloader.ExistingJobRemovalSession  = (*readSession)(nil)
 )
 

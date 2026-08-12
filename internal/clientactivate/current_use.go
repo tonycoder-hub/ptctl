@@ -279,14 +279,29 @@ func (verified *VerifiedCurrentUse) Observation() CurrentUseObservation {
 	return verified.observation
 }
 
-// RemovalRequest returns the same-session opaque job locator only while this
+// MutationRequest returns the same-session opaque job locator only while this
 // invocation still holds the verified current-use capability. The locator is
-// deliberately omitted from every public observation and JSON report.
-func (verified *VerifiedCurrentUse) RemovalRequest() (downloader.ExistingJobMutationRequest, bool) {
+// deliberately omitted from every public observation and JSON report. Callers
+// still need a narrower, code-owned mutation interface before using it.
+func (verified *VerifiedCurrentUse) MutationRequest() (downloader.ExistingJobMutationRequest, bool) {
 	if !verified.Verified() {
 		return downloader.ExistingJobMutationRequest{}, false
 	}
 	return downloader.ExistingJobMutationRequest{JobKey: verified.jobKey}, true
+}
+
+// RemovalRequest is retained for the keep-data removal workflow. It does not
+// grant any authority beyond MutationRequest.
+func (verified *VerifiedCurrentUse) RemovalRequest() (downloader.ExistingJobMutationRequest, bool) {
+	return verified.MutationRequest()
+}
+
+func (verified *VerifiedCurrentUse) JobStarted() bool {
+	return verified.Verified() && startedState(verified.observation.JobState)
+}
+
+func (verified *VerifiedCurrentUse) JobStopped() bool {
+	return verified.Verified() && completeStoppedState(verified.observation.JobState)
 }
 
 func (verified *VerifiedCurrentUse) SameSession(session downloader.LedgerSession) bool {
@@ -305,6 +320,42 @@ func (verified *VerifiedCurrentUse) Reobserve(ctx context.Context, session downl
 	}
 	if !verified.StableWith(after) {
 		return nil, observation, fmt.Errorf("%w: current downloader use changed across the removal bracket", ErrPolicy)
+	}
+	return after, observation, nil
+}
+
+// VerifyCurrentJobStopped closes a same-session stop bracket. The job state is
+// allowed to move from a complete started state to a complete stopped state;
+// every identity, layout, selection, progress, and final-filesystem claim must
+// remain stable and the second observation must begin after the first ended.
+func VerifyCurrentJobStopped(ctx context.Context, before *VerifiedCurrentUse, session downloader.LedgerSession) (*VerifiedCurrentUse, CurrentUseObservation, error) {
+	if before == nil || !before.JobStarted() || !before.SameSession(session) {
+		return nil, CurrentUseObservation{}, fmt.Errorf("%w: started current-use authority is unavailable", ErrPolicy)
+	}
+	after, observation, err := VerifyCurrentUse(ctx, before.authority, session)
+	if err != nil {
+		return nil, observation, err
+	}
+	if !after.JobStopped() || !before.stableAcrossStop(after) {
+		return nil, observation, fmt.Errorf("%w: downloader job did not make a stable transition to stopped", ErrPolicy)
+	}
+	return after, observation, nil
+}
+
+// VerifyExpectedJobStopped is the recovery form of VerifyCurrentJobStopped.
+// It proves a fresh stopped observation against the reviewed activation and
+// exact final, but does not attribute that state to an earlier request.
+func VerifyExpectedJobStopped(ctx context.Context, authority *CurrentUseAuthority, session downloader.LedgerSession, notBefore time.Time) (*VerifiedCurrentUse, CurrentUseObservation, error) {
+	if authority == nil || authority.prepared == nil || authority.completion == nil || !authority.completion.Verified() ||
+		authority.plan.Validate() != nil || session == nil {
+		return nil, CurrentUseObservation{}, fmt.Errorf("%w: expected current-use authority is unavailable", ErrPolicy)
+	}
+	after, observation, err := VerifyCurrentUse(ctx, authority, session)
+	if err != nil {
+		return nil, observation, err
+	}
+	if !after.JobStopped() || !notBefore.IsZero() && after.started.Before(notBefore) {
+		return nil, observation, fmt.Errorf("%w: downloader does not prove the reviewed exact job stopped after the requested boundary", ErrPolicy)
 	}
 	return after, observation, nil
 }
@@ -421,6 +472,24 @@ func (verified *VerifiedCurrentUse) StableWith(after *VerifiedCurrentUse) bool {
 		beforeObservation.ActivationPlanID == afterObservation.ActivationPlanID &&
 		beforeObservation.TerminalMarkerID == afterObservation.TerminalMarkerID &&
 		beforeObservation.JobState == afterObservation.JobState && beforeObservation.JobProgress == afterObservation.JobProgress &&
+		beforeObservation.Final == afterObservation.Final && !after.started.Before(verified.ended)
+}
+
+func (verified *VerifiedCurrentUse) stableAcrossStop(after *VerifiedCurrentUse) bool {
+	if !verified.Verified() || !after.Verified() {
+		return false
+	}
+	beforeObservation, afterObservation := verified.observation, after.observation
+	return verified.authority.useID == after.authority.useID && beforeObservation.UseID == afterObservation.UseID &&
+		sameLedgerSession(verified.session, after.session) && verified.jobKey == after.jobKey &&
+		beforeObservation.Driver == afterObservation.Driver && beforeObservation.JobID == afterObservation.JobID &&
+		beforeObservation.FileLayoutID == afterObservation.FileLayoutID &&
+		beforeObservation.CompleteFileSnapshotID == afterObservation.CompleteFileSnapshotID &&
+		beforeObservation.ActivationOperationID == afterObservation.ActivationOperationID &&
+		beforeObservation.ActivationPlanID == afterObservation.ActivationPlanID &&
+		beforeObservation.TerminalMarkerID == afterObservation.TerminalMarkerID &&
+		beforeObservation.JobProgress == afterObservation.JobProgress && beforeObservation.AllSelected == afterObservation.AllSelected &&
+		beforeObservation.AllComplete == afterObservation.AllComplete && beforeObservation.FileLimits == afterObservation.FileLimits &&
 		beforeObservation.Final == afterObservation.Final && !after.started.Before(verified.ended)
 }
 

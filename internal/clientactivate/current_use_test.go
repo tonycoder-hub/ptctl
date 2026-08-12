@@ -50,6 +50,10 @@ func TestCurrentUseRequiresStableCompleteExactJob(t *testing.T) {
 	if !ok || request.JobKey != fixture.opaqueKey {
 		t.Fatalf("removal request authority missing: %#v ok=%t", request, ok)
 	}
+	mutation, ok := before.MutationRequest()
+	if !ok || mutation != request {
+		t.Fatalf("generic mutation authority differs: %#v %#v ok=%t", mutation, request, ok)
+	}
 	serialized, err := json.Marshal(struct {
 		Verified    *VerifiedCurrentUse   `json:"verified"`
 		Observation CurrentUseObservation `json:"observation"`
@@ -74,6 +78,75 @@ func TestCurrentUseRequiresStableCompleteExactJob(t *testing.T) {
 	second, _, err := VerifyCurrentUse(context.Background(), authority, changedSession)
 	if err != nil || first.StableWith(second) {
 		t.Fatalf("state-changing bracket was stable: first=%#v second=%#v err=%v", first.Observation(), second.Observation(), err)
+	}
+}
+
+func TestCurrentUseProvesStableStoppedTransition(t *testing.T) {
+	fixture := makeActivationFixture(t)
+	completion := completeRecheckOnlyForCurrentUse(t, fixture)
+	hostRoot, err := filepath.EvalSymlinks(fixture.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := PrepareCurrentUse(fixture.verifiedFinal, completion, CurrentUseOptions{
+		ClientConfigID: fixture.clientConfig, HostRoot: hostRoot, ClientRoot: "/downloads",
+		FileLimits: downloader.DefaultJobFileLedgerLimits(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	started := fixture.job("uploading", 1)
+	stopped := fixture.job("stoppedUP", 1)
+	session := newActivationSession(fixture,
+		activationLedger(fixture.meta, &started, now),
+		activationLedger(fixture.meta, &stopped, now.Add(time.Second)))
+	before, _, err := VerifyCurrentUse(context.Background(), authority, session)
+	if err != nil || !before.JobStarted() || before.JobStopped() {
+		t.Fatalf("before=%#v err=%v", before.Observation(), err)
+	}
+	after, observation, err := VerifyCurrentJobStopped(context.Background(), before, session)
+	if err != nil || !after.JobStopped() || after.JobStarted() || observation.JobState != "stoppedUP" ||
+		observation.FileLayoutID != before.Observation().FileLayoutID || observation.Final != before.Observation().Final || session.RequestsMade() != 3 {
+		t.Fatalf("after=%#v requests=%d err=%v", observation, session.RequestsMade(), err)
+	}
+
+	recoverySession := newActivationSession(fixture, activationLedger(fixture.meta, &stopped, now.Add(2*time.Second)))
+	recovered, recoveredObservation, err := VerifyExpectedJobStopped(context.Background(), authority, recoverySession, now.Add(time.Second))
+	if err != nil || !recovered.JobStopped() || recoveredObservation.UseID != observation.UseID || recoverySession.RequestsMade() != 2 {
+		t.Fatalf("recovered=%#v requests=%d err=%v", recoveredObservation, recoverySession.RequestsMade(), err)
+	}
+}
+
+func TestCurrentUseRejectsUnchangedOrCrossSessionStopBracket(t *testing.T) {
+	fixture := makeActivationFixture(t)
+	completion := completeRecheckOnlyForCurrentUse(t, fixture)
+	hostRoot, err := filepath.EvalSymlinks(fixture.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := PrepareCurrentUse(fixture.verifiedFinal, completion, CurrentUseOptions{
+		ClientConfigID: fixture.clientConfig, HostRoot: hostRoot, ClientRoot: "/downloads",
+		FileLimits: downloader.DefaultJobFileLedgerLimits(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	started := fixture.job("uploading", 1)
+	session := newActivationSession(fixture,
+		activationLedger(fixture.meta, &started, now),
+		activationLedger(fixture.meta, &started, now.Add(time.Second)))
+	before, _, err := VerifyCurrentUse(context.Background(), authority, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, observation, err := VerifyCurrentJobStopped(context.Background(), before, session); !errors.Is(err, ErrPolicy) || observation.JobState != "uploading" {
+		t.Fatalf("unchanged job was accepted as stopped: %#v err=%v", observation, err)
+	}
+	other := newActivationSession(fixture, activationLedger(fixture.meta, &started, now.Add(2*time.Second)))
+	if _, _, err := VerifyCurrentJobStopped(context.Background(), before, other); !errors.Is(err, ErrPolicy) || other.RequestsMade() != 1 {
+		t.Fatalf("cross-session stop bracket was accepted: requests=%d err=%v", other.RequestsMade(), err)
 	}
 }
 
