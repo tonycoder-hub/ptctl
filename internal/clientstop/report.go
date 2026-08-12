@@ -21,6 +21,7 @@ const (
 	OutcomeIntegrityFailed     = "integrity_failed"
 	OutcomeAlreadyComplete     = "already_complete"
 	OutcomeHistoricalComplete  = "historical_stop_complete"
+	OutcomeHistoricalRetained  = "historical_stop_retained"
 )
 
 type PlanReport struct {
@@ -37,6 +38,20 @@ type OperationReport struct {
 	PhaseBefore string `json:"phase_before,omitempty"`
 	PhaseAfter  string `json:"phase_after,omitempty"`
 	Resumable   bool   `json:"resumable"`
+}
+
+type Finding struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type JournalRetentionReport struct {
+	State                      string `json:"state"`
+	IntentMarkerID             string `json:"intent_marker_id,omitempty"`
+	CompletionMarkerID         string `json:"completion_marker_id,omitempty"`
+	IntentDurable              bool   `json:"intent_durable"`
+	CompletionDurable          bool   `json:"completion_durable"`
+	HistoricalTerminalEvidence bool   `json:"historical_terminal_evidence"`
 }
 
 type WriteReport struct {
@@ -84,6 +99,7 @@ type Report struct {
 	Stopped   StoppedReport                        `json:"stopped"`
 	Final     materialize.FinalObservation         `json:"materialized_final"`
 	Assurance AssuranceReport                      `json:"assurance"`
+	Retention JournalRetentionReport               `json:"retention"`
 	Blockers  []string                             `json:"blockers"`
 	Warnings  []string                             `json:"warnings"`
 }
@@ -92,6 +108,7 @@ func newReport(prepared *PreparedPlan) Report {
 	report := Report{
 		Outcome: OutcomeBlocked, Effect: "none", Operation: OperationReport{Status: "not_created", Phase: "planned"},
 		Mutation: MutationReport{Status: "not_attempted"}, Stopped: StoppedReport{Status: "not_observed"},
+		Retention: JournalRetentionReport{State: "not_requested"},
 		Assurance: AssuranceReport{RequestRetryPolicy: "single_effectful_request_no_automatic_retry",
 			QueueEvidence: "not_observed", FilesystemEvidence: "not_reverified_after_stop", CompletionBasis: "not_completed",
 			Atomicity: "downloader_and_filesystem_observations_are_bracketed_non_atomic"},

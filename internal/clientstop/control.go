@@ -8,6 +8,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
+	"github.com/tonycoder-hub/ptctl/internal/materialize"
 )
 
 type StatusOptions struct {
@@ -35,10 +36,24 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 	}
 	handle, _, err := openJournal(ctx, options.TargetRoot, options.OperationID, false, nil)
 	if err != nil {
+		var forgetting *forgetInProgressError
+		if errors.As(err, &forgetting) {
+			applyForgetControlReport(&report, forgetting)
+			return report, nil
+		}
 		report.classify(err)
 		return report, err
 	}
 	defer handle.Close()
+	if handle.state.Retained {
+		applyRetainedJournalReport(&report, handle.state)
+		if handle.state.RetentionIntentID != "" && handle.state.Intent.PlanID != options.ExpectedPlanID {
+			err = fmt.Errorf("%w: client stop selector differs from the retained tombstone", ErrPolicy)
+			report.classify(err)
+			return report, err
+		}
+		return report, nil
+	}
 	report = reportFromJournal(handle.state)
 	report.Plan.ExpectedID, report.Plan.Matches = options.ExpectedPlanID, handle.state.Intent.PlanID == options.ExpectedPlanID
 	if handle.state.Intent.PlanID != options.ExpectedPlanID {
@@ -63,6 +78,11 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 	handle, recovery, err := openJournal(ctx, options.TargetRoot, options.OperationID, true, nil)
 	report.applyRecovery(recovery)
 	if err != nil {
+		var forgetting *forgetInProgressError
+		if errors.As(err, &forgetting) {
+			applyForgetControlReport(&report, forgetting)
+			return report, err
+		}
 		if journalRecoveryMayHaveChangedState(recovery) {
 			report.Operation.Status, report.Operation.Phase, report.Operation.Resumable = "recovery_incomplete", "marker_recovery_incomplete", true
 		}
@@ -70,6 +90,13 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 		return report, err
 	}
 	defer handle.Close()
+	if handle.state.Retained {
+		applyRetainedJournalReport(&report, handle.state)
+		err = fmt.Errorf("%w: retained client stop state cannot be resumed", ErrPolicy)
+		report.Blockers = append(report.Blockers, "client_stop.prune_boundary")
+		report.classify(err)
+		return report, err
+	}
 	report = reportFromJournal(handle.state)
 	report.applyRecovery(recovery)
 	report.Plan.ExpectedID, report.Plan.Matches = options.ExpectedPlanID, handle.state.Intent.PlanID == options.ExpectedPlanID
@@ -231,6 +258,50 @@ func reportFromJournal(state journalState) Report {
 		report.Blockers = append(report.Blockers, "client_stop.attempt_budget_exhausted")
 	}
 	return report
+}
+
+func applyRetainedJournalReport(report *Report, state journalState) {
+	if report == nil {
+		return
+	}
+	expected := report.Plan.ExpectedID
+	selectedOperation := report.Operation.ID
+	report.Effect = "read_private_client_stop_retention_tombstone"
+	report.Operation = OperationReport{ID: selectedOperation, Status: "retention_initializing", Phase: "retention_initializing", Resumable: false}
+	report.Retention = JournalRetentionReport{State: "initializing"}
+	report.Outcome = OutcomeIncomplete
+	if state.RetentionIntentID == "" {
+		report.Blockers = append(report.Blockers, "client_stop.prune_incomplete")
+		return
+	}
+	plan := state.Intent.Plan
+	report.Plan = PlanReport{ID: state.Intent.PlanID, ExpectedID: expected, Matches: expected == "" || expected == state.Intent.PlanID, Data: plan}
+	report.Operation.ID = state.Intent.OperationID.String()
+	report.Final = historicalStopFinal(plan, "historical_retention_tombstone_current_final_not_observed")
+	report.Assurance.QueueEvidence = "historical_retention_tombstone_only_not_currently_observed"
+	report.Assurance.FilesystemEvidence = "historical_plan_only_not_currently_reverified"
+	report.Assurance.CompletionBasis = state.Completion.Basis
+	report.Retention = JournalRetentionReport{State: "intent_recorded", IntentMarkerID: state.RetentionIntentID.String(),
+		IntentDurable: state.RetentionIntentDurable, HistoricalTerminalEvidence: true}
+	report.Operation.Status, report.Operation.Phase = "pruning", "retention_intent_recorded"
+	if state.RetentionComplete {
+		report.Outcome = OutcomeHistoricalRetained
+		report.Operation.Status, report.Operation.Phase = "retained", "retained_stop_completion"
+		report.Retention.State = "complete"
+		report.Retention.CompletionMarkerID = state.RetentionCompleteID.String()
+		report.Retention.CompletionDurable = true
+	} else {
+		report.Blockers = append(report.Blockers, "client_stop.prune_incomplete")
+	}
+	report.Warnings = append(report.Warnings,
+		"the retained tombstone is historical evidence and does not prove current downloader stopped state or current materialized bytes")
+}
+
+func historicalStopFinal(plan Plan, assurance string) materialize.FinalObservation {
+	return materialize.FinalObservation{OperationID: plan.MaterializeOperationID, MaterializePlanID: plan.MaterializePlanID,
+		MetafileVariantID: plan.MetafileVariantID, InfoHashV1: plan.InfoHashV1, InfoHashV2: plan.InfoHashV2,
+		TargetRootIdentity: plan.TargetRootIdentity, FinalObjectIdentity: plan.FinalObjectIdentity, MultiFile: plan.MultiFile,
+		ManifestFiles: plan.ManifestFiles, ContentBytes: plan.ContentBytes, AuthorityBasis: "historical_stop_journal", Assurance: assurance}
 }
 
 func statusOutcome(state journalState) string {

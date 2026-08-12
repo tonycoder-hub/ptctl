@@ -29,6 +29,18 @@ type clientStopJSONEnvelope struct {
 	Data   clientstop.Report `json:"data"`
 }
 
+type clientStopRetentionJSONEnvelope struct {
+	Schema string                     `json:"schema"`
+	Kind   string                     `json:"kind"`
+	Data   clientstop.RetentionReport `json:"data"`
+}
+
+type clientStopForgetJSONEnvelope struct {
+	Schema string                  `json:"schema"`
+	Kind   string                  `json:"kind"`
+	Data   clientstop.ForgetReport `json:"data"`
+}
+
 type transmissionClientStopCLIFixture struct {
 	materialized clientAdoptCLIFixture
 	server       *transmissionAdoptServer
@@ -229,6 +241,8 @@ func TestClientStopBadUsageDoesNotReadPassword(t *testing.T) {
 		{"client", "stop", "run", "--password-stdin", "--expect-stop-plan-id", planID, "--acknowledge-client-stop"},
 		{"client", "stop", "resume", "--password-stdin", "--expect-stop-plan-id", planID, "--acknowledge-repeat-stop", operation},
 		{"client", "stop", "status", "--target", `C:\not-opened`, "--expect-stop-plan-id", strings.Repeat("b", 24), operation},
+		{"client", "stop", "prune", "--target", `C:\not-opened`, "--expect-stop-plan-id", planID, operation},
+		{"client", "stop", "forget", "--target", `C:\not-opened`, "--expect-stop-plan-id", planID, operation},
 	} {
 		reader := &trackingReader{}
 		var out, errOut bytes.Buffer
@@ -236,6 +250,79 @@ func TestClientStopBadUsageDoesNotReadPassword(t *testing.T) {
 			t.Fatalf("args=%v code=%d read=%t stdout=%q stderr=%q", args, code, reader.read, out.String(), errOut.String())
 		}
 	}
+}
+
+func TestClientStopPruneAndForgetAreCredentialFreeLocalTransitions(t *testing.T) {
+	fixture := prepareClientStopCLIFixture(t)
+	base := clientStopBaseArgs(fixture)
+	planned := runClientStopJSON(t, append([]string{"client", "stop", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	runArgs := append([]string{"client", "stop", "run"}, base...)
+	runArgs = append(runArgs, "--expect-stop-plan-id", planned.Data.Plan.ID, "--acknowledge-client-stop")
+	stopped := runClientStopJSON(t, runArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	requests := fixture.server.totalRequests()
+
+	pruneArgs := []string{"client", "stop", "prune", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-stop-plan-id", planned.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", stopped.Data.Operation.ID}
+	reader := &trackingReader{}
+	prunedRaw := runClientStopRaw(t, pruneArgs, reader, 0)
+	var pruned clientStopRetentionJSONEnvelope
+	if err := json.Unmarshal(prunedRaw, &pruned); err != nil {
+		t.Fatal(err)
+	}
+	if reader.read || fixture.server.totalRequests() != requests || pruned.Kind != "client.stop.retention" ||
+		pruned.Data.Outcome != clientstop.RetentionOutcomePruned || !pruned.Data.Markers.ExactTombstone ||
+		pruned.Data.Proof.AttemptsRecorded != 1 || pruned.Data.Proof.ResponsesRecorded != 1 {
+		t.Fatalf("pruned=%#v read=%t requests=%d/%d", pruned.Data, reader.read, fixture.server.totalRequests(), requests)
+	}
+	assertClientStopPrivate(t, prunedRaw, fixture)
+
+	statusArgs := []string{"client", "stop", "status", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-stop-plan-id", planned.Data.Plan.ID, "--output", "json", stopped.Data.Operation.ID}
+	status := runClientStopJSON(t, statusArgs, &trackingReader{}, 0)
+	if status.Data.Outcome != clientstop.OutcomeHistoricalRetained || !status.Data.Retention.CompletionDurable || status.Data.Operation.Resumable {
+		t.Fatalf("retained status=%#v", status.Data)
+	}
+	resumeArgs := append([]string{"client", "stop", "resume"}, base...)
+	resumeArgs = append(resumeArgs, "--expect-stop-plan-id", planned.Data.Plan.ID, stopped.Data.Operation.ID)
+	reader = &trackingReader{}
+	blocked := runClientStopJSON(t, resumeArgs, reader, 4)
+	if reader.read || fixture.server.totalRequests() != requests || blocked.Data.Operation.Status != "retained" {
+		t.Fatalf("retained resume read=%t requests=%d/%d report=%#v", reader.read, fixture.server.totalRequests(), requests, blocked.Data)
+	}
+	runAgainArgs := append([]string{"client", "stop", "run"}, base...)
+	runAgainArgs = append(runAgainArgs, "--expect-stop-plan-id", planned.Data.Plan.ID, "--acknowledge-client-stop")
+	reader = &trackingReader{}
+	blockedRun := runClientStopJSON(t, runAgainArgs, reader, 4)
+	if reader.read || fixture.server.totalRequests() != requests || blockedRun.Data.Operation.Status != "retained" {
+		t.Fatalf("retained run read=%t requests=%d/%d report=%#v", reader.read, fixture.server.totalRequests(), requests, blockedRun.Data)
+	}
+
+	forgetArgs := []string{"client", "stop", "forget", "--target", fixture.materialized.materialize.targetRoot,
+		"--expect-stop-plan-id", planned.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json", stopped.Data.Operation.ID}
+	reader = &trackingReader{}
+	forgottenRaw := runClientStopRaw(t, forgetArgs, reader, 0)
+	var forgotten clientStopForgetJSONEnvelope
+	if err := json.Unmarshal(forgottenRaw, &forgotten); err != nil {
+		t.Fatal(err)
+	}
+	if reader.read || fixture.server.totalRequests() != requests || forgotten.Kind != "client.stop.forget" ||
+		forgotten.Data.Outcome != clientstop.ForgetOutcomeForgotten || !forgotten.Data.Authority.TargetHistoricalEvidenceErased ||
+		forgotten.Data.Authority.ExactTombstoneEvidenceAvailable {
+		t.Fatalf("forgotten=%#v read=%t requests=%d/%d", forgotten.Data, reader.read, fixture.server.totalRequests(), requests)
+	}
+	assertClientStopPrivate(t, forgottenRaw, fixture)
+
+	reader = &trackingReader{}
+	repeatedRaw := runClientStopRaw(t, forgetArgs, reader, 1)
+	var repeated clientStopForgetJSONEnvelope
+	if err := json.Unmarshal(repeatedRaw, &repeated); err != nil {
+		t.Fatal(err)
+	}
+	if reader.read || fixture.server.totalRequests() != requests || repeated.Data.Outcome != clientstop.ForgetOutcomeAbsentUnattributed ||
+		repeated.Data.WritesPerformed != 0 {
+		t.Fatalf("repeated forget=%#v read=%t requests=%d/%d", repeated.Data, reader.read, fixture.server.totalRequests(), requests)
+	}
+	assertClientStopPrivate(t, repeatedRaw, fixture)
 }
 
 func TestTransmissionClientStopUsesExactV1RPCAndStoppedProof(t *testing.T) {
@@ -342,6 +429,15 @@ func runClientStopJSON(t *testing.T, args []string, stdin ioReader, expectedCode
 		t.Fatalf("unexpected client stop envelope: %s", out.Bytes())
 	}
 	return result
+}
+
+func runClientStopRaw(t *testing.T, args []string, stdin ioReader, expectedCode int) []byte {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	if code := Run(args, stdin, &out, &errOut); code != expectedCode {
+		t.Fatalf("command=%v code=%d want=%d stdout=%q stderr=%q", args[:3], code, expectedCode, out.String(), errOut.String())
+	}
+	return out.Bytes()
 }
 
 func assertClientStopPrivate(t *testing.T, raw []byte, fixture clientRemoveCLIFixture) {

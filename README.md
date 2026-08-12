@@ -12,7 +12,7 @@ domains and reconciles them around verifiable torrent metadata.
 > workflow, reviewed `client adopt run|resume|prune|forget` stopped-add or
 > observation-only existing-stopped operations,
 > explicit `client activate run|resume|prune|forget` recheck/start operations,
-> acknowledged `client stop run|resume` exact-job stopped transitions,
+> acknowledged `client stop run|resume|prune|forget` exact-job stopped transitions,
 > acknowledged `client remove run|resume|prune|forget` exact-job removal that always
 > retains local data, acknowledged source-name retirement, and the separate
 > acknowledged `seed retire parent-cleanup run|resume|prune|forget` empty-directory boundary. The
@@ -31,7 +31,10 @@ domains and reconciles them around verifiable torrent metadata.
 > selected terminal recheck/start journal while retaining the exact historical
 > completion needed by source-retirement review; `client activate forget` has
 > a third acknowledgement and irreversibly removes only that retained
-> activation tombstone plus its last recovery marker. Outside the separately
+> activation tombstone plus its last recovery marker. `client stop prune`
+> likewise replaces one terminal stop request journal with an exact historical
+> tombstone; `client stop forget` separately and irreversibly removes only that
+> tombstone plus its final recovery marker. Outside the separately
 > acknowledged source-name retirement and empty-parent-cleanup workflows, no
 > listed operation overwrites, moves, rewrites, or deletes a source namespace
 > or published final layout. Retirement can unlink only the reviewed exact
@@ -242,7 +245,6 @@ capabilities at the edge, not assumptions in the core domain model.
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
 index alone, background refresh/watchers, downloader location or broader
 existing-job mutation beyond the exact stopped transition,
-prune/forget retention for client-stop journals,
 client-layout reconciliation for attributed file semantics such as padding or
 symlink leaves and for zero-length files without an observed physical binding,
   reflink/hardlink or cross-filesystem materialization, automatic execution of
@@ -1266,6 +1268,19 @@ ptctl client stop resume \
 ptctl client stop status --target "D:\\PT" \
   --expect-stop-plan-id STOP_PLAN_ID --output json \
   sha256:STOP_OPERATION_DIGEST
+
+# Compact only this terminal stop operation's private request journal. No
+# password or downloader connection is used.
+ptctl client stop prune --target "D:\\PT" \
+  --expect-stop-plan-id STOP_PLAN_ID \
+  --acknowledge-operation-state-deletion \
+  --output json sha256:STOP_OPERATION_DIGEST
+
+# Irreversibly erase only that exact compact historical tombstone.
+ptctl client stop forget --target "D:\\PT" \
+  --expect-stop-plan-id STOP_PLAN_ID \
+  --acknowledge-historical-evidence-deletion \
+  --output json sha256:STOP_OPERATION_DIGEST
 ```
 
 The stop plan binds the terminal activation lineage, typed identity, opaque
@@ -1279,9 +1294,28 @@ job in a complete stopped state with the same layout and a fresh exact final
 proof. Unknown transport results remain resumable but are never repeated
 automatically. JSON kind is `client.stop`.
 
-This slice deliberately retains its private stop journal and has no stop
-`prune` or `forget` command yet. That makes historical request attribution
-durable without pretending the later retention/deletion lifecycle exists.
+Stop pruning is a distinct local deletion authority. It requires one full stop
+operation ID, the reviewed stop plan ID, and
+`--acknowledge-operation-state-deletion`. Before deleting anything, it seals
+the exact terminal intent, bounded attempt chain, sparse response chain,
+completion, and all domain-separated marker IDs into a canonical owner-private
+retention intent. Only after that intent is durably published and rebound does
+it remove the original request markers and empty scratch directory; an exact
+retention completion closes the tombstone. Crashes at either boundary advance
+only through the same explicit selector. Ordinary run/resume cannot cross the
+retention boundary, and status labels the retained proof historical. JSON kind
+is `client.stop.retention`.
+
+Stop `forget` is a third, narrower irreversible boundary with its own
+`--acknowledge-historical-evidence-deletion`. It publishes a deterministic
+owner-private root recovery intent before touching the exact tombstone, then
+removes only those retained markers and the exact operation subtree, confirms
+durable absence, and removes the recovery intent last. Partial transitions are
+recoverable only through the same operation and plan IDs. Neither command
+opens a downloader session, reads a password, touches the job or content, or
+selects latest/by-age state. Once the last marker is gone, later absence is
+reported as `absent_unattributed`, never as proof of an earlier forget. JSON
+kind is `client.stop.forget`.
 
 Activation `prune` is a distinct local-only deletion boundary. It takes one
 full activation operation ID, the reviewed activation plan ID, and

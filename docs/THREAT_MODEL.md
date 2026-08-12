@@ -730,8 +730,28 @@ request unless both `--acknowledge-client-stop` and
 Read-only status has no credential or network authority and labels all remote
 and filesystem evidence historical. Reports omit endpoint, username, password,
 raw path, job key, magnet/tracker material, and private metafile bytes.
-Stop-journal prune/forget is not part of this slice; the private journal remains
-retained.
+Stop-journal pruning is a separate, locally acknowledged deletion authority.
+It accepts only one full operation ID and reviewed stop-plan ID; there is no
+latest/by-age selector. A canonical retention intent preserves the exact
+terminal intent, bounded attempt chain, sparse response chain, completion, and
+all marker links before any original marker is removed. The intent is durably
+published and rebound first; exact per-name deletion, an exact namespace audit,
+and a final retention completion follow. An intent-only or partially pruned
+state blocks ordinary run/resume and is advanced only by repeating the same
+explicit prune selector. Prune never reads stdin credentials, opens a client
+session, writes content, or selects another operation.
+
+Stop-tombstone forgetting has a third acknowledgement and publishes a
+deterministic owner-private root recovery marker before touching the complete
+tombstone. The marker binds the exact retained intent/completion, plan,
+operation-root identity, and target-root identity. Only those two markers,
+their empty directory, and the exact lock-only operation subtree may be
+removed; durable absence is checked before the root marker is removed last.
+Partial transitions remain recoverable through that marker and block run,
+resume, and prune before credentials or network access. After final deletion,
+later absence is deliberately unattributed. Forget cannot remove content,
+client jobs, source names, another operation, unexpected objects, or exported
+copies of historical evidence.
 
 Client removal is an independent existing-job mutation boundary. `plan` writes
 nothing; `run` requires `--acknowledge-client-removal`, and repeating a request
@@ -1246,7 +1266,6 @@ synthetic metafiles; real tracker artifacts are forbidden.
 - durable OS-keyring or audited credential-helper integration;
 - downloader location transitions and client-side
   private-variant observability;
-- prune/forget retention for client-stop journals;
 - recursive or policy-selected source-parent cleanup, block-reclamation
   accounting, and explicit retirement of unselected aliases; journaled
   retirement and the separate acknowledged parent-cleanup operation remove

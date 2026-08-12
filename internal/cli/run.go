@@ -182,6 +182,8 @@ Usage:
   ptctl client stop run [same selectors] --expect-stop-plan-id ID --acknowledge-client-stop [--output table|json]
   ptctl client stop resume [same selectors] --expect-stop-plan-id ID [--acknowledge-client-stop --acknowledge-repeat-stop] [--output table|json] OPERATION_ID
   ptctl client stop status --target PATH --expect-stop-plan-id ID [--output table|json] OPERATION_ID
+  ptctl client stop prune --target PATH --expect-stop-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl client stop forget --target PATH --expect-stop-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
   ptctl client remove plan [activation/final/mapping/client selectors] [--output table|json]
   ptctl client remove run [same selectors] --expect-removal-plan-id ID --acknowledge-client-removal [--output table|json]
   ptctl client remove resume [same selectors] --expect-removal-plan-id ID [--acknowledge-client-removal --acknowledge-repeat-removal] [--output table|json] OPERATION_ID
@@ -2276,6 +2278,10 @@ func jsonKind(data any) string {
 		return "client.removal.forget"
 	case clientstop.Report:
 		return "client.stop"
+	case clientstop.RetentionReport:
+		return "client.stop.retention"
+	case clientstop.ForgetReport:
+		return "client.stop.forget"
 	case sourceretire.Report:
 		return "content.source_retirement_plan"
 	case sourceretire.ExecutionReport:

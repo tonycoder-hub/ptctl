@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -57,6 +58,10 @@ func (a *app) clientStop(args []string) error {
 		return a.clientStopResume(args[1:])
 	case "status":
 		return a.clientStopStatus(args[1:])
+	case "prune":
+		return a.clientStopPrune(args[1:])
+	case "forget":
+		return a.clientStopForget(args[1:])
 	default:
 		return usageError("unknown client stop subcommand %q", args[0])
 	}
@@ -68,6 +73,8 @@ func (a *app) clientStopHelp() {
   ptctl client stop run [same selectors] --expect-stop-plan-id ID --acknowledge-client-stop [--output table|json]
   ptctl client stop resume [same selectors] --expect-stop-plan-id ID [--acknowledge-client-stop --acknowledge-repeat-stop] [--output table|json] OPERATION_ID
   ptctl client stop status --target PATH --expect-stop-plan-id ID [--output table|json] OPERATION_ID
+  ptctl client stop prune --target PATH --expect-stop-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
+  ptctl client stop forget --target PATH --expect-stop-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
 Plan is read-only. Run proves one complete started exact typed job on the
 reviewed materialized layout, journals intent, and sends one non-retried stop
@@ -76,7 +83,9 @@ job stopped with the same complete file layout, followed by exact final-file
 reverification. Resume observes first; a second request requires both stop and
 repeat acknowledgements. It may first recover one exact pending local marker;
 this never sends a downloader request. Status is local-only historical journal
-inspection. Stop journals have no prune/forget command in this slice.
+inspection. Prune is local-only and replaces one terminal journal with an exact
+historical tombstone. Forget has a separate acknowledgement and irreversibly
+removes that tombstone; neither command opens a downloader session.
 `)
 }
 
@@ -305,7 +314,14 @@ func (a *app) clientStopRun(args []string) error {
 	status, statusErr := clientstop.Status(ctx, clientstop.StatusOptions{TargetRoot: prepared.targetRoot, OperationID: operation, ExpectedPlanID: *expected})
 	if statusErr == nil || !errors.Is(statusErr, clientstop.ErrOperationNotFound) && !errors.Is(statusErr, clientstop.ErrInitializationIncomplete) {
 		if statusErr == nil {
-			statusErr = fmt.Errorf("%w: client stop operation already exists; use resume", clientstop.ErrPolicy)
+			message := "client stop operation already exists; use resume"
+			switch {
+			case status.Operation.Status == "forgetting" || status.Retention.State == "forgetting":
+				message = "client stop historical evidence deletion is in progress; use client stop forget"
+			case status.Retention.State != "not_requested":
+				message = "client stop operation has crossed the prune boundary and cannot be run again"
+			}
+			statusErr = fmt.Errorf("%w: %s", clientstop.ErrPolicy, message)
 			status = clientstop.WithFailure(status, statusErr)
 		}
 		return a.finishClientStop(prepared.output, status, statusErr)
@@ -369,6 +385,10 @@ func (a *app) clientStopResume(args []string) error {
 	markerRecoveryRequired := errors.Is(preflightErr, clientstop.ErrMarkerRecoveryRequired)
 	if preflightErr != nil && !initializationIncomplete && !markerRecoveryRequired {
 		return a.finishClientStop(prepared.output, preflight, preflightErr)
+	}
+	if preflight.Retention.State != "not_requested" || preflight.Operation.Status == "forgetting" {
+		policyErr := fmt.Errorf("%w: retained or forgetting client stop history cannot be resumed", clientstop.ErrPolicy)
+		return a.finishClientStop(prepared.output, clientstop.WithFailure(preflight, policyErr), policyErr)
 	}
 	if initializationIncomplete && !*ack || !initializationIncomplete && !markerRecoveryRequired && (preflight.Operation.Phase == "journaled" || preflight.Operation.Phase == "request_not_sent") && !*ack {
 		policyErr := fmt.Errorf("%w: client stop acknowledgement is required", clientstop.ErrPolicy)
@@ -436,6 +456,66 @@ func (a *app) clientStopStatus(args []string) error {
 	return a.finishClientStop(*output, report, operationErr)
 }
 
+func (a *app) clientStopPrune(args []string) error {
+	fs := newFlagSet("client stop prune")
+	output := fs.String("output", "table", "table or json")
+	target := fs.String("target", "", "materialized target root")
+	expected := fs.String("expect-stop-plan-id", "", "reviewed 24-hex client stop plan ID")
+	acknowledge := fs.Bool("acknowledge-operation-state-deletion", false, "acknowledge deletion of one terminal stop journal")
+	timeout := fs.Duration("timeout", time.Hour, "bounded private retention transition timeout")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *target == "" {
+		return usageError("client stop prune requires --target, --expect-stop-plan-id, acknowledgement, and one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validMaterializePlanID(*expected) || !*acknowledge {
+		return usageError("client stop prune requires canonical --expect-stop-plan-id and --acknowledge-operation-state-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("client stop prune --timeout must be in (0,1h]")
+	}
+	operation, err := clientstop.ParseOperationID(fs.Arg(0))
+	if err != nil || clientstop.OperationIDForPlan(*expected) != operation {
+		return usageError("client stop prune operation and plan IDs disagree")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := clientstop.Prune(ctx, clientstop.PruneOptions{TargetRoot: *target, OperationID: operation,
+		ExpectedPlanID: *expected, Acknowledge: true, Limits: clientstop.DefaultRetentionLimits()})
+	return a.finishClientStopRetention(*output, report, operationErr)
+}
+
+func (a *app) clientStopForget(args []string) error {
+	fs := newFlagSet("client stop forget")
+	output := fs.String("output", "table", "table or json")
+	target := fs.String("target", "", "materialized target root")
+	expected := fs.String("expect-stop-plan-id", "", "reviewed 24-hex client stop plan ID")
+	acknowledge := fs.Bool("acknowledge-historical-evidence-deletion", false, "acknowledge irreversible deletion of the retained stop tombstone")
+	timeout := fs.Duration("timeout", time.Minute, "historical-evidence deletion wall-clock budget")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *target == "" {
+		return usageError("client stop forget requires --target, --expect-stop-plan-id, acknowledgement, and one OPERATION_ID")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !validMaterializePlanID(*expected) || !*acknowledge {
+		return usageError("client stop forget requires canonical --expect-stop-plan-id and --acknowledge-historical-evidence-deletion")
+	}
+	if *timeout <= 0 || *timeout > time.Hour {
+		return usageError("client stop forget --timeout must be in (0,1h]")
+	}
+	operation, err := clientstop.ParseOperationID(fs.Arg(0))
+	if err != nil || clientstop.OperationIDForPlan(*expected) != operation {
+		return usageError("client stop forget operation and plan IDs disagree")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, operationErr := clientstop.Forget(ctx, clientstop.ForgetOptions{TargetRoot: *target, OperationID: operation,
+		ExpectedPlanID: *expected, Acknowledge: true, Limits: clientstop.DefaultForgetLimits()})
+	return a.finishClientStopForget(*output, report, operationErr)
+}
+
 func (a *app) finishClientStop(output string, report clientstop.Report, operationErr error) error {
 	if output == "json" {
 		if err := writeJSON(a.stdout, report, nil); err != nil {
@@ -458,6 +538,57 @@ func (a *app) finishClientStop(output string, report clientstop.Report, operatio
 		return &inconclusiveErr{message: "client stop is not complete; see report"}
 	}
 	return fmt.Errorf("client stop was interrupted; see report")
+}
+
+func (a *app) finishClientStopRetention(output string, report clientstop.RetentionReport, operationErr error) error {
+	if output == "json" {
+		if err := writeJSON(a.stdout, report, nil); err != nil {
+			return err
+		}
+	} else if output == "table" {
+		if err := writeClientStopRetentionHuman(a.stdout, report); err != nil {
+			return err
+		}
+	} else {
+		return usageError("--output must be table or json")
+	}
+	if operationErr == nil {
+		return nil
+	}
+	if errors.Is(operationErr, clientstop.ErrIntegrity) {
+		return &integrityErr{message: "client stop retention failed integrity validation; see report"}
+	}
+	if errors.Is(operationErr, clientstop.ErrPolicy) || errors.Is(operationErr, clientstop.ErrOperationNotFound) {
+		return &inconclusiveErr{message: "client stop retention is blocked; see report"}
+	}
+	return fmt.Errorf("client stop retention was interrupted; see report")
+}
+
+func (a *app) finishClientStopForget(output string, report clientstop.ForgetReport, operationErr error) error {
+	if output == "json" {
+		if err := writeJSON(a.stdout, report, nil); err != nil {
+			return err
+		}
+	} else if output == "table" {
+		if err := writeClientStopForgetHuman(a.stdout, report); err != nil {
+			return err
+		}
+	} else {
+		return usageError("--output must be table or json")
+	}
+	if operationErr == nil && report.Outcome == clientstop.ForgetOutcomeForgotten {
+		return nil
+	}
+	switch report.Outcome {
+	case clientstop.ForgetOutcomeIntegrityFailed:
+		return &integrityErr{message: "client stop historical evidence failed integrity validation; see report"}
+	case clientstop.ForgetOutcomeBlocked:
+		return &inconclusiveErr{message: "client stop historical-evidence deletion is blocked; see report"}
+	case clientstop.ForgetOutcomeAbsentUnattributed:
+		return fmt.Errorf("client stop historical evidence is absent without a remaining attribution marker; see report")
+	default:
+		return fmt.Errorf("client stop historical-evidence deletion was interrupted or its durability is unconfirmed; see report")
+	}
 }
 
 func writeClientStopHuman(out io.Writer, report clientstop.Report) error {
@@ -483,9 +614,77 @@ func writeClientStopHuman(out io.Writer, report clientstop.Report) error {
 		terminalSafe(report.Stopped.Status), terminalSafe(materializeValueOr(report.Stopped.Observation.JobState, "not_observed")), report.Stopped.Observation.RequestsMade,
 		terminalSafe(valueOrUnknown(report.Final.MetafileVariantID)), terminalSafe(valueOrUnknown(report.Final.FinalObjectIdentity)), report.Final.BytesVerified,
 		terminalSafe(report.Assurance.CompletionBasis), terminalSafe(report.Assurance.QueueEvidence), terminalSafe(report.Assurance.FilesystemEvidence), terminalSafe(report.Assurance.Atomicity))
+	fmt.Fprintf(w, "\nRETENTION\nSTATE\t%s\nINTENT MARKER\t%s\nCOMPLETION MARKER\t%s\nINTENT DURABLE\t%t\nCOMPLETION DURABLE\t%t\nHISTORICAL TERMINAL EVIDENCE\t%t\n",
+		terminalSafe(report.Retention.State), terminalSafe(materializeValueOr(report.Retention.IntentMarkerID, "none")),
+		terminalSafe(materializeValueOr(report.Retention.CompletionMarkerID, "none")), report.Retention.IntentDurable,
+		report.Retention.CompletionDurable, report.Retention.HistoricalTerminalEvidence)
 	fmt.Fprintln(w, "\nWARNINGS")
 	writeClientStopStrings(w, report.Warnings)
 	return w.Flush()
+}
+
+func writeClientStopRetentionHuman(out io.Writer, report clientstop.RetentionReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nPHASE BEFORE\t%s\nPHASE AFTER\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseBefore), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeClientStopFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / TARGET\nPLAN ID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nEXPECTED ROOT IDENTITY\t%s\nOBSERVED ROOT IDENTITY\t%s\nROOT BOUND\t%t\nSTABILITY\t%s\n",
+		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(valueOrUnknown(report.Plan.ExpectedID)), report.Plan.Matches,
+		terminalSafe(valueOrUnknown(report.Target.ExpectedRootIdentity)), terminalSafe(valueOrUnknown(report.Target.ObservedRootIdentity)),
+		report.Target.RootIdentityBound, terminalSafe(report.Target.StabilityAssurance))
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nINTENT ID\t%s\nCOMPLETION ID\t%s\nATTEMPTS\t%d\nRESPONSES\t%d\nAUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(valueOrUnknown(report.Proof.IntentID)), terminalSafe(valueOrUnknown(report.Proof.CompletionID)),
+		report.Proof.AttemptsRecorded, report.Proof.ResponsesRecorded, report.Proof.HistoricalAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nRETENTION / WRITES\nSTATE\t%s\nINTENT MARKER\t%s\nCOMPLETE MARKER\t%s\nINTENT DURABLE\t%t\nCOMPLETION DURABLE\t%t\nEXACT TOMBSTONE\t%t\nPRUNE RESUMABLE\t%t\nCONTROL DIRECTORIES\t%d\nTEMPORARY FILES\t%d\nMARKER PUBLICATIONS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\n",
+		terminalSafe(report.Markers.State), terminalSafe(valueOrUnknown(report.Markers.IntentMarkerID)), terminalSafe(valueOrUnknown(report.Markers.CompleteMarkerID)),
+		report.Markers.IntentDurable, report.Markers.CompletionDurable, report.Markers.ExactTombstone, report.Markers.PruneResumable,
+		report.Writes.ControlDirectoriesCreated, report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications,
+		report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved)
+	fmt.Fprintln(w, "\nISSUES")
+	writeClientStopFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	writeClientStopStrings(w, report.Warnings)
+	return w.Flush()
+}
+
+func writeClientStopForgetHuman(out io.Writer, report clientstop.ForgetReport) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES PERFORMED\t%d\nWRITES UNCERTAIN\t%t\nOPERATION ID\t%s\nOPERATION STATUS\t%s\nPHASE BEFORE\t%s\nPHASE AFTER\t%s\nRESUMABLE\t%t\n",
+		terminalSafe(string(report.Outcome)), terminalSafe(strings.Join(report.Effect, ",")), report.WritesPerformed, report.WritesUncertain,
+		terminalSafe(report.Operation.ID), terminalSafe(report.Operation.Status), terminalSafe(report.Operation.PhaseBefore), terminalSafe(report.Operation.PhaseAfter), report.Operation.Resumable)
+	fmt.Fprintln(w, "\nBLOCKERS")
+	writeClientStopFindings(w, report.Blockers)
+	fmt.Fprintf(w, "\nPLAN / TARGET\nPLAN ID\t%s\nEXPECTED ID\t%s\nMATCHES\t%t\nEXPECTED ROOT IDENTITY\t%s\nOBSERVED ROOT IDENTITY\t%s\nROOT BOUND\t%t\nSTABILITY\t%s\n",
+		terminalSafe(valueOrUnknown(report.Plan.ID)), terminalSafe(valueOrUnknown(report.Plan.ExpectedID)), report.Plan.Matches,
+		terminalSafe(valueOrUnknown(report.Target.ExpectedRootIdentity)), terminalSafe(valueOrUnknown(report.Target.ObservedRootIdentity)),
+		report.Target.RootIdentityBound, terminalSafe(report.Target.StabilityAssurance))
+	fmt.Fprintf(w, "\nAUTHORITY\nSTATE\t%s\nFORGET MARKER\t%s\nMARKER DURABLE\t%t\nRETENTION INTENT\t%s\nRETENTION COMPLETE\t%s\nEXACT TOMBSTONE EVIDENCE AVAILABLE\t%t\nTARGET HISTORICAL EVIDENCE ERASED\t%t\n",
+		terminalSafe(report.Authority.State), terminalSafe(valueOrUnknown(report.Authority.MarkerID)), report.Authority.MarkerDurable,
+		terminalSafe(valueOrUnknown(report.Authority.RetentionIntentMarkerID)), terminalSafe(valueOrUnknown(report.Authority.RetentionCompleteMarkerID)),
+		report.Authority.ExactTombstoneEvidenceAvailable, report.Authority.TargetHistoricalEvidenceErased)
+	fmt.Fprintf(w, "\nHISTORICAL PROOF\nBASIS\t%s\nINTENT ID\t%s\nCOMPLETION ID\t%s\nATTEMPTS\t%d\nRESPONSES\t%d\nAUTHORITY\t%t\nASSURANCE\t%s\n",
+		terminalSafe(report.Proof.Basis), terminalSafe(valueOrUnknown(report.Proof.IntentID)), terminalSafe(valueOrUnknown(report.Proof.CompletionID)),
+		report.Proof.AttemptsRecorded, report.Proof.ResponsesRecorded, report.Proof.HistoricalAuthority, terminalSafe(report.Proof.Assurance))
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nMARKER TEMPORARIES\t%d\nMARKER PUBLICATIONS\t%d\nAMBIGUOUS MARKER PUBLICATIONS\t%d\nREMOVAL ATTEMPTS\t%d\nFILES REMOVED\t%d\nDIRECTORIES REMOVED\t%d\nBYTES REMOVED\t%d\nAMBIGUOUS REMOVALS\t%d\nMAX MARKER BYTES\t%d\n",
+		report.Writes.MarkerTemporaryFiles, report.Writes.MarkerPublications, report.Writes.AmbiguousMarkerPublications, report.Writes.RemovalAttempts,
+		report.Writes.FilesRemoved, report.Writes.DirectoriesRemoved, report.Writes.BytesRemoved, report.Writes.AmbiguousRemovals, report.Limits.MaxMarkerBytes)
+	fmt.Fprintln(w, "\nISSUES")
+	writeClientStopFindings(w, report.Issues)
+	fmt.Fprintln(w, "\nWARNINGS")
+	writeClientStopStrings(w, report.Warnings)
+	return w.Flush()
+}
+
+func writeClientStopFindings(out io.Writer, findings []clientstop.Finding) {
+	if len(findings) == 0 {
+		fmt.Fprintln(out, "-\tnone")
+		return
+	}
+	for _, finding := range findings {
+		fmt.Fprintf(out, "-\t%s\t%s\n", terminalSafe(finding.Code), terminalSafe(finding.Message))
+	}
 }
 
 func writeClientStopStrings(out io.Writer, values []string) {

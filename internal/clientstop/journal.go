@@ -46,21 +46,27 @@ type journalRecoveryReceipt struct {
 }
 
 type journalState struct {
-	Intent       Intent
-	IntentID     MarkerID
-	Attempts     []Attempt
-	AttemptIDs   []MarkerID
-	Responses    map[int]Response
-	ResponseIDs  map[int]MarkerID
-	Completion   *Completion
-	CompletionID MarkerID
-	Pending      string
+	Intent                 Intent
+	IntentID               MarkerID
+	Attempts               []Attempt
+	AttemptIDs             []MarkerID
+	Responses              map[int]Response
+	ResponseIDs            map[int]MarkerID
+	Completion             *Completion
+	CompletionID           MarkerID
+	Pending                string
+	Retained               bool
+	RetentionIntentDurable bool
+	RetentionComplete      bool
+	RetentionIntentID      RetentionMarkerID
+	RetentionCompleteID    RetentionMarkerID
 }
 
 type journalHandle struct {
-	session *fsbind.Session
-	subtree *fsbind.Subtree
-	state   journalState
+	session   *fsbind.Session
+	subtree   *fsbind.Subtree
+	state     journalState
+	retention retentionState
 }
 
 type namedMarkerObservation struct {
@@ -116,7 +122,13 @@ func createJournal(ctx context.Context, targetRoot string, plan Plan, planID str
 	if rootInfo.Identity.String() != plan.TargetRootIdentity {
 		return failSession(fmt.Errorf("%w: target root identity differs from the client stop plan", ErrIntegrity))
 	}
-	directoryName, err := operationDirectoryName(OperationIDForPlan(planID))
+	operationID := OperationIDForPlan(planID)
+	if pending, inspectErr := inspectForgetControl(ctx, session, operationID, planID); inspectErr != nil {
+		return failSession(inspectErr)
+	} else if pending != nil {
+		return failSession(pending)
+	}
+	directoryName, err := operationDirectoryName(operationID)
 	if err != nil {
 		return failSession(err)
 	}
@@ -142,7 +154,7 @@ func createJournal(ctx context.Context, targetRoot string, plan Plan, planID str
 	if err := subtree.SyncDirectory(ctx, root); err != nil {
 		return fail(err)
 	}
-	intent := Intent{Schema: IntentSchemaV1, OperationID: OperationIDForPlan(planID), OperationRootIdentity: subtree.Identity().String(), PlanID: planID, Plan: plan}
+	intent := Intent{Schema: IntentSchemaV1, OperationID: operationID, OperationRootIdentity: subtree.Identity().String(), PlanID: planID, Plan: plan}
 	raw, id, err := encodeIntent(intent)
 	if err != nil {
 		return fail(err)
@@ -175,6 +187,11 @@ func openJournal(ctx context.Context, targetRoot string, operationID OperationID
 		_ = session.Close()
 		return nil, recovery, err
 	}
+	if pending, inspectErr := inspectForgetControl(ctx, session, operationID, ""); inspectErr != nil {
+		return failSession(inspectErr)
+	} else if pending != nil {
+		return failSession(pending)
+	}
 	directoryName, err := operationDirectoryName(operationID)
 	if err != nil {
 		return failSession(err)
@@ -190,6 +207,30 @@ func openJournal(ctx context.Context, targetRoot string, operationID OperationID
 	fail := func(err error) (*journalHandle, journalRecoveryReceipt, error) {
 		_ = handle.Close()
 		return nil, recovery, err
+	}
+	retention, retentionErr := loadRetentionState(ctx, handle, operationID, rootInfo.Identity)
+	if retentionErr != nil {
+		return fail(retentionErr)
+	}
+	if retention.ForgetPending {
+		return fail(&forgetInProgressError{marker: retention.ForgetIntent, markerID: retention.ForgetID})
+	}
+	if retention.DirectoryPresent {
+		limits := DefaultRetentionLimits()
+		switch {
+		case retention.IntentID != "":
+			if _, auditErr := auditRetentionNamespace(ctx, handle, retention.Intent, limits, true,
+				retention.IntentPresent, retention.CompletePresent); auditErr != nil {
+				return fail(auditErr)
+			}
+		default:
+			if _, liveErr := handle.readStateForRetention(ctx, operationID); liveErr != nil {
+				return fail(liveErr)
+			}
+		}
+		handle.retention = retention
+		handle.state = retention.journalState()
+		return handle, recovery, nil
 	}
 	state, err := handle.loadState(ctx, operationID)
 	if errors.Is(err, ErrInitializationIncomplete) && recoverPending {
@@ -311,6 +352,17 @@ func emptyJournalState(intent Intent, id MarkerID) journalState {
 }
 
 func (handle *journalHandle) loadState(ctx context.Context, operationID OperationID) (journalState, error) {
+	return handle.loadStateWithRetention(ctx, operationID, false)
+}
+
+func (handle *journalHandle) readStateForRetention(ctx context.Context, operationID OperationID) (journalState, error) {
+	if handle == nil || handle.subtree == nil {
+		return journalState{}, fmt.Errorf("%w: client stop journal authority is unavailable", ErrIntegrity)
+	}
+	return handle.loadStateWithRetention(ctx, operationID, true)
+}
+
+func (handle *journalHandle) loadStateWithRetention(ctx context.Context, operationID OperationID, allowRetention bool) (journalState, error) {
 	intentPath, _ := fsbind.PathFromComponents([]string{intentFileName})
 	if _, err := handle.subtree.Inspect(ctx, intentPath); errors.Is(err, fsbind.ErrNotFound) {
 		if validation := handle.validateUninitializedNamespace(ctx); validation != nil {
@@ -346,6 +398,7 @@ func (handle *journalHandle) loadState(ctx context.Context, operationID Operatio
 		switch {
 		case entry.Name == operationLockEntryName && entry.Kind == string(fsbind.ObjectKindRegular):
 		case entry.Name == scratchDirectory && entry.Kind == string(fsbind.ObjectKindDirectory):
+		case allowRetention && entry.Name == retentionDirectoryName && entry.Kind == string(fsbind.ObjectKindDirectory):
 		case entry.Name == intentFileName && entry.Kind == string(fsbind.ObjectKindRegular):
 		case entry.Name == completionFileName && entry.Kind == string(fsbind.ObjectKindRegular):
 			names = append(names, entry.Name)
@@ -513,6 +566,18 @@ func validateNextAttempt(state journalState, attempt Attempt) error {
 		}
 	}
 	return nil
+}
+
+func sameJournalEntries(left, right []fsbind.Entry) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateResponseForAttempt(state journalState, sequence int, response Response) error {

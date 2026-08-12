@@ -1315,8 +1315,31 @@ recovery has no downloader authority. An effectful repeat requires the base
 stop acknowledgement plus a separate repeat acknowledgement and remains capped
 by the fixed three-attempt budget. `status` reads only one explicit journal and
 labels queue/final evidence historical. Downloader and filesystem evidence are
-bracketed and non-atomic. This slice retains stop journals; a separate
-prune/forget retention lifecycle is not implemented yet.
+bracketed and non-atomic.
+
+`client stop prune` is a separate, credential-free local deletion authority.
+It accepts only one full operation ID and its reviewed stop-plan ID plus
+`--acknowledge-operation-state-deletion`; it has no list/latest or age-based
+selector. A canonical retention intent binds the target and operation-root
+identities and copies the exact terminal intent, ordered attempts, sparse
+response chain, completion, and all marker IDs. Only after that intent is
+durably published and rebound may the implementation remove those exact live
+journal markers and the empty scratch directory. It audits the remaining
+namespace and publishes a retention completion last. An intent-only crash state
+blocks ordinary run/resume and advances only through the same prune selector.
+The complete tombstone is non-executable historical evidence and cannot create
+current downloader or filesystem authority.
+
+`client stop forget` is the final historical-evidence boundary. With a separate
+acknowledgement and the same explicit operation/plan selector, it publishes a
+domain-separated root recovery intent before touching the complete tombstone.
+It removes only the retained completion, retained intent, their empty directory,
+and the exact lock-only operation subtree, confirms durable absence, and removes
+the root intent last. Status exposes partial transitions as `forgetting`, while
+run, resume, and prune stop before credential or network access. After the last
+marker is gone, subsequent absence is deliberately unattributed. Neither
+retention transition can touch the downloader job, content, source names,
+another operation, or exported copies of the reports.
 
 ## Exact downloader-job removal while keeping data
 

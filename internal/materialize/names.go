@@ -49,6 +49,11 @@ const (
 	// reviewed exact-job stop request and its stopped-state proof journal.
 	ClientStopOperationDirectoryPrefix = ".ptctl-client-stop-"
 	clientStopDirectoryPrefix          = ClientStopOperationDirectoryPrefix
+	// ClientStopForgetMarkerPrefix reserves the root-level, owner-private
+	// recovery marker used while one exact retained client-stop tombstone is
+	// being irreversibly forgotten.
+	ClientStopForgetMarkerPrefix = ".ptctl-client-stop-forget-"
+	clientStopForgetMarkerPrefix = ClientStopForgetMarkerPrefix
 	// SourceRetireOperationDirectoryPrefix is reserved for the separately
 	// acknowledged, journaled removal of source names after client activation.
 	SourceRetireOperationDirectoryPrefix = ".ptctl-source-retire-"
@@ -78,7 +83,7 @@ const (
 )
 
 func hasReservedControlPrefix(name string) bool {
-	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientAdoptForgetMarkerPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, clientRemoveDirectoryPrefix, clientRemoveForgetMarkerPrefix, clientStopDirectoryPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix, parentCleanupDirectoryPrefix, parentCleanupForgetMarkerPrefix}
+	prefixes := []string{operationDirectoryPrefix, materializeForgetMarkerPrefix, clientAdoptDirectoryPrefix, clientAdoptForgetMarkerPrefix, clientActivateDirectoryPrefix, clientActivateForgetMarkerPrefix, clientRemoveDirectoryPrefix, clientRemoveForgetMarkerPrefix, clientStopDirectoryPrefix, clientStopForgetMarkerPrefix, sourceRetireDirectoryPrefix, sourceRetireForgetMarkerPrefix, parentCleanupDirectoryPrefix, parentCleanupForgetMarkerPrefix}
 	for _, prefix := range prefixes {
 		if runtime.GOOS == "windows" {
 			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
