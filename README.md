@@ -433,6 +433,13 @@ ptctl storage index refresh \
   --state-store "D:\Private\ptctl-metafiles" \
   --profile media
 
+ptctl storage index refresh-discover \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --profile media \
+  --torrent release.torrent \
+  --target "D:\PT" \
+  --output json
+
 ptctl storage index inspect \
   --state-store "D:\Private\ptctl-metafiles" \
   --profile media
@@ -453,6 +460,18 @@ root before the result can be `stored`. A failed descriptor publication can
 leave an orphan data record, but latest selection lists descriptors only. Concurrent
 writers that produce the same maximum generation are reported as ambiguous;
 they are never ordered by wall-clock time.
+
+`storage index refresh-discover` is the explicit combined write/read boundary.
+Before writing, it validates the immutable profile, metafile, mapping, and all
+candidate/proof budgets; a manifest deeper than `--max-states` stops with zero
+index writes. Otherwise it publishes exactly the ordinary immutable data and
+descriptor generation, reopens every requested-size locator, and runs the
+ordinary exact v1/v2/hybrid matcher in the same process. Only a complete,
+unchanged invocation may return `verified_unique`, `verified_ambiguous`, or
+`not_found`. Its report keeps the two publication receipts and bounded scan
+accounting but omits profile paths and filesystem identity hints. This is a
+sequential, bracketed, non-atomic observation—not a durable freshness token.
+JSON or a later process cannot recreate its authority.
 
 Use a sealed snapshot as a bounded candidate source without scanning every
 directory again:
@@ -495,7 +514,8 @@ verified in that invocation; a serialized report has no authority. New or
 unindexed alternatives remain unobserved but do not make the explicitly chosen
 exact source unsafe to copy. Changing the descriptor, match, locator identity,
 or target requires a new review. Use ordinary same-call `--search-root`
-discovery whenever current uniqueness or absence itself is required.
+discovery, or the explicit effectful `storage index refresh-discover`, whenever
+current uniqueness or absence itself is required.
 If a safety budget stops evaluation of other historical assignments after the
 selected map has been proved, only that selected map remains authorized; the
 report stays explicit about incomplete alternative enumeration.

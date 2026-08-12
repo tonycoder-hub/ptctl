@@ -3,6 +3,9 @@ package storageindex
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,12 +34,44 @@ type RefreshResult struct {
 	ProfileRevision       string                        `json:"profile_revision"`
 	Generation            uint64                        `json:"generation"`
 	SnapshotID            string                        `json:"snapshot_id,omitempty"`
+	ObservedAtStart       time.Time                     `json:"observed_at_start,omitempty"`
+	ObservedAtEnd         time.Time                     `json:"observed_at_end,omitempty"`
 	DataRecord            metastore.RecordRef           `json:"data_record"`
 	DescriptorRecord      metastore.RecordRef           `json:"descriptor_record"`
 	DataPublication       metastore.RecordImportReceipt `json:"data_publication"`
 	DescriptorPublication metastore.RecordImportReceipt `json:"descriptor_publication"`
 	Scan                  storage.FullInventoryResult   `json:"scan"`
 	StopReasons           []string                      `json:"stop_reasons"`
+	authorityDigest       [sha256.Size]byte
+	authoritySet          bool
+}
+
+// HasLiveAuthority reports whether this is the unchanged process-local result
+// of one complete Refresh for the exact immutable profile. Serialized reports
+// lose the private authority bit, and changing any receipt, scan accounting,
+// root observation, or record reference invalidates the digest.
+func (result RefreshResult) HasLiveAuthority(profile Profile) bool {
+	if !result.authoritySet || result.Status != "stored" || !result.Scan.Complete ||
+		!fullInventoryRootsComplete(result.Scan.Roots) || len(result.StopReasons) != 0 ||
+		result.ProfileID != profile.ID || result.ProfileRevision != profile.Revision ||
+		result.SnapshotID == "" || result.DataRecord.ID == "" || result.DescriptorRecord.ID == "" ||
+		result.ObservedAtStart.IsZero() || result.ObservedAtEnd.Before(result.ObservedAtStart) || profile.Validate() != nil {
+		return false
+	}
+	digest := refreshAuthorityDigest(result)
+	return subtle.ConstantTimeCompare(result.authorityDigest[:], digest[:]) == 1
+}
+
+func refreshAuthorityDigest(result RefreshResult) [sha256.Size]byte {
+	// RefreshResult contains no maps. encoding/json therefore gives a stable
+	// field-ordered projection while deliberately omitting the private fields.
+	type publicRefresh RefreshResult
+	raw, err := json.Marshal(publicRefresh(result))
+	if err != nil {
+		return [sha256.Size]byte{}
+	}
+	payload := append([]byte("ptctl-storage-index-refresh-authority-v1\x00"), raw...)
+	return sha256.Sum256(payload)
 }
 
 type streamedInventory struct {
@@ -100,6 +135,7 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 		return result, err
 	}
 	result.SnapshotID = header.SnapshotID
+	result.ObservedAtStart = header.ObservedAtStart
 	roots, err := fullInventoryRoots(profile)
 	if err != nil {
 		return result, err
@@ -156,6 +192,7 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 	}
 	streamResult := <-streamed
 	result.Scan = streamResult.result
+	result.ObservedAtEnd = streamResult.footer.ObservedAtEnd
 	result.DataRecord = dataRef
 	result.DataPublication = dataReceipt
 	result.WritesPerformed += dataReceipt.WritesPerformed
@@ -209,6 +246,8 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 		return result, fmt.Errorf("storage index publication could not be revalidated")
 	}
 	result.Status = "stored"
+	result.authorityDigest = refreshAuthorityDigest(result)
+	result.authoritySet = true
 	return result, nil
 }
 

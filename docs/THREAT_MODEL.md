@@ -1156,6 +1156,27 @@ Consequently snapshot-only discovery always reports current search incomplete,
 never emits a plan, never claims `not_found` or `verified_unique`, and cannot
 make reconciliation consistent.
 
+The explicit `storage index refresh-discover` command does not weaken that
+rule. It may use completeness only inside the invocation that performed the
+full bounded inventory, published and jointly revalidated its exact immutable
+data/descriptor pair, reloaded requested sizes, and reopened every retained
+locator before the ordinary exact content proof. Private digests bind the
+refresh and candidate values to the same profile revision, generation, exact
+record IDs, initialized store identity, counters, diagnostics, and observation
+interval. A copied DTO, JSON round trip, later snapshot load, changed
+locator/root/hint, or any budget stop loses current-search authority. The
+result is explicitly
+same-invocation bracketed non-atomic; it does not claim the namespace remained
+frozen between reads or after return.
+
+The candidate-state budget is checked before the effectful boundary. A manifest
+that cannot fit it causes no inventory and no record write. If inventory
+publication succeeds but candidate/path/proof work later becomes incomplete,
+the report retains the actual data/descriptor write receipts while refusing
+unique or absent conclusions. Public output contains stable profile/snapshot/
+record IDs and bounded counts, but not stored root bytes, filesystem/root hints,
+private relative issue paths, raw source paths, or any reusable authority.
+
 Profiles bind exact root bytes, platform/path semantics, one-filesystem/network
 policy, and hard scan budgets. Display names and creation times are not
 authority. A profile from another GOOS is inspectable but rejected for live
@@ -1248,7 +1269,8 @@ interruptible. Users should narrow roots and budgets before scanning mounted
 remote storage.
 
 `metafile store init`, `metafile store import`, `storage profile create`,
-`storage index refresh`, the artifact/binding phases of `site metafile fetch`,
+`storage index refresh`, `storage index refresh-discover`, the artifact/binding
+phases of `site metafile fetch`,
 acknowledged materialize operations, acknowledged exact stopped-job
 adoption/activation, acknowledged exact current-job stop, and acknowledged
 exact keep-data client removal are the

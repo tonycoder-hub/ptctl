@@ -10,7 +10,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
+	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
@@ -209,15 +211,161 @@ func (a *app) storageProfileInspect(args []string) error {
 
 func (a *app) storageIndexCommand(args []string) error {
 	if len(args) == 0 {
-		return usageError("storage index requires refresh or inspect")
+		return usageError("storage index requires refresh, refresh-discover, or inspect")
 	}
 	switch args[0] {
 	case "refresh":
 		return a.storageIndexRefresh(args[1:])
+	case "refresh-discover":
+		return a.storageIndexRefreshDiscover(args[1:])
 	case "inspect":
 		return a.storageIndexInspect(args[1:])
 	default:
 		return usageError("unknown storage index subcommand %q", args[0])
+	}
+}
+
+func (a *app) storageIndexRefreshDiscover(args []string) error {
+	fs := newFlagSet("storage index refresh-discover")
+	output := fs.String("output", "table", "table or json")
+	stateStore := fs.String("state-store", "", "initialized private state/metafile store root")
+	profileSelector := fs.String("profile", "", "storage profile name or immutable ID")
+	torrentPath := fs.String("torrent", "", "metafile path")
+	metafileStore := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
+	metafileVariant := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
+	target := fs.String("target", "", "optional target storage root for a layout-only plan")
+	strategy := fs.String("strategy", "copy", "layout plan strategy; only copy is supported")
+	showAbsolute := fs.Bool("show-absolute-paths", false, "include absolute verified source and target paths in output")
+	requireVerified := fs.Bool("require-verified", false, "exit 4 after the report unless source_outcome is verified_unique")
+	timeout := fs.Duration("timeout", time.Hour, "shared refresh, reobservation, and proof wall-clock budget")
+	hostRoot := fs.String("host-root", "", "optional host namespace root for source paths, or target paths with --target")
+	clientRoot := fs.String("client-root", "", "optional downloader namespace root paired with --host-root")
+	clientStyle := fs.String("client-style", "posix", "downloader path style: posix or windows; requires host/client roots")
+
+	candidateDefaults := storageindex.DefaultCandidateLimits()
+	maxCandidates := fs.Int("max-candidates", candidateDefaults.MaxCandidates, "maximum requested-size index candidates reobserved")
+	maxCandidatePathBytes := fs.Int64("max-candidate-path-bytes", candidateDefaults.MaxPathBytes, "maximum retained candidate relative-path bytes")
+	maxCandidateIssues := fs.Int("max-candidate-issues", candidateDefaults.MaxIssues, "maximum candidate reobservation issues retained")
+
+	matchDefaults := metafile.DefaultSourceMatchLimits()
+	maxCandidatesPerFile := fs.Int("max-candidates-per-file", matchDefaults.MaxCandidatesPerFile, "maximum candidates explored for one torrent file")
+	maxCandidateEdges := fs.Int("max-candidate-edges", matchDefaults.MaxCandidateEdges, "maximum manifest-file to source-candidate edges considered")
+	maxStates := fs.Int("max-states", matchDefaults.MaxStates, "maximum candidate assignment states; checked before index publication")
+	maxVerifiedLayouts := fs.Int("max-verified-layouts", matchDefaults.MaxVerifiedLayouts, "maximum verified alternatives retained")
+	maxProofBytes := fs.Int64("max-proof-bytes", matchDefaults.MaxProofWorkBytes, "maximum physical and virtual bytes charged to proof work")
+	if handled, err := parseStorageFlags(a, fs, args,
+		"ptctl storage index refresh-discover --state-store DIR --profile PROFILE (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) [flags]",
+		"Explicitly writes one complete immutable index generation, then reobserves requested-size locators and runs exact source discovery in the same invocation. Only this process-local bracket may prove current uniqueness or absence; later reads remain historical candidate evidence."); handled || err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *stateStore == "" || *profileSelector == "" {
+		return usageError("storage index refresh-discover requires --state-store, --profile, one metafile input, and flags only")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if *timeout <= 0 || *timeout > 7*24*time.Hour {
+		return usageError("--timeout must be greater than zero and no more than 168h")
+	}
+	if *strategy != "copy" {
+		return usageError("--strategy must be copy; layout strategies are used only with --target")
+	}
+	if flagWasSet(fs, "strategy") && *target == "" {
+		return usageError("--strategy requires --target")
+	}
+	if *clientStyle != "posix" && *clientStyle != "windows" {
+		return usageError("--client-style must be posix or windows")
+	}
+	if (*hostRoot == "") != (*clientRoot == "") {
+		return usageError("--host-root and --client-root must be provided together")
+	}
+	if flagWasSet(fs, "client-style") && *hostRoot == "" {
+		return usageError("--client-style requires --host-root and --client-root")
+	}
+	if *hostRoot != "" {
+		if err := storage.ValidatePathMappingConfig(*hostRoot, *clientRoot, *clientStyle == "windows"); err != nil {
+			return usageError("storage index refresh-discover path mapping is invalid: %v", err)
+		}
+	}
+	candidateLimits := candidateDefaults
+	candidateLimits.MaxCandidates = *maxCandidates
+	candidateLimits.MaxPathBytes = *maxCandidatePathBytes
+	candidateLimits.MaxIssues = *maxCandidateIssues
+	if err := candidateLimits.Validate(); err != nil {
+		return usageError("storage index refresh-discover: %v", err)
+	}
+	matchLimits := matchDefaults
+	matchLimits.MaxCandidatesPerFile = *maxCandidatesPerFile
+	matchLimits.MaxCandidateEdges = *maxCandidateEdges
+	matchLimits.MaxStates = *maxStates
+	matchLimits.MaxVerifiedLayouts = *maxVerifiedLayouts
+	matchLimits.MaxProofWorkBytes = *maxProofBytes
+	if err := matchLimits.Validate(); err != nil {
+		return usageError("storage index refresh-discover: %v", err)
+	}
+	input, err := flaggedMetafileInput(
+		"storage index refresh-discover", *torrentPath, *metafileStore, *metafileVariant,
+		flagWasSet(fs, "torrent"), flagWasSet(fs, "metafile-store"), flagWasSet(fs, "metafile-variant"),
+	)
+	if err != nil {
+		return err
+	}
+	meta, err := loadMetafileInput(context.Background(), input)
+	if err != nil {
+		return err
+	}
+	store, err := metastore.Open(*stateStore)
+	if err != nil {
+		return err
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		return err
+	}
+	selection, err := repository.SelectProfile(context.Background(), *profileSelector)
+	if err != nil {
+		return err
+	}
+	if err := storageindex.ValidateProfileForLiveUse(selection.Profile, storageindex.DefaultLimits()); err != nil {
+		return err
+	}
+	inventoryLimits := discoveryInventoryLimitsFromProfile(selection.Profile, candidateLimits)
+	if err := inventoryLimits.Validate(); err != nil {
+		return err
+	}
+	options := seed.DiscoverOptions{
+		InventoryLimits: inventoryLimits, MatchLimits: matchLimits, ShowAbsolutePaths: *showAbsolute,
+		TimeBudget: *timeout, TargetRoot: *target, Strategy: *strategy,
+	}
+	if *hostRoot != "" {
+		options.ClientMapping = &seed.ClientMappingOptions{HostRoot: *hostRoot, ClientRoot: *clientRoot, ClientWindows: *clientStyle == "windows"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	result, discoverErr := seed.RefreshAndDiscoverFromIndex(ctx, repository, meta, selection.Profile, candidateLimits, options, storageindex.RefreshOptions{})
+	if *output == "json" {
+		err = writeJSON(a.stdout, result, nil)
+	} else {
+		err = writeDiscoveryHuman(a.stdout, result)
+	}
+	if err != nil {
+		return err
+	}
+	if discoverErr != nil {
+		return discoverErr
+	}
+	if *requireVerified && result.SourceOutcome != "verified_unique" {
+		return &inconclusiveErr{message: "storage index refresh-discover source outcome is not verified_unique"}
+	}
+	return nil
+}
+
+func discoveryInventoryLimitsFromProfile(profile storageindex.Profile, candidates storageindex.CandidateLimits) storage.InventoryLimits {
+	return storage.InventoryLimits{
+		MaxRoots: len(profile.Roots), MaxDepth: profile.ScanLimits.MaxDepth,
+		MaxDirectories: profile.ScanLimits.MaxDirectories, MaxEntries: profile.ScanLimits.MaxEntries,
+		MaxEntriesPerDirectory: profile.ScanLimits.MaxEntriesPerDirectory,
+		MaxCandidates:          candidates.MaxCandidates, MaxPathBytes: candidates.MaxPathBytes, MaxIssues: candidates.MaxIssues,
 	}
 }
 

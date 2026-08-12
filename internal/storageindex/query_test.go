@@ -153,3 +153,69 @@ func TestLoadCandidatesCandidateBudgetIsNPlusOneAndStillVerifiesSnapshot(t *test
 		t.Fatalf("candidate budget contract failed: query=%#v err=%v", query, err)
 	}
 }
+
+func TestRefreshAndLoadCandidatesBindsOnlySameInvocationCompleteGeneration(t *testing.T) {
+	repository := testRepository(t)
+	ctx := context.Background()
+	root := physicalIndexTempDir(t)
+	writeTestFile(t, filepath.Join(root, "wanted.bin"), []byte("payload"))
+	writeTestFile(t, filepath.Join(root, "other.bin"), []byte("other"))
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh, candidates, err := repository.RefreshAndLoadCandidates(ctx, profileReceipt.Profile, []int64{7}, DefaultCandidateLimits(), RefreshOptions{Clock: deterministicClock(time.Now().UTC())})
+	if err != nil || !refresh.HasLiveAuthority(profileReceipt.Profile) || !candidates.HasLiveAuthority(profileReceipt.Profile) ||
+		!candidates.CurrentSearchComplete || candidates.CurrentSearch == nil || candidates.CurrentSearch.Status != "complete" || len(candidates.Candidates) != 1 ||
+		candidates.DescriptorRecordID != refresh.DescriptorRecord.ID || candidates.DataRecordID != refresh.DataRecord.ID {
+		t.Fatalf("same-invocation generation was not bound: refresh=%#v candidates=%#v err=%v", refresh, candidates, err)
+	}
+
+	refreshRaw, err := json.Marshal(refresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayedRefresh RefreshResult
+	if err := json.Unmarshal(refreshRaw, &replayedRefresh); err != nil {
+		t.Fatal(err)
+	}
+	if replayedRefresh.HasLiveAuthority(profileReceipt.Profile) {
+		t.Fatal("serialized refresh recovered process-local authority")
+	}
+	candidateRaw, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayedCandidates CandidateResult
+	if err := json.Unmarshal(candidateRaw, &replayedCandidates); err != nil {
+		t.Fatal(err)
+	}
+	if replayedCandidates.HasLiveAuthority(profileReceipt.Profile) {
+		t.Fatal("serialized current candidates recovered process-local authority")
+	}
+
+	historical, err := repository.LoadCandidates(ctx, profileReceipt.Profile, refresh.DescriptorRecord.ID, []int64{7}, DefaultCandidateLimits())
+	if err != nil || !historical.HasLiveAuthority(profileReceipt.Profile) || historical.CurrentSearchComplete || historical.CurrentSearch != nil {
+		t.Fatalf("later sealed read did not lose current completeness: %#v err=%v", historical, err)
+	}
+}
+
+func TestRefreshAndLoadCandidatesBudgetNeverClaimsCurrentCompleteness(t *testing.T) {
+	repository := testRepository(t)
+	ctx := context.Background()
+	root := physicalIndexTempDir(t)
+	writeTestFile(t, filepath.Join(root, "a.bin"), []byte("x"))
+	writeTestFile(t, filepath.Join(root, "b.bin"), []byte("y"))
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultCandidateLimits()
+	limits.MaxCandidates = 1
+	refresh, candidates, err := repository.RefreshAndLoadCandidates(ctx, profileReceipt.Profile, []int64{1}, limits, RefreshOptions{Clock: deterministicClock(time.Now().UTC())})
+	if err != nil || !refresh.HasLiveAuthority(profileReceipt.Profile) || !candidates.HasLiveAuthority(profileReceipt.Profile) ||
+		candidates.CurrentSearchComplete || candidates.CurrentSearch == nil || candidates.CurrentSearch.Status != "incomplete" ||
+		!containsString(candidates.StopReasons, "max_candidates") || !containsString(candidates.StopReasons, "current_refresh_changed_before_candidate_verification") {
+		t.Fatalf("truncated candidates gained current completeness: refresh=%#v candidates=%#v err=%v", refresh, candidates, err)
+	}
+}

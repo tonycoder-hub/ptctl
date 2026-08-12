@@ -162,6 +162,7 @@ Usage:
   ptctl storage profile create --state-store DIR --name NAME --search-root PATH [--search-root PATH...] [--output table|json]
   ptctl storage profile inspect --state-store DIR [--output table|json] PROFILE
   ptctl storage index refresh --state-store DIR --profile PROFILE [--output table|json]
+  ptctl storage index refresh-discover --state-store DIR --profile PROFILE (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) [--target PATH] [--output table|json]
   ptctl storage index inspect --state-store DIR --profile PROFILE [--snapshot-record ID] [--output table|json]
 
   ptctl client status --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
@@ -221,11 +222,11 @@ Safety defaults:
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.
-  * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes.
+  * Seed discovery and materialization planning have hard scan/proof budgets and perform no writes. Storage index refresh-discover is a separately named explicit write boundary which publishes one immutable generation before same-call proof.
   * Seed materialize run/resume copy only and never clobber; prune has a separate acknowledgement and deletes only one explicit operation's private state while retaining its tombstone; forget has a third acknowledgement and irreversibly deletes only that exact tombstone plus its last recovery marker.
   * Seed retire plan performs fresh proof reads only and grants no deletion authority. Run/resume require a separate exact plan ID and deletion acknowledgement, journal every explicit name, and never remove directories, aliases, padding, empty files, or final content. Prune has its own acknowledgement and deletes only one terminal operation's private journal while retaining a tombstone; forget has a third acknowledgement and deletes only that exact tombstone plus its last recovery marker.
   * Seed retire parent-cleanup plan is zero-write. Its separately acknowledged run/resume journal and remove only reviewed same-identity empty immediate parents; they never recurse into ancestors, search roots, files, or non-empty directories. Prune replaces one terminal cleanup journal with an exact no-path tombstone; forget separately and irreversibly removes only that exact tombstone through a final root-level recovery marker.
-  * Client adoption has two reviewed actions: add one absent exact-infohash job in stopped mode, or record an observation-only lineage for one already-present exact stopped job without submitting a metafile or mutating the downloader. Transmission is v1-only; a matching built-in driver can feed the separate reviewed recheck/start workflow. Adoption never rechecks, resumes, moves, or deletes content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
+  * Client adoption has three reviewed actions: add one absent exact-infohash job in stopped mode, re-add one job after an explicitly attributed terminal removal, or record an observation-only lineage for one already-present exact stopped job without submitting a metafile or mutating the downloader. Transmission is v1-only; a matching built-in driver can feed the separate reviewed recheck/start workflow. Adoption never rechecks, resumes, moves, or deletes content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
   * Client activation only rechecks or starts the reviewed exact existing job, with at most one non-retried mutation per invocation. Its separately acknowledged local prune deletes only one terminal private journal after sealing an exact tombstone and never reads a credential or contacts the client.
   * Client stop targets one reviewed complete started exact job, journals intent before one non-retried request, and requires a fresh exact stopped-state observation plus final filesystem re-verification before completion. Recovery observes first and never repeats an inconclusive request without a separate acknowledgement.
   * Client removal targets one reviewed typed-identity job, explicitly keeps local data, journals intent before one non-retried request, and requires exact queue absence plus final filesystem re-verification before completion.
@@ -3057,6 +3058,32 @@ func writeDiscoveryHuman(out io.Writer, result seed.DiscoveryResult) error {
 	} else {
 		for _, blocker := range result.Blockers {
 			fmt.Fprintf(w, "%s\t%s\n", terminalSafe(blocker.Code), terminalSafe(blocker.Message))
+		}
+	}
+	if result.IndexRefresh != nil {
+		inventoryInterval := "-"
+		if !result.IndexRefresh.ObservedAtStart.IsZero() && !result.IndexRefresh.ObservedAtEnd.IsZero() {
+			inventoryInterval = result.IndexRefresh.ObservedAtStart.UTC().Format(time.RFC3339Nano) + " .. " + result.IndexRefresh.ObservedAtEnd.UTC().Format(time.RFC3339Nano)
+		}
+		currentSearchEnd := "-"
+		if !result.IndexRefresh.CurrentSearchObservedAtEnd.IsZero() {
+			currentSearchEnd = result.IndexRefresh.CurrentSearchObservedAtEnd.UTC().Format(time.RFC3339Nano)
+		}
+		fmt.Fprintln(w, "\nINDEX REFRESH")
+		fmt.Fprintf(w, "STATUS\t%s\nWRITES\t%d\nPROFILE\t%s\nGENERATION\t%d\nSNAPSHOT\t%s\nDATA RECORD\t%s\nDESCRIPTOR RECORD\t%s\nINVENTORY INTERVAL\t%s\nFILES OBSERVED\t%d\nPATH BYTES\t%s\nASSURANCE\t%s\nCURRENT SEARCH\t%s\nCURRENT SEARCH END\t%s\nCURRENT SEARCH ASSURANCE\t%s\nCANDIDATES\t%d / %d\nCANDIDATE PATH BYTES\t%s / %s\n",
+			terminalSafe(result.IndexRefresh.Status), result.IndexRefresh.WritesPerformed,
+			terminalSafe(result.IndexRefresh.ProfileID), result.IndexRefresh.Generation,
+			terminalSafe(result.IndexRefresh.SnapshotID), terminalSafe(result.IndexRefresh.DataRecord.ID.String()),
+			terminalSafe(result.IndexRefresh.DescriptorRecord.ID.String()), terminalSafe(inventoryInterval), result.IndexRefresh.ScanUsed.FilesEmitted,
+			humanBytes(result.IndexRefresh.ScanUsed.EmittedPathBytes), terminalSafe(result.IndexRefresh.Assurance),
+			terminalSafe(result.IndexRefresh.CurrentSearchStatus), terminalSafe(currentSearchEnd), terminalSafe(result.IndexRefresh.CurrentSearchAssurance),
+			result.IndexRefresh.CandidateUsed.CandidatesRetained, result.IndexRefresh.CandidateLimits.MaxCandidates,
+			humanBytes(result.IndexRefresh.CandidateUsed.RetainedPathBytes), humanBytes(result.IndexRefresh.CandidateLimits.MaxPathBytes))
+		if len(result.IndexRefresh.StopReasons) > 0 {
+			fmt.Fprintf(w, "STOP REASONS\t%s\n", terminalSafe(strings.Join(result.IndexRefresh.StopReasons, ",")))
+		}
+		if len(result.IndexRefresh.CandidateStopReasons) > 0 {
+			fmt.Fprintf(w, "CANDIDATE STOPS\t%s\n", terminalSafe(strings.Join(result.IndexRefresh.CandidateStopReasons, ",")))
 		}
 	}
 	fmt.Fprintln(w, "\nSCAN STOPS")

@@ -95,6 +95,159 @@ func TestStorageProfileRefreshAndSnapshotOnlyDiscoveryArePrivateAndFailClosed(t 
 	}
 }
 
+func TestStorageIndexRefreshDiscoverProvesUniqueAndReportsPrivatePublication(t *testing.T) {
+	ctx := t.Context()
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentRoot := physicalCLITempDir(t)
+	content := []byte("refresh-discover-cli")
+	sourcePath := filepath.Join(contentRoot, "renamed-private-source.bin")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateProfile(ctx, "media", []string{contentRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(physicalCLITempDir(t), "source.torrent")
+	if err := os.WriteFile(torrentPath, testV1Metafile("final.bin", content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := physicalCLITempDir(t)
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"storage", "index", "refresh-discover", "--state-store", stateRoot, "--profile", "media",
+		"--torrent", torrentPath, "--target", targetRoot, "--require-verified", "--output", "json",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("refresh-discover: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	var envelope struct {
+		Schema string               `json:"schema"`
+		Kind   string               `json:"kind"`
+		Data   seed.DiscoveryResult `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	result := envelope.Data
+	if envelope.Schema != "ptctl.dev/v1" || envelope.Kind != "content.source_discovery" ||
+		result.SourceOutcome != "verified_unique" || result.Selection.Status != "ready" || result.Plan == nil ||
+		result.WritesPerformed != 2 || result.IndexRefresh == nil || result.IndexRefresh.Status != "stored" ||
+		result.IndexRefresh.WritesPerformed != 2 || result.IndexRefresh.DataRecord.ID == "" ||
+		result.IndexRefresh.DescriptorRecord.ID == "" || result.IndexRefresh.Assurance != "same_invocation_complete_generation_published_and_revalidated" ||
+		result.IndexRefresh.CurrentSearchStatus != "complete" || result.IndexRefresh.CurrentSearchObservedAtEnd.IsZero() ||
+		len(result.IndexRefresh.StopReasons) != 0 || len(result.IndexRefresh.CandidateStopReasons) != 0 {
+		t.Fatalf("unexpected refresh-discover report: %s", out.String())
+	}
+	if strings.Contains(out.String(), `"stop_reasons": null`) || strings.Contains(out.String(), `"candidate_stop_reasons": null`) {
+		t.Fatalf("empty refresh arrays encoded as null: %s", out.String())
+	}
+	assertJSONDoesNotContain(t, out.Bytes(), stateRoot, contentRoot, sourcePath, targetRoot, torrentPath)
+
+	descriptors, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil || len(descriptors.Records) != 1 || descriptors.Records[0].ID != result.IndexRefresh.DescriptorRecord.ID {
+		t.Fatalf("descriptor publication mismatch: %#v err=%v", descriptors, err)
+	}
+	data, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDataV1, metastore.DefaultRecordLimits())
+	if err != nil || len(data.Records) != 1 || data.Records[0].ID != result.IndexRefresh.DataRecord.ID {
+		t.Fatalf("data publication mismatch: %#v err=%v", data, err)
+	}
+}
+
+func TestStorageIndexRefreshDiscoverReportsNotFoundBeforeRequireExit(t *testing.T) {
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentRoot := physicalCLITempDir(t)
+	if _, err := repository.CreateProfile(t.Context(), "empty", []string{contentRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(physicalCLITempDir(t), "absent.torrent")
+	if err := os.WriteFile(torrentPath, testV1Metafile("absent.bin", []byte("not-present")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"storage", "index", "refresh-discover", "--state-store", stateRoot, "--profile", "empty",
+		"--torrent", torrentPath, "--require-verified", "--output", "json",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 4 || !strings.Contains(errOut.String(), "not verified_unique") {
+		t.Fatalf("not-found require exit: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	var envelope struct {
+		Data seed.DiscoveryResult `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.SourceOutcome != "not_found" || envelope.Data.WritesPerformed != 2 || envelope.Data.IndexRefresh == nil || envelope.Data.IndexRefresh.Status != "stored" {
+		t.Fatalf("not-found report was lost before require exit: %s", out.String())
+	}
+}
+
+func TestStorageIndexRefreshDiscoverManifestBudgetPerformsNoWrite(t *testing.T) {
+	ctx := t.Context()
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentRoot := physicalCLITempDir(t)
+	if _, err := repository.CreateProfile(ctx, "media", []string{contentRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(physicalCLITempDir(t), "bundle.torrent")
+	if err := os.WriteFile(torrentPath, testV1MultiFileMetafile([]byte("abcdef")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"storage", "index", "refresh-discover", "--state-store", stateRoot, "--profile", "media",
+		"--torrent", torrentPath, "--max-states", "1", "--require-verified", "--output", "json",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 4 || !strings.Contains(errOut.String(), "not verified_unique") {
+		t.Fatalf("manifest budget exit: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	var envelope struct {
+		Data seed.DiscoveryResult `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	result := envelope.Data
+	if result.SourceOutcome != "incomplete" || result.WritesPerformed != 0 || result.IndexRefresh == nil ||
+		result.IndexRefresh.Status != "not_started" || result.IndexRefresh.WritesPerformed != 0 ||
+		result.Scan.PathConfinement != "not_started_manifest_state_budget" {
+		t.Fatalf("manifest budget crossed write boundary: %s", out.String())
+	}
+	after, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil || len(after.Records) != len(before.Records) {
+		t.Fatalf("manifest budget published descriptor: before=%d after=%d err=%v", len(before.Records), len(after.Records), err)
+	}
+}
+
 func TestSeedDiscoverStoredProfileUsageIsValidatedBeforeStoreRead(t *testing.T) {
 	missing := filepath.Join(physicalCLITempDir(t), "missing-state")
 	var out, errOut bytes.Buffer
@@ -412,6 +565,7 @@ func TestStorageProfileAndIndexSubcommandHelpIsDiscoverable(t *testing.T) {
 		{"storage", "profile", "create", "--help"},
 		{"storage", "profile", "inspect", "--help"},
 		{"storage", "index", "refresh", "--help"},
+		{"storage", "index", "refresh-discover", "--help"},
 		{"storage", "index", "inspect", "--help"},
 	}
 	for _, command := range commands {

@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
+	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
+	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
 
 type ClientMappingOptions struct {
@@ -173,21 +175,53 @@ type DiscoveryPlan struct {
 	Blockers          []string                 `json:"blockers"`
 }
 
+// DiscoveryIndexRefresh is the public, non-authoritative receipt for an
+// immutable storage-index generation written immediately before discovery.
+// It deliberately excludes profile paths, filesystem identity hints, and the
+// private refresh/candidate authorities used by the same invocation.
+type DiscoveryIndexRefresh struct {
+	Status                     string                        `json:"status"`
+	Effect                     string                        `json:"effect"`
+	WritesPerformed            int                           `json:"writes_performed"`
+	ProfileID                  string                        `json:"profile_id"`
+	ProfileRevision            string                        `json:"profile_revision"`
+	Generation                 uint64                        `json:"generation"`
+	SnapshotID                 string                        `json:"snapshot_id,omitempty"`
+	ObservedAtStart            time.Time                     `json:"observed_at_start,omitempty"`
+	ObservedAtEnd              time.Time                     `json:"observed_at_end,omitempty"`
+	DataRecord                 metastore.RecordRef           `json:"data_record"`
+	DescriptorRecord           metastore.RecordRef           `json:"descriptor_record"`
+	DataPublication            metastore.RecordImportReceipt `json:"data_publication"`
+	DescriptorPublication      metastore.RecordImportReceipt `json:"descriptor_publication"`
+	ScanComplete               bool                          `json:"scan_complete"`
+	ScanLimits                 storage.FullInventoryLimits   `json:"scan_limits"`
+	ScanUsed                   storage.FullInventoryStats    `json:"scan_used"`
+	StopReasons                []string                      `json:"stop_reasons"`
+	Assurance                  string                        `json:"assurance"`
+	CurrentSearchStatus        string                        `json:"current_search_status"`
+	CurrentSearchObservedAtEnd time.Time                     `json:"current_search_observed_at_end,omitempty"`
+	CurrentSearchAssurance     string                        `json:"current_search_assurance"`
+	CandidateLimits            storageindex.CandidateLimits  `json:"candidate_limits"`
+	CandidateUsed              storageindex.CandidateStats   `json:"candidate_used"`
+	CandidateStopReasons       []string                      `json:"candidate_stop_reasons"`
+}
+
 type DiscoveryResult struct {
-	Effect              string             `json:"effect"`
-	WritesPerformed     int                `json:"writes_performed"`
-	AbsolutePathsShown  bool               `json:"absolute_paths_shown"`
-	Torrent             DiscoveryTorrent   `json:"torrent"`
-	SourceOutcome       string             `json:"source_outcome"`
-	Selection           DiscoverySelection `json:"selection"`
-	Handoff             DiscoveryHandoff   `json:"handoff"`
-	BestEvidence        string             `json:"best_evidence"`
-	Scan                DiscoveryScan      `json:"scan"`
-	Files               []DiscoveryFile    `json:"files"`
-	Matches             []DiscoveryMatch   `json:"matches"`
-	Plan                *DiscoveryPlan     `json:"plan,omitempty"`
-	Blockers            []DiscoveryBlocker `json:"blockers"`
-	Warnings            []string           `json:"warnings"`
+	Effect              string                 `json:"effect"`
+	WritesPerformed     int                    `json:"writes_performed"`
+	AbsolutePathsShown  bool                   `json:"absolute_paths_shown"`
+	Torrent             DiscoveryTorrent       `json:"torrent"`
+	SourceOutcome       string                 `json:"source_outcome"`
+	Selection           DiscoverySelection     `json:"selection"`
+	Handoff             DiscoveryHandoff       `json:"handoff"`
+	BestEvidence        string                 `json:"best_evidence"`
+	Scan                DiscoveryScan          `json:"scan"`
+	Files               []DiscoveryFile        `json:"files"`
+	Matches             []DiscoveryMatch       `json:"matches"`
+	Plan                *DiscoveryPlan         `json:"plan,omitempty"`
+	IndexRefresh        *DiscoveryIndexRefresh `json:"index_refresh,omitempty"`
+	Blockers            []DiscoveryBlocker     `json:"blockers"`
+	Warnings            []string               `json:"warnings"`
 	verifiedSource      *metafile.VerifiedSource
 	verifiedSelectionID string
 	verifiedSourceMode  string
@@ -214,6 +248,11 @@ func (result *DiscoveryResult) VerifiedSource(meta *metafile.MetaInfo) (*metafil
 			result.verifiedScopeID == "" || result.Selection.ScopeID != result.verifiedScopeID {
 			return nil, false
 		}
+	case "indexed_current_unique":
+		if result.SourceOutcome != "verified_unique" || result.Selection.Status != "ready" ||
+			result.verifiedScopeID == "" || result.Selection.ScopeID != result.verifiedScopeID {
+			return nil, false
+		}
 	case "exact_root":
 		if result.SourceOutcome != "verified_exact_root" || result.Selection.Status != "ready_exact" ||
 			result.verifiedScopeID == "" || result.Selection.ScopeID != result.verifiedScopeID {
@@ -237,7 +276,7 @@ func (result *DiscoveryResult) BuildMaterializePlan(ctx context.Context, meta *m
 	switch result.verifiedSourceMode {
 	case "live_unique":
 		return BuildMaterializePlanFromVerified(ctx, meta, verified, targetRoot, strategy)
-	case "indexed_explicit":
+	case "indexed_explicit", "indexed_current_unique":
 		return buildMaterializePlanFromIndexedSelection(ctx, meta, verified, targetRoot, strategy, result.verifiedScopeID)
 	default:
 		return Plan{}, fmt.Errorf("verified discovery source authority mode is invalid")
@@ -268,6 +307,12 @@ func (result DiscoveryResult) PublicReportCopy() DiscoveryResult {
 		for i := range result.Matches {
 			result.Matches[i].Verification = result.Matches[i].Verification.PublicCopy()
 		}
+	}
+	if result.IndexRefresh != nil {
+		refresh := *result.IndexRefresh
+		refresh.StopReasons = append([]string{}, refresh.StopReasons...)
+		refresh.CandidateStopReasons = append([]string{}, refresh.CandidateStopReasons...)
+		result.IndexRefresh = &refresh
 	}
 	return result
 }
@@ -309,32 +354,7 @@ func Discover(ctx context.Context, meta *metafile.MetaInfo, options DiscoverOpti
 		return result, err
 	}
 	if len(meta.Files) > options.MatchLimits.MaxStates {
-		matchResult, matchErr := metafile.MatchSourceCandidates(ctx, meta, nil, options.MatchLimits)
-		if matchErr != nil {
-			return result, matchErr
-		}
-		inventory := storage.InventoryResult{
-			Complete:        false,
-			PathConfinement: "not_started_manifest_state_budget",
-			Limits:          options.InventoryLimits,
-			Roots:           []storage.SearchRootObservation{},
-			Candidates:      []storage.FileObservation{},
-			LimitHits:       []string{},
-			Issues:          []storage.ScanIssue{},
-			Warnings:        []string{},
-		}
-		result.Scan = buildDiscoveryScan(inventory, matchResult, options.ShowAbsolutePaths)
-		result.Scan.TimeBudgetMillis = options.TimeBudget.Milliseconds()
-		result.Blockers = append(result.Blockers,
-			DiscoveryBlocker{Code: "scan.not_started", Message: "storage scanning was not started because the manifest exceeds the candidate-state budget"},
-			DiscoveryBlocker{Code: "source.verification_incomplete", Message: "candidate verification could not start within the configured state budget"},
-		)
-		if options.TargetRoot != "" || options.ClientMapping != nil {
-			result.Handoff.Status = "blocked"
-			result.Blockers = append(result.Blockers, DiscoveryBlocker{Code: "handoff.source_selection_blocked", Message: "the requested handoff requires one complete, uniquely verified source assignment"})
-		}
-		result.Warnings = append(result.Warnings, "discovery stopped before search-root inventory or content access; zero writes were intentionally performed")
-		return result, nil
+		return manifestStateBudgetDiscovery(ctx, meta, options, "discovery stopped before search-root inventory or content access; zero writes were intentionally performed")
 	}
 	wantedSizes := manifestWantedSizes(meta)
 	inventory, err := storage.InventoryCandidates(ctx, options.SearchRoots, storage.InventoryOptions{
@@ -454,6 +474,36 @@ func Discover(ctx context.Context, meta *metafile.MetaInfo, options DiscoverOpti
 	result.Warnings = append(result.Warnings, inventory.Warnings...)
 	result.Warnings = append(result.Warnings, "discovery performs metadata and content reads; zero writes were intentionally performed")
 	result.Blockers = deduplicateBlockers(result.Blockers)
+	return result, nil
+}
+
+func manifestStateBudgetDiscovery(ctx context.Context, meta *metafile.MetaInfo, options DiscoverOptions, warning string) (DiscoveryResult, error) {
+	result := newDiscoveryResult(meta, options)
+	matchResult, err := metafile.MatchSourceCandidates(ctx, meta, nil, options.MatchLimits)
+	if err != nil {
+		return result, err
+	}
+	inventory := storage.InventoryResult{
+		Complete:        false,
+		PathConfinement: "not_started_manifest_state_budget",
+		Limits:          options.InventoryLimits,
+		Roots:           []storage.SearchRootObservation{},
+		Candidates:      []storage.FileObservation{},
+		LimitHits:       []string{},
+		Issues:          []storage.ScanIssue{},
+		Warnings:        []string{},
+	}
+	result.Scan = buildDiscoveryScan(inventory, matchResult, options.ShowAbsolutePaths)
+	result.Scan.TimeBudgetMillis = options.TimeBudget.Milliseconds()
+	result.Blockers = append(result.Blockers,
+		DiscoveryBlocker{Code: "scan.not_started", Message: "storage scanning was not started because the manifest exceeds the candidate-state budget"},
+		DiscoveryBlocker{Code: "source.verification_incomplete", Message: "candidate verification could not start within the configured state budget"},
+	)
+	if options.TargetRoot != "" || options.ClientMapping != nil {
+		result.Handoff.Status = "blocked"
+		result.Blockers = append(result.Blockers, DiscoveryBlocker{Code: "handoff.source_selection_blocked", Message: "the requested handoff requires one complete, uniquely verified source assignment"})
+	}
+	result.Warnings = append(result.Warnings, warning)
 	return result, nil
 }
 

@@ -2,8 +2,10 @@ package seed
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -35,6 +37,292 @@ func TestDiscoverFromIndexPreservesExactMatchButBlocksUniqueSelectionAndPlan(t *
 	}
 	if _, err := result.Matches[0].Verification.MatchSourceSnapshot(filepath.Join(root, "renamed.bin")); err == nil {
 		t.Fatal("snapshot-only public match retained a process-local path oracle")
+	}
+}
+
+func TestDiscoverFromCurrentIndexProvesUniqueAndPublishedGenerationLaterDoesNot(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("current-index-proof")
+	meta := discoverV1SingleMeta(t, "source.bin", content)
+	root := physicalSeedIndexTempDir(t)
+	writeSeedFile(t, filepath.Join(root, "renamed.bin"), content)
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh, candidates, err := repository.RefreshAndLoadCandidates(ctx, profileReceipt.Profile, []int64{int64(len(content))}, storageindex.DefaultCandidateLimits(), storageindex.RefreshOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := physicalSeedIndexTempDir(t)
+	result, err := DiscoverFromCurrentIndex(ctx, meta, profileReceipt.Profile, candidates, defaultDiscoverOptions(nil, target))
+	if err != nil || result.SourceOutcome != "verified_unique" || result.Selection.Status != "ready" ||
+		result.Selection.Basis != "same_invocation_complete_index_refresh_unique_exact_match" || result.Selection.ScopeID == "" ||
+		result.Plan == nil || result.Plan.SourceMode != "indexed_explicit_map" || result.Plan.SourceSelectionID != result.Selection.ScopeID ||
+		!result.Scan.Complete || !result.Scan.VerificationComplete {
+		t.Fatalf("current refresh did not establish unique source: %#v err=%v", result, err)
+	}
+	if _, ok := result.VerifiedSource(meta); !ok {
+		t.Fatal("current indexed discovery lost process-local verified source")
+	}
+	public := result.PublicReportCopy()
+	if _, ok := public.VerifiedSource(meta); ok {
+		t.Fatal("public current-index discovery retained source authority")
+	}
+	raw, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayed storageindex.CandidateResult
+	if err := json.Unmarshal(raw, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DiscoverFromCurrentIndex(ctx, meta, profileReceipt.Profile, replayed, defaultDiscoverOptions(nil, "")); err == nil {
+		t.Fatal("serialized current candidate result authorized discovery")
+	}
+	historical, err := repository.LoadCandidates(ctx, profileReceipt.Profile, refresh.DescriptorRecord.ID, []int64{int64(len(content))}, storageindex.DefaultCandidateLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, err := DiscoverFromIndex(ctx, meta, profileReceipt.Profile, historical, defaultDiscoverOptions(nil, ""))
+	if err != nil || later.SourceOutcome != "incomplete" || len(later.Matches) != 1 {
+		t.Fatalf("later sealed read retained current uniqueness: %#v err=%v", later, err)
+	}
+}
+
+func TestDiscoverFromCurrentIndexProvesNotFoundAndAmbiguity(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("current-index-outcomes")
+	meta := discoverV1SingleMeta(t, "source.bin", content)
+	root := physicalSeedIndexTempDir(t)
+	writeSeedFile(t, filepath.Join(root, "wrong-size.bin"), []byte("x"))
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, absentCandidates, err := repository.RefreshAndLoadCandidates(ctx, profileReceipt.Profile, []int64{int64(len(content))}, storageindex.DefaultCandidateLimits(), storageindex.RefreshOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	absent, err := DiscoverFromCurrentIndex(ctx, meta, profileReceipt.Profile, absentCandidates, defaultDiscoverOptions(nil, ""))
+	if err != nil || absent.SourceOutcome != "not_found" || !absent.Scan.Complete || !absent.Scan.VerificationComplete {
+		t.Fatalf("complete current generation did not prove absence: %#v err=%v", absent, err)
+	}
+
+	writeSeedFile(t, filepath.Join(root, "first.bin"), content)
+	writeSeedFile(t, filepath.Join(root, "second.bin"), content)
+	_, ambiguousCandidates, err := repository.RefreshAndLoadCandidates(ctx, profileReceipt.Profile, []int64{int64(len(content))}, storageindex.DefaultCandidateLimits(), storageindex.RefreshOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ambiguous, err := DiscoverFromCurrentIndex(ctx, meta, profileReceipt.Profile, ambiguousCandidates, defaultDiscoverOptions(nil, ""))
+	if err != nil || ambiguous.SourceOutcome != "verified_ambiguous" || len(ambiguous.Matches) != 2 ||
+		!hasDiscoveryBlocker(ambiguous.Blockers, "source.multiple_verified_matches") {
+		t.Fatalf("complete current generation hid ambiguity: %#v err=%v", ambiguous, err)
+	}
+}
+
+func TestRefreshAndDiscoverFromIndexPublishesReceiptAndReproducesExplicitPlan(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("refresh-discover-plan")
+	meta := discoverV1SingleMeta(t, "final.bin", content)
+	root := physicalSeedIndexTempDir(t)
+	writeSeedFile(t, filepath.Join(root, "renamed.bin"), content)
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := physicalSeedIndexTempDir(t)
+	options := defaultDiscoverOptions(nil, target)
+	result, err := RefreshAndDiscoverFromIndex(ctx, repository, meta, profileReceipt.Profile, storageindex.DefaultCandidateLimits(), options, storageindex.RefreshOptions{})
+	if err != nil || result.SourceOutcome != "verified_unique" || result.IndexRefresh == nil ||
+		result.IndexRefresh.Status != "stored" || result.IndexRefresh.WritesPerformed != 2 || result.WritesPerformed != 2 ||
+		result.IndexRefresh.Assurance != "same_invocation_complete_generation_published_and_revalidated" || result.Plan == nil {
+		t.Fatalf("refresh discovery receipt or result is incomplete: %#v err=%v", result, err)
+	}
+	currentPlanID := result.Plan.ID
+	matchID := result.Selection.SelectedID
+	descriptorID := result.IndexRefresh.DescriptorRecord.ID
+
+	historical, err := repository.LoadCandidates(ctx, profileReceipt.Profile, descriptorID, []int64{int64(len(content))}, storageindex.DefaultCandidateLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := DiscoverFromIndex(ctx, meta, profileReceipt.Profile, historical, defaultDiscoverOptions(nil, ""))
+	if err != nil || len(preview.Matches) != 1 || preview.Matches[0].ID != matchID || preview.SourceOutcome != "incomplete" {
+		t.Fatalf("published generation was not a stable historical preview: %#v err=%v", preview, err)
+	}
+	explicitOptions := defaultDiscoverOptions(nil, target)
+	explicitOptions.ExplicitSourceMatchID = matchID
+	explicit, err := DiscoverFromIndex(ctx, meta, profileReceipt.Profile, historical, explicitOptions)
+	if err != nil || explicit.Plan == nil || explicit.Plan.ID != currentPlanID || explicit.Selection.ScopeID != result.Selection.ScopeID {
+		t.Fatalf("explicit historical selection did not reproduce reviewed plan: %#v err=%v", explicit, err)
+	}
+}
+
+func TestRefreshAndDiscoverFromIndexStopsBeforePublicationAtManifestBudget(t *testing.T) {
+	ctx := context.Background()
+	meta := discoverManySameSizeMeta(t, 20)
+	root := physicalSeedIndexTempDir(t)
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := defaultDiscoverOptions(nil, "")
+	options.MatchLimits.MaxStates = 7
+	result, err := RefreshAndDiscoverFromIndex(ctx, repository, meta, profileReceipt.Profile, storageindex.DefaultCandidateLimits(), options, storageindex.RefreshOptions{})
+	if err != nil || result.WritesPerformed != 0 || result.IndexRefresh == nil || result.IndexRefresh.Status != "not_started" ||
+		result.IndexRefresh.WritesPerformed != 0 || result.Scan.PathConfinement != "not_started_manifest_state_budget" {
+		t.Fatalf("manifest budget crossed the write boundary: %#v err=%v", result, err)
+	}
+	after, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil || len(after.Records) != len(before.Records) {
+		t.Fatalf("manifest budget published a descriptor: before=%d after=%d err=%v", len(before.Records), len(after.Records), err)
+	}
+}
+
+func TestRefreshAndDiscoverFromIndexCandidateBudgetRetainsWritesButNotUniqueness(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("refresh-candidate-budget")
+	meta := discoverV1SingleMeta(t, "final.bin", content)
+	root := physicalSeedIndexTempDir(t)
+	writeSeedFile(t, filepath.Join(root, "first.bin"), content)
+	writeSeedFile(t, filepath.Join(root, "second.bin"), content)
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := storageindex.DefaultCandidateLimits()
+	limits.MaxCandidates = 1
+	result, err := RefreshAndDiscoverFromIndex(ctx, repository, meta, profileReceipt.Profile, limits, defaultDiscoverOptions(nil, ""), storageindex.RefreshOptions{})
+	if err != nil || result.SourceOutcome != "incomplete" || result.WritesPerformed != 2 || result.IndexRefresh == nil ||
+		result.IndexRefresh.Status != "stored" || !hasDiscoveryBlocker(result.Blockers, "index.current_candidate_search_incomplete") ||
+		!slices.Contains(result.Scan.StopReasons, "current_candidate_search_incomplete") {
+		t.Fatalf("candidate truncation overstated current search or erased writes: %#v err=%v", result, err)
+	}
+	if _, ok := result.VerifiedSource(meta); ok {
+		t.Fatal("truncated current candidate search retained verified authority")
+	}
+}
+
+func TestRefreshAndDiscoverFromIndexInvalidObservationIntervalRetainsWritesButNoAuthority(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("refresh-observation-interval")
+	meta := discoverV1SingleMeta(t, "final.bin", content)
+	root := physicalSeedIndexTempDir(t)
+	writeSeedFile(t, filepath.Join(root, "source.bin"), content)
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(time.Hour)
+	times := []time.Time{base, base.Add(time.Second), base.Add(-time.Second)}
+	clockIndex := 0
+	result, err := RefreshAndDiscoverFromIndex(ctx, repository, meta, profileReceipt.Profile, storageindex.DefaultCandidateLimits(), defaultDiscoverOptions(nil, ""), storageindex.RefreshOptions{Clock: func() time.Time {
+		value := times[clockIndex]
+		clockIndex++
+		return value
+	}})
+	if err == nil || result.SourceOutcome != "incomplete" || result.WritesPerformed != 2 || result.IndexRefresh == nil ||
+		result.IndexRefresh.Status != "stored" || result.IndexRefresh.CurrentSearchStatus != "incomplete" ||
+		result.IndexRefresh.CurrentSearchAssurance != "current_candidate_binding_failed" ||
+		!slices.Contains(result.IndexRefresh.CandidateStopReasons, "current_candidate_binding_failed") ||
+		!hasDiscoveryBlocker(result.Blockers, "index.current_candidate_binding_failed") {
+		t.Fatalf("invalid same-invocation interval was overstated or erased publication receipts: %#v err=%v", result, err)
+	}
+	if _, ok := result.VerifiedSource(meta); ok {
+		t.Fatal("invalid current-search interval retained verified source authority")
+	}
+}
+
+func TestRefreshAndDiscoverFromIndexPublicCopyAndJSONLoseAuthority(t *testing.T) {
+	ctx := context.Background()
+	content := []byte("refresh-discover-public-copy")
+	meta := discoverV1SingleMeta(t, "final.bin", content)
+	root := physicalSeedIndexTempDir(t)
+	writeSeedFile(t, filepath.Join(root, "source.bin"), content)
+	store, _, err := metastore.Init(filepath.Join(physicalSeedIndexTempDir(t), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := RefreshAndDiscoverFromIndex(ctx, repository, meta, profileReceipt.Profile, storageindex.DefaultCandidateLimits(), defaultDiscoverOptions(nil, ""), storageindex.RefreshOptions{})
+	if err != nil || result.SourceOutcome != "verified_unique" {
+		t.Fatalf("refresh discovery failed: %#v err=%v", result, err)
+	}
+	public := result.PublicReportCopy()
+	if _, ok := public.VerifiedSource(meta); ok {
+		t.Fatal("public refresh discovery retained source authority")
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayed DiscoveryResult
+	if err := json.Unmarshal(raw, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := replayed.VerifiedSource(meta); ok {
+		t.Fatal("serialized refresh discovery regained source authority")
 	}
 }
 

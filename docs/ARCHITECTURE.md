@@ -738,6 +738,32 @@ bounded accounting, diagnostics, every historical row, and every fresh
 observation/locator. Seed discovery rejects a copied DTO if any of those public
 fields changed; a JSON round trip cannot recreate candidate authority.
 
+`storage index refresh-discover` composes refresh, exact generation reload,
+requested-size locator reobservation, and ordinary source matching in one
+explicit invocation. The refresh result has its own private digest over the
+complete scan, profile revision, record/publication receipts, observation
+interval, diagnostics, and counters. The candidate authority must bind the
+same profile, snapshot, descriptor, data object, and initialized private-store
+identity. Each operation independently rebinds and validates that store; exact
+domain-separated record IDs prevent a byte-different clone from substituting
+another generation.
+Its current-search interval begins with inventory and ends only after candidate
+reobservation; the inventory footer time remains separately auditable. A
+manifest which cannot fit the candidate-state budget is rejected before
+filesystem enumeration or record publication. Candidate/path truncation after
+publication preserves both write receipts but makes the source result
+`incomplete`.
+
+This composition can produce `verified_unique`, `verified_ambiguous`, or
+`not_found` only while both process-local authorities remain intact and the
+ordinary content matcher is complete. The guarantee is sequential,
+identity-guarded, bracketed, and non-atomic. Serialization strips refresh,
+candidate, and `VerifiedSource` authority. Loading the same immutable
+generation later returns to the historical rules below. A unique plan uses the
+same domain-separated profile/snapshot/descriptor/match scope as explicit
+historical selection, so the later explicit selector can reproduce the plan
+without treating the earlier JSON report as proof.
+
 Historical inventory completeness and current search completeness are separate
 axes. In unselected snapshot `seed discover`:
 
@@ -761,9 +787,12 @@ Budgets on unselected alternatives do not erase an already complete proof of
 the selected map, but they keep verification completeness false and cannot be
 used to infer how many other current layouts exist.
 
-`reconcile report` consumes the same result and therefore cannot become
-`consistent` from a historical snapshot. Ordinary same-invocation full
-`--search-root` enumeration can establish current absence or unique selection.
+`reconcile report` consumes the historical path described above and therefore
+cannot become `consistent` from a historical snapshot. Ordinary
+same-invocation full
+`--search-root` enumeration, and the separate explicit
+`storage index refresh-discover` command, can establish current absence or
+unique selection for their own invocation.
 Alternatively, explicit `--source` can establish `verified_exact_root` for one
 selected layout and can become locally consistent with a client, but never
 establishes uniqueness or absence outside that layout. An explicit

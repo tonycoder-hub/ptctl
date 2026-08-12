@@ -11,6 +11,7 @@ import (
 	"hash"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
@@ -58,6 +59,27 @@ type CandidateStats struct {
 	IssueOverflow           int   `json:"issue_overflow"`
 }
 
+type CurrentSearchRoot struct {
+	ID     string `json:"root_id"`
+	Status string `json:"status"`
+}
+
+// CurrentSearchEvidence describes the complete metadata enumeration which
+// produced this exact immutable generation in the same invocation. It is
+// bracketed and non-atomic: only the private CandidateResult authority can let
+// a caller use it for current uniqueness or absence.
+type CurrentSearchEvidence struct {
+	Status                 string                      `json:"status"`
+	Stability              string                      `json:"stability_assurance"`
+	ObservedAtStart        time.Time                   `json:"observed_at_start"`
+	InventoryObservedAtEnd time.Time                   `json:"inventory_observed_at_end"`
+	ObservedAtEnd          time.Time                   `json:"observed_at_end"`
+	PathConfinement        string                      `json:"path_confinement"`
+	Limits                 storage.FullInventoryLimits `json:"limits"`
+	Roots                  []CurrentSearchRoot         `json:"roots"`
+	Stats                  storage.FullInventoryStats  `json:"stats"`
+}
+
 // IndexedCandidate contains fresh process-local FileObservation authority.
 // SnapshotEntry is historical evidence only; all content proof must use the
 // live observation and its identity-bound opener.
@@ -73,6 +95,7 @@ type CandidateResult struct {
 	Complete                   bool                        `json:"complete"`
 	HistoricalSnapshotVerified bool                        `json:"historical_snapshot_verified"`
 	CurrentSearchComplete      bool                        `json:"current_search_complete"`
+	CurrentSearch              *CurrentSearchEvidence      `json:"current_search,omitempty"`
 	ProfileID                  string                      `json:"profile_id"`
 	SnapshotID                 string                      `json:"snapshot_id"`
 	DescriptorRecordID         metastore.RecordID          `json:"descriptor_record_id"`
@@ -86,6 +109,7 @@ type CandidateResult struct {
 	Candidates                 []IndexedCandidate          `json:"-"`
 	authorityDigest            [sha256.Size]byte
 	authoritySet               bool
+	authorityMode              string
 }
 
 // HasLiveAuthority proves that this value is the unchanged process-local
@@ -93,8 +117,23 @@ type CandidateResult struct {
 // JSON deliberately loses this authority, and changing any profile/snapshot,
 // accounting, diagnostic, locator, or observation field invalidates it.
 func (result CandidateResult) HasLiveAuthority(profile Profile) bool {
-	if !result.authoritySet || !result.HistoricalSnapshotVerified || result.CurrentSearchComplete ||
+	if !result.authoritySet || !result.HistoricalSnapshotVerified ||
 		result.ProfileID != profile.ID || profile.ID == "" || profile.Revision == "" {
+		return false
+	}
+	switch result.authorityMode {
+	case "historical_snapshot":
+		if result.CurrentSearchComplete || result.CurrentSearch != nil {
+			return false
+		}
+	case "same_invocation_refresh":
+		if result.CurrentSearch == nil || result.CurrentSearchComplete != (result.CurrentSearch.Status == "complete") ||
+			!isCanonicalTime(result.CurrentSearch.ObservedAtStart) || !isCanonicalTime(result.CurrentSearch.InventoryObservedAtEnd) ||
+			!isCanonicalTime(result.CurrentSearch.ObservedAtEnd) || result.CurrentSearch.InventoryObservedAtEnd.Before(result.CurrentSearch.ObservedAtStart) ||
+			result.CurrentSearch.ObservedAtEnd.Before(result.CurrentSearch.InventoryObservedAtEnd) {
+			return false
+		}
+	default:
 		return false
 	}
 	digest := candidateAuthorityDigest(result, profile)
@@ -104,10 +143,37 @@ func (result CandidateResult) HasLiveAuthority(profile Profile) bool {
 func candidateAuthorityDigest(result CandidateResult, profile Profile) [sha256.Size]byte {
 	digest := sha256.New()
 	_, _ = io.WriteString(digest, "ptctl-storage-index-live-candidates-v1\x00")
+	writeCandidateAuthorityString(digest, result.authorityMode)
 	writeCandidateAuthorityString(digest, result.Effect)
 	writeCandidateAuthorityBool(digest, result.Complete)
 	writeCandidateAuthorityBool(digest, result.HistoricalSnapshotVerified)
 	writeCandidateAuthorityBool(digest, result.CurrentSearchComplete)
+	if result.CurrentSearch == nil {
+		writeCandidateAuthorityBool(digest, false)
+	} else {
+		writeCandidateAuthorityBool(digest, true)
+		current := result.CurrentSearch
+		writeCandidateAuthorityString(digest, current.Status)
+		writeCandidateAuthorityString(digest, current.Stability)
+		writeCandidateAuthorityString(digest, current.ObservedAtStart.UTC().Format(time.RFC3339Nano))
+		writeCandidateAuthorityString(digest, current.InventoryObservedAtEnd.UTC().Format(time.RFC3339Nano))
+		writeCandidateAuthorityString(digest, current.ObservedAtEnd.UTC().Format(time.RFC3339Nano))
+		writeCandidateAuthorityString(digest, current.PathConfinement)
+		writeCandidateAuthorityInts(digest,
+			int64(current.Limits.MaxRoots), int64(current.Limits.MaxDepth), int64(current.Limits.MaxDirectories),
+			int64(current.Limits.MaxEntries), int64(current.Limits.MaxEntriesPerDirectory), int64(current.Limits.MaxFiles),
+			current.Limits.MaxPathBytes, int64(current.Limits.MaxIssues),
+			int64(current.Stats.DirectoriesOpened), int64(current.Stats.EntriesExamined), current.Stats.TraversalNameBytes,
+			int64(current.Stats.RegularFilesSeen), int64(current.Stats.FilesEmitted), current.Stats.EmittedPathBytes,
+			int64(current.Stats.SymlinksSkipped), int64(current.Stats.ReparseSkipped), int64(current.Stats.MountsSkipped),
+			int64(current.Stats.SpecialSkipped), int64(current.Stats.IdentityHintsUnavailable), int64(current.Stats.IssueOverflow),
+		)
+		writeCandidateAuthorityInt(digest, int64(len(current.Roots)))
+		for _, root := range current.Roots {
+			writeCandidateAuthorityString(digest, root.ID)
+			writeCandidateAuthorityString(digest, root.Status)
+		}
+	}
 	writeCandidateAuthorityString(digest, result.ProfileID)
 	writeCandidateAuthorityString(digest, profile.Revision)
 	writeCandidateAuthorityString(digest, result.SnapshotID)
@@ -357,9 +423,85 @@ func (repository *Repository) LoadCandidates(ctx context.Context, profile Profil
 		return result.Candidates[i].Observation.SortKey() < result.Candidates[j].Observation.SortKey()
 	})
 	result.Stats.CandidatesRetained = len(result.Candidates)
+	result.authorityMode = "historical_snapshot"
 	result.authorityDigest = candidateAuthorityDigest(result, profile)
 	result.authoritySet = true
 	return result, nil
+}
+
+// RefreshAndLoadCandidates performs one complete refresh, reads back the exact
+// descriptor/data pair it just published, and reobserves only requested-size
+// locators. CurrentSearchComplete becomes true only when every stage and every
+// retained locator remained stable. The returned refresh and candidate values
+// retain process-local authority; JSON round trips cannot recreate it.
+func (repository *Repository) RefreshAndLoadCandidates(ctx context.Context, profile Profile, wantedSizes []int64, candidateLimits CandidateLimits, options RefreshOptions) (RefreshResult, CandidateResult, error) {
+	refresh, err := repository.Refresh(ctx, profile, options)
+	if err != nil || refresh.Status != "stored" {
+		return refresh, CandidateResult{}, err
+	}
+	candidates, err := repository.LoadCandidates(ctx, profile, refresh.DescriptorRecord.ID, wantedSizes, candidateLimits)
+	if err != nil {
+		return refresh, candidates, err
+	}
+	clock := options.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	observedAtEnd := canonicalTime(clock())
+	linked, err := repository.bindCurrentRefresh(profile, refresh, candidates, observedAtEnd)
+	return refresh, linked, err
+}
+
+func (repository *Repository) bindCurrentRefresh(profile Profile, refresh RefreshResult, candidates CandidateResult, observedAtEnd time.Time) (CandidateResult, error) {
+	if repository == nil || repository.store == nil || !refresh.HasLiveAuthority(profile) || !candidates.HasLiveAuthority(profile) {
+		return candidates, fmt.Errorf("same-invocation storage index refresh authority is unavailable")
+	}
+	if !isCanonicalTime(observedAtEnd) || observedAtEnd.Before(refresh.ObservedAtEnd) {
+		return candidates, fmt.Errorf("same-invocation storage index observation interval is invalid")
+	}
+	if candidates.ProfileID != refresh.ProfileID || candidates.SnapshotID != refresh.SnapshotID ||
+		candidates.DescriptorRecordID != refresh.DescriptorRecord.ID || candidates.DataRecordID != refresh.DataRecord.ID ||
+		candidates.DataLoad.Store.StoreID != repository.store.Info().StoreID ||
+		refresh.DataPublication.Store.StoreID != repository.store.Info().StoreID ||
+		refresh.DescriptorPublication.Store.StoreID != repository.store.Info().StoreID {
+		return candidates, fmt.Errorf("same-invocation storage index records do not share one initialized store identity and generation")
+	}
+	roots := make([]CurrentSearchRoot, len(refresh.Scan.Roots))
+	for index, root := range refresh.Scan.Roots {
+		roots[index] = CurrentSearchRoot{ID: root.ID, Status: root.Status}
+	}
+	candidates.CurrentSearch = &CurrentSearchEvidence{
+		Status: "incomplete", Stability: "same_invocation_complete_refresh_then_live_reobservation_bracketed_non_atomic",
+		ObservedAtStart: refresh.ObservedAtStart, InventoryObservedAtEnd: refresh.ObservedAtEnd, ObservedAtEnd: observedAtEnd,
+		PathConfinement: refresh.Scan.PathConfinement, Limits: refresh.Scan.Limits,
+		Roots: roots, Stats: refresh.Scan.Stats,
+	}
+	stable := candidates.Complete && len(candidates.StopReasons) == 0 && candidates.Stats.StaleLocators == 0 &&
+		candidates.Stats.ChangedHints == 0 && candidates.Stats.StaleRoots == 0 && candidates.Stats.IssueOverflow == 0
+	if stable {
+		candidates.CurrentSearchComplete = true
+		candidates.CurrentSearch.Status = "complete"
+		candidates.Warnings = removeCandidateWarning(candidates.Warnings, "sealed snapshot completeness is historical and never proves the current filesystem search space")
+		candidates.Warnings = append(candidates.Warnings, "this candidate set is linked to the complete refresh performed in the same invocation; later snapshot reads lose current-search authority")
+	} else {
+		candidates.CurrentSearchComplete = false
+		candidates.StopReasons = appendUniqueString(candidates.StopReasons, "current_refresh_changed_before_candidate_verification")
+		candidates.Warnings = append(candidates.Warnings, "the complete refresh was published, but later candidate reobservation changed or exceeded a budget; current uniqueness and absence are unavailable")
+	}
+	candidates.authorityMode = "same_invocation_refresh"
+	candidates.authorityDigest = candidateAuthorityDigest(candidates, profile)
+	candidates.authoritySet = true
+	return candidates, nil
+}
+
+func removeCandidateWarning(values []string, unwanted string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != unwanted {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func normalizeWantedSizes(values []int64) ([]int64, error) {

@@ -97,10 +97,12 @@ func BuildMaterializePlanFromVerified(ctx context.Context, meta *metafile.MetaIn
 	return buildMaterializePlan(ctx, meta, verified, "discovered_map", "", "", targetRoot, strategy)
 }
 
-// buildMaterializePlanFromIndexedSelection consumes one explicitly selected,
-// live-reverified source assignment whose immutable profile/snapshot/match
-// scope is bound by sourceSelectionID. It does not claim current-filesystem
-// uniqueness or absence.
+// buildMaterializePlanFromIndexedSelection consumes one live-reverified source
+// assignment whose immutable profile/snapshot/match scope is bound by
+// sourceSelectionID. The assignment may have been explicitly selected from a
+// historical generation or uniquely proven by a same-invocation refresh. The
+// resulting plan stays reproducible through the explicit snapshot+match form
+// and never treats serialized discovery output as authority.
 func buildMaterializePlanFromIndexedSelection(ctx context.Context, meta *metafile.MetaInfo, verified *metafile.VerifiedSource, targetRoot, strategy, sourceSelectionID string) (Plan, error) {
 	if !canonicalIndexedSourceSelectionID(sourceSelectionID) {
 		return Plan{}, fmt.Errorf("indexed source selection identity is invalid")
