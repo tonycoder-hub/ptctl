@@ -80,6 +80,7 @@ type transmissionAdoptServer struct {
 	add       atomic.Int32
 	verify    atomic.Int32
 	start     atomic.Int32
+	stop      atomic.Int32
 	testing   *testing.T
 }
 
@@ -805,7 +806,7 @@ func (server *transmissionAdoptServer) serveHTTP(writer http.ResponseWriter, req
 		server.writeResponse(writer, rpc, map[string]any{"torrent_added": map[string]any{
 			"id": 7, "name": materializeFinalName, "hash_string": server.meta.InfoHashV1,
 		}})
-	case "torrent_verify", "torrent_start":
+	case "torrent_verify", "torrent_start", "torrent_stop":
 		var params struct {
 			IDs []string `json:"ids"`
 		}
@@ -818,9 +819,12 @@ func (server *transmissionAdoptServer) serveHTTP(writer http.ResponseWriter, req
 		if method == "torrent_verify" {
 			server.verify.Add(1)
 			server.status = 1
-		} else {
+		} else if method == "torrent_start" {
 			server.start.Add(1)
 			server.status, server.progress = 5, 1
+		} else {
+			server.stop.Add(1)
+			server.status, server.progress = 0, 1
 		}
 		server.mu.Unlock()
 		server.writeResponse(writer, rpc, map[string]any{})

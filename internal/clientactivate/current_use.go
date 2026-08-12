@@ -319,7 +319,7 @@ func (verified *VerifiedCurrentUse) Reobserve(ctx context.Context, session downl
 		return nil, observation, err
 	}
 	if !verified.StableWith(after) {
-		return nil, observation, fmt.Errorf("%w: current downloader use changed across the removal bracket", ErrPolicy)
+		return nil, observation, fmt.Errorf("%w: current downloader use changed across the current-use bracket", ErrPolicy)
 	}
 	return after, observation, nil
 }

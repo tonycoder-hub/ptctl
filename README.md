@@ -12,6 +12,7 @@ domains and reconciles them around verifiable torrent metadata.
 > workflow, reviewed `client adopt run|resume|prune|forget` stopped-add or
 > observation-only existing-stopped operations,
 > explicit `client activate run|resume|prune|forget` recheck/start operations,
+> acknowledged `client stop run|resume` exact-job stopped transitions,
 > acknowledged `client remove run|resume|prune|forget` exact-job removal that always
 > retains local data, acknowledged source-name retirement, and the separate
 > acknowledged `seed retire parent-cleanup run|resume|prune|forget` empty-directory boundary. The
@@ -179,6 +180,12 @@ capabilities at the edge, not assumptions in the core domain model.
   durable per-request intent, exact typed job/per-file layout reobservation,
   current-final re-verification, and no automatic replay of unknown requests;
   Transmission control remains v1-only;
+- explicitly reviewed qBittorrent or Transmission stop of one current complete
+  started exact job, with a durable request intent, one non-retried native
+  stop request, same-session stopped-state/file-layout proof, and another exact
+  materialized-final verification before completion; a lost response may
+  produce causality-unproven stopped evidence but is never replayed without a
+  second acknowledgement; Transmission remains v1-only;
 - explicitly reviewed qBittorrent or Transmission removal of one current exact
   typed-identity job while retaining all local data, with a durable request
   intent, no fan-out or automatic retry, complete queue-absence observation,
@@ -233,8 +240,9 @@ capabilities at the edge, not assumptions in the core domain model.
   human-readable tables.
 
 Not implemented yet: current-filesystem negative/uniqueness proofs from an
-index alone, background refresh/watchers, downloader pause/location or broader
-existing-job mutation,
+index alone, background refresh/watchers, downloader location or broader
+existing-job mutation beyond the exact stopped transition,
+prune/forget retention for client-stop journals,
 client-layout reconciliation for attributed file semantics such as padding or
 symlink leaves and for zero-length files without an observed physical binding,
   reflink/hardlink or cross-filesystem materialization, automatic execution of
@@ -1222,6 +1230,58 @@ Completion remains a bracketed client claim
 plus a same-invocation exact final proof, not proof of a raw private variant or
 an atomic client/filesystem snapshot. Each invocation sends at most one
 effectful client POST. JSON kind is `client.activation`.
+
+Stop one reviewed complete started exact job without removing it or changing
+its location:
+
+```bash
+# Read-only review. This proves the current exact job is complete and started.
+ptctl client stop plan \
+  --metafile-store "D:\\ptctl-store" \
+  --metafile-variant sha256:METAFILE_DIGEST \
+  --target "D:\\PT" \
+  --materialize-operation sha256:MATERIALIZE_OPERATION_DIGEST \
+  --materialize-plan-id MATERIALIZE_PLAN_ID \
+  --activation-operation sha256:ACTIVATION_OPERATION_DIGEST \
+  --activation-plan-id ACTIVATION_PLAN_ID \
+  --host-root "D:\\PT" --client-root "/downloads" --client-style posix \
+  --driver qbittorrent --url "https://127.0.0.1:8080" \
+  --username USER --password-stdin --output json
+
+# Journal the exact reviewed intent, then issue at most one native stop request.
+ptctl client stop run \
+  [the same selectors] \
+  --expect-stop-plan-id STOP_PLAN_ID \
+  --acknowledge-client-stop --output json
+
+# Recovery observes first. If a previous request may have crossed the boundary
+# and the job is still started, repeating it additionally requires both flags.
+ptctl client stop resume \
+  [the same selectors] \
+  --expect-stop-plan-id STOP_PLAN_ID \
+  --acknowledge-client-stop --acknowledge-repeat-stop \
+  --output json sha256:STOP_OPERATION_DIGEST
+
+# Historical, credential-free inspection; it makes no downloader request.
+ptctl client stop status --target "D:\\PT" \
+  --expect-stop-plan-id STOP_PLAN_ID --output json \
+  sha256:STOP_OPERATION_DIGEST
+```
+
+The stop plan binds the terminal activation lineage, typed identity, opaque
+job/file-layout references, complete snapshot, current started state, path
+mapping, exact materialized final, built-in protocol, and one exact native
+route (`pause` for qBittorrent 4, `stop` for qBittorrent 5, or
+`torrent-stop`/`torrent_stop` for Transmission RPC 5/6). The opaque downloader
+job locator never enters JSON. HTTP acceptance is only request evidence:
+completion also requires the same authenticated session to observe the exact
+job in a complete stopped state with the same layout and a fresh exact final
+proof. Unknown transport results remain resumable but are never repeated
+automatically. JSON kind is `client.stop`.
+
+This slice deliberately retains its private stop journal and has no stop
+`prune` or `forget` command yet. That makes historical request attribution
+durable without pretending the later retention/deletion lifecycle exists.
 
 Activation `prune` is a distinct local-only deletion boundary. It takes one
 full activation operation ID, the reviewed activation plan ID, and

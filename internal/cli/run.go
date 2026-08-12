@@ -16,6 +16,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/clientremove"
+	"github.com/tonycoder-hub/ptctl/internal/clientstop"
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/downloader/qbittorrent"
@@ -177,6 +178,10 @@ Usage:
   ptctl client activate status --target PATH [--output table|json] OPERATION_ID
   ptctl client activate prune --target PATH --expect-activation-plan-id ID --acknowledge-operation-state-deletion [--output table|json] OPERATION_ID
   ptctl client activate forget --target PATH --expect-activation-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
+  ptctl client stop plan [activation/final/mapping/client selectors] [--output table|json]
+  ptctl client stop run [same selectors] --expect-stop-plan-id ID --acknowledge-client-stop [--output table|json]
+  ptctl client stop resume [same selectors] --expect-stop-plan-id ID [--acknowledge-client-stop --acknowledge-repeat-stop] [--output table|json] OPERATION_ID
+  ptctl client stop status --target PATH --expect-stop-plan-id ID [--output table|json] OPERATION_ID
   ptctl client remove plan [activation/final/mapping/client selectors] [--output table|json]
   ptctl client remove run [same selectors] --expect-removal-plan-id ID --acknowledge-client-removal [--output table|json]
   ptctl client remove resume [same selectors] --expect-removal-plan-id ID [--acknowledge-client-removal --acknowledge-repeat-removal] [--output table|json] OPERATION_ID
@@ -220,6 +225,7 @@ Safety defaults:
   * Seed retire parent-cleanup plan is zero-write. Its separately acknowledged run/resume journal and remove only reviewed same-identity empty immediate parents; they never recurse into ancestors, search roots, files, or non-empty directories. Prune replaces one terminal cleanup journal with an exact no-path tombstone; forget separately and irreversibly removes only that exact tombstone through a final root-level recovery marker.
   * Client adoption has two reviewed actions: add one absent exact-infohash job in stopped mode, or record an observation-only lineage for one already-present exact stopped job without submitting a metafile or mutating the downloader. Transmission is v1-only; a matching built-in driver can feed the separate reviewed recheck/start workflow. Adoption never rechecks, resumes, moves, or deletes content. Its separately acknowledged prune deletes only one terminal private journal after sealing an exact tombstone.
   * Client activation only rechecks or starts the reviewed exact existing job, with at most one non-retried mutation per invocation. Its separately acknowledged local prune deletes only one terminal private journal after sealing an exact tombstone and never reads a credential or contacts the client.
+  * Client stop targets one reviewed complete started exact job, journals intent before one non-retried request, and requires a fresh exact stopped-state observation plus final filesystem re-verification before completion. Recovery observes first and never repeats an inconclusive request without a separate acknowledgement.
   * Client removal targets one reviewed typed-identity job, explicitly keeps local data, journals intent before one non-retried request, and requires exact queue absence plus final filesystem re-verification before completion.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
   * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
@@ -297,8 +303,11 @@ func (a *app) client(args []string) error {
 	if len(args) > 0 && args[0] == "remove" {
 		return a.clientRemove(args[1:])
 	}
+	if len(args) > 0 && args[0] == "stop" {
+		return a.clientStop(args[1:])
+	}
 	if len(args) == 0 || (args[0] != "status" && args[0] != "list") {
-		return usageError("client requires status, list, adopt, activate, or remove")
+		return usageError("client requires status, list, adopt, activate, stop, or remove")
 	}
 	command := args[0]
 	fs := newFlagSet("client " + command)
@@ -2265,6 +2274,8 @@ func jsonKind(data any) string {
 		return "client.removal.retention"
 	case clientremove.ForgetReport:
 		return "client.removal.forget"
+	case clientstop.Report:
+		return "client.stop"
 	case sourceretire.Report:
 		return "content.source_retirement_plan"
 	case sourceretire.ExecutionReport:

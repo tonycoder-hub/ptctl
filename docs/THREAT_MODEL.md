@@ -707,6 +707,32 @@ as unattributed rather than idempotently successful. This storage transition
 cannot revoke an opaque process-local completion capability already issued to a
 concurrent caller before forgetting began.
 
+Client stop is an independent, narrower existing-job mutation boundary. It is
+available only from a current exact materialized final, canonical terminal
+activation, complete typed job/file-layout observation, and a code-owned
+version-specific stop descriptor. `plan` is zero-write; `run` requires
+`--acknowledge-client-stop`, journals the exact intent before one native stop
+request, and never retries, redirects, relogs in, fans out, removes the job,
+moves data, or accepts an all-job selector. qBittorrent 4/5 and Transmission
+RPC 5/6 use distinct reviewed routes; Transmission accepts only a full v1
+identity.
+
+HTTP/RPC acceptance, current stopped state, and local content proof remain
+separate. Completion requires the same session to observe the same typed job,
+same opaque job identity, same complete file layout and snapshot, progress 1,
+and a supported stopped state, followed by another exact final proof. If the
+request response is lost but those later observations succeed, the result is
+explicitly causality-unproven. Recovery may first publish one byte-exact pending
+local marker, then observes the client before considering another mutation. A
+still-started job after a possibly effectful prior attempt cannot cause a second
+request unless both `--acknowledge-client-stop` and
+`--acknowledge-repeat-stop` are supplied.
+Read-only status has no credential or network authority and labels all remote
+and filesystem evidence historical. Reports omit endpoint, username, password,
+raw path, job key, magnet/tracker material, and private metafile bytes.
+Stop-journal prune/forget is not part of this slice; the private journal remains
+retained.
+
 Client removal is an independent existing-job mutation boundary. `plan` writes
 nothing; `run` requires `--acknowledge-client-removal`, and repeating a request
 whose result may be unknown additionally requires
@@ -1138,7 +1164,8 @@ remote storage.
 `metafile store init`, `metafile store import`, `storage profile create`,
 `storage index refresh`, the artifact/binding phases of `site metafile fetch`,
 acknowledged materialize operations, acknowledged exact stopped-job
-adoption/activation, and acknowledged exact keep-data client removal are the
+adoption/activation, acknowledged exact current-job stop, and acknowledged
+exact keep-data client removal are the
 explicit write exceptions.
 Store/index/fetch reported write
 count covers logical publication of an accepted store marker or immutable
@@ -1154,6 +1181,10 @@ writes, login/ledger/add requests, and add receipt.
 Activation uses the same private-write accounting shape but separately reports
 descriptor/ledger/file-ledger reads, recheck/start attempt markers, exactly
 attempted client actions, completion markers, and unknown request results.
+Stop separately reports owner-private intent/attempt/response/completion marker
+writes, the single native mutation attempt, fresh exact stopped-state/layout
+evidence, and post-stop exact final proof. Unknown request outcome is never an
+automatic repeat.
 Removal separately reports owner-private intent/attempt/response/completion
 marker writes, temporary cleanup, the one mutation attempt, complete typed
 absence, and the post-removal final proof. Unknown request outcome never becomes
@@ -1213,8 +1244,9 @@ synthetic metafiles; real tracker artifacts are forbidden.
   no-path lifecycle, and no operation is selected automatically by policy);
 - reflink/cross-filesystem materialization and reviewed network-target support;
 - durable OS-keyring or audited credential-helper integration;
-- downloader pause/location transitions and client-side
+- downloader location transitions and client-side
   private-variant observability;
+- prune/forget retention for client-stop journals;
 - recursive or policy-selected source-parent cleanup, block-reclamation
   accounting, and explicit retirement of unselected aliases; journaled
   retirement and the separate acknowledged parent-cleanup operation remove
@@ -1238,7 +1270,8 @@ ptctl will not infer those guarantees from an HTTP 200 response.
 No broader deletion or downloader mutation beyond exact private operation-state
 pruning and explicitly selected tombstone forgetting, acknowledged source-name
 retirement, exact same-identity empty immediate-parent cleanup, exact
-stopped-add, reviewed recheck/start, and exact keep-data job-removal slices,
+stopped-add, reviewed recheck/start, exact current-job stop, and exact
+keep-data job-removal slices,
 tracker write, or broader content strategy should be added until the relevant
 gap has a testable control and a failure-recovery story. The private metafile
 store grants no authority over seeded content, a materialize acknowledgement

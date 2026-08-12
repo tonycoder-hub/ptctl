@@ -1283,6 +1283,41 @@ destroys the evidence needed for idempotent attribution, so a later call cannot
 claim historical success. It never opens a downloader session, reads a
 credential, mutates content, retires sources, or selects another operation.
 
+## Exact downloader-job stopped transition
+
+`client stop plan` is zero-write and accepts the same current-final, terminal
+activation, mapping, and client selectors as keep-data removal. It opens one
+narrow `downloader.ExistingJobStopSession`, binds a code-owned versioned stop
+descriptor, and accepts only a complete exact job that is currently in a
+started seeding state. The plan records typed identity, current-use/job/layout
+IDs, complete file snapshot, reviewed started state, activation/materialize
+lineage, root/object identities, and file-ledger limits. The process-local job
+key is intentionally absent from the plan and every report.
+
+```text
+fresh exact started current-use authority
+  -> durable private stop intent
+  -> durable per-attempt marker
+  -> one native exact-job stop request (no retry, redirect, or fan-out)
+  -> durable normalized response receipt
+  -> same-session stable exact stopped job and file-layout observation
+  -> fresh exact materialized-final verification
+  -> durable completion marker
+```
+
+qBittorrent 4 binds `pause`, qBittorrent 5 binds `stop`; Transmission RPC 5
+binds `torrent-stop` and RPC 6 binds `torrent_stop`. Transmission is v1-only.
+A response never proves stopped state. Conversely, stopped state observed after
+an unknown response may close the journal only with an explicit
+causality-unproven basis. `resume` may first recover one exact pending local
+marker, then observes stopped state before considering a repeat; local marker
+recovery has no downloader authority. An effectful repeat requires the base
+stop acknowledgement plus a separate repeat acknowledgement and remains capped
+by the fixed three-attempt budget. `status` reads only one explicit journal and
+labels queue/final evidence historical. Downloader and filesystem evidence are
+bracketed and non-atomic. This slice retains stop journals; a separate
+prune/forget retention lifecycle is not implemented yet.
+
 ## Exact downloader-job removal while keeping data
 
 `client remove` consumes a current `materialize.VerifiedFinal`, one canonical

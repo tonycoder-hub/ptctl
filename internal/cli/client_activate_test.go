@@ -51,7 +51,10 @@ type clientActivateServer struct {
 	recheck    atomic.Int32
 	start      atomic.Int32
 	add        atomic.Int32
+	stop       atomic.Int32
 	remove     atomic.Int32
+	stopMode   string
+	stopHook   func()
 	removeMode string
 	removeHook func()
 }
@@ -364,7 +367,19 @@ func (server *clientActivateServer) currentState() (string, float64) {
 }
 
 func (server *clientActivateServer) totalRequests() int32 {
-	return server.login.Load() + server.version.Load() + server.ledger.Load() + server.add.Load() + server.recheck.Load() + server.start.Load() + server.remove.Load()
+	return server.login.Load() + server.version.Load() + server.ledger.Load() + server.add.Load() + server.recheck.Load() + server.start.Load() + server.stop.Load() + server.remove.Load()
+}
+
+func (server *clientActivateServer) setStopMode(mode string) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.stopMode = mode
+}
+
+func (server *clientActivateServer) setStopHook(hook func()) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.stopHook = hook
 }
 
 func (server *clientActivateServer) setRemoveMode(mode string) {
@@ -449,6 +464,31 @@ func (server *clientActivateServer) serveHTTP(writer http.ResponseWriter, reques
 		server.start.Add(1)
 		server.validateAction(writer, request)
 		server.setState("uploading", 1)
+	case "/api/v2/torrents/pause", "/api/v2/torrents/stop":
+		server.stop.Add(1)
+		if !server.validateStopAction(writer, request) {
+			return
+		}
+		server.mu.Lock()
+		mode := server.stopMode
+		hook := server.stopHook
+		server.mu.Unlock()
+		if mode != "unknown_keep_started" && mode != "accepted_keep_started" {
+			server.setState("stoppedUP", 1)
+		}
+		if hook != nil {
+			hook()
+		}
+		if mode == "unknown_keep_started" || mode == "unknown_job_stopped" {
+			connection, _, err := writer.(http.Hijacker).Hijack()
+			if err != nil {
+				server.t.Errorf("hijack stop response: %v", err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		_, _ = writer.Write([]byte("Ok."))
 	case "/api/v2/torrents/delete":
 		server.remove.Add(1)
 		if request.Method != http.MethodPost || request.ParseForm() != nil || len(request.PostForm) != 2 ||
@@ -483,13 +523,19 @@ func (server *clientActivateServer) serveHTTP(writer http.ResponseWriter, reques
 }
 
 func (server *clientActivateServer) validateAction(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost || request.ParseForm() != nil || len(request.PostForm) != 1 ||
-		request.PostForm.Get("hashes") != clientAdoptJobKey {
-		server.t.Errorf("invalid activation request: %#v", request.PostForm)
-		http.Error(writer, "invalid", http.StatusBadRequest)
+	if !server.validateStopAction(writer, request) {
 		return
 	}
 	_, _ = writer.Write([]byte("Ok."))
+}
+
+func (server *clientActivateServer) validateStopAction(writer http.ResponseWriter, request *http.Request) bool {
+	if request.Method != http.MethodPost || request.ParseForm() != nil || len(request.PostForm) != 1 || request.PostForm.Get("hashes") != clientAdoptJobKey {
+		server.t.Errorf("invalid activation request: %#v", request.PostForm)
+		http.Error(writer, "invalid", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 func clientActivateBaseArgs(fixture clientAdoptCLIFixture, endpoint, adoptionOperation, adoptionPlanID string) []string {
