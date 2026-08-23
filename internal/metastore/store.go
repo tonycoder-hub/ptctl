@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 )
@@ -32,6 +33,7 @@ var (
 // states. Production always uses the platform primitive directly.
 var publishNoReplace = platformSessionPublishNoReplace
 var confirmPrivateStoreLayout = platformConfirmPrivateStoreLayout
+var initPreparationMu sync.Mutex
 
 type Store struct {
 	root string
@@ -60,6 +62,19 @@ func Init(root string) (*Store, InitReceipt, error) {
 	if err != nil {
 		return nil, receipt, safeError("initialize private metafile store", err)
 	}
+	// Windows applies the private owner after directory creation through the
+	// new handle. Keep same-process initializers from observing that bounded
+	// setup window as an unsafe pre-existing layout. Staging and no-replace
+	// marker publication remain concurrent below this preparation section.
+	initPreparationMu.Lock()
+	preparationLocked := true
+	unlockPreparation := func() {
+		if preparationLocked {
+			preparationLocked = false
+			initPreparationMu.Unlock()
+		}
+	}
+	defer unlockPreparation()
 	_, err = ensurePrivateDirectory(clean)
 	if err != nil {
 		return nil, receipt, safeError("initialize private metafile store", err)
@@ -79,6 +94,7 @@ func Init(root string) (*Store, InitReceipt, error) {
 		return nil, receipt, safeError("initialize private metafile store", err)
 	}
 	if concurrentInfo != nil {
+		unlockPreparation()
 		if err := session.check("before_success"); err != nil {
 			return nil, receipt, fmt.Errorf("initialize private metafile store: bound identity changed")
 		}
@@ -90,6 +106,7 @@ func Init(root string) (*Store, InitReceipt, error) {
 	if err := confirmPrivateStoreLayout(session); err != nil {
 		return nil, receipt, fmt.Errorf("initialize private metafile store: layout durability precondition failed")
 	}
+	unlockPreparation()
 
 	storeID, err := randomStoreID()
 	if err != nil {
