@@ -264,9 +264,21 @@ func (verified *VerifiedFinal) matchesVerifiedSource(meta *metafile.MetaInfo, so
 	if !verification.Verified || verification.SourceSnapshotID == "" {
 		return false
 	}
+	finalRoot := filepath.Join(verified.authority.targetRoot, verified.authority.layout.FinalName)
+	physicalFinalRoot, err := filepath.EvalSymlinks(finalRoot)
+	if err != nil {
+		return false
+	}
+	physicalFinalRoot = filepath.Clean(physicalFinalRoot)
 	expected := make(map[int]string, len(verified.authority.layout.Files))
 	for _, file := range verified.authority.layout.Files {
-		path := filepath.Join(append([]string{verified.authority.targetRoot}, file.Components...)...)
+		path := physicalFinalRoot
+		if verified.authority.layout.MultiFile {
+			if len(file.Components) == 0 || !sameVerifiedFinalPath(file.Components[0], verified.authority.layout.FinalName) {
+				return false
+			}
+			path = filepath.Join(append([]string{physicalFinalRoot}, file.Components[1:]...)...)
+		}
 		expected[file.ManifestIndex] = filepath.Clean(path)
 	}
 	bindings := source.Bindings()
@@ -284,14 +296,6 @@ func (verified *VerifiedFinal) matchesVerifiedSource(meta *metafile.MetaInfo, so
 }
 
 func sameVerifiedFinalPath(expected, observed string) bool {
-	expected, err := filepath.EvalSymlinks(expected)
-	if err != nil {
-		return false
-	}
-	observed, err = filepath.EvalSymlinks(observed)
-	if err != nil {
-		return false
-	}
 	expected = filepath.Clean(expected)
 	observed = filepath.Clean(observed)
 	if storage.CurrentSemantics().CaseSensitive {
