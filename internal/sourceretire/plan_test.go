@@ -308,7 +308,10 @@ func makeRetireFixtureMode(t *testing.T, retainActivation bool) retireFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sourceRoot := t.TempDir()
+	sourceRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	sourcePath := filepath.Join(sourceRoot, "PRIVATE-SOURCE-PATH-CANARY.bin")
 	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
 		t.Fatal(err)

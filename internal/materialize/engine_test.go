@@ -323,7 +323,11 @@ func TestIndexedExplicitSourceAuthorityResumesEarlyMaterialize(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(searchRoot, "renamed.bin"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "state"))
+	physicalStoreRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, _, err := metastore.Init(filepath.Join(physicalStoreRoot, "state"))
 	if err != nil {
 		t.Fatal(err)
 	}

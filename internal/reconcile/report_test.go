@@ -1606,7 +1606,11 @@ func reconciledFreshIndexSingleFile(t *testing.T, clockValues []time.Time) (*met
 		t.Fatal("fresh index fixture requires exactly three clock values")
 	}
 	meta, _, _, root := reconciledSingleFile(t)
-	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "state"))
+	physical, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, _, err := metastore.Init(filepath.Join(physical, "state"))
 	if err != nil {
 		t.Fatal(err)
 	}

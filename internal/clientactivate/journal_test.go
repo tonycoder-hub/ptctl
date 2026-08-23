@@ -15,6 +15,9 @@ import (
 func testActivationPlan(t *testing.T, root string) Plan {
 	t.Helper()
 	session, info, err := fsbind.BindExisting(root)
+	if errors.Is(err, fsbind.ErrUnsupported) {
+		t.Skipf("client activation filesystem binding is unsupported: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

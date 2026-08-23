@@ -655,7 +655,9 @@ func TestStatusReportsExplicitMissingOperationWithoutInventingJournalState(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := Status(context.Background(), StatusOptions{TargetRoot: t.TempDir(), OperationID: operationID})
+	targetRoot := t.TempDir()
+	preflightAdoptionFilesystem(t, targetRoot)
+	report, err := Status(context.Background(), StatusOptions{TargetRoot: targetRoot, OperationID: operationID})
 	if !errors.Is(err, ErrOperationNotFound) || report.Outcome != OutcomeBlocked || report.Operation.Status != "not_found" ||
 		report.Operation.ID != operationID.String() || report.Operation.Resumable || report.WritesPerformed != 0 {
 		t.Fatalf("report=%#v err=%v", report, err)
@@ -726,7 +728,13 @@ func makeMaterializedFixture(t *testing.T, ctx context.Context) materializedFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "metastore"))
+	targetRoot := t.TempDir()
+	preflightAdoptionFilesystem(t, targetRoot)
+	physicalStoreRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, _, err := metastore.Init(filepath.Join(physicalStoreRoot, "metastore"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +746,6 @@ func makeMaterializedFixture(t *testing.T, ctx context.Context) materializedFixt
 	if err := os.WriteFile(filepath.Join(searchRoot, "renamed-source"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	targetRoot := t.TempDir()
 	discovery, err := seed.Discover(ctx, meta, seed.DiscoverOptions{
 		SearchRoots: []string{searchRoot}, InventoryLimits: storage.DefaultInventoryLimits(),
 		MatchLimits: metafile.DefaultSourceMatchLimits(), TimeBudget: 10 * time.Second,
@@ -766,6 +773,20 @@ func makeMaterializedFixture(t *testing.T, ctx context.Context) materializedFixt
 	return materializedFixture{
 		meta: meta, store: store, artifact: artifact.ID, targetRoot: targetRoot,
 		operation: operation, planID: discovery.Plan.ID, verified: verified,
+	}
+}
+
+func preflightAdoptionFilesystem(t *testing.T, root string) {
+	t.Helper()
+	session, _, err := fsbind.BindExisting(root)
+	if errors.Is(err, fsbind.ErrUnsupported) {
+		t.Skipf("client adoption filesystem binding is unsupported: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

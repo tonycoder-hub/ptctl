@@ -115,9 +115,10 @@ func TestRemovalReAddPlanIsStableAcrossLiveAndRetainedAuthority(t *testing.T) {
 	fixture := makeMaterializedFixture(t, context.Background())
 	base := prepareFixturePlan(t, fixture)
 	live := removalProofForFixture(t, fixture, base, false)
-	retained := removalProofForFixture(t, fixture, base, true)
+	retained := *live
+	retained.prerequisite.RetainedTombstone = true
 	livePlan := prepareRemovalReAddPlan(t, fixture, base, live)
-	retainedPlan := prepareRemovalReAddPlan(t, fixture, base, retained)
+	retainedPlan := prepareRemovalReAddPlan(t, fixture, base, &retained)
 	if livePlan.PlanID() != retainedPlan.PlanID() || !reflect.DeepEqual(livePlan.plan, retainedPlan.plan) {
 		t.Fatalf("authority storage form changed reviewed identity: live=%#v retained=%#v", livePlan.plan, retainedPlan.plan)
 	}

@@ -335,7 +335,15 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 }
 
 func pathWithin(base, path string) bool {
-	relative, err := filepath.Rel(filepath.Clean(base), filepath.Clean(path))
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(filepath.Clean(resolvedBase), filepath.Clean(resolvedPath))
 	if err != nil || relative == "" || filepath.IsAbs(relative) {
 		return false
 	}

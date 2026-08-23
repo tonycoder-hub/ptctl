@@ -421,11 +421,16 @@ func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := Run([]string{"seed", "retire", "forget", "--target", t.TempDir(), "--expect-plan-id", plan,
-		"--acknowledge-historical-evidence-deletion", derived.String()}, reader, &out, &errOut); code != 1 || reader.read ||
-		!strings.Contains(out.String(), "absent_unattributed") || !strings.Contains(out.String(), "TARGET HISTORICAL EVIDENCE ERASED") {
-		t.Fatalf("absent forget table code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
-	}
+	t.Run("absent forget table", func(t *testing.T) {
+		targetRoot := materializeTargetRoot(t)
+		var forgetOut, forgetErr bytes.Buffer
+		forgetReader := &trackingReader{}
+		if code := Run([]string{"seed", "retire", "forget", "--target", targetRoot, "--expect-plan-id", plan,
+			"--acknowledge-historical-evidence-deletion", derived.String()}, forgetReader, &forgetOut, &forgetErr); code != 1 || forgetReader.read ||
+			!strings.Contains(forgetOut.String(), "absent_unattributed") || !strings.Contains(forgetOut.String(), "TARGET HISTORICAL EVIDENCE ERASED") {
+			t.Fatalf("absent forget table code=%d read=%t stdout=%q stderr=%q", code, forgetReader.read, forgetOut.String(), forgetErr.String())
+		}
+	})
 	out.Reset()
 	errOut.Reset()
 	reader = &trackingReader{}

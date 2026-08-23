@@ -63,10 +63,14 @@ func ObserveExactSource(ctx context.Context, meta *metafile.MetaInfo, contentPat
 		return result, fmt.Errorf("resolve exact source path: %w", err)
 	}
 	inputPath = filepath.Clean(inputPath)
-	rootPath := inputPath
+	resolvedInputPath, err := filepath.EvalSymlinks(inputPath)
+	if err != nil {
+		return result, fmt.Errorf("resolve physical exact source path: %w", err)
+	}
+	rootPath := filepath.Clean(resolvedInputPath)
 	if !meta.MultiFile {
-		if bound, ok := verified.Path(0); ok && sameCleanPath(bound, inputPath) {
-			rootPath = filepath.Dir(inputPath)
+		if bound, ok := verified.Path(0); ok && sameCleanPath(bound, rootPath) {
+			rootPath = filepath.Dir(rootPath)
 		}
 	}
 	selectionID := exactSourceSelectionID(meta.MetafileVariantID, verification.SourceSnapshotID)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
+	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
@@ -246,6 +247,16 @@ func makeActivationFixtureFromModeDriverAndAdoption(t *testing.T, raw []byte, so
 		}
 	}
 	targetRoot := t.TempDir()
+	session, _, err := fsbind.BindExisting(targetRoot)
+	if errors.Is(err, fsbind.ErrUnsupported) {
+		t.Skipf("client activation filesystem binding is unsupported: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
 	discovery, err := seed.Discover(ctx, meta, seed.DiscoverOptions{
 		SearchRoots: []string{searchRoot}, InventoryLimits: storage.DefaultInventoryLimits(),
 		MatchLimits: metafile.DefaultSourceMatchLimits(), TimeBudget: 10 * time.Second,
@@ -303,7 +314,11 @@ func makeActivationFixtureFromModeDriverAndAdoption(t *testing.T, raw []byte, so
 	if adoptExisting {
 		runOptions.AcknowledgeExistingStopped = true
 	} else {
-		store, _, initErr := metastore.Init(filepath.Join(t.TempDir(), "metastore"))
+		physicalStoreRoot, resolveErr := filepath.EvalSymlinks(t.TempDir())
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		store, _, initErr := metastore.Init(filepath.Join(physicalStoreRoot, "metastore"))
 		if initErr != nil {
 			t.Fatal(initErr)
 		}

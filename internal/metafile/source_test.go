@@ -119,8 +119,12 @@ func TestVerifyContentSourceRetainsPhysicalEmptyFileAuthority(t *testing.T) {
 	if !verified.Result().Verified {
 		t.Fatalf("exact layout did not verify: %#v", verified.Result())
 	}
+	physicalEmptyPath, err := filepath.EvalSymlinks(emptyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	path, ok := verified.Path(1)
-	if !ok || path != emptyPath {
+	if !ok || path != physicalEmptyPath {
 		t.Fatalf("physical empty-file binding was discarded: path=%q ok=%t bindings=%#v", path, ok, verified.Bindings())
 	}
 	precondition, err := verified.SourcePrecondition(1)

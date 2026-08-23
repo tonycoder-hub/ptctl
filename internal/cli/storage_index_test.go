@@ -262,6 +262,7 @@ func TestSeedDiscoverStoredProfileUsageIsValidatedBeforeStoreRead(t *testing.T) 
 
 func TestIndexedExplicitSelectionPlansAndMaterializesWithoutClaimingUnique(t *testing.T) {
 	ctx := t.Context()
+	targetRoot := materializeTargetRoot(t)
 	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
 	store, _, err := metastore.Init(stateRoot)
 	if err != nil {
@@ -290,8 +291,6 @@ func TestIndexedExplicitSelectionPlansAndMaterializesWithoutClaimingUnique(t *te
 	if err := os.WriteFile(torrentPath, testV1Metafile("selected-final.bin", content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	targetRoot := physicalCLITempDir(t)
-
 	var out, errOut bytes.Buffer
 	base := []string{
 		"--torrent", torrentPath, "--state-store", stateRoot, "--storage-profile", "media",

@@ -466,6 +466,9 @@ func testStopPlan(t *testing.T) (string, Plan) {
 	t.Helper()
 	root := t.TempDir()
 	session, info, err := fsbind.BindExisting(root)
+	if errors.Is(err, fsbind.ErrUnsupported) {
+		t.Skipf("client stop filesystem binding is unsupported: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

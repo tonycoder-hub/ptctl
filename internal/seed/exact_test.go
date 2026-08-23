@@ -51,7 +51,11 @@ func TestObserveExactSourceRetainsPhysicalEmptyBindingWithoutUniquenessClaim(t *
 	if !ok {
 		t.Fatal("exact result did not retain its process-local proof")
 	}
-	if path, ok := verified.Path(1); !ok || path != emptyPath {
+	physicalEmptyPath, err := filepath.EvalSymlinks(emptyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path, ok := verified.Path(1); !ok || path != physicalEmptyPath {
 		t.Fatalf("empty binding mismatch: path=%q ok=%t", path, ok)
 	}
 	if mode, ok := result.VerifiedSourceMode(meta); !ok || mode != "exact_root" {
