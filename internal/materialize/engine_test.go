@@ -664,9 +664,18 @@ func TestRunPhysicallyCreatesEmptyManifestFile(t *testing.T) {
 		t.Fatalf("empty-file materialized-final bridge failed: %#v %v", exact, err)
 	}
 	source, ok := exact.VerifiedSource(meta)
-	if emptyPath, exists := source.Path(1); !ok || !exists || emptyPath != filepath.Join(targetRoot, "bundle", "empty") ||
-		!bridge.Matches(final, meta, &exact, source) {
-		t.Fatalf("empty-file materialized-final bridge lost physical authority: path=%q exists=%t ok=%t", emptyPath, exists, ok)
+	if !ok {
+		t.Fatal("empty-file materialized-final bridge lost exact-source authority")
+	}
+	physicalEmptyPath, err := filepath.EvalSymlinks(filepath.Join(targetRoot, "bundle", "empty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyPath, exists := source.Path(1); !exists || emptyPath != physicalEmptyPath {
+		t.Fatalf("empty-file materialized-final bridge lost physical path: path=%q expected=%q exists=%t", emptyPath, physicalEmptyPath, exists)
+	}
+	if !bridge.Matches(final, meta, &exact, source) {
+		t.Fatal("empty-file materialized-final bridge lost process-local authority")
 	}
 }
 
