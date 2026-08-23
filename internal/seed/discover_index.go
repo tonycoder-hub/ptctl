@@ -305,6 +305,7 @@ func RefreshAndDiscoverFromIndex(
 			CurrentSearchStatus: "not_started", CurrentSearchAssurance: "not_started_before_publication",
 			CandidateLimits: candidateLimits, CandidateStopReasons: []string{"max_candidate_states"},
 		}
+		blocked.bindIndexRefreshAuthority()
 		return blocked, err
 	}
 
@@ -316,6 +317,7 @@ func RefreshAndDiscoverFromIndex(
 	result.WritesPerformed = refresh.WritesPerformed
 	if refresh.Status != "stored" || !refresh.HasLiveAuthority(profile) {
 		result = incompleteRefreshDiscovery(result, meta, refresh, options, "index_refresh_incomplete")
+		result.bindIndexRefreshAuthority()
 		return result, refreshErr
 	}
 	if refreshErr != nil {
@@ -325,16 +327,19 @@ func RefreshAndDiscoverFromIndex(
 		}
 		result.IndexRefresh = incompleteCurrentSearchReceipt(refresh, profile, indexed, reason)
 		result = incompleteRefreshDiscovery(result, meta, refresh, options, reason)
+		result.bindIndexRefreshAuthority()
 		return result, refreshErr
 	}
 	if !indexed.HasLiveAuthority(profile) || indexed.CurrentSearch == nil {
 		result.IndexRefresh = incompleteCurrentSearchReceipt(refresh, profile, indexed, "current_candidate_authority_unavailable")
 		result = incompleteRefreshDiscovery(result, meta, refresh, options, "current_candidate_authority_unavailable")
+		result.bindIndexRefreshAuthority()
 		return result, nil
 	}
 	if !indexed.CurrentSearchComplete {
 		result.IndexRefresh = discoveryIndexRefreshWithCandidates(refresh, profile, indexed)
 		result = incompleteCurrentCandidateDiscovery(result, indexed, options)
+		result.bindIndexRefreshAuthority()
 		return result, nil
 	}
 
@@ -342,6 +347,7 @@ func RefreshAndDiscoverFromIndex(
 	result.IndexRefresh = discoveryIndexRefreshWithCandidates(refresh, profile, indexed)
 	result.Effect = "read_storage_metadata+write_private_storage_index+read_content"
 	result.WritesPerformed = refresh.WritesPerformed
+	result.bindIndexRefreshAuthority()
 	return result, err
 }
 

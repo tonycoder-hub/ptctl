@@ -164,6 +164,38 @@ func TestRefreshAndDiscoverFromIndexPublishesReceiptAndReproducesExplicitPlan(t 
 		result.IndexRefresh.Assurance != "same_invocation_complete_generation_published_and_revalidated" || result.Plan == nil {
 		t.Fatalf("refresh discovery receipt or result is incomplete: %#v err=%v", result, err)
 	}
+	trustedRefresh, ok := result.ReconciliationIndexRefresh()
+	if !ok || trustedRefresh.WritesPerformed != 2 || trustedRefresh.DescriptorRecord.ID != result.IndexRefresh.DescriptorRecord.ID {
+		t.Fatalf("same-call refresh receipt authority is unavailable: %#v", trustedRefresh)
+	}
+	mutations := []struct {
+		name   string
+		mutate func(*DiscoveryResult)
+	}{
+		{name: "top_effect", mutate: func(value *DiscoveryResult) { value.Effect = "read_content" }},
+		{name: "top_writes", mutate: func(value *DiscoveryResult) { value.WritesPerformed-- }},
+		{name: "nested_effect", mutate: func(value *DiscoveryResult) { value.IndexRefresh.Effect = "read_storage_metadata" }},
+		{name: "nested_negative_writes", mutate: func(value *DiscoveryResult) { value.IndexRefresh.WritesPerformed = -1 }},
+		{name: "nested_excess_writes", mutate: func(value *DiscoveryResult) { value.IndexRefresh.WritesPerformed = 3 }},
+		{name: "data_negative_writes", mutate: func(value *DiscoveryResult) { value.IndexRefresh.DataPublication.WritesPerformed = -1 }},
+		{name: "descriptor_excess_writes", mutate: func(value *DiscoveryResult) { value.IndexRefresh.DescriptorPublication.WritesPerformed = 2 }},
+		{name: "publication_sum", mutate: func(value *DiscoveryResult) { value.IndexRefresh.DescriptorPublication.WritesPerformed = 0 }},
+		{name: "publication_effect", mutate: func(value *DiscoveryResult) { value.IndexRefresh.DataPublication.Effect = "write_public_storage_index" }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			tampered := result
+			refresh := *result.IndexRefresh
+			tampered.IndexRefresh = &refresh
+			mutation.mutate(&tampered)
+			// Rebinding isolates the semantic validation from the digest check;
+			// even process-local callers cannot bless contradictory accounting.
+			tampered.bindIndexRefreshAuthority()
+			if _, ok := tampered.ReconciliationIndexRefresh(); ok {
+				t.Fatal("mutated refresh receipt retained process-local authority")
+			}
+		})
+	}
 	currentPlanID := result.Plan.ID
 	matchID := result.Selection.SelectedID
 	descriptorID := result.IndexRefresh.DescriptorRecord.ID
@@ -210,6 +242,9 @@ func TestRefreshAndDiscoverFromIndexStopsBeforePublicationAtManifestBudget(t *te
 	if err != nil || result.WritesPerformed != 0 || result.IndexRefresh == nil || result.IndexRefresh.Status != "not_started" ||
 		result.IndexRefresh.WritesPerformed != 0 || result.Scan.PathConfinement != "not_started_manifest_state_budget" {
 		t.Fatalf("manifest budget crossed the write boundary: %#v err=%v", result, err)
+	}
+	if refresh, ok := result.ReconciliationIndexRefresh(); !ok || refresh.WritesPerformed != 0 {
+		t.Fatalf("zero-write preflight receipt lost process-local accounting authority: %#v", refresh)
 	}
 	after, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
 	if err != nil || len(after.Records) != len(before.Records) {
@@ -313,6 +348,9 @@ func TestRefreshAndDiscoverFromIndexPublicCopyAndJSONLoseAuthority(t *testing.T)
 	if _, ok := public.VerifiedSource(meta); ok {
 		t.Fatal("public refresh discovery retained source authority")
 	}
+	if _, ok := public.ReconciliationIndexRefresh(); ok {
+		t.Fatal("public refresh discovery retained refresh-receipt authority")
+	}
 	raw, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
@@ -323,6 +361,9 @@ func TestRefreshAndDiscoverFromIndexPublicCopyAndJSONLoseAuthority(t *testing.T)
 	}
 	if _, ok := replayed.VerifiedSource(meta); ok {
 		t.Fatal("serialized refresh discovery regained source authority")
+	}
+	if _, ok := replayed.ReconciliationIndexRefresh(); ok {
+		t.Fatal("serialized refresh discovery regained refresh-receipt authority")
 	}
 }
 

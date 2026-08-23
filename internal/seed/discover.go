@@ -2,6 +2,9 @@ package seed
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -226,6 +229,8 @@ type DiscoveryResult struct {
 	verifiedSelectionID string
 	verifiedSourceMode  string
 	verifiedScopeID     string
+	indexRefreshDigest  [sha256.Size]byte
+	indexRefreshSet     bool
 }
 
 // VerifiedSource returns the process-local proof retained by this source
@@ -292,6 +297,62 @@ func (result *DiscoveryResult) VerifiedSourceMode(meta *metafile.MetaInfo) (stri
 	return result.verifiedSourceMode, true
 }
 
+// ReconciliationIndexRefresh returns the unchanged, process-local receipt for
+// an index refresh performed by RefreshAndDiscoverFromIndex. It is deliberately
+// independent from source uniqueness: an incomplete refresh may still have
+// durably published one or two records which an enclosing effectful workflow
+// must report honestly. PublicReportCopy and JSON serialization lose this
+// authority, and mutating any public refresh field invalidates it.
+func (result *DiscoveryResult) ReconciliationIndexRefresh() (DiscoveryIndexRefresh, bool) {
+	if result == nil || !result.indexRefreshSet || result.IndexRefresh == nil {
+		return DiscoveryIndexRefresh{}, false
+	}
+	refresh := *result.IndexRefresh
+	if result.Effect != "read_storage_metadata+write_private_storage_index+read_content" ||
+		refresh.Effect != "read_storage_metadata+write_private_storage_index" ||
+		result.WritesPerformed != refresh.WritesPerformed || !validDiscoveryIndexRefreshWrites(refresh) {
+		return DiscoveryIndexRefresh{}, false
+	}
+	digest := discoveryIndexRefreshAuthorityDigest(refresh)
+	if subtle.ConstantTimeCompare(result.indexRefreshDigest[:], digest[:]) != 1 {
+		return DiscoveryIndexRefresh{}, false
+	}
+	return refresh, true
+}
+
+func validDiscoveryIndexRefreshWrites(refresh DiscoveryIndexRefresh) bool {
+	if refresh.WritesPerformed < 0 || refresh.WritesPerformed > 2 {
+		return false
+	}
+	publications := [...]metastore.RecordImportReceipt{refresh.DataPublication, refresh.DescriptorPublication}
+	writes := 0
+	for _, publication := range publications {
+		if publication.WritesPerformed < 0 || publication.WritesPerformed > 1 ||
+			publication.Effect != "" && publication.Effect != "write_private_sealed_record" ||
+			publication.WritesPerformed > 0 && publication.Effect != "write_private_sealed_record" {
+			return false
+		}
+		writes += publication.WritesPerformed
+	}
+	return writes == refresh.WritesPerformed
+}
+
+func (result *DiscoveryResult) bindIndexRefreshAuthority() {
+	if result == nil || result.IndexRefresh == nil {
+		return
+	}
+	result.indexRefreshDigest = discoveryIndexRefreshAuthorityDigest(*result.IndexRefresh)
+	result.indexRefreshSet = true
+}
+
+func discoveryIndexRefreshAuthorityDigest(refresh DiscoveryIndexRefresh) [sha256.Size]byte {
+	raw, err := json.Marshal(refresh)
+	if err != nil {
+		return [sha256.Size]byte{}
+	}
+	return sha256.Sum256(append([]byte("ptctl-seed-index-refresh-receipt-v1\x00"), raw...))
+}
+
 // PublicReportCopy removes the process-local capability retained by Discover.
 // The returned value can be embedded in a report or serialized without giving
 // callers a way to recover absolute verified source paths through
@@ -302,6 +363,8 @@ func (result DiscoveryResult) PublicReportCopy() DiscoveryResult {
 	result.verifiedSelectionID = ""
 	result.verifiedSourceMode = ""
 	result.verifiedScopeID = ""
+	result.indexRefreshDigest = [sha256.Size]byte{}
+	result.indexRefreshSet = false
 	if result.Matches != nil {
 		result.Matches = append([]DiscoveryMatch(nil), result.Matches...)
 		for i := range result.Matches {

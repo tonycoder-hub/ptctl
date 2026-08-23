@@ -213,7 +213,7 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 	if !result.Scan.Complete || !fullInventoryRootsComplete(result.Scan.Roots) || streamResult.footer.Files != result.Scan.Stats.FilesEmitted ||
 		streamResult.footer.PathBytes != result.Scan.Stats.EmittedPathBytes {
 		result.StopReasons = appendUniqueString(result.StopReasons, "inventory_receipt_mismatch")
-		return result, fmt.Errorf("storage index inventory receipt does not match its sealed stream")
+		return result, fmt.Errorf("%w: inventory receipt does not match its sealed stream", ErrIntegrity)
 	}
 	if options.afterDataPublication != nil {
 		options.afterDataPublication()
@@ -241,9 +241,13 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 		return result, descriptorErr
 	}
 	verification, err := repository.store.VerifyRecordSet(ctx, []metastore.RecordRef{descriptorRef, dataRef}, repository.recordLimits(repository.limits.MaxSnapshots))
-	if err != nil || !verification.Complete || verification.RecordsVerified != 2 {
+	if err != nil {
 		result.StopReasons = appendUniqueString(result.StopReasons, "post_publish_revalidation_failed")
-		return result, fmt.Errorf("storage index publication could not be revalidated")
+		return result, err
+	}
+	if !verification.Complete || verification.RecordsVerified != 2 {
+		result.StopReasons = appendUniqueString(result.StopReasons, "post_publish_revalidation_failed")
+		return result, fmt.Errorf("%w: storage index publication could not be revalidated", ErrIntegrity)
 	}
 	result.Status = "stored"
 	result.authorityDigest = refreshAuthorityDigest(result)

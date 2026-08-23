@@ -25,6 +25,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/site"
 	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
+	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
 
 func TestBuildConsistentReportKeepsAxesSeparateAndPathsPrivate(t *testing.T) {
@@ -64,6 +65,124 @@ func TestBuildConsistentReportKeepsAxesSeparateAndPathsPrivate(t *testing.T) {
 	}
 	if _, err := publicDiscovery.Matches[0].Verification.MatchSourceSnapshot(filepath.Join(root, "renamed.bin")); err == nil {
 		t.Fatal("the public report retained a source-path snapshot oracle")
+	}
+}
+
+func TestBuildEffectfulIndexRefreshRequiresSameInvocationReceiptAuthority(t *testing.T) {
+	meta, discovery, source, root := reconciledSingleFile(t)
+	job := matchingJob(meta, "/downloads/renamed.bin")
+	before, after := ledgerPair(job)
+	// A public receipt can describe claimed writes, but cannot authorize an
+	// effectful reconciliation or preserve a storage proof.
+	discovery.IndexRefresh = &seed.DiscoveryIndexRefresh{
+		Status: "stored", Effect: "read_storage_metadata+write_private_storage_index", WritesPerformed: 2,
+		ProfileID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source, StorageIndexRefreshRequested: true,
+		Client: ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, PathMapping: testPathMapping(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome == "consistent" || report.WritesPerformed != 0 || report.Ledgers.Storage.ProcessLocalProof ||
+		relationStatus(report, "storage_content_proof") != "incomplete" || !slices.ContainsFunc(report.Blockers, func(finding ReportFinding) bool { return finding.Code == "storage.index_refresh_authority_missing" }) {
+		t.Fatalf("untrusted refresh receipt affected reconciliation: %#v", report)
+	}
+}
+
+func TestBuildFreshIndexRefreshRequiresClosedClientBracket(t *testing.T) {
+	base := time.Date(2026, 8, 10, 1, 2, 3, 0, time.UTC)
+	cases := []struct {
+		name       string
+		times      []time.Time
+		consistent bool
+	}{
+		{name: "closed_endpoints", times: []time.Time{base.Add(time.Second), base.Add(time.Second), base.Add(2 * time.Second)}, consistent: true},
+		{name: "starts_before_before_end", times: []time.Time{base, base.Add(time.Second), base.Add(2 * time.Second)}},
+		{name: "live_search_ends_after_after_start", times: []time.Time{base.Add(time.Second), base.Add(2 * time.Second), base.Add(3 * time.Second)}},
+		{name: "overlaps_both_client_snapshots", times: []time.Time{base, base.Add(2 * time.Second), base.Add(3 * time.Second)}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			meta, discovery, source, root := reconciledFreshIndexSingleFile(t, test.times)
+			job := matchingJob(meta, "/downloads/renamed.bin")
+			before, after := ledgerPair(job)
+			report, err := Build(BuildInput{
+				Meta: meta, Discovery: discovery, VerifiedSource: source, StorageIndexRefreshRequested: true,
+				Client: ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, PathMapping: testPathMapping(root),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			hasBracketBlocker := slices.ContainsFunc(report.Blockers, func(finding ReportFinding) bool {
+				return finding.Code == "storage.index_refresh_outside_client_bracket"
+			})
+			if report.WritesPerformed != 2 || !report.Ledgers.Storage.ProcessLocalProof || relationStatus(report, "storage_content_proof") != "verified_unique" {
+				t.Fatalf("trusted writes or independent storage proof were erased: %#v", report)
+			}
+			if test.consistent {
+				if report.Outcome != "consistent" || hasBracketBlocker {
+					t.Fatalf("closed endpoint bracket was rejected: %#v", report)
+				}
+			} else if report.Outcome != "incomplete" || !hasBracketBlocker {
+				t.Fatalf("out-of-bracket refresh was overstated: %#v", report)
+			}
+		})
+	}
+}
+
+func TestBuildFreshIndexRefreshRejectsTerminalModeComposition(t *testing.T) {
+	base := time.Date(2026, 8, 10, 1, 2, 3, 0, time.UTC)
+	meta, discovery, source, root := reconciledFreshIndexSingleFile(t, []time.Time{base.Add(time.Second), base.Add(time.Second), base.Add(2 * time.Second)})
+	job := matchingJob(meta, "/downloads/renamed.bin")
+	before, after := ledgerPair(job)
+	cases := []struct {
+		name string
+		set  func(*BuildInput)
+	}{
+		{name: "materialized_final", set: func(input *BuildInput) { input.MaterializedFinal.Requested = true }},
+		{name: "adoption", set: func(input *BuildInput) { input.ClientAdoption.Requested = true }},
+		{name: "activation", set: func(input *BuildInput) { input.ClientActivation.Requested = true }},
+		{name: "stop", set: func(input *BuildInput) { input.ClientStop.Requested = true }},
+		{name: "removal", set: func(input *BuildInput) { input.ClientRemoval.Requested = true }},
+		{name: "retirement", set: func(input *BuildInput) { input.SourceRetirement.Requested = true }},
+		{name: "parent_cleanup", set: func(input *BuildInput) { input.ParentCleanup.Requested = true }},
+		{name: "unexpected_terminal_activity", set: func(input *BuildInput) { input.ClientRemoval.CompletionAttempted = true }},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			input := BuildInput{
+				Meta: meta, Discovery: discovery, VerifiedSource: source, StorageIndexRefreshRequested: true,
+				Client: ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, PathMapping: testPathMapping(root),
+			}
+			test.set(&input)
+			report, err := Build(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Outcome != "incomplete" || report.WritesPerformed != 2 || !report.Ledgers.Storage.ProcessLocalProof ||
+				!slices.ContainsFunc(report.Blockers, func(finding ReportFinding) bool { return finding.Code == "storage.index_refresh_mode_conflict" }) {
+				t.Fatalf("refresh mode conflict was not fail-closed: %#v", report)
+			}
+		})
+	}
+}
+
+func TestBuildOrdinaryReportNeverAccountsFreshIndexWrites(t *testing.T) {
+	base := time.Date(2026, 8, 10, 1, 2, 3, 0, time.UTC)
+	meta, discovery, source, root := reconciledFreshIndexSingleFile(t, []time.Time{base.Add(time.Second), base.Add(time.Second), base.Add(2 * time.Second)})
+	job := matchingJob(meta, "/downloads/renamed.bin")
+	before, after := ledgerPair(job)
+	report, err := Build(BuildInput{
+		Meta: meta, Discovery: discovery, VerifiedSource: source,
+		Client: ClientBracket{Requested: true, Before: &before, After: &after, RequestsMade: 3}, PathMapping: testPathMapping(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcome != "consistent" || report.WritesPerformed != 0 || slices.Contains(report.Effect, "write_private_storage_index") {
+		t.Fatalf("ordinary report accepted effectful receipt authority: %#v", report)
 	}
 }
 
@@ -1477,6 +1596,50 @@ func reconciledSingleFile(t *testing.T) (*metafile.MetaInfo, seed.DiscoveryResul
 	source, ok := discovery.VerifiedSource(meta)
 	if !ok {
 		t.Fatalf("discovery did not retain process-local proof: %#v", discovery)
+	}
+	return meta, discovery, source, root
+}
+
+func reconciledFreshIndexSingleFile(t *testing.T, clockValues []time.Time) (*metafile.MetaInfo, seed.DiscoveryResult, *metafile.VerifiedSource, string) {
+	t.Helper()
+	if len(clockValues) != 3 {
+		t.Fatal("fresh index fixture requires exactly three clock values")
+	}
+	meta, _, _, root := reconciledSingleFile(t)
+	store, _, err := metastore.Init(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := repository.CreateProfile(context.Background(), "media", []string{root}, false, storageindex.DefaultScanLimits(), clockValues[0].Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clockIndex := 0
+	discovery, err := seed.RefreshAndDiscoverFromIndex(
+		context.Background(), repository, meta, profile.Profile, storageindex.DefaultCandidateLimits(),
+		seed.DiscoverOptions{
+			InventoryLimits: storage.DefaultInventoryLimits(), MatchLimits: metafile.DefaultSourceMatchLimits(), Strategy: "copy",
+			ClientMapping: &seed.ClientMappingOptions{HostRoot: root, ClientRoot: "/downloads"},
+		},
+		storageindex.RefreshOptions{Clock: func() time.Time {
+			if clockIndex >= len(clockValues) {
+				t.Fatal("fresh index fixture clock was called too many times")
+			}
+			value := clockValues[clockIndex]
+			clockIndex++
+			return value
+		}},
+	)
+	if err != nil || discovery.SourceOutcome != "verified_unique" || discovery.WritesPerformed != 2 {
+		t.Fatalf("fresh index fixture failed: discovery=%#v err=%v", discovery, err)
+	}
+	source, ok := discovery.VerifiedSource(meta)
+	if !ok {
+		t.Fatal("fresh index fixture lost process-local storage proof")
 	}
 	return meta, discovery, source, root
 }

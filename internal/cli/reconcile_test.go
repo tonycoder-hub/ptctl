@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
@@ -20,9 +22,11 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/reconcile"
+	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/site"
 	"github.com/tonycoder-hub/ptctl/internal/sourceretire"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
+	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
 
 const (
@@ -121,6 +125,266 @@ func TestReconcileReportBracketsOneClientSessionAndProducesConsistentJSON(t *tes
 		t.Fatalf("single-file reconciliation unexpectedly read a file ledger: %#v", response.Data.Ledgers.Downloader.FileLayout)
 	}
 	assertJSONStringsExclude(t, out.Bytes(), torrentPath, searchRoot, filepath.Join(searchRoot, "PTCTL-CLIENT-PATH-CANARY.bin"), clientPath, server.URL, clientUser, password, magnet, magnetCanary)
+}
+
+func TestReconcileRefreshReportWritesFreshIndexInsideClientBracket(t *testing.T) {
+	torrentPath, searchRoot, meta := writeReconciliationFixture(t)
+	const profileName = "PROFILE-NAME-CANARY"
+	stateRoot := filepath.Join(physicalCLITempDir(t), "fresh-reconcile-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateProfile(t.Context(), profileName, []string{searchRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		clientPath    = reconciliationClientRoot + "/PTCTL-CLIENT-PATH-CANARY.bin"
+		trackerCanary = "FRESH-TRACKER-PASSKEY-CANARY"
+	)
+	magnet := "magnet:?xt=urn:btih:" + meta.InfoHashV1 + "&tr=https%3A%2F%2Ftracker.invalid%2Fannounce%3Fpasskey%3D" + trackerCanary
+	var requests []string
+	var listReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "fresh", Path: "/"})
+			_, _ = w.Write([]byte("Ok."))
+		case "/api/v2/torrents/info":
+			readNumber := listReads.Add(1)
+			descriptors, listErr := store.ListRecords(t.Context(), metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+			if listErr != nil || readNumber == 1 && len(descriptors.Records) != 0 || readNumber == 2 && len(descriptors.Records) != 1 {
+				t.Errorf("refresh was not bracketed by downloader reads: read=%d descriptors=%d err=%v", readNumber, len(descriptors.Records), listErr)
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"hash": "opaque-fresh-job", "magnet_uri": magnet,
+				"name": "PTCTL-CLIENT-PATH-CANARY.bin", "size": int64(len("content")), "progress": 1.0,
+				"state": "uploading", "save_path": reconciliationClientRoot, "content_path": clientPath,
+				"downloaded": int64(len("content")), "uploaded": int64(1),
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"reconcile", "refresh-report", "--torrent", torrentPath, "--state-store", stateRoot, "--storage-profile", profileName,
+		"--driver", "qbittorrent", "--url", server.URL, "--username", reconciliationClientUser, "--password-stdin",
+		"--host-root", searchRoot, "--client-root", reconciliationClientRoot, "--output", "json",
+	}, strings.NewReader(reconciliationClientPassword+"\n"), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	if !slices.Equal(requests, []string{"/api/v2/auth/login", "/api/v2/torrents/info", "/api/v2/torrents/info"}) {
+		t.Fatalf("unexpected downloader request sequence: %#v", requests)
+	}
+	var response struct {
+		Kind string           `json:"kind"`
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	refresh := response.Data.Ledgers.Storage.Discovery.IndexRefresh
+	if response.Kind != "ledger.reconciliation" || response.Data.Outcome != "consistent" || response.Data.WritesPerformed != 2 ||
+		!response.Data.Scope.StorageIndexRefreshRequested || !response.Data.Ledgers.Storage.ProcessLocalProof ||
+		refresh == nil || refresh.Status != "stored" || refresh.CurrentSearchStatus != "complete" ||
+		!slices.Contains(response.Data.Effect, "write_private_storage_index") {
+		t.Fatalf("fresh reconciliation contract is incomplete: %s", out.String())
+	}
+	assertJSONStringsExclude(t, out.Bytes(), profileName, stateRoot, searchRoot, torrentPath, clientPath, server.URL, reconciliationClientUser, reconciliationClientPassword, magnet, trackerCanary)
+
+	descriptors, err := store.ListRecords(t.Context(), metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil || len(descriptors.Records) != 1 || descriptors.Records[0].ID != refresh.DescriptorRecord.ID {
+		t.Fatalf("fresh descriptor publication mismatch: %#v err=%v", descriptors, err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = Run([]string{
+		"reconcile", "refresh-report", "--torrent", torrentPath, "--state-store", stateRoot, "--storage-profile", profileName,
+		"--driver", "qbittorrent", "--url", server.URL, "--username", reconciliationClientUser, "--password-stdin",
+		"--host-root", searchRoot, "--client-root", reconciliationClientRoot,
+	}, strings.NewReader(reconciliationClientPassword+"\n"), &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("table code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	for _, secret := range []string{profileName, stateRoot, searchRoot, torrentPath, clientPath, server.URL, reconciliationClientUser, reconciliationClientPassword, magnet, trackerCanary, "magnet:?"} {
+		if strings.Contains(out.String(), secret) || strings.Contains(errOut.String(), secret) {
+			t.Fatalf("default report leaked %q: stdout=%q stderr=%q", secret, out.String(), errOut.String())
+		}
+	}
+}
+
+func TestReconcileRefreshReportClassifiesPostPublicationErrorsAfterReport(t *testing.T) {
+	cases := []struct {
+		name     string
+		injected error
+		exitCode int
+		outcome  string
+	}{
+		{name: "integrity", injected: storageindex.ErrIntegrity, exitCode: 3, outcome: "integrity_failed"},
+		{name: "ordinary_io", injected: errors.New("ordinary storage I/O failed"), exitCode: 1, outcome: "partial"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			torrentPath, searchRoot, _ := writeReconciliationFixture(t)
+			stateRoot := filepath.Join(physicalCLITempDir(t), "post-publication-state")
+			store, _, err := metastore.Init(stateRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.CreateProfile(t.Context(), "media", []string{searchRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			var out, errOut bytes.Buffer
+			a := &app{
+				stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, registry: site.NewRegistry(),
+				refreshDiscovery: func(ctx context.Context, repository *storageindex.Repository, meta *metafile.MetaInfo, profile storageindex.Profile, limits storageindex.CandidateLimits, options seed.DiscoverOptions, refreshOptions storageindex.RefreshOptions) (seed.DiscoveryResult, error) {
+					result, refreshErr := seed.RefreshAndDiscoverFromIndex(ctx, repository, meta, profile, limits, options, refreshOptions)
+					if refreshErr != nil {
+						return result, refreshErr
+					}
+					return result, test.injected
+				},
+			}
+			code := runWithApp([]string{
+				"reconcile", "refresh-report", "--torrent", torrentPath, "--state-store", stateRoot, "--storage-profile", "media", "--output", "json",
+			}, a)
+			if code != test.exitCode || !strings.Contains(out.String(), `"kind": "ledger.reconciliation"`) {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+			}
+			var response struct {
+				Data reconcile.Report `json:"data"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			refresh := response.Data.Ledgers.Storage.Discovery.IndexRefresh
+			if response.Data.Outcome != test.outcome || response.Data.WritesPerformed != 2 || refresh == nil || refresh.WritesPerformed != 2 || refresh.Status != "stored" {
+				t.Fatalf("post-publication error erased writes: %s", out.String())
+			}
+			assertJSONStringsExclude(t, out.Bytes(), stateRoot, searchRoot, torrentPath)
+		})
+	}
+}
+
+func TestReconcileStoredIndexFailuresAreReportFirst(t *testing.T) {
+	torrentPath, searchRoot, _ := writeReconciliationFixture(t)
+	stateRoot := filepath.Join(physicalCLITempDir(t), "invalid-index-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateProfile(t.Context(), "media", []string{searchRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	invalid, _, err := store.ImportRecord(t.Context(), metastore.RecordKindStorageIndexDescriptorV1, bytes.NewBufferString("{}\n"), metastore.DefaultRecordLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name     string
+		state    string
+		extra    []string
+		exitCode int
+		outcome  string
+	}{
+		{name: "integrity", state: stateRoot, extra: []string{"--snapshot-record", invalid.ID.String()}, exitCode: 3, outcome: "integrity_failed"},
+		{name: "ordinary_io", state: filepath.Join(physicalCLITempDir(t), "missing-state"), exitCode: 1, outcome: "incomplete"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{"reconcile", "report", "--torrent", torrentPath, "--state-store", test.state, "--storage-profile", "media", "--output", "json"}
+			args = append(args, test.extra...)
+			var out, errOut bytes.Buffer
+			code := Run(args, strings.NewReader(""), &out, &errOut)
+			if code != test.exitCode || !strings.Contains(out.String(), `"kind": "ledger.reconciliation"`) || !strings.Contains(out.String(), `"outcome": "`+test.outcome+`"`) {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+			}
+			assertJSONStringsExclude(t, out.Bytes(), torrentPath, searchRoot, stateRoot, test.state)
+		})
+	}
+}
+
+func TestReconcileRefreshReportRejectsHistoricalOrAlternateStorageSelectorsBeforeCredentialRead(t *testing.T) {
+	cases := [][]string{
+		{"reconcile", "refresh-report", "--torrent", "x.torrent", "--state-store", "state", "--storage-profile", "media", "--snapshot-record", "sha256:" + strings.Repeat("a", 64), "--driver", "qbittorrent", "--url", "http://127.0.0.1", "--username", "user", "--password-stdin"},
+		{"reconcile", "refresh-report", "--torrent", "x.torrent", "--state-store", "state", "--storage-profile", "media", "--search-root", "other", "--driver", "qbittorrent", "--url", "http://127.0.0.1", "--username", "user", "--password-stdin"},
+	}
+	for _, args := range cases {
+		reader := &trackingReader{}
+		var out, errOut bytes.Buffer
+		if code := Run(args, reader, &out, &errOut); code != 2 || reader.read {
+			t.Fatalf("args=%v code=%d stdin_read=%t stdout=%s stderr=%s", args, code, reader.read, out.String(), errOut.String())
+		}
+	}
+}
+
+func TestReconcileRefreshReportManifestBudgetDoesNotReadCredentialOrPublish(t *testing.T) {
+	stateRoot := filepath.Join(physicalCLITempDir(t), "budget-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := physicalCLITempDir(t)
+	if _, err := repository.CreateProfile(t.Context(), "media", []string{root}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(physicalCLITempDir(t), "many.torrent")
+	if err := os.WriteFile(torrentPath, testV1MultiFileMetafile([]byte("123456")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := &trackingReader{}
+	var out, errOut bytes.Buffer
+	args := []string{
+		"reconcile", "refresh-report", "--torrent", torrentPath, "--state-store", stateRoot, "--storage-profile", "media",
+		"--max-states", "1", "--driver", "qbittorrent", "--url", "http://127.0.0.1:1", "--username", "user", "--password-stdin", "--output", "json",
+	}
+	code := Run(args, reader, &out, &errOut)
+	if code != 0 || reader.read || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdin_read=%t stdout=%s stderr=%s", code, reader.read, out.String(), errOut.String())
+	}
+	var response struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.WritesPerformed != 0 || response.Data.Outcome != "incomplete" || response.Data.Ledgers.Storage.Discovery.IndexRefresh == nil || response.Data.Ledgers.Storage.Discovery.IndexRefresh.Status != "not_started" {
+		t.Fatalf("manifest budget report is dishonest: %s", out.String())
+	}
+	descriptors, err := store.ListRecords(t.Context(), metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil || len(descriptors.Records) != 0 {
+		t.Fatalf("manifest budget crossed publication boundary: %#v err=%v", descriptors, err)
+	}
+
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	code = Run(append(append([]string{}, args...), "--require-reconciled"), reader, &out, &errOut)
+	if code != 4 || reader.read || !strings.Contains(out.String(), `"outcome": "incomplete"`) || !strings.Contains(errOut.String(), "outcome is not consistent") {
+		t.Fatalf("required code=%d stdin_read=%t stdout=%s stderr=%s", code, reader.read, out.String(), errOut.String())
+	}
 }
 
 func TestReconcileObservesLiveSiteAndDownloaderFromOneStrictCredentialBundle(t *testing.T) {
@@ -504,7 +768,7 @@ func TestReconcileReportStorageOnlyIsPartialAndReportOriented(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Kind != "ledger.reconciliation" || response.Data.Outcome != "partial" || response.Data.Ledgers.Storage.Status != "verified_unique" || !response.Data.Ledgers.Storage.ProcessLocalProof || response.Data.Ledgers.Downloader.Status != "not_requested" || response.Data.Scope.ClientRequested || len(response.Data.Relations) != 5 {
+	if response.Kind != "ledger.reconciliation" || response.Data.Outcome != "partial" || response.Data.WritesPerformed != 0 || slices.Contains(response.Data.Effect, "write_private_storage_index") || response.Data.Ledgers.Storage.Status != "verified_unique" || !response.Data.Ledgers.Storage.ProcessLocalProof || response.Data.Ledgers.Downloader.Status != "not_requested" || response.Data.Scope.ClientRequested || len(response.Data.Relations) != 5 {
 		t.Fatalf("unexpected storage-only report: %s", out.String())
 	}
 	assertJSONStringsExclude(t, out.Bytes(), torrentPath, searchRoot)

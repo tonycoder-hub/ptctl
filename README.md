@@ -473,6 +473,41 @@ accounting but omits profile paths and filesystem identity hints. This is a
 sequential, bracketed, non-atomic observation—not a durable freshness token.
 JSON or a later process cannot recreate its authority.
 
+The same authority can be consumed inside the downloader bracket with the
+separately named effectful reconciliation command:
+
+```bash
+printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile refresh-report \
+  --torrent release.torrent \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --storage-profile media \
+  --driver qbittorrent \
+  --url https://seedbox.example \
+  --username admin \
+  --password-stdin \
+  --host-root 'D:\' \
+  --client-root /downloads \
+  --output json
+```
+
+`refresh-report` performs the first bounded client snapshot, publishes and
+revalidates one complete index generation, runs live candidate/content proof,
+then performs the second client snapshot. Its report retains the exact index
+write count and marks the fresh-index scope explicitly. Historical snapshot
+selectors and alternate storage modes are rejected. When a client is selected,
+the first snapshot must finish no later than refresh start, and refresh plus
+live reobservation must finish no later than the second snapshot starts. An
+out-of-bracket interval reports
+`storage.index_refresh_outside_client_bracket`: already published writes and
+independent storage proof remain visible, but the combined outcome cannot be
+`consistent`. Materialized-final, adoption, activation, stop, removal,
+retirement, and parent-cleanup modes are structurally incompatible with this
+refresh boundary; the core builder fails such composition closed with
+`storage.index_refresh_mode_conflict`, even for non-CLI callers. Site evidence,
+the client bracket, and path mapping remain composable. Ordinary `reconcile
+report` remains zero-write and cannot promote a retained refresh DTO into write
+authority.
+
 Use a sealed snapshot as a bounded candidate source without scanning every
 directory again:
 
@@ -1799,6 +1834,11 @@ handshake, performs one version read, and makes at most six HTTP requests. Both
 paths are serial and never automatically retry.
 No pause, recheck, move, add, or filesystem write is performed.
 
+For a current completeness proof over a stored profile, use `reconcile
+refresh-report` as documented above. That command is intentionally not
+read-only: its only writes are the immutable index data and descriptor records
+reported in `writes_performed`; it performs no downloader or content mutation.
+
 ```bash
 printf '%s' "$QBITTORRENT_PASSWORD" | ptctl reconcile report \
   --torrent release.torrent \
@@ -2183,7 +2223,11 @@ Add `--require-verified` to return `4` unless `source_outcome` is exactly
 evidence. `torrent verify` prints its result before returning `3`.
 Reconciliation is also report-oriented. Add `--require-reconciled` to return
 `4` unless the independently reported local axes are `consistent`; the report
-is still printed first.
+is still printed first. Storage-index corruption, non-canonical descriptor/data
+records, and descriptor/data binding mismatches print the reconciliation report
+before exit `3`; ordinary index/store I/O prints it before exit `1`. A
+structurally incomplete report remains exit `0` by default, and only
+`--require-reconciled` changes that report-oriented result to exit `4`.
 
 Site-binding inspection returns `0` only after the explicit record and linked
 private artifact verify together and the current built-in adapter accepts the

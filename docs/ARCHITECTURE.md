@@ -64,9 +64,9 @@ at that boundary. Adapter runtime errors are normalized to fixed public codes
 while context cancellation and deadlines retain their typed causes, so an
 adapter cannot relay cookie, URL, response-body, or server diagnostic text.
 
-## Read-only ledger reconciliation
+## Ledger reconciliation
 
-`reconcile report` is the second vertical slice. One invocation resolves and
+The ordinary `reconcile report` path is read-only. One invocation resolves and
 parses one exact metafile, optionally reads one authenticated site detail page,
 optionally opens one read-only downloader session, reads a
 bounded job ledger, performs either ordinary storage discovery or an explicitly
@@ -793,6 +793,33 @@ same-invocation full
 `--search-root` enumeration, and the separate explicit
 `storage index refresh-discover` command, can establish current absence or
 unique selection for their own invocation.
+`reconcile refresh-report` is the corresponding effectful ledger composition:
+one optional downloader Before snapshot encloses the same complete refresh,
+joint record revalidation, candidate reobservation, and ordinary exact matcher,
+followed by the optional After snapshot. The reconciliation builder accepts
+the index publication accounting only through an unchanged process-local
+refresh-receipt digest. The authority check also binds the enclosing discovery
+effect/write count to the nested refresh receipt, restricts each immutable
+publication to zero or one write, requires their sum to equal the reported
+total, and limits that total to `0..2`. Public DTOs and JSON cannot synthesize
+either the write receipt authority or storage proof. The existing `reconcile
+report` path does not request this authority and retains its zero-write
+contract.
+
+With a requested client bracket, `Build` accepts the combined fresh-index
+relation only when `Before.ObservedAtEnd <= refresh.ObservedAtStart` and the
+later of refresh/live-search end is no later than `After.ObservedAtStart`.
+Failure adds `storage.index_refresh_outside_client_bracket` and prevents
+`consistent` without erasing trusted publications or independent storage
+proof. The same composition gate rejects refresh combined with
+materialized-final, adoption, activation, stop, removal, retirement, or
+parent-cleanup using `storage.index_refresh_mode_conflict`; integrity,
+conflict, and ambiguous outcomes retain precedence. Site, client, and lexical
+path-mapping axes remain available. Storage-index structural/non-canonical
+records and descriptor/data binding mismatches carry a typed integrity cause,
+so the CLI can print the full report before exit `3`; operational I/O exits `1`,
+ordinary incomplete reports exit `0`, and `--require-reconciled` converts only
+the latter to exit `4`.
 Alternatively, explicit `--source` can establish `verified_exact_root` for one
 selected layout and can become locally consistent with a client, but never
 establishes uniqueness or absence outside that layout. An explicit

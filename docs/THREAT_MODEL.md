@@ -1169,6 +1169,29 @@ result is explicitly
 same-invocation bracketed non-atomic; it does not claim the namespace remained
 frozen between reads or after return.
 
+`reconcile refresh-report` reuses exactly that process-local authority inside
+the optional downloader Before/After bracket. It is a separately named write
+boundary: the report must expose the immutable index publications and their
+logical write count, while downloader and content remain unmodified. A claimed
+public refresh receipt is insufficient; the reconciliation lattice fails
+closed unless the receipt digest and current content authority both survive
+the same process. Top-level and nested effect/write accounting must agree, each
+publication receipt is limited to zero or one write, and their exact sum is
+bounded to `0..2`. Historical selectors cannot be mixed into this mode, and a
+manifest-state failure is detected before credential input, downloader
+requests, inventory, or record publication.
+
+If downloader state is requested, the complete refresh/live-search interval
+must lie after the Before snapshot ends and before the After snapshot starts;
+endpoint equality is allowed. Otherwise
+`storage.index_refresh_outside_client_bracket` preserves the real publication
+receipts and independent same-call content proof but forbids a `consistent`
+cross-axis conclusion. The general builder separately rejects composition with
+materialized-final, adoption, activation, stop, removal, retirement, or
+parent-cleanup through `storage.index_refresh_mode_conflict`; a caller cannot
+bypass that boundary by avoiding the CLI. Stronger integrity, conflict, and
+ambiguity classifications still win.
+
 The candidate-state budget is checked before the effectful boundary. A manifest
 that cannot fit it causes no inventory and no record write. If inventory
 publication succeeds but candidate/path/proof work later becomes incomplete,
@@ -1176,6 +1199,11 @@ the report retains the actual data/descriptor write receipts while refusing
 unique or absent conclusions. Public output contains stable profile/snapshot/
 record IDs and bounded counts, but not stored root bytes, filesystem/root hints,
 private relative issue paths, raw source paths, or any reusable authority.
+Malformed or non-canonical index records and descriptor/data binding failures
+carry an integrity classification. Reconciliation remains report-first: those
+failures exit `3` only after the report, ordinary store/filesystem I/O exits `1`
+after the report, structural incompleteness defaults to `0`, and
+`--require-reconciled` changes only that last case to `4`.
 
 Profiles bind exact root bytes, platform/path semantics, one-filesystem/network
 policy, and hard scan budgets. Display names and creation times are not
@@ -1269,7 +1297,7 @@ interruptible. Users should narrow roots and budgets before scanning mounted
 remote storage.
 
 `metafile store init`, `metafile store import`, `storage profile create`,
-`storage index refresh`, `storage index refresh-discover`, the artifact/binding
+`storage index refresh`, `storage index refresh-discover`, `reconcile refresh-report`, the artifact/binding
 phases of `site metafile fetch`,
 acknowledged materialize operations, acknowledged exact stopped-job
 adoption/activation, acknowledged exact current-job stop, and acknowledged
@@ -1282,8 +1310,9 @@ when that accepted state became visible, including a possible count of `1` for
 `published_durability_unconfirmed`. Materialize instead separately counts
 operation subtrees/directories, journal objects/events, scratch/staged objects,
 publication attempts, logical publications, ambiguous writes, and bytes. Store
-inspect and every non-materialize/non-adoption/non-activation/non-removal artifact consumer
-remain zero-write. Adoption separately counts its operation/control directories,
+inspect and every ordinary non-materialize/non-adoption/non-activation/non-removal
+artifact consumer remain zero-write; `reconcile refresh-report` is the explicit
+index-publication exception described above. Adoption separately counts its operation/control directories,
 temporary marker bytes, no-clobber marker publications/removals, uncertain
 writes, login/ledger/add requests, and add receipt.
 Activation uses the same private-write accounting shape but separately reports

@@ -47,22 +47,23 @@ type ClientBracket struct {
 }
 
 type BuildInput struct {
-	Meta              *metafile.MetaInfo
-	Discovery         seed.DiscoveryResult
-	VerifiedSource    *metafile.VerifiedSource
-	Client            ClientBracket
-	SiteRef           *domain.TorrentRef
-	SiteBinding       SiteBindingSelection
-	SiteDetail        SiteDetailSelection
-	MaterializedFinal MaterializedFinalSelection
-	ClientAdoption    ClientAdoptionSelection
-	ClientActivation  ClientActivationSelection
-	ClientStop        ClientStopSelection
-	ClientRemoval     ClientRemovalSelection
-	SourceRetirement  SourceRetirementSelection
-	ParentCleanup     ParentCleanupSelection
-	PathMapping       *PathMappingOptions
-	ShowAbsolutePaths bool
+	Meta                         *metafile.MetaInfo
+	Discovery                    seed.DiscoveryResult
+	VerifiedSource               *metafile.VerifiedSource
+	StorageIndexRefreshRequested bool
+	Client                       ClientBracket
+	SiteRef                      *domain.TorrentRef
+	SiteBinding                  SiteBindingSelection
+	SiteDetail                   SiteDetailSelection
+	MaterializedFinal            MaterializedFinalSelection
+	ClientAdoption               ClientAdoptionSelection
+	ClientActivation             ClientActivationSelection
+	ClientStop                   ClientStopSelection
+	ClientRemoval                ClientRemovalSelection
+	SourceRetirement             SourceRetirementSelection
+	ParentCleanup                ParentCleanupSelection
+	PathMapping                  *PathMappingOptions
+	ShowAbsolutePaths            bool
 }
 
 // ClientAdoptionCompletionProof is implemented only by a process-local read
@@ -239,24 +240,25 @@ type Report struct {
 }
 
 type ReportScope struct {
-	MetafileVariantID          string `json:"metafile_variant_id"`
-	SiteRequested              bool   `json:"site_requested"`
-	SiteBindingRequested       bool   `json:"site_binding_requested"`
-	SiteBindingSelector        string `json:"site_binding_selector"`
-	SiteDetailRequested        bool   `json:"site_detail_requested"`
-	ClientRequested            bool   `json:"client_requested"`
-	PathMappingRequested       bool   `json:"path_mapping_requested"`
-	PathMappingID              string `json:"path_mapping_id,omitempty"`
-	ClientPathSemantics        string `json:"client_path_semantics"`
-	ClientFileLayoutMode       string `json:"client_file_layout_mode"`
-	MaterializedFinalRequested bool   `json:"materialized_final_requested"`
-	ClientAdoptionRequested    bool   `json:"client_adoption_requested"`
-	ClientActivationRequested  bool   `json:"client_activation_requested"`
-	ClientStopRequested        bool   `json:"client_stop_requested"`
-	ClientRemovalRequested     bool   `json:"client_removal_requested"`
-	SourceRetirementRequested  bool   `json:"source_retirement_requested"`
-	ParentCleanupRequested     bool   `json:"parent_cleanup_requested"`
-	AbsolutePathsShown         bool   `json:"absolute_paths_shown"`
+	MetafileVariantID            string `json:"metafile_variant_id"`
+	SiteRequested                bool   `json:"site_requested"`
+	SiteBindingRequested         bool   `json:"site_binding_requested"`
+	SiteBindingSelector          string `json:"site_binding_selector"`
+	SiteDetailRequested          bool   `json:"site_detail_requested"`
+	ClientRequested              bool   `json:"client_requested"`
+	StorageIndexRefreshRequested bool   `json:"storage_index_refresh_requested"`
+	PathMappingRequested         bool   `json:"path_mapping_requested"`
+	PathMappingID                string `json:"path_mapping_id,omitempty"`
+	ClientPathSemantics          string `json:"client_path_semantics"`
+	ClientFileLayoutMode         string `json:"client_file_layout_mode"`
+	MaterializedFinalRequested   bool   `json:"materialized_final_requested"`
+	ClientAdoptionRequested      bool   `json:"client_adoption_requested"`
+	ClientActivationRequested    bool   `json:"client_activation_requested"`
+	ClientStopRequested          bool   `json:"client_stop_requested"`
+	ClientRemovalRequested       bool   `json:"client_removal_requested"`
+	SourceRetirementRequested    bool   `json:"source_retirement_requested"`
+	ParentCleanupRequested       bool   `json:"parent_cleanup_requested"`
+	AbsolutePathsShown           bool   `json:"absolute_paths_shown"`
 }
 
 type ReportLedgers struct {
@@ -703,13 +705,16 @@ type clientAssessment struct {
 	contentStable bool
 }
 
-// Build creates a read-only reconciliation report. VerifiedSource must be the
+// Build creates an axis-separated reconciliation report. Ordinary callers are
+// read-only. StorageIndexRefreshRequested is the sole effectful composition:
+// its write accounting is accepted only from the unchanged process-local
+// receipt retained by RefreshAndDiscoverFromIndex. VerifiedSource must be the
 // opaque value returned by the same live/indexed discovery or exact-root
 // observation, and Client.Before and Client.After must bracket that
 // observation. A materialized-final request additionally requires the opaque
 // bridge created by VerifyCurrentFinalSource. A JSON round-trip intentionally
 // loses these storage capabilities and therefore cannot produce a verified
-// relation.
+// relation or trusted refresh write receipt.
 func Build(input BuildInput) (Report, error) {
 	if input.Meta == nil {
 		return Report{}, fmt.Errorf("metafile is nil")
@@ -736,28 +741,59 @@ func Build(input BuildInput) (Report, error) {
 		Outcome:         "partial",
 		Assurance:       "axis_separated_non_atomic",
 		Scope: ReportScope{
-			MetafileVariantID:          meta.MetafileVariantID,
-			SiteRequested:              input.SiteRef != nil || input.SiteBinding.Requested || input.SiteDetail.Requested,
-			SiteBindingRequested:       input.SiteBinding.Requested,
-			SiteBindingSelector:        siteBindingSelector(input.SiteBinding.Requested),
-			SiteDetailRequested:        input.SiteDetail.Requested,
-			ClientRequested:            input.Client.Requested,
-			PathMappingRequested:       input.PathMapping != nil,
-			PathMappingID:              pathMappingIDValue,
-			ClientPathSemantics:        pathSemantics,
-			ClientFileLayoutMode:       fileLayoutMode,
-			MaterializedFinalRequested: input.MaterializedFinal.Requested,
-			ClientAdoptionRequested:    input.ClientAdoption.Requested,
-			ClientActivationRequested:  input.ClientActivation.Requested,
-			ClientStopRequested:        input.ClientStop.Requested,
-			ClientRemovalRequested:     input.ClientRemoval.Requested,
-			SourceRetirementRequested:  input.SourceRetirement.Requested,
-			ParentCleanupRequested:     input.ParentCleanup.Requested,
-			AbsolutePathsShown:         input.ShowAbsolutePaths,
+			MetafileVariantID:            meta.MetafileVariantID,
+			SiteRequested:                input.SiteRef != nil || input.SiteBinding.Requested || input.SiteDetail.Requested,
+			SiteBindingRequested:         input.SiteBinding.Requested,
+			SiteBindingSelector:          siteBindingSelector(input.SiteBinding.Requested),
+			SiteDetailRequested:          input.SiteDetail.Requested,
+			ClientRequested:              input.Client.Requested,
+			StorageIndexRefreshRequested: input.StorageIndexRefreshRequested,
+			PathMappingRequested:         input.PathMapping != nil,
+			PathMappingID:                pathMappingIDValue,
+			ClientPathSemantics:          pathSemantics,
+			ClientFileLayoutMode:         fileLayoutMode,
+			MaterializedFinalRequested:   input.MaterializedFinal.Requested,
+			ClientAdoptionRequested:      input.ClientAdoption.Requested,
+			ClientActivationRequested:    input.ClientActivation.Requested,
+			ClientStopRequested:          input.ClientStop.Requested,
+			ClientRemovalRequested:       input.ClientRemoval.Requested,
+			SourceRetirementRequested:    input.SourceRetirement.Requested,
+			ParentCleanupRequested:       input.ParentCleanup.Requested,
+			AbsolutePathsShown:           input.ShowAbsolutePaths,
 		},
 		Relations: []Relation{},
 		Blockers:  []ReportFinding{},
 		Warnings:  []string{},
+	}
+	refreshAuthorityOK := true
+	refreshCompositionBlocked := false
+	if input.StorageIndexRefreshRequested {
+		refresh, ok := input.Discovery.ReconciliationIndexRefresh()
+		if ok {
+			report.Effect = append(report.Effect, "write_private_storage_index")
+			report.WritesPerformed = refresh.WritesPerformed
+			report.Warnings = append(report.Warnings, "the immutable storage index generation was written between optional downloader snapshots; all observations remain sequential and non-atomic")
+			if input.Client.Requested && storageIndexRefreshRequiresClientBracket(refresh) && !storageIndexRefreshWithinClientBracket(refresh, input.Client) {
+				refreshCompositionBlocked = true
+				report.Blockers = append(report.Blockers, ReportFinding{
+					Code:    "storage.index_refresh_outside_client_bracket",
+					Message: "the storage-index refresh and live candidate observation are not fully enclosed by the downloader Before and After snapshots",
+				})
+			}
+		} else {
+			refreshAuthorityOK = false
+			report.Blockers = append(report.Blockers, ReportFinding{
+				Code:    "storage.index_refresh_authority_missing",
+				Message: "the requested storage-index refresh is not backed by an unchanged same-invocation receipt",
+			})
+		}
+		if storageIndexRefreshModeConflict(input) {
+			refreshCompositionBlocked = true
+			report.Blockers = append(report.Blockers, ReportFinding{
+				Code:    "storage.index_refresh_mode_conflict",
+				Message: "storage-index refresh cannot be composed with materialized-final or terminal workflow modes",
+			})
+		}
 	}
 	if input.Client.RequestsMade > 0 || input.Client.Before != nil || input.Client.After != nil || input.Client.FileAttempted {
 		report.Effect = append(report.Effect, "read_downloader_state")
@@ -828,6 +864,13 @@ func Build(input BuildInput) (Report, error) {
 		MaterializedFinal: MaterializedFinalLedger{Status: "not_requested"},
 		Discovery:         sanitizedDiscovery(input.Discovery, input.ShowAbsolutePaths),
 	}
+	if !refreshAuthorityOK {
+		if storageLedger.Status != "integrity_failed" {
+			storageLedger.Status = "incomplete"
+			storageRelation.Status = "incomplete"
+		}
+		storageRelation.BlockerCodes = append(storageRelation.BlockerCodes, "storage.index_refresh_authority_missing")
+	}
 	if verifiedStorageOutcome(input.Discovery.SourceOutcome) {
 		storageLedger.SelectedSourceID = input.Discovery.Selection.SelectedID
 		storageRelation.RightIDs = append(storageRelation.RightIDs, input.Discovery.Selection.SelectedID)
@@ -854,6 +897,17 @@ func Build(input BuildInput) (Report, error) {
 			storageRelation.BlockerCodes = append(storageRelation.BlockerCodes, blocker.Code)
 			report.Blockers = append(report.Blockers, ReportFinding{Code: blocker.Code, Message: blocker.Message})
 		}
+	}
+	if !refreshAuthorityOK {
+		if storageLedger.Status != "integrity_failed" {
+			storageLedger.Status = "incomplete"
+			storageRelation.Status = "incomplete"
+		}
+		storageLedger.ProcessLocalProof = false
+		storageLedger.SelectedSourceID = ""
+		storageLedger.SourceSnapshotID = ""
+		storageRelation.EvidenceLevel = "none"
+		storageRelation.RightIDs = nil
 	}
 	materializedLedger, materializedOK, materializedBlockers, materializedWarnings := assessMaterializedFinal(
 		meta, input.MaterializedFinal, &input.Discovery, input.VerifiedSource,
@@ -1078,6 +1132,9 @@ func Build(input BuildInput) (Report, error) {
 		removalLedger.Status, input.ClientRemoval.Requested || removalLedger.Status != "not_requested",
 		retirementLedger.Status, input.SourceRetirement.Requested || retirementLedger.Status != "not_requested",
 		parentCleanupLedger.Status, input.ParentCleanup.Requested || parentCleanupLedger.Status != "not_requested")
+	if refreshCompositionBlocked && report.Outcome != "integrity_failed" && report.Outcome != "conflict" && report.Outcome != "ambiguous" {
+		report.Outcome = "incomplete"
+	}
 	if report.Outcome == "consistent" {
 		if removalLedger.Status == "historical_keep_data_removal_current_job_absent" {
 			report.Assurance = "current_exact_local_content_plus_bracketed_typed_client_absence_and_canonical_historical_keep_data_removal_non_atomic"
@@ -1121,6 +1178,38 @@ func Build(input BuildInput) (Report, error) {
 		report.Relations[i].BlockerCodes = stableStrings(report.Relations[i].BlockerCodes)
 	}
 	return report, nil
+}
+
+func storageIndexRefreshModeConflict(input BuildInput) bool {
+	materialized := input.MaterializedFinal.Requested || input.MaterializedFinal.Final != nil || input.MaterializedFinal.Source != nil || input.MaterializedFinal.StopReason != ""
+	adoption := input.ClientAdoption.Requested || input.ClientAdoption.CompletionAttempted || input.ClientAdoption.Completion != nil || input.ClientAdoption.CurrentJob != nil || input.ClientAdoption.StopReason != ""
+	activation := input.ClientActivation.Requested || input.ClientActivation.Completion != nil || input.ClientActivation.CurrentUse != nil || input.ClientActivation.CurrentAbsence != nil || input.ClientActivation.StopReason != ""
+	stop := input.ClientStop.Requested || input.ClientStop.CompletionAttempted || input.ClientStop.Completion != nil || input.ClientStop.CurrentStopped != nil || input.ClientStop.StopReason != ""
+	removal := input.ClientRemoval.Requested || input.ClientRemoval.CompletionAttempted || input.ClientRemoval.Completion != nil || input.ClientRemoval.StopReason != ""
+	retirement := input.SourceRetirement.Requested || input.SourceRetirement.CompletionAttempted || input.SourceRetirement.AbsenceAttempted || input.SourceRetirement.Completion != nil || input.SourceRetirement.CurrentAbsence != nil || input.SourceRetirement.StopReason != ""
+	parentCleanup := input.ParentCleanup.Requested || input.ParentCleanup.CompletionAttempted || input.ParentCleanup.AbsenceAttempted || input.ParentCleanup.Completion != nil || input.ParentCleanup.CurrentAbsence != nil || input.ParentCleanup.StopReason != ""
+	return materialized || adoption || activation || stop || removal || retirement || parentCleanup
+}
+
+func storageIndexRefreshRequiresClientBracket(refresh seed.DiscoveryIndexRefresh) bool {
+	return refresh.Status != "not_started" || !refresh.ObservedAtStart.IsZero() || !refresh.ObservedAtEnd.IsZero() || !refresh.CurrentSearchObservedAtEnd.IsZero()
+}
+
+func storageIndexRefreshWithinClientBracket(refresh seed.DiscoveryIndexRefresh, bracket ClientBracket) bool {
+	if bracket.Before == nil || bracket.After == nil || refresh.ObservedAtStart.IsZero() || refresh.ObservedAtEnd.IsZero() ||
+		bracket.Before.ObservedAtEnd.IsZero() || bracket.After.ObservedAtStart.IsZero() {
+		return false
+	}
+	refreshEnd := refresh.ObservedAtEnd
+	if !refresh.CurrentSearchObservedAtEnd.IsZero() {
+		if refresh.CurrentSearchObservedAtEnd.Before(refreshEnd) {
+			return false
+		}
+		refreshEnd = refresh.CurrentSearchObservedAtEnd
+	}
+	return !refresh.ObservedAtEnd.Before(refresh.ObservedAtStart) &&
+		!refresh.ObservedAtStart.Before(bracket.Before.ObservedAtEnd) &&
+		!bracket.After.ObservedAtStart.Before(refreshEnd)
 }
 
 func assessMaterializedFinal(meta *metafile.MetaInfo, selection MaterializedFinalSelection, discovery *seed.DiscoveryResult, source *metafile.VerifiedSource) (MaterializedFinalLedger, bool, []ReportFinding, []string) {

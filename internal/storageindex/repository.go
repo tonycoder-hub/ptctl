@@ -22,6 +22,10 @@ var (
 	ErrSnapshotNotFound            = errors.New("storage index snapshot was not found")
 	ErrSnapshotAmbiguous           = errors.New("storage index snapshot selection is ambiguous")
 	ErrSnapshotSelectionIncomplete = errors.New("storage index snapshot selection is incomplete")
+	// ErrIntegrity identifies structurally invalid or non-canonical storage
+	// index records and descriptor/data binding failures. Callers may classify
+	// it separately from ordinary store and filesystem I/O failures.
+	ErrIntegrity = errors.New("storage index failed integrity validation")
 )
 
 const (
@@ -291,19 +295,22 @@ func (repository *Repository) loadProfiles(ctx context.Context) ([]loadedProfile
 
 func (repository *Repository) loadProfile(ctx context.Context, observed metastore.RecordRef) (loadedProfile, error) {
 	var profile Profile
+	var decodeErr error
 	ref, receipt, err := repository.store.LoadRecord(ctx, metastore.RecordKindStorageProfileV1, observed.ID, repository.recordLimits(repository.limits.MaxProfiles), func(reader io.Reader) error {
-		var decodeErr error
 		profile, decodeErr = DecodeProfile(reader)
 		return decodeErr
 	})
 	if err != nil || !receipt.Complete {
 		if err != nil {
+			if decodeErr != nil && !errors.Is(decodeErr, context.Canceled) && !errors.Is(decodeErr, context.DeadlineExceeded) {
+				return loadedProfile{}, fmt.Errorf("%w: storage profile record is invalid", ErrIntegrity)
+			}
 			return loadedProfile{}, err
 		}
-		return loadedProfile{}, fmt.Errorf("storage profile record load is incomplete")
+		return loadedProfile{}, fmt.Errorf("%w: storage profile record load is incomplete", ErrIntegrity)
 	}
 	if observed.SizeBytes != 0 && ref.SizeBytes != observed.SizeBytes {
-		return loadedProfile{}, fmt.Errorf("storage profile record size changed")
+		return loadedProfile{}, fmt.Errorf("%w: storage profile record size changed", ErrIntegrity)
 	}
 	return loadedProfile{ref: ref, profile: profile}, nil
 }
@@ -329,19 +336,22 @@ func (repository *Repository) loadDescriptors(ctx context.Context) ([]loadedDesc
 
 func (repository *Repository) loadDescriptor(ctx context.Context, observed metastore.RecordRef) (loadedDescriptor, error) {
 	var descriptor SnapshotDescriptor
+	var decodeErr error
 	ref, receipt, err := repository.store.LoadRecord(ctx, metastore.RecordKindStorageIndexDescriptorV1, observed.ID, repository.recordLimits(repository.limits.MaxSnapshots), func(reader io.Reader) error {
-		var decodeErr error
 		descriptor, decodeErr = DecodeDescriptor(reader, repository.limits)
 		return decodeErr
 	})
 	if err != nil || !receipt.Complete {
 		if err != nil {
+			if decodeErr != nil && !errors.Is(decodeErr, context.Canceled) && !errors.Is(decodeErr, context.DeadlineExceeded) {
+				return loadedDescriptor{}, fmt.Errorf("%w: storage index descriptor is invalid", ErrIntegrity)
+			}
 			return loadedDescriptor{}, err
 		}
-		return loadedDescriptor{}, fmt.Errorf("storage index descriptor load is incomplete")
+		return loadedDescriptor{}, fmt.Errorf("%w: storage index descriptor load is incomplete", ErrIntegrity)
 	}
 	if observed.SizeBytes != 0 && ref.SizeBytes != observed.SizeBytes {
-		return loadedDescriptor{}, fmt.Errorf("storage index descriptor size changed")
+		return loadedDescriptor{}, fmt.Errorf("%w: storage index descriptor size changed", ErrIntegrity)
 	}
 	return loadedDescriptor{ref: ref, descriptor: descriptor}, nil
 }

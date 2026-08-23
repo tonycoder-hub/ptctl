@@ -301,16 +301,16 @@ func (repository *Repository) LoadCandidates(ctx context.Context, profile Profil
 	result.SnapshotID = descriptor.ID
 	dataID, err := metastore.ParseRecordID(descriptor.DataRecordID)
 	if err != nil {
-		return result, fmt.Errorf("storage index descriptor data identity is invalid")
+		return result, fmt.Errorf("%w: storage index descriptor data identity is invalid", ErrIntegrity)
 	}
 	result.DataRecordID = dataID
 
 	provisional := make([]Entry, 0)
 	var decodedHeader SnapshotHeader
 	var decodedFooter SnapshotFooter
+	var snapshotDecodeErr error
 	dataRef, loadReceipt, loadErr := repository.store.LoadRecord(ctx, metastore.RecordKindStorageIndexDataV1, dataID, repository.recordLimits(repository.limits.MaxSnapshots), func(reader io.Reader) error {
-		var decodeErr error
-		decodedHeader, decodedFooter, decodeErr = DecodeSnapshot(ctx, reader, repository.limits, func(entry Entry) error {
+		decodedHeader, decodedFooter, snapshotDecodeErr = DecodeSnapshot(ctx, reader, repository.limits, func(entry Entry) error {
 			result.Stats.SnapshotFilesConsidered++
 			if !wantedSize(wanted, entry.SizeBytes) {
 				return nil
@@ -334,19 +334,22 @@ func (repository *Repository) LoadCandidates(ctx context.Context, profile Profil
 			result.Stats.RetainedPathBytes += pathBytes
 			return nil
 		})
-		return decodeErr
+		return snapshotDecodeErr
 	})
 	result.DataLoad = loadReceipt
 	if loadErr != nil || !loadReceipt.Complete {
 		result.StopReasons = appendUniqueString(result.StopReasons, "snapshot_data_invalid")
 		if loadErr != nil {
+			if snapshotDecodeErr != nil && !errors.Is(snapshotDecodeErr, context.Canceled) && !errors.Is(snapshotDecodeErr, context.DeadlineExceeded) {
+				return result, fmt.Errorf("%w: storage index data is invalid", ErrIntegrity)
+			}
 			return result, loadErr
 		}
-		return result, fmt.Errorf("storage index data load is incomplete")
+		return result, fmt.Errorf("%w: storage index data load is incomplete", ErrIntegrity)
 	}
 	if dataRef.ID != dataID || !snapshotBindsDescriptor(decodedHeader, decodedFooter, descriptor, profile) {
 		result.StopReasons = appendUniqueString(result.StopReasons, "snapshot_descriptor_mismatch")
-		return result, fmt.Errorf("storage index descriptor does not bind its data stream")
+		return result, fmt.Errorf("%w: storage index descriptor does not bind its data stream", ErrIntegrity)
 	}
 	result.HistoricalSnapshotVerified = true
 	if len(result.StopReasons) == 0 {
@@ -355,7 +358,7 @@ func (repository *Repository) LoadCandidates(ctx context.Context, profile Profil
 
 	rootByID, observationByID, err := candidateRoots(profile, descriptor)
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("%w: storage index root scope does not bind the selected profile", ErrIntegrity)
 	}
 	grouped := make(map[string][]Entry)
 	for _, entry := range provisional {
@@ -441,6 +444,9 @@ func (repository *Repository) RefreshAndLoadCandidates(ctx context.Context, prof
 	}
 	candidates, err := repository.LoadCandidates(ctx, profile, refresh.DescriptorRecord.ID, wantedSizes, candidateLimits)
 	if err != nil {
+		if errors.Is(err, ErrSnapshotSelectionIncomplete) {
+			return refresh, candidates, fmt.Errorf("%w: freshly published descriptor does not bind the selected profile", ErrIntegrity)
+		}
 		return refresh, candidates, err
 	}
 	clock := options.Clock
@@ -464,7 +470,7 @@ func (repository *Repository) bindCurrentRefresh(profile Profile, refresh Refres
 		candidates.DataLoad.Store.StoreID != repository.store.Info().StoreID ||
 		refresh.DataPublication.Store.StoreID != repository.store.Info().StoreID ||
 		refresh.DescriptorPublication.Store.StoreID != repository.store.Info().StoreID {
-		return candidates, fmt.Errorf("same-invocation storage index records do not share one initialized store identity and generation")
+		return candidates, fmt.Errorf("%w: same-invocation records do not share one initialized store identity and generation", ErrIntegrity)
 	}
 	roots := make([]CurrentSearchRoot, len(refresh.Scan.Roots))
 	for index, root := range refresh.Scan.Roots {

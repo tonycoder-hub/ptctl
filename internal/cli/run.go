@@ -41,11 +41,22 @@ var (
 )
 
 type app struct {
-	stdin    io.Reader
-	stdout   io.Writer
-	stderr   io.Writer
-	registry *site.Registry
+	stdin            io.Reader
+	stdout           io.Writer
+	stderr           io.Writer
+	registry         *site.Registry
+	refreshDiscovery refreshDiscoveryFunc
 }
+
+type refreshDiscoveryFunc func(
+	context.Context,
+	*storageindex.Repository,
+	*metafile.MetaInfo,
+	storageindex.Profile,
+	storageindex.CandidateLimits,
+	seed.DiscoverOptions,
+	storageindex.RefreshOptions,
+) (seed.DiscoveryResult, error)
 
 type envelope struct {
 	Schema   string   `json:"schema"`
@@ -80,6 +91,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		stdin: stdin, stdout: stdout, stderr: stderr,
 		registry: site.NewRegistry(tjupt.New("")),
 	}
+	return runWithApp(args, a)
+}
+
+func runWithApp(args []string, a *app) int {
 	if len(args) == 0 {
 		a.help()
 		return 0
@@ -111,10 +126,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	fmt.Fprintf(stderr, "error: %s\n", terminalSafe(security.Redact(err.Error())))
+	fmt.Fprintf(a.stderr, "error: %s\n", terminalSafe(security.Redact(err.Error())))
 	var usage *usageErr
 	if errors.As(err, &usage) {
-		fmt.Fprintln(stderr, "run 'ptctl help' for usage")
+		fmt.Fprintln(a.stderr, "run 'ptctl help' for usage")
 		return 2
 	}
 	var integrity *integrityErr
@@ -126,6 +141,21 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 4
 	}
 	return 1
+}
+
+func (a *app) refreshAndDiscoverFromIndex(
+	ctx context.Context,
+	repository *storageindex.Repository,
+	meta *metafile.MetaInfo,
+	profile storageindex.Profile,
+	candidateLimits storageindex.CandidateLimits,
+	options seed.DiscoverOptions,
+	refreshOptions storageindex.RefreshOptions,
+) (seed.DiscoveryResult, error) {
+	if a.refreshDiscovery != nil {
+		return a.refreshDiscovery(ctx, repository, meta, profile, candidateLimits, options, refreshOptions)
+	}
+	return seed.RefreshAndDiscoverFromIndex(ctx, repository, meta, profile, candidateLimits, options, refreshOptions)
 }
 
 func (a *app) help() {
@@ -193,6 +223,7 @@ Usage:
   ptctl client remove forget --target PATH --expect-removal-plan-id ID --acknowledge-historical-evidence-deletion [--output table|json] OPERATION_ID
 
   ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--stop-operation ID --stop-plan-id ID] [--removal-operation ID --removal-plan-id ID | --retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [--output table|json]
+  ptctl reconcile refresh-report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --state-store DIR --storage-profile PROFILE [--driver DRIVER --url URL --username USER --password-stdin] [--output table|json]
 
   ptctl seed plan (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --source PATH --target PATH [--output table|json]
   ptctl seed discover (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--search-root PATH... | --state-store DIR --storage-profile PROFILE) [--target PATH] [--output table|json]
@@ -231,7 +262,7 @@ Safety defaults:
   * Client stop targets one reviewed complete started exact job, journals intent before one non-retried request, and requires a fresh exact stopped-state observation plus final filesystem re-verification before completion. Recovery observes first and never repeats an inconclusive request without a separate acknowledgement.
   * Client removal targets one reviewed typed-identity job, explicitly keeps local data, journals intent before one non-retried request, and requires exact queue absence plus final filesystem re-verification before completion.
   * Storage index snapshots are immutable candidate hints; only a same-call complete live scan can prove current uniqueness or absence.
-  * Reconciliation uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes.
+  * Ordinary reconcile report uses one client login, two bounded job-ledger reads, at most two bounded same-job file-list reads, and no client or filesystem writes. The separately named refresh-report may publish one immutable storage-index generation between those reads.
   * Explicit stop reconciliation reads one canonical terminal stop journal or complete retention tombstone before credentials, then binds only attributed stop history to the existing current stopped-job bracket without another request. Historical stop evidence never proves current job incarnation.
 `)
 }
@@ -361,17 +392,42 @@ func (a *app) client(args []string) error {
 }
 
 func (a *app) reconcileCommand(args []string) error {
-	if len(args) == 0 || args[0] != "report" {
-		return usageError("reconcile requires report")
+	if len(args) == 0 {
+		return usageError("reconcile requires report or refresh-report")
 	}
-	return a.reconcileReport(args[1:])
+	switch args[0] {
+	case "report":
+		return a.reconcileReportMode(args[1:], false)
+	case "refresh-report":
+		return a.reconcileReportMode(args[1:], true)
+	default:
+		return usageError("reconcile requires report or refresh-report")
+	}
 }
 
 func (a *app) reconcileReport(args []string) error {
-	fs := newFlagSet("reconcile report")
+	return a.reconcileReportMode(args, false)
+}
+
+func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
+	commandName := "reconcile report"
+	if refreshIndex {
+		commandName = "reconcile refresh-report"
+	}
+	fs := newFlagSet(commandName)
 	var flagOutput strings.Builder
 	fs.SetOutput(&flagOutput)
 	fs.Usage = func() {
+		if refreshIndex {
+			fmt.Fprintln(fs.Output(), "Usage:")
+			fmt.Fprintln(fs.Output(), "  ptctl reconcile refresh-report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) --state-store DIR --storage-profile PROFILE [--driver DRIVER --url URL --username USER --password-stdin] [flags]")
+			fmt.Fprintln(fs.Output(), "")
+			fmt.Fprintln(fs.Output(), "This explicitly effectful report writes one complete immutable storage-index generation and immediately consumes its process-local authority between optional downloader Before and After snapshots. The refresh must start after Before ends and its live search must end before After starts; endpoint equality is allowed. Materialized-final and terminal workflow modes are unavailable. It may establish current storage uniqueness or absence, but remains sequential and non-atomic. The ordinary reconcile report command remains zero-write.")
+			fmt.Fprintln(fs.Output(), "")
+			fmt.Fprintln(fs.Output(), "Flags:")
+			fs.PrintDefaults()
+			return
+		}
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  ptctl reconcile report (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) (--source PATH | --search-root PATH... | --state-store DIR --storage-profile PROFILE | --target PATH --materialize-operation ID --materialize-plan-id ID) [--adoption-operation ID --adoption-plan-id ID] [--activation-operation ID --activation-plan-id ID] [--stop-operation ID --stop-plan-id ID] [--removal-operation ID --removal-plan-id ID | --retirement-operation ID --retirement-plan-id ID --retirement-search-root PATH... [--parent-cleanup-operation ID --parent-cleanup-plan-id ID --parent-cleanup-search-root PATH...]] [flags]")
 		fmt.Fprintln(fs.Output(), "")
@@ -458,10 +514,10 @@ func (a *app) reconcileReport(args []string) error {
 		if detail == "" {
 			detail = err.Error()
 		}
-		return usageError("reconcile report: %s", detail)
+		return usageError("%s: %s", commandName, detail)
 	}
 	if fs.NArg() != 0 {
-		return usageError("reconcile report accepts flags only; unexpected argument %q", fs.Arg(0))
+		return usageError("%s accepts flags only; unexpected argument %q", commandName, fs.Arg(0))
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
@@ -474,6 +530,17 @@ func (a *app) reconcileReport(args []string) error {
 	removalRequested := explicit["removal-operation"] || explicit["removal-plan-id"]
 	retirementRequested := explicit["retirement-operation"] || explicit["retirement-plan-id"] || explicit["retirement-search-root"] || explicit["retirement-allow-network"]
 	parentCleanupRequested := explicit["parent-cleanup-operation"] || explicit["parent-cleanup-plan-id"] || explicit["parent-cleanup-search-root"] || explicit["parent-cleanup-allow-network"]
+	if refreshIndex {
+		if !explicit["state-store"] || !explicit["storage-profile"] || *stateStore == "" || *storageProfile == "" {
+			return usageError("reconcile refresh-report requires non-empty --state-store and --storage-profile")
+		}
+		if explicit["snapshot-record"] {
+			return usageError("--snapshot-record selects historical evidence and is unavailable for reconcile refresh-report")
+		}
+		if exactRequested || len(searchRoots) > 0 || materializedRequested || adoptionRequested || activationRequested || stopRequested || removalRequested || retirementRequested || parentCleanupRequested {
+			return usageError("reconcile refresh-report uses only the immutable storage profile as its storage scope")
+		}
+	}
 	if exactRequested && *exactSource == "" {
 		return usageError("reconcile report requires --source to be non-empty")
 	}
@@ -654,7 +721,7 @@ func (a *app) reconcileReport(args []string) error {
 		}
 		explicitDescriptor = parsedDescriptor
 	}
-	input, err := flaggedMetafileInput("reconcile report", *torrentPath, *storeRoot, *variantID, explicit["torrent"], explicit["metafile-store"], explicit["metafile-variant"])
+	input, err := flaggedMetafileInput(commandName, *torrentPath, *storeRoot, *variantID, explicit["torrent"], explicit["metafile-store"], explicit["metafile-variant"])
 	if err != nil {
 		return err
 	}
@@ -729,7 +796,7 @@ func (a *app) reconcileReport(args []string) error {
 	clientFileLimits.MaxPathBytes = *maxClientFilePathBytes
 	clientFileLimits.MaxResponseBytes = *maxClientFileResponseBytes
 	if err := clientFileLimits.Validate(); err != nil {
-		return usageError("reconcile report: %v", err)
+		return usageError("%s: %v", commandName, err)
 	}
 
 	mappingRootsRequested := explicit["host-root"] || explicit["client-root"] || *hostRoot != "" || *clientRoot != ""
@@ -748,7 +815,7 @@ func (a *app) reconcileReport(args []string) error {
 
 	siteRef, err := parseSiteRef(*siteRefValue)
 	if err != nil {
-		return usageError("reconcile report: %v", err)
+		return usageError("%s: %v", commandName, err)
 	}
 	if siteDetailRequested && siteRef == nil {
 		return usageError("live site detail reconciliation requires --site-ref SITE/REMOTE_ID")
@@ -767,17 +834,17 @@ func (a *app) reconcileReport(args []string) error {
 	matchLimits.MaxVerifiedLayouts = *maxVerifiedLayouts
 	matchLimits.MaxProofWorkBytes = *maxProofBytes
 	if err := inventoryLimits.Validate(); err != nil {
-		return usageError("reconcile report: %v", err)
+		return usageError("%s: %v", commandName, err)
 	}
 	if !indexedRequested && !exactRequested && !materializedRequested && len(searchRoots) > inventoryLimits.MaxRoots {
 		return usageError("reconcile report accepts at most %d --search-root values", inventoryLimits.MaxRoots)
 	}
 	if err := matchLimits.Validate(); err != nil {
-		return usageError("reconcile report: %v", err)
+		return usageError("%s: %v", commandName, err)
 	}
 	if mappingRootsRequested {
 		if err := storage.ValidatePathMappingConfig(*hostRoot, *clientRoot, *clientStyle == "windows"); err != nil {
-			return usageError("reconcile report path mapping is invalid: %v", err)
+			return usageError("%s path mapping is invalid: %v", commandName, err)
 		}
 	}
 	if activationRequested {
@@ -829,16 +896,16 @@ func (a *app) reconcileReport(args []string) error {
 	if clientRequested {
 		clientAdapter, err = newReadOnlyDownloaderDriver(*driverName, *endpoint)
 		if err != nil {
-			return usageError("reconcile report downloader endpoint is invalid: %v", err)
+			return usageError("%s downloader endpoint is invalid: %v", commandName, err)
 		}
 		if adoptionRequested || activationRequested {
 			configured, ok := clientAdapter.(configuredLedgerDriver)
 			if !ok {
-				return usageError("reconcile report downloader configuration identity is unavailable")
+				return usageError("%s downloader configuration identity is unavailable", commandName)
 			}
 			clientConfigID, err = configured.ClientConfigID(*username)
 			if err != nil {
-				return usageError("reconcile report downloader configuration is invalid")
+				return usageError("%s downloader configuration is invalid", commandName)
 			}
 		}
 	}
@@ -869,6 +936,7 @@ func (a *app) reconcileReport(args []string) error {
 	if err != nil {
 		return err
 	}
+	refreshManifestBudgetBlocked := refreshIndex && len(meta.Files) > matchLimits.MaxStates
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	adoptionSelection := reconcile.ClientAdoptionSelection{Requested: adoptionRequested}
@@ -1132,28 +1200,37 @@ func (a *app) reconcileReport(args []string) error {
 	var indexedRepository *storageindex.Repository
 	var indexedProfile storageindex.Profile
 	var indexedDescriptorID metastore.RecordID
+	var storageIndexGateErr error
 	if indexedRequested {
 		store, openErr := metastore.Open(*stateStore)
 		if openErr != nil {
-			return openErr
+			storageIndexGateErr = openErr
+		} else {
+			indexedRepository, storageIndexGateErr = storageindex.NewRepository(store, storageindex.DefaultLimits())
+			if storageIndexGateErr == nil {
+				profileSelection, selectionErr := indexedRepository.SelectProfile(ctx, *storageProfile)
+				if selectionErr != nil {
+					storageIndexGateErr = selectionErr
+				} else if liveErr := storageindex.ValidateProfileForLiveUse(profileSelection.Profile, storageindex.DefaultLimits()); liveErr != nil {
+					storageIndexGateErr = liveErr
+				} else {
+					indexedProfile = profileSelection.Profile
+					if refreshIndex {
+						inventoryLimits = discoveryInventoryLimitsFromProfile(indexedProfile, storageindex.CandidateLimits{
+							MaxCandidates: inventoryLimits.MaxCandidates, MaxPathBytes: inventoryLimits.MaxPathBytes, MaxIssues: inventoryLimits.MaxIssues,
+						})
+						storageIndexGateErr = inventoryLimits.Validate()
+					} else {
+						snapshotSelection, selectionErr := indexedRepository.SelectSnapshot(ctx, profileSelection.Profile, explicitDescriptor)
+						if selectionErr != nil {
+							storageIndexGateErr = selectionErr
+						} else {
+							indexedDescriptorID = snapshotSelection.DescriptorRecordID
+						}
+					}
+				}
+			}
 		}
-		indexedRepository, err = storageindex.NewRepository(store, storageindex.DefaultLimits())
-		if err != nil {
-			return err
-		}
-		profileSelection, selectionErr := indexedRepository.SelectProfile(ctx, *storageProfile)
-		if selectionErr != nil {
-			return selectionErr
-		}
-		if liveErr := storageindex.ValidateProfileForLiveUse(profileSelection.Profile, storageindex.DefaultLimits()); liveErr != nil {
-			return liveErr
-		}
-		snapshotSelection, selectionErr := indexedRepository.SelectSnapshot(ctx, profileSelection.Profile, explicitDescriptor)
-		if selectionErr != nil {
-			return selectionErr
-		}
-		indexedProfile = profileSelection.Profile
-		indexedDescriptorID = snapshotSelection.DescriptorRecordID
 	}
 	siteSelection := reconcile.SiteBindingSelection{Requested: explicit["site-binding-record"], RecordID: siteBindingRecordID}
 	siteBindingGateFailed := false
@@ -1190,7 +1267,7 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	var siteCredential site.Credential
 	var clientCredential downloader.Credential
-	if !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed && !parentCleanupGateFailed {
+	if !refreshManifestBudgetBlocked && storageIndexGateErr == nil && !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed && !parentCleanupGateFailed {
 		switch {
 		case siteDetailRequested && clientRequested:
 			siteCredential, clientCredential, err = readReconciliationCredentialBundle(a.stdin, *username)
@@ -1205,7 +1282,11 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	siteDetailSelection := reconcile.SiteDetailSelection{Requested: siteDetailRequested, Config: siteDetailConfig}
 	if siteDetailRequested {
-		if siteBindingGateFailed {
+		if refreshManifestBudgetBlocked {
+			siteDetailSelection.StopReason = "site_detail_skipped_by_storage_preflight"
+		} else if storageIndexGateErr != nil {
+			siteDetailSelection.StopReason = "site_detail_skipped_by_storage_index_gate"
+		} else if siteBindingGateFailed {
 			siteDetailSelection.StopReason = "site_detail_skipped_by_binding_gate"
 		} else if adoptionGateFailed || activationGateFailed || stopGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed {
 			siteDetailSelection.StopReason = "site_detail_skipped_by_prerequisite_gate"
@@ -1219,13 +1300,13 @@ func (a *app) reconcileReport(args []string) error {
 		FileLayoutMode: *clientFileLayout,
 		FileLimits:     clientFileLimits,
 	}
-	if clientRequested && (siteBindingGateFailed || adoptionGateFailed || activationGateFailed || stopGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed) {
+	if clientRequested && (refreshManifestBudgetBlocked || storageIndexGateErr != nil || siteBindingGateFailed || adoptionGateFailed || activationGateFailed || stopGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed) {
 		bracket.StopReason = "client_snapshot_incomplete"
 	}
 	var session downloader.LedgerSession
 	var fileJobKey string
 	fileBeforeComplete := false
-	if clientRequested && !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed {
+	if clientRequested && !refreshManifestBudgetBlocked && storageIndexGateErr == nil && !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed {
 		session, err = clientAdapter.OpenReadSession(ctx, clientCredential)
 		if err != nil {
 			session = nil
@@ -1284,7 +1365,10 @@ func (a *app) reconcileReport(args []string) error {
 	var discoveryErr error
 	materializedSelection := reconcile.MaterializedFinalSelection{Requested: materializedRequested}
 	materializedFinalIntegrityFailed := false
-	if materializedRequested {
+	if storageIndexGateErr != nil {
+		discovery = reconciliationStorageIndexUnavailableDiscovery(meta, discoverOptions, refreshIndex, reconciliationStorageIndexIntegrityError(storageIndexGateErr))
+		discoveryErr = storageIndexGateErr
+	} else if materializedRequested {
 		verifiedFinal, sourceBridge, observed, _, finalErr := materialize.VerifyCurrentFinalSource(ctx, materialize.FinalProofOptions{
 			Meta: meta, TargetRoot: *materializeTarget, OperationID: materializeOperation,
 			ExpectedPlanID: *materializePlanID, Limits: materialize.DefaultLimits(),
@@ -1316,6 +1400,12 @@ func (a *app) reconcileReport(args []string) error {
 			ShowAbsolutePaths: *showAbsolute,
 			TimeBudget:        *timeout,
 		})
+	} else if refreshIndex {
+		candidateLimits := storageindex.DefaultCandidateLimits()
+		candidateLimits.MaxCandidates = inventoryLimits.MaxCandidates
+		candidateLimits.MaxPathBytes = inventoryLimits.MaxPathBytes
+		candidateLimits.MaxIssues = inventoryLimits.MaxIssues
+		discovery, discoveryErr = a.refreshAndDiscoverFromIndex(ctx, indexedRepository, meta, indexedProfile, candidateLimits, discoverOptions, storageindex.RefreshOptions{})
 	} else if indexedRequested {
 		candidateLimits := storageindex.DefaultCandidateLimits()
 		candidateLimits.MaxCandidates = inventoryLimits.MaxCandidates
@@ -1323,6 +1413,7 @@ func (a *app) reconcileReport(args []string) error {
 		candidateLimits.MaxIssues = inventoryLimits.MaxIssues
 		indexed, queryErr := indexedRepository.LoadCandidates(ctx, indexedProfile, indexedDescriptorID, wantedMetafileSizes(meta), candidateLimits)
 		if queryErr != nil {
+			discovery = reconciliationStorageIndexUnavailableDiscovery(meta, discoverOptions, false, reconciliationStorageIndexIntegrityError(queryErr))
 			discoveryErr = queryErr
 		} else {
 			discovery, discoveryErr = seed.DiscoverFromIndex(ctx, meta, indexedProfile, indexed, discoverOptions)
@@ -1368,27 +1459,31 @@ func (a *app) reconcileReport(args []string) error {
 		}
 		discoveryErr = nil
 	}
-	if discoveryErr != nil {
+	if discoveryErr != nil && !refreshIndex && !indexedRequested {
 		return discoveryErr
+	}
+	if discoveryErr != nil && indexedRequested && reconciliationStorageIndexIntegrityError(discoveryErr) {
+		discovery = reconciliationStorageIndexIntegrityDiscovery(discovery)
 	}
 	verifiedSource, _ := discovery.VerifiedSource(meta)
 	report, err := reconcile.Build(reconcile.BuildInput{
-		Meta:              meta,
-		Discovery:         discovery,
-		VerifiedSource:    verifiedSource,
-		Client:            bracket,
-		SiteRef:           siteRef,
-		SiteBinding:       siteSelection,
-		SiteDetail:        siteDetailSelection,
-		MaterializedFinal: materializedSelection,
-		ClientAdoption:    adoptionSelection,
-		ClientActivation:  activationSelection,
-		ClientStop:        stopSelection,
-		ClientRemoval:     removalSelection,
-		SourceRetirement:  retirementSelection,
-		ParentCleanup:     parentCleanupSelection,
-		PathMapping:       reportMapping,
-		ShowAbsolutePaths: *showAbsolute,
+		Meta:                         meta,
+		Discovery:                    discovery,
+		VerifiedSource:               verifiedSource,
+		StorageIndexRefreshRequested: refreshIndex,
+		Client:                       bracket,
+		SiteRef:                      siteRef,
+		SiteBinding:                  siteSelection,
+		SiteDetail:                   siteDetailSelection,
+		MaterializedFinal:            materializedSelection,
+		ClientAdoption:               adoptionSelection,
+		ClientActivation:             activationSelection,
+		ClientStop:                   stopSelection,
+		ClientRemoval:                removalSelection,
+		SourceRetirement:             retirementSelection,
+		ParentCleanup:                parentCleanupSelection,
+		PathMapping:                  reportMapping,
+		ShowAbsolutePaths:            *showAbsolute,
 	})
 	if err != nil {
 		return err
@@ -1400,6 +1495,9 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if discoveryErr != nil && reconciliationStorageIndexIntegrityError(discoveryErr) {
+		return &integrityErr{message: "the selected storage index or sealed object failed integrity verification; see report"}
 	}
 	if siteBindingIntegrityFailed {
 		return &integrityErr{message: "the explicit site binding record or linked metafile artifact failed integrity verification"}
@@ -1424,6 +1522,9 @@ func (a *app) reconcileReport(args []string) error {
 	}
 	if parentCleanupIntegrityFailed {
 		return &integrityErr{message: "the explicit terminal parent-cleanup journal failed integrity verification"}
+	}
+	if discoveryErr != nil {
+		return discoveryErr
 	}
 	if *requireReconciled && report.Outcome != "consistent" {
 		return &inconclusiveErr{message: "reconciliation outcome is not consistent"}
@@ -1462,6 +1563,59 @@ func siteBindingLoadStopReason(err error) string {
 	default:
 		return "site_binding_load_failed"
 	}
+}
+
+func reconciliationStorageIndexIntegrityError(err error) bool {
+	return errors.Is(err, storageindex.ErrIntegrity) || errors.Is(err, metastore.ErrCorruptRecord) ||
+		errors.Is(err, metastore.ErrRecordConsumerIncomplete) || errors.Is(err, metastore.ErrCorruptArtifact)
+}
+
+func reconciliationStorageIndexUnavailableDiscovery(meta *metafile.MetaInfo, options seed.DiscoverOptions, refreshRequested, integrityFailure bool) seed.DiscoveryResult {
+	effect := "read_private_storage_index+read_live_storage_metadata+read_content"
+	if refreshRequested {
+		effect = "read_storage_metadata+read_content"
+	}
+	physicalBytes := int64(0)
+	for _, file := range meta.Files {
+		if !strings.Contains(file.Attribute, "p") {
+			physicalBytes += file.Length
+		}
+	}
+	result := seed.DiscoveryResult{
+		Effect: effect, WritesPerformed: 0, AbsolutePathsShown: options.ShowAbsolutePaths,
+		Torrent: seed.DiscoveryTorrent{
+			Name: meta.Name, Version: meta.Version, MetafileVariantID: meta.MetafileVariantID,
+			InfoHashV1: meta.InfoHashV1, InfoHashV2: meta.InfoHashV2, PhysicalBytes: physicalBytes, Files: len(meta.Files),
+		},
+		SourceOutcome: "incomplete", Selection: seed.DiscoverySelection{Status: "blocked"},
+		Handoff: seed.DiscoveryHandoff{Status: "blocked"}, BestEvidence: "none",
+		Scan: seed.DiscoveryScan{
+			Complete: false, VerificationComplete: false, TimeBudgetMillis: options.TimeBudget.Milliseconds(),
+			PathConfinement: "not_started_storage_index_unavailable", SearchRoots: []seed.DiscoveryRoot{},
+			InventoryLimits: options.InventoryLimits, MatchLimits: options.MatchLimits,
+			StopReasons: []string{"storage_index_unavailable"}, InventoryIssues: []storage.ScanIssue{}, MatchIssues: []metafile.SourceMatchIssue{},
+		},
+		Files: []seed.DiscoveryFile{}, Matches: []seed.DiscoveryMatch{},
+		Blockers: []seed.DiscoveryBlocker{{
+			Code: "index.storage_index_unavailable", Message: "the selected storage index could not be loaded and verified in this invocation",
+		}},
+		Warnings: []string{"stored index records and selectors are historical evidence only and were not accepted as current content proof"},
+	}
+	if integrityFailure {
+		return reconciliationStorageIndexIntegrityDiscovery(result)
+	}
+	return result
+}
+
+func reconciliationStorageIndexIntegrityDiscovery(result seed.DiscoveryResult) seed.DiscoveryResult {
+	result.SourceOutcome = "integrity_failed"
+	result.Selection = seed.DiscoverySelection{Status: "blocked"}
+	result.Handoff = seed.DiscoveryHandoff{Status: "blocked"}
+	result.BestEvidence = "none"
+	result.Blockers = append(result.Blockers, seed.DiscoveryBlocker{
+		Code: "index.storage_index_integrity_failed", Message: "the selected storage index failed structural or binding integrity verification",
+	})
+	return result
 }
 
 func reconciliationActivationStopReason(ctx context.Context, err error) string {
@@ -2546,7 +2700,7 @@ func writeReconciliationHuman(out io.Writer, report reconcile.Report) error {
 	if mappingID == "" {
 		mappingID = "not_requested"
 	}
-	fmt.Fprintf(w, "PT RECONCILIATION\nOUTCOME\t%s\nEFFECT\t%s\nWRITES\t%d\nASSURANCE\t%s\nPATH MAPPING\t%s\nCLIENT PATH SEMANTICS\t%s\n", terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, "+")), report.WritesPerformed, terminalSafe(report.Assurance), terminalSafe(mappingID), terminalSafe(report.Scope.ClientPathSemantics))
+	fmt.Fprintf(w, "PT RECONCILIATION\nOUTCOME\t%s\nEFFECT\t%s\nWRITES\t%d\nASSURANCE\t%s\nINDEX REFRESH\t%t\nPATH MAPPING\t%s\nCLIENT PATH SEMANTICS\t%s\n", terminalSafe(report.Outcome), terminalSafe(strings.Join(report.Effect, "+")), report.WritesPerformed, terminalSafe(report.Assurance), report.Scope.StorageIndexRefreshRequested, terminalSafe(mappingID), terminalSafe(report.Scope.ClientPathSemantics))
 
 	fmt.Fprintln(w, "\nBLOCKERS\nCODE\tMESSAGE")
 	if len(report.Blockers) == 0 {

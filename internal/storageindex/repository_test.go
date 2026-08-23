@@ -78,6 +78,67 @@ func TestProfileValidationRecomputesDeclarationIdentity(t *testing.T) {
 	}
 }
 
+func TestRepositoryClassifiesInvalidIndexRecordsAndBindingsAsIntegrity(t *testing.T) {
+	ctx := context.Background()
+	t.Run("descriptor", func(t *testing.T) {
+		repository := testRepository(t)
+		profile, err := repository.CreateProfile(ctx, "media", []string{physicalIndexTempDir(t)}, false, DefaultScanLimits(), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, _, err := repository.store.ImportRecord(ctx, metastore.RecordKindStorageIndexDescriptorV1, bytes.NewBufferString("{}\n"), repository.recordLimits(repository.limits.MaxSnapshots))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repository.SelectSnapshot(ctx, profile.Profile, ref.ID); !errors.Is(err, ErrIntegrity) {
+			t.Fatalf("non-canonical descriptor was not classified as integrity failure: %v", err)
+		}
+	})
+
+	t.Run("data", func(t *testing.T) {
+		repository := testRepository(t)
+		profile, err := repository.CreateProfile(ctx, "media", []string{physicalIndexTempDir(t)}, false, DefaultScanLimits(), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		descriptorID := importTestDescriptor(t, repository, profile.Profile, 1, "invalid-data")
+		if _, err := repository.LoadCandidates(ctx, profile.Profile, descriptorID, []int64{1}, DefaultCandidateLimits()); !errors.Is(err, ErrIntegrity) {
+			t.Fatalf("invalid data stream was not classified as integrity failure: %v", err)
+		}
+	})
+
+	t.Run("descriptor_data_binding", func(t *testing.T) {
+		repository := testRepository(t)
+		root := physicalIndexTempDir(t)
+		writeTestFile(t, filepath.Join(root, "payload.bin"), []byte("payload"))
+		profile, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		refresh, err := repository.Refresh(ctx, profile.Profile, RefreshOptions{Clock: deterministicClock(time.Now().UTC())})
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, err := repository.SelectSnapshot(ctx, profile.Profile, refresh.DescriptorRecord.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		descriptor := selected.Descriptor
+		descriptor.Files++
+		raw, err := EncodeDescriptor(descriptor, repository.limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, _, err := repository.store.ImportRecord(ctx, metastore.RecordKindStorageIndexDescriptorV1, bytes.NewReader(raw), repository.recordLimits(repository.limits.MaxSnapshots))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repository.LoadCandidates(ctx, profile.Profile, ref.ID, []int64{7}, DefaultCandidateLimits()); !errors.Is(err, ErrIntegrity) {
+			t.Fatalf("descriptor/data mismatch was not classified as integrity failure: %v", err)
+		}
+	})
+}
+
 func testRepository(t *testing.T) *Repository {
 	t.Helper()
 	store, _, err := metastore.Init(filepath.Join(physicalIndexTempDir(t), "state"))
