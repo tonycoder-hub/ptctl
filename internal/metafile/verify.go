@@ -658,6 +658,10 @@ func resolveFiles(ctx context.Context, meta *MetaInfo, contentPath string) ([]fi
 		if err != nil {
 			return nil, fmt.Errorf("resolve content path: %w", err)
 		}
+		path, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve physical content path: %w", err)
+		}
 		return preflight(ctx, []fileSpec{{path: path, length: meta.Files[0].Length, padding: strings.Contains(meta.Files[0].Attribute, "p")}})
 	}
 

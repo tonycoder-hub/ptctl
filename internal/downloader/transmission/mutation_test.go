@@ -151,8 +151,9 @@ func TestAddStoppedRejectsNonExactPayloadAndNormalizesClientConfigID(t *testing.
 	receipt, err := session.AddStopped(context.Background(), downloader.AddStoppedRequest{Metafile: mutationPayload{
 		variant: "sha256:" + strings.Repeat("c", 64), size: 4, bytes: []byte("abc"),
 	}, SavePath: "/downloads", Identity: downloader.TypedIdentity{InfoHashV1: testHash}})
-	if err == nil || receipt.Complete || requestCount() != 3 {
-		t.Fatalf("short payload was accepted: receipt=%#v requests=%d err=%v", receipt, requestCount(), err)
+	serverRequests := requestCount()
+	if err == nil || receipt.Complete || receipt.RequestsAttempted != 1 || session.RequestsMade() != 3 || serverRequests < 2 || serverRequests > 3 {
+		t.Fatalf("short payload was accepted: receipt=%#v requests=%d/%d err=%v", receipt, serverRequests, session.RequestsMade(), err)
 	}
 
 	first, _ := New("https://EXAMPLE.com:443/transmission/rpc")

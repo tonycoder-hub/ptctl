@@ -275,12 +275,29 @@ func (verified *VerifiedFinal) matchesVerifiedSource(meta *metafile.MetaInfo, so
 	}
 	for _, binding := range bindings {
 		path, ok := expected[binding.FileIndex]
-		if !ok || path != filepath.Clean(binding.Path) {
+		if !ok || !sameVerifiedFinalPath(path, binding.Path) {
 			return false
 		}
 		delete(expected, binding.FileIndex)
 	}
 	return len(expected) == 0
+}
+
+func sameVerifiedFinalPath(expected, observed string) bool {
+	expected, err := filepath.EvalSymlinks(expected)
+	if err != nil {
+		return false
+	}
+	observed, err = filepath.EvalSymlinks(observed)
+	if err != nil {
+		return false
+	}
+	expected = filepath.Clean(expected)
+	observed = filepath.Clean(observed)
+	if storage.CurrentSemantics().CaseSensitive {
+		return expected == observed
+	}
+	return strings.EqualFold(expected, observed)
 }
 
 func appendDiscoveryBlocker(values []seed.DiscoveryBlocker, blocker seed.DiscoveryBlocker) []seed.DiscoveryBlocker {
