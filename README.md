@@ -78,7 +78,9 @@ capabilities at the edge, not assumptions in the core domain model.
 - exact v1 infohash calculation from the original `info` byte slice;
 - exact whole-metafile SHA-256 variant identity, kept distinct from infohashes;
 - a versioned private metafile store with explicit initialization, exact-byte
-  import, content-addressed no-clobber objects, and verified inspection;
+  import, content-addressed no-clobber objects, verified inspection, and
+  same-user/same-session cross-process Windows coordination for the owner/DACL
+  layout setup window without serializing immutable object publication;
 - immutable storage profiles plus bounded, deterministic, streaming filesystem
   inventory snapshots sealed into the same owner-only private store;
 - descriptor-last snapshot publication, domain-separated record IDs, bounded

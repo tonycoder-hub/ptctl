@@ -16,6 +16,10 @@ func platformCommitAssurance() string {
 	return "same_filesystem_link_no_replace_file_final_and_parent_directories_fsync"
 }
 
+func platformAcquireInitPreparation(string) (func(), error) {
+	return func() {}, nil
+}
+
 func platformValidateStoreLocation(path string, mayNotExist bool) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("store location is not absolute")

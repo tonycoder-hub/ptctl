@@ -63,14 +63,21 @@ func Init(root string) (*Store, InitReceipt, error) {
 		return nil, receipt, safeError("initialize private metafile store", err)
 	}
 	// Windows applies the private owner after directory creation through the
-	// new handle. Keep same-process initializers from observing that bounded
-	// setup window as an unsafe pre-existing layout. Staging and no-replace
-	// marker publication remain concurrent below this preparation section.
+	// new handle. Keep same-process and same-user/same-session cross-process
+	// initializers from observing that bounded setup window as an unsafe
+	// pre-existing layout. Staging and no-replace marker publication remain
+	// concurrent below this preparation section.
 	initPreparationMu.Lock()
 	preparationLocked := true
+	platformUnlock, err := platformAcquireInitPreparation(clean)
+	if err != nil {
+		initPreparationMu.Unlock()
+		return nil, receipt, safeError("initialize private metafile store", err)
+	}
 	unlockPreparation := func() {
 		if preparationLocked {
 			preparationLocked = false
+			platformUnlock()
 			initPreparationMu.Unlock()
 		}
 	}

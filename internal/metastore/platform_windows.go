@@ -3,10 +3,12 @@
 package metastore
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -19,6 +21,8 @@ const forbiddenWindowsAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT |
 	windows.FILE_ATTRIBUTE_RECALL_ON_OPEN |
 	windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 
+const windowsInitPreparationWaitMilliseconds = uint32(30_000)
+
 // setWindowsPrivateOwner is a narrow test seam around the post-creation owner
 // assignment. Supplying O: in the creation descriptor can require
 // SeRestorePrivilege; assigning the caller's enabled user SID through a
@@ -27,6 +31,61 @@ var setWindowsPrivateOwner = setCurrentUserAsOwner
 
 func platformCommitAssurance() string {
 	return "same_fixed_drive_movefileex_no_replace_write_through_and_file_flush"
+}
+
+func platformAcquireInitPreparation(root string) (func(), error) {
+	name, err := platformInitPreparationMutexName(root)
+	if err != nil {
+		return nil, err
+	}
+	securityAttributes, err := privateSecurityAttributes()
+	if err != nil {
+		return nil, fmt.Errorf("build private store initializer lock security failed")
+	}
+
+	// A Windows mutex is owned by the calling OS thread. Pin this goroutine
+	// until release so the runtime cannot migrate it between Wait and Release.
+	runtime.LockOSThread()
+	handle, err := windows.CreateMutex(securityAttributes, false, name)
+	if (err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS)) || handle == 0 {
+		if handle != 0 {
+			_ = windows.CloseHandle(handle)
+		}
+		runtime.UnlockOSThread()
+		return nil, fmt.Errorf("create private store initializer lock failed")
+	}
+	wait, waitErr := windows.WaitForSingleObject(handle, windowsInitPreparationWaitMilliseconds)
+	if waitErr != nil || wait != windows.WAIT_OBJECT_0 && wait != windows.WAIT_ABANDONED {
+		_ = windows.CloseHandle(handle)
+		runtime.UnlockOSThread()
+		if wait == uint32(windows.WAIT_TIMEOUT) {
+			return nil, fmt.Errorf("private store initializer lock timed out")
+		}
+		return nil, fmt.Errorf("acquire private store initializer lock failed")
+	}
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		_ = windows.ReleaseMutex(handle)
+		_ = windows.CloseHandle(handle)
+		runtime.UnlockOSThread()
+	}, nil
+}
+
+func platformInitPreparationMutexName(root string) (*uint16, error) {
+	current, err := currentUserSID()
+	if err != nil {
+		return nil, fmt.Errorf("resolve private store initializer identity failed")
+	}
+	key := sha256.Sum256([]byte("ptctl-metastore-init-preparation-v1\x00" + current.String() + "\x00" + strings.ToUpper(filepath.Clean(root))))
+	name, err := windows.UTF16PtrFromString(fmt.Sprintf(`Local\ptctl-metastore-init-v1-%x`, key[:]))
+	if err != nil {
+		return nil, fmt.Errorf("encode private store initializer lock failed")
+	}
+	return name, nil
 }
 
 func platformValidateStoreLocation(path string, mayNotExist bool) error {

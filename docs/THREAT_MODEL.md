@@ -514,6 +514,18 @@ closed. If identity is lost after publication, the receipt still records the
 visible write and the operation cannot return ordinary success. tmpfs, ramfs,
 and other volatile or unreviewed filesystems are rejected as durable stores.
 
+Windows directory creation has a bounded interval between applying an
+owner-only protected DACL and assigning the current user as owner through the
+new handle. A same-user, same-session, normalized-path-derived named mutex
+serializes only root/`objects`/`tmp` preparation across processes so a
+concurrent CLI does not misclassify that interval as an unsafe pre-existing
+store. The fixed 30-second wait fails closed on timeout. The mutex grants no
+store or publication authority, carries no path text in its name, and is
+released before random staging and no-replace marker publication; all ordinary
+binding, privacy, and durability checks still apply. Calls from different
+Windows sessions retain the fail-closed behavior rather than treating the
+mutex as a cross-session security primitive.
+
 Publication and durability confirmation are not one fact. A failure before
 publication cannot create an accepted final object. After a complete object has
 become visible, however, final-directory `fsync` or write-through confirmation

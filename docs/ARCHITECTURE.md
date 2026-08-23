@@ -524,7 +524,15 @@ creation below that root, inspection, publication, cleanup, and directory
 flushing are handle-relative; Linux additionally binds device and mount ID,
 while macOS binds device and filesystem ID. Windows pins every path
 prefix plus the three private directories with no-delete guards, checks the
-volume identity, and rechecks the named binding before reporting success.
+volume identity, and rechecks the named binding before reporting success. A
+per-user, per-session, normalized-path-derived Windows named mutex serializes
+only initial root/`objects`/`tmp` owner-and-DACL preparation across CLI
+processes. It is a bounded availability guard, not store authority: the bound
+layout validation and atomic marker publication remain mandatory, and
+immutable marker/object publication is still coordinated by no-replace
+filesystem operations. The fixed wait is 30 seconds; timeout and different
+Windows sessions remain fail-closed rather than relying on this availability
+guard.
 Volatile memory filesystems are not durable store backends. Temporary objects
 remain private before no-replace publication. POSIX publishes with a no-replace
 link and then `fsync`s the final directory; Windows uses no-replace `MoveFileEx`
