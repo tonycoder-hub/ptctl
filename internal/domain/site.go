@@ -13,12 +13,14 @@ const (
 )
 
 const (
-	CapabilityAuthCheck   Capability = "auth.check"
-	CapabilityAccountRead Capability = "account.read"
-	CapabilitySearch      Capability = "torrent.search"
-	CapabilityDetail      Capability = "torrent.detail"
-	CapabilityMetafile    Capability = "torrent.metafile.read_effectful"
-	CapabilityBonusRead   Capability = "bonus.catalog.read"
+	CapabilityAuthCheck     Capability = "auth.check"
+	CapabilityAccountRead   Capability = "account.read"
+	CapabilitySearch        Capability = "torrent.search"
+	CapabilityDetail        Capability = "torrent.detail"
+	CapabilityMetafile      Capability = "torrent.metafile.read_effectful"
+	CapabilityBonusRead     Capability = "bonus.catalog.read"
+	CapabilityBonusReview   Capability = "bonus.offer.review"
+	CapabilityBonusExchange Capability = "bonus.exchange.submit_effectful"
 )
 
 type SiteDescriptor struct {
@@ -79,6 +81,21 @@ type TorrentRef struct {
 	RemoteID string `json:"remote_id"`
 }
 
+// SiteMetafileObservation is the public, content-free proof produced when a
+// site adapter's one effectful fetch is imported as an exact metafile variant.
+// Origin and RouteID identify the adapter-controlled route that was actually
+// observed; neither value is inferred from TorrentRef or an info hash.
+type SiteMetafileObservation struct {
+	Ref               TorrentRef `json:"ref"`
+	Origin            string     `json:"origin"`
+	RouteID           string     `json:"route_id"`
+	MetafileVariantID string     `json:"metafile_variant_id"`
+	Basis             string     `json:"basis"`
+	ObservedAtStart   time.Time  `json:"observed_at_start"`
+	ObservedAtEnd     time.Time  `json:"observed_at_end"`
+	ResponseBytes     int64      `json:"response_bytes"`
+}
+
 type TorrentSummary struct {
 	Ref         TorrentRef `json:"ref"`
 	Name        string     `json:"name"`
@@ -91,6 +108,19 @@ type TorrentSummary struct {
 	Promotion   *Promotion `json:"promotion,omitempty"`
 }
 
+// TorrentDetail is a bounded, public projection of one authenticated site
+// detail page. Every field remains a site claim: it is neither a metafile
+// identity nor content proof. DisplayTitle can include site decorations such
+// as a promotion label and must never be used as a torrent identity.
+type TorrentDetail struct {
+	Ref                       TorrentRef `json:"ref"`
+	DisplayTitle              string     `json:"display_title"`
+	Seeders                   *int       `json:"seeders,omitempty"`
+	Leechers                  *int       `json:"leechers,omitempty"`
+	DownloadReferenceObserved bool       `json:"download_reference_observed"`
+	EvidenceBasis             []string   `json:"evidence_basis"`
+}
+
 type Promotion struct {
 	UploadFactor   string     `json:"upload_factor"`
 	DownloadFactor string     `json:"download_factor"`
@@ -100,7 +130,8 @@ type Promotion struct {
 // BonusCatalogRow intentionally preserves site-defined columns. Bonus shop
 // semantics are not portable enough to force into a universal purchase model.
 type BonusCatalogRow struct {
-	Columns []string `json:"columns"`
+	Selector string   `json:"selector,omitempty"`
+	Columns  []string `json:"columns"`
 }
 
 type BonusCatalog struct {
@@ -108,4 +139,21 @@ type BonusCatalog struct {
 	Balance    string            `json:"balance,omitempty"`
 	Rows       []BonusCatalogRow `json:"rows"`
 	ObservedAt time.Time         `json:"observed_at"`
+}
+
+// BonusOfferReview is a bounded public projection of one site-defined bonus
+// form. It is a live site claim and a review aid only: ReviewID is not replay
+// authority and does not authorize a later form submission.
+type BonusOfferReview struct {
+	SiteID        string   `json:"site_id"`
+	Selector      string   `json:"selector"`
+	ReviewID      string   `json:"review_id"`
+	Balance       string   `json:"balance,omitempty"`
+	Columns       []string `json:"columns"`
+	Availability  string   `json:"availability"`
+	InputMode     string   `json:"input_mode"`
+	ActionMethod  string   `json:"action_method"`
+	ActionRouteID string   `json:"action_route_id"`
+	FormShapeID   string   `json:"form_shape_id"`
+	EvidenceBasis []string `json:"evidence_basis"`
 }

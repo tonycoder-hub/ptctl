@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -34,15 +35,235 @@ type Status struct {
 	ObservedAt    time.Time `json:"observed_at"`
 }
 
+// IdentityStatus describes whether a downloader job exposed a usable, typed
+// BitTorrent identity. The opaque job key remains separate because downloader
+// APIs do not give that field portable v1/v2 semantics.
+type IdentityStatus string
+
+const (
+	IdentityStatusUnavailable IdentityStatus = "unavailable"
+	IdentityStatusValid       IdentityStatus = "valid"
+	IdentityStatusInvalid     IdentityStatus = "invalid"
+)
+
 type Torrent struct {
-	Hash       string  `json:"hash"`
-	Name       string  `json:"name"`
-	SizeBytes  int64   `json:"size_bytes"`
-	Progress   float64 `json:"progress"`
-	State      string  `json:"state"`
-	SavePath   string  `json:"save_path"`
-	Downloaded int64   `json:"downloaded_bytes"`
-	Uploaded   int64   `json:"uploaded_bytes"`
+	Hash             string         `json:"hash"`
+	InfoHashV1       string         `json:"info_hash_v1,omitempty"`
+	InfoHashV2       string         `json:"info_hash_v2,omitempty"`
+	IdentityStatus   IdentityStatus `json:"identity_status"`
+	IdentityEvidence []string       `json:"identity_evidence"`
+	IdentityIssues   []string       `json:"identity_issues"`
+	Name             string         `json:"name"`
+	SizeBytes        int64          `json:"size_bytes"`
+	Progress         float64        `json:"progress"`
+	State            string         `json:"state"`
+	SavePath         string         `json:"save_path"`
+	ContentPath      string         `json:"content_path,omitempty"`
+	Downloaded       int64          `json:"downloaded_bytes"`
+	Uploaded         int64          `json:"uploaded_bytes"`
+}
+
+// LedgerCapabilities declare which normalized facts a downloader read ledger
+// can expose. A true value is a capability, not a claim that every job supplied
+// that fact.
+type LedgerCapabilities struct {
+	TypedInfoHashes bool `json:"typed_info_hashes"`
+	ContentPath     bool `json:"content_path"`
+	RawMetafile     bool `json:"raw_metafile"`
+	JobFiles        bool `json:"job_files"`
+}
+
+const (
+	DriverQBittorrent  = "qbittorrent"
+	DriverTransmission = "transmission"
+)
+
+// LedgerDriver opens a bounded, read-only observation session. Mutation ports
+// remain separate so adding a read adapter cannot accidentally authorize
+// pause, move, recheck, add, or delete operations.
+type LedgerDriver interface {
+	OpenReadSession(context.Context, Credential) (LedgerSession, error)
+}
+
+// LedgerEvidenceDescriptor is a built-in, code-owned description of the
+// normalized claims a driver can make. Reports must not derive evidence labels
+// from untrusted snapshot strings.
+type LedgerEvidenceDescriptor struct {
+	Driver             string
+	IdentityBasis      string
+	ContentPathBasis   string
+	FilePathBasis      string
+	FileSelectionBasis string
+	OpenRequests       int
+}
+
+// DescribeLedgerDriver recognizes only audited built-in adapters. Snapshot
+// capabilities alone never make an unknown driver authoritative.
+func DescribeLedgerDriver(driver string) (LedgerEvidenceDescriptor, bool) {
+	switch driver {
+	case DriverQBittorrent:
+		return LedgerEvidenceDescriptor{
+			Driver:             DriverQBittorrent,
+			IdentityBasis:      "qbittorrent_magnet_uri_xt",
+			ContentPathBasis:   "qbittorrent_content_path_claim",
+			FilePathBasis:      "qbittorrent_effective_file_path_claims",
+			FileSelectionBasis: "qbittorrent_selection_claims",
+			OpenRequests:       1,
+		}, true
+	case DriverTransmission:
+		return LedgerEvidenceDescriptor{
+			Driver:             DriverTransmission,
+			IdentityBasis:      "transmission_hash_string_sha1",
+			ContentPathBasis:   "transmission_download_dir_and_name_claim",
+			FilePathBasis:      "transmission_effective_file_path_claims",
+			FileSelectionBasis: "transmission_wanted_claims",
+			OpenRequests:       2,
+		}, true
+	default:
+		return LedgerEvidenceDescriptor{}, false
+	}
+}
+
+// LedgerDriverSupportsIdentity reports whether one audited read ledger can
+// expose every typed identity family required by identity. It grants no
+// mutation authority. In particular, Transmission exposes only its complete
+// SHA-1/v1 hash string, while qBittorrent can expose v1, v2, and hybrid magnet
+// identities through the normalized ledger.
+func LedgerDriverSupportsIdentity(driver string, identity TypedIdentity) bool {
+	if identity.Validate() != nil {
+		return false
+	}
+	switch driver {
+	case DriverQBittorrent:
+		return true
+	case DriverTransmission:
+		return identity.InfoHashV1 != "" && identity.InfoHashV2 == ""
+	default:
+		return false
+	}
+}
+
+// LedgerSnapshot is one bounded observation of downloader jobs. Observation
+// timestamps bracket the complete request and parse, rather than pretending
+// that all jobs were sampled atomically.
+type LedgerSnapshot struct {
+	Driver          string             `json:"driver"`
+	ObservedAtStart time.Time          `json:"observed_at_start"`
+	ObservedAtEnd   time.Time          `json:"observed_at_end"`
+	Complete        bool               `json:"complete"`
+	Capabilities    LedgerCapabilities `json:"capabilities"`
+	Jobs            []Torrent          `json:"jobs"`
+}
+
+type JobFileSelection string
+
+const (
+	JobFileSelectionSelected JobFileSelection = "selected"
+	JobFileSelectionSkipped  JobFileSelection = "skipped"
+)
+
+type JobFile struct {
+	Index              int              `json:"index"`
+	RelativeComponents []string         `json:"relative_components"`
+	SizeBytes          int64            `json:"size_bytes"`
+	Progress           float64          `json:"progress"`
+	Selection          JobFileSelection `json:"selection"`
+	Complete           bool             `json:"complete"`
+}
+
+const (
+	defaultJobFileLedgerMaxFiles         = 10_000
+	defaultJobFileLedgerMaxPathBytes     = int64(16 << 20)
+	defaultJobFileLedgerMaxResponseBytes = int64(8 << 20)
+
+	hardJobFileLedgerMaxFiles         = 100_000
+	hardJobFileLedgerMaxPathBytes     = int64(64 << 20)
+	hardJobFileLedgerMaxResponseBytes = int64(32 << 20)
+)
+
+// JobFileLedgerLimits are mandatory work and retention budgets. Callers may
+// tighten the defaults but cannot disable a limit or exceed its hard cap.
+type JobFileLedgerLimits struct {
+	MaxFiles         int   `json:"max_files"`
+	MaxPathBytes     int64 `json:"max_path_bytes"`
+	MaxResponseBytes int64 `json:"max_response_bytes"`
+}
+
+func DefaultJobFileLedgerLimits() JobFileLedgerLimits {
+	return JobFileLedgerLimits{
+		MaxFiles:         defaultJobFileLedgerMaxFiles,
+		MaxPathBytes:     defaultJobFileLedgerMaxPathBytes,
+		MaxResponseBytes: defaultJobFileLedgerMaxResponseBytes,
+	}
+}
+
+func (limits JobFileLedgerLimits) Validate() error {
+	if limits.MaxFiles <= 0 || limits.MaxFiles > hardJobFileLedgerMaxFiles {
+		return fmt.Errorf("maximum job files must be in 1..%d", hardJobFileLedgerMaxFiles)
+	}
+	if limits.MaxPathBytes <= 0 || limits.MaxPathBytes > hardJobFileLedgerMaxPathBytes {
+		return fmt.Errorf("maximum job-file path bytes must be in 1..%d", hardJobFileLedgerMaxPathBytes)
+	}
+	if limits.MaxResponseBytes <= 0 || limits.MaxResponseBytes > hardJobFileLedgerMaxResponseBytes {
+		return fmt.Errorf("maximum job-file response bytes must be in 1..%d", hardJobFileLedgerMaxResponseBytes)
+	}
+	return nil
+}
+
+type JobFileLedgerUsage struct {
+	FilesConsidered int   `json:"files_considered"`
+	PathBytes       int64 `json:"path_bytes"`
+	ResponseBytes   int64 `json:"response_bytes"`
+}
+
+// JobFileLedgerSnapshot is one bounded observation of a single downloader
+// job's effective file paths and selection state. JobKey is process-local
+// request authority and is intentionally omitted from serialized reports.
+type JobFileLedgerSnapshot struct {
+	Driver          string              `json:"driver"`
+	JobKey          string              `json:"-"`
+	SavePath        string              `json:"-"`
+	ContentPath     string              `json:"-"`
+	ObservedAtStart time.Time           `json:"observed_at_start"`
+	ObservedAtEnd   time.Time           `json:"observed_at_end"`
+	Complete        bool                `json:"complete"`
+	Limits          JobFileLedgerLimits `json:"limits"`
+	Used            JobFileLedgerUsage  `json:"used"`
+	Files           []JobFile           `json:"files"`
+}
+
+// LedgerSession reuses one authenticated read-only downloader session. The
+// request count includes every session-opening handshake or authentication
+// request. Close releases idle connections and must not perform an effectful
+// logout request.
+type LedgerSession interface {
+	ReadLedger(context.Context) (LedgerSnapshot, error)
+	ReadJobFiles(context.Context, string, JobFileLedgerLimits) (JobFileLedgerSnapshot, error)
+	RequestsMade() int
+	Close() error
+}
+
+// RequestCountError lets audit-oriented callers retain the exact number of
+// attempted HTTP requests when opening a read session fails before a session
+// value can be returned.
+type RequestCountError interface {
+	error
+	RequestsMade() int
+}
+
+// RequestsMadeFromError extracts an adapter's request count without depending
+// on its concrete error type. The boolean is false when the error carries no
+// audited count.
+func RequestsMadeFromError(err error) (int, bool) {
+	var counted RequestCountError
+	if !errors.As(err, &counted) {
+		return 0, false
+	}
+	requests := counted.RequestsMade()
+	if requests < 0 {
+		return 0, false
+	}
+	return requests, true
 }
 
 type Driver interface {

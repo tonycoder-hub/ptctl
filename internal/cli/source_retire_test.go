@@ -1,0 +1,1202 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
+	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
+	"github.com/tonycoder-hub/ptctl/internal/materialize"
+	"github.com/tonycoder-hub/ptctl/internal/reconcile"
+	"github.com/tonycoder-hub/ptctl/internal/sourceretire"
+)
+
+type sourceRetireJSONEnvelope struct {
+	Schema string              `json:"schema"`
+	Kind   string              `json:"kind"`
+	Data   sourceretire.Report `json:"data"`
+}
+
+type sourceRetireExecutionJSONEnvelope struct {
+	Schema string                       `json:"schema"`
+	Kind   string                       `json:"kind"`
+	Data   sourceretire.ExecutionReport `json:"data"`
+}
+
+type sourceRetireRetentionJSONEnvelope struct {
+	Schema string                                `json:"schema"`
+	Kind   string                                `json:"kind"`
+	Data   sourceretire.ExecutionRetentionReport `json:"data"`
+}
+
+type sourceRetireForgetJSONEnvelope struct {
+	Schema string                             `json:"schema"`
+	Kind   string                             `json:"kind"`
+	Data   sourceretire.ExecutionForgetReport `json:"data"`
+}
+
+type sourceRetireParentCleanupJSONEnvelope struct {
+	Schema string                           `json:"schema"`
+	Kind   string                           `json:"kind"`
+	Data   sourceretire.ParentCleanupReport `json:"data"`
+}
+
+type sourceRetireParentCleanupExecutionJSONEnvelope struct {
+	Schema string                                    `json:"schema"`
+	Kind   string                                    `json:"kind"`
+	Data   sourceretire.ParentCleanupExecutionReport `json:"data"`
+}
+
+type sourceRetireParentCleanupRetentionJSONEnvelope struct {
+	Schema string                                    `json:"schema"`
+	Kind   string                                    `json:"kind"`
+	Data   sourceretire.ParentCleanupRetentionReport `json:"data"`
+}
+
+type sourceRetireParentCleanupForgetJSONEnvelope struct {
+	Schema string                                 `json:"schema"`
+	Kind   string                                 `json:"kind"`
+	Data   sourceretire.ParentCleanupForgetReport `json:"data"`
+}
+
+func TestSeedRetirePlanIsZeroWritePrivateAndRequireAware(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newClientActivateServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+
+	baseAdopt := clientAdoptBaseArgs(fixture, server.server.URL)
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, baseAdopt...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adoptionPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	adoptionRun := append([]string{"client", "adopt", "run"}, baseAdopt...)
+	adoptionRun = append(adoptionRun, "--expect-adoption-plan-id", adoptionPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(adoptionRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+	if adopted.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck {
+		t.Fatalf("adoption did not complete: %s", out.String())
+	}
+
+	baseActivation := clientActivateBaseArgs(fixture, server.server.URL, adopted.Data.Operation.ID, adopted.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "activate", "plan"}, baseActivation...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	activationPlan := decodeClientActivateReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	activationRun := append([]string{"client", "activate", "run"}, baseActivation...)
+	activationRun = append(activationRun, "--expect-activation-plan-id", activationPlan.Data.Plan.ID, "--acknowledge-client-recheck")
+	if code := Run(activationRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	activation := decodeClientActivateReport(t, out.Bytes())
+	if activation.Data.Outcome != clientactivate.OutcomeRecheckInProgress {
+		t.Fatalf("activation did not enter checking: %s", out.String())
+	}
+	server.setState("stoppedUP", 1)
+	out.Reset()
+	errOut.Reset()
+	activationResume := append([]string{"client", "activate", "resume"}, baseActivation...)
+	activationResume = append(activationResume, "--expect-activation-plan-id", activationPlan.Data.Plan.ID, activationPlan.Data.Operation.ID)
+	if code := Run(activationResume, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+
+	checked := decodeClientActivateReport(t, out.Bytes())
+	if checked.Data.Outcome != clientactivate.OutcomeCheckedStopped || !checked.Data.Journal.RecheckCompletionDurable {
+		t.Fatalf("activation did not complete recheck: %s", out.String())
+	}
+
+	args := sourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	requestsBeforeRetire := server.totalRequests()
+	if code := Run(args, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	report := decodeSourceRetireReport(t, out.Bytes())
+	if report.Schema != "ptctl.dev/v1" || report.Kind != "content.source_retirement_plan" ||
+		report.Data.Outcome != sourceretire.OutcomeEligible || report.Data.WritesPerformed != 0 ||
+		report.Data.DeletionPerformed || report.Data.Plan.DeletionAuthority != "none" || report.Data.Plan.ID == "" ||
+		len(report.Data.Plan.SourceFiles) != 1 || report.Data.Plan.SourceFiles[0].SourcePath != "" ||
+		!report.Data.Scan.Complete || !report.Data.Scan.VerificationComplete || report.Data.Scan.StopReasons == nil ||
+		report.Data.Blockers == nil || report.Data.Issues == nil || report.Data.Warnings == nil ||
+		report.Data.Activation.Driver != "qbittorrent" || report.Data.ClientUse.Before.Driver != "qbittorrent" ||
+		!report.Data.ClientUse.Stable || report.Data.ClientUse.RequestsMade != 3 ||
+		server.totalRequests()-requestsBeforeRetire != 3 {
+		t.Fatalf("unexpected retirement report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+	tableArgs := append([]string(nil), args...)
+	for index := 0; index < len(tableArgs)-1; index++ {
+		if tableArgs[index] == "--output" {
+			tableArgs[index+1] = "table"
+			break
+		}
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(tableArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 ||
+		!strings.Contains(out.String(), "DELETION AUTHORITY") || !strings.Contains(out.String(), "none") ||
+		!strings.Contains(out.String(), "CURRENT CLIENT USE") {
+		t.Fatalf("retire table code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	// Explicit path disclosure changes presentation only, not the reviewed plan
+	// identity or any write/deletion count.
+	shownArgs := append(append([]string(nil), args...), "--show-absolute-paths")
+	out.Reset()
+	errOut.Reset()
+	if code := Run(shownArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("shown retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	shown := decodeSourceRetireReport(t, out.Bytes())
+	if shown.Data.Plan.ID != report.Data.Plan.ID || shown.Data.Plan.SourceFiles[0].SourcePath != fixture.materialize.sourcePath {
+		t.Fatalf("path opt-in changed authority or failed: %s", out.String())
+	}
+
+	// Selecting the published final itself is a complete positive conflict. The
+	// report is still emitted first; --require-eligible converts it to exit 4.
+	blockedArgs := sourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	for index := 0; index < len(blockedArgs)-1; index++ {
+		if blockedArgs[index] == "--search-root" {
+			blockedArgs[index+1] = fixture.materialize.targetRoot
+			break
+		}
+	}
+	blockedArgs = append(blockedArgs, "--require-eligible")
+	out.Reset()
+	errOut.Reset()
+	blockedReader := &trackingReader{}
+	requestsBeforeBlocked := server.totalRequests()
+	if code := Run(blockedArgs, blockedReader, &out, &errOut); code != 4 {
+		t.Fatalf("blocked retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	blocked := decodeSourceRetireReport(t, out.Bytes())
+	if blocked.Data.Outcome != sourceretire.OutcomeBlocked || blocked.Data.WritesPerformed != 0 ||
+		!sourceRetireFinding(blocked.Data.Blockers, "source.overlaps_final") || blockedReader.read ||
+		server.totalRequests() != requestsBeforeBlocked {
+		t.Fatalf("published final was not blocked: %s", out.String())
+	}
+
+	limitedArgs := append(append([]string(nil), args...), "--max-proof-bytes", "1", "--require-eligible")
+	out.Reset()
+	errOut.Reset()
+	limitedReader := &trackingReader{}
+	requestsBeforeLimited := server.totalRequests()
+	if code := Run(limitedArgs, limitedReader, &out, &errOut); code != 4 {
+		t.Fatalf("limited retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	limited := decodeSourceRetireReport(t, out.Bytes())
+	if limited.Data.Outcome != sourceretire.OutcomeIncomplete || limited.Data.Scan.StopReasons == nil ||
+		len(limited.Data.Scan.StopReasons) == 0 || limited.Data.WritesPerformed != 0 ||
+		limited.Data.Activation.ObservedAtStart == "" || limited.Data.Final.OperationID == "" || limitedReader.read ||
+		server.totalRequests() != requestsBeforeLimited {
+		t.Fatalf("proof budget was not reported as incomplete: %s", out.String())
+	}
+
+	// A syntactically valid mapping that differs from the reviewed activation is
+	// rejected before stdin or another client request.
+	mismatchedMapping := append([]string(nil), args...)
+	for index := 0; index < len(mismatchedMapping)-1; index++ {
+		if mismatchedMapping[index] == "--client-root" {
+			mismatchedMapping[index+1] = "/different-client-root"
+			break
+		}
+	}
+	mismatchReader := &trackingReader{}
+	requestsBeforeMismatch := server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(mismatchedMapping, mismatchReader, &out, &errOut); code != 4 || mismatchReader.read ||
+		server.totalRequests() != requestsBeforeMismatch {
+		t.Fatalf("mapping mismatch code=%d read=%t stdout=%q stderr=%q", code, mismatchReader.read, out.String(), errOut.String())
+	}
+
+	// A selected source under any ptctl control prefix is a local policy
+	// conflict, so it must be reported before credential or client I/O.
+	reservedSource := filepath.Join(fixture.materialize.sourceRoot, materialize.SourceRetireOperationDirectoryPrefix+"payload")
+	if err := os.Rename(fixture.materialize.sourcePath, reservedSource); err != nil {
+		t.Fatal(err)
+	}
+	reservedReader := &trackingReader{}
+	requestsBeforeReserved := server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(args, reservedReader, &out, &errOut); code != 0 || reservedReader.read || server.totalRequests() != requestsBeforeReserved {
+		t.Fatalf("reserved source code=%d read=%t requests=%d stdout=%q stderr=%q", code, reservedReader.read,
+			server.totalRequests()-requestsBeforeReserved, out.String(), errOut.String())
+	}
+	reserved := decodeSourceRetireReport(t, out.Bytes())
+	if reserved.Data.Outcome != sourceretire.OutcomeBlocked || !sourceRetireFinding(reserved.Data.Blockers, "source.control_namespace_reserved") {
+		t.Fatalf("reserved source was not blocked locally: %s", out.String())
+	}
+	if err := os.Rename(reservedSource, fixture.materialize.sourcePath); err != nil {
+		t.Fatal(err)
+	}
+
+	// A transport failure is a complete, privacy-safe report with the adapter's
+	// exact attempted-request count. It does not retry or become a fatal default
+	// exit merely because --require-eligible was not requested.
+	server.server.Close()
+	out.Reset()
+	errOut.Reset()
+	const passwordCanary = "SOURCE-RETIRE-PASSWORD-CANARY"
+	if code := Run(args, strings.NewReader(passwordCanary+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("transport failure code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	failed := decodeSourceRetireReport(t, out.Bytes())
+	if failed.Data.Outcome != sourceretire.OutcomeIncomplete || failed.Data.ClientUse.Status != "incomplete" ||
+		failed.Data.ClientUse.RequestsMade != 1 || !sourceRetireFinding(failed.Data.Issues, "client.current_use_incomplete") ||
+		bytes.Contains(out.Bytes(), []byte(passwordCanary)) {
+		t.Fatalf("unsafe transport failure report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+}
+
+func TestTransmissionSeedRetirePlanAndRunExactSourceDeletion(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newTransmissionAdoptServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+
+	adoptionBase := transmissionClientAdoptBaseArgs(fixture, server.server.URL)
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, adoptionBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adoptionPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	adoptionRun := append(append([]string{"client", "adopt", "run"}, adoptionBase...),
+		"--expect-adoption-plan-id", adoptionPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(adoptionRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+	if adopted.Data.Outcome != clientadopt.OutcomeAdoptedPendingRecheck || adopted.Data.Plan.Driver != "transmission" {
+		t.Fatalf("Transmission adoption did not complete: %s", out.String())
+	}
+
+	activationBase := transmissionClientActivateBaseArgs(fixture, server.server.URL, adopted.Data.Operation.ID, adopted.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "activate", "plan"}, activationBase...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission activation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	activationPlan := decodeClientActivateReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	activationRun := append(append([]string{"client", "activate", "run"}, activationBase...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, "--acknowledge-client-recheck")
+	if code := Run(activationRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission activation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	server.setState(0, 1)
+	out.Reset()
+	errOut.Reset()
+	activationResume := append(append([]string{"client", "activate", "resume"}, activationBase...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, activationPlan.Data.Operation.ID)
+	if code := Run(activationResume, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("Transmission activation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	checked := decodeClientActivateReport(t, out.Bytes())
+	if checked.Data.Outcome != clientactivate.OutcomeCheckedStopped || !checked.Data.Journal.RecheckCompletionDurable {
+		t.Fatalf("Transmission activation did not complete recheck: %s", out.String())
+	}
+
+	planArgs := transmissionSourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	requestsBefore := transmissionSourceRetireRequests(server)
+	if code := Run(planArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("Transmission retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	plan := decodeSourceRetireReport(t, out.Bytes())
+	if plan.Data.Outcome != sourceretire.OutcomeEligible || plan.Data.WritesPerformed != 0 || plan.Data.DeletionPerformed ||
+		plan.Data.Activation.Driver != "transmission" || plan.Data.ClientUse.Before.Driver != "transmission" ||
+		plan.Data.ClientUse.After.Driver != "transmission" || !plan.Data.ClientUse.Stable || plan.Data.ClientUse.RequestsMade != 4 ||
+		transmissionSourceRetireRequests(server)-requestsBefore != 4 {
+		t.Fatalf("unexpected Transmission retirement plan: %s", out.String())
+	}
+	if _, err := os.Stat(fixture.materialize.sourcePath); err != nil {
+		t.Fatalf("read-only Transmission retirement plan changed source: %v", err)
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	runArgs := append([]string(nil), planArgs...)
+	runArgs[2] = "run"
+	runArgs = append(runArgs, "--expect-plan-id", plan.Data.Plan.ID, "--acknowledge-source-deletion")
+	out.Reset()
+	errOut.Reset()
+	requestsBefore = transmissionSourceRetireRequests(server)
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("Transmission retire run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	execution := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if execution.Data.Outcome != sourceretire.ExecutionOutcomeRetired || !execution.Data.DeletionPerformed ||
+		execution.Data.Writes.NamesRemoved != 1 || execution.Data.Operation.Resumable ||
+		execution.Data.ClientUse.Before.Driver != "transmission" || execution.Data.ClientUse.After.Driver != "transmission" ||
+		execution.Data.ClientUse.RequestsMade != 5 || transmissionSourceRetireRequests(server)-requestsBefore != 5 {
+		t.Fatalf("unexpected Transmission retirement execution: %s", out.String())
+	}
+	if _, err := os.Lstat(fixture.materialize.sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("Transmission-retired source remains: %v", err)
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+}
+
+func TestSeedRetireUsageAndHelpAreStrict(t *testing.T) {
+	reader := &trackingReader{}
+	var out, errOut bytes.Buffer
+	code := Run([]string{"seed", "retire", "plan", "--torrent", "missing.torrent", "--search-root", "missing",
+		"--target", "missing", "--materialize-operation", "bad", "--materialize-plan-id", strings.Repeat("a", 24),
+		"--activation-operation", strings.Repeat("b", 64), "--activation-plan-id", strings.Repeat("c", 24)}, reader, &out, &errOut)
+	if code != 2 || reader.read {
+		t.Fatalf("bad usage code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"seed", "retire", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
+		!strings.Contains(out.String(), "deletion_authority") || !strings.Contains(out.String(), "zero writes") ||
+		!strings.Contains(out.String(), "two bounded job-ledger reads") || !strings.Contains(out.String(), "retains an exact tombstone") ||
+		!strings.Contains(out.String(), "qbittorrent|transmission") || !strings.Contains(out.String(), "Transmission") ||
+		!strings.Contains(out.String(), "not_inspected") || !strings.Contains(out.String(), "unattributed absence") ||
+		!strings.Contains(out.String(), "parent-cleanup") || !strings.Contains(out.String(), "grants") {
+		t.Fatalf("help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "--help"}, strings.NewReader(""), &out, &errOut); code != 0 ||
+		!strings.Contains(out.String(), "immediate parents") || !strings.Contains(out.String(), "zero-write") ||
+		!strings.Contains(out.String(), "acknowledge-empty-parent-removal") || !strings.Contains(out.String(), "recursively removes") ||
+		!strings.Contains(out.String(), "acknowledge-operation-state-deletion") ||
+		!strings.Contains(out.String(), "acknowledge-historical-evidence-deletion") || !strings.Contains(out.String(), "no-path tombstone") {
+		t.Fatalf("parent cleanup help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "plan", "--torrent", "missing.torrent", "--search-root", "missing",
+		"--target", "missing", "--materialize-operation", "present", "--materialize-plan-id", "present",
+		"--activation-operation", "present", "--activation-plan-id", "present", "--host-root", "present",
+		"--client-root", "/present", "--driver", "unsupported", "--url", "https://example.invalid",
+		"--username", "present", "--password-stdin"}, reader, &out, &errOut); code != 2 || reader.read {
+		t.Fatalf("unsupported driver code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	operation := "sha256:" + strings.Repeat("a", 64)
+	plan := "sha256:" + strings.Repeat("b", 64)
+	if code := Run([]string{"seed", "retire", "prune", "--target", "missing", "--expect-plan-id", plan, operation}, reader, &out, &errOut); code != 2 || reader.read {
+		t.Fatalf("missing prune acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "forget", "--target", "missing", "--expect-plan-id", plan, operation}, reader, &out, &errOut); code != 2 || reader.read {
+		t.Fatalf("missing forget acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "status", "--target", "missing", "--max-operations", "1", operation}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("operation-list flag with explicit selector code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	derived, err := sourceretire.OperationIDForPlanID(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("absent forget table", func(t *testing.T) {
+		targetRoot := materializeTargetRoot(t)
+		var forgetOut, forgetErr bytes.Buffer
+		forgetReader := &trackingReader{}
+		if code := Run([]string{"seed", "retire", "forget", "--target", targetRoot, "--expect-plan-id", plan,
+			"--acknowledge-historical-evidence-deletion", derived.String()}, forgetReader, &forgetOut, &forgetErr); code != 1 || forgetReader.read ||
+			!strings.Contains(forgetOut.String(), "absent_unattributed") || !strings.Contains(forgetOut.String(), "TARGET HISTORICAL EVIDENCE ERASED") {
+			t.Fatalf("absent forget table code=%d read=%t stdout=%q stderr=%q", code, forgetReader.read, forgetOut.String(), forgetErr.String())
+		}
+	})
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "plan", "--target", "missing",
+		"--retirement-operation", operation, "--retirement-plan-id", plan, "--search-root", "missing"}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("mismatched cleanup selector code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "plan", "--target", "missing",
+		"--retirement-operation", derived.String(), "--retirement-plan-id", plan, "--search-root", "missing",
+		"--max-parents", "0"}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("invalid cleanup limit code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "run", "--target", "missing",
+		"--retirement-operation", derived.String(), "--retirement-plan-id", plan, "--search-root", "missing",
+		"--expect-cleanup-plan-id", plan}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("missing cleanup execution acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "run", "--target", "missing",
+		"--retirement-operation", derived.String(), "--retirement-plan-id", plan, "--search-root", "missing",
+		"--expect-cleanup-plan-id", plan, "--acknowledge-empty-parent-removal", "--max-parents", "10001"},
+		reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("over-protocol cleanup review limit code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	cleanupOperation, err := sourceretire.ParentCleanupOperationIDForPlanID(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "prune", "--target", "missing",
+		"--expect-cleanup-plan-id", plan, cleanupOperation.String()}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("missing parent cleanup prune acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run([]string{"seed", "retire", "parent-cleanup", "forget", "--target", "missing",
+		"--expect-cleanup-plan-id", plan, cleanupOperation.String()}, reader, &out, &errOut); code != 2 || reader.read || out.Len() != 0 {
+		t.Fatalf("missing parent cleanup forget acknowledgement code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+}
+
+func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
+	fixture := newClientAdoptCLIFixture(t)
+	server := newClientActivateServer(t, fixture.meta, fixture.raw)
+	defer server.server.Close()
+
+	baseAdopt := clientAdoptBaseArgs(fixture, server.server.URL)
+	var out, errOut bytes.Buffer
+	if code := Run(append([]string{"client", "adopt", "plan"}, baseAdopt...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adoptionPlan := decodeClientAdoptReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	adoptionRun := append(append([]string{"client", "adopt", "run"}, baseAdopt...),
+		"--expect-adoption-plan-id", adoptionPlan.Data.Plan.ID, "--acknowledge-client-add")
+	if code := Run(adoptionRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("adoption run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	adopted := decodeClientAdoptReport(t, out.Bytes())
+
+	baseActivation := clientActivateBaseArgs(fixture, server.server.URL, adopted.Data.Operation.ID, adopted.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append([]string{"client", "activate", "plan"}, baseActivation...), strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	activationPlan := decodeClientActivateReport(t, out.Bytes())
+	out.Reset()
+	errOut.Reset()
+	activationRun := append(append([]string{"client", "activate", "run"}, baseActivation...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, "--acknowledge-client-recheck")
+	if code := Run(activationRun, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	server.setState("stoppedUP", 1)
+	out.Reset()
+	errOut.Reset()
+	activationResume := append(append([]string{"client", "activate", "resume"}, baseActivation...),
+		"--expect-activation-plan-id", activationPlan.Data.Plan.ID, activationPlan.Data.Operation.ID)
+	if code := Run(activationResume, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("activation resume code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+
+	// Put the still-verifiable source under one dedicated immediate parent so
+	// retirement leaves an empty directory that the later zero-write planner
+	// can review without ever considering the search root itself.
+	cleanupParent := filepath.Join(fixture.materialize.sourceRoot, "PRIVATE-RETIRED-PARENT-CANARY")
+	if err := os.Mkdir(cleanupParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nestedSource := filepath.Join(cleanupParent, filepath.Base(fixture.materialize.sourcePath))
+	if err := os.Rename(fixture.materialize.sourcePath, nestedSource); err != nil {
+		t.Fatal(err)
+	}
+	fixture.materialize.sourcePath = nestedSource
+
+	planArgs := sourceRetireBaseArgs(fixture, server.server.URL, activationPlan.Data.Operation.ID, activationPlan.Data.Plan.ID)
+	out.Reset()
+	errOut.Reset()
+	if code := Run(planArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("retire plan code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	plan := decodeSourceRetireReport(t, out.Bytes())
+
+	missingAck := append([]string(nil), planArgs...)
+	missingAck[2] = "run"
+	missingAck = append(missingAck, "--expect-plan-id", plan.Data.Plan.ID)
+	reader := &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	requestsBefore := server.totalRequests()
+	if code := Run(missingAck, reader, &out, &errOut); code != 2 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("missing ack code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(fixture.materialize.sourcePath); err != nil {
+		t.Fatalf("missing ack changed source: %v", err)
+	}
+
+	runArgs := append(append([]string(nil), missingAck...), "--acknowledge-source-deletion")
+	out.Reset()
+	errOut.Reset()
+	requestsBefore = server.totalRequests()
+	if code := Run(runArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("retire run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	execution := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if execution.Schema != "ptctl.dev/v1" || execution.Kind != "content.source_retirement" ||
+		execution.Data.Outcome != sourceretire.ExecutionOutcomeRetired || !execution.Data.DeletionPerformed ||
+		execution.Data.Writes.NamesRemoved != 1 || execution.Data.Operation.Resumable ||
+		server.totalRequests()-requestsBefore != 4 {
+		t.Fatalf("unexpected execution report: %s", out.String())
+	}
+	if _, err := os.Lstat(fixture.materialize.sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("retired source remains: %v", err)
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	statusArgs := []string{"seed", "retire", "status", "--target", fixture.materialize.targetRoot, "--output", "json", execution.Data.Operation.ID}
+	if code := Run(statusArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("status code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	status := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if status.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || status.Data.Operation.Status != "historical_complete" || status.Data.WritesPerformed != 0 {
+		t.Fatalf("unexpected status: %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run([]string{"seed", "retire", "status", "--target", fixture.materialize.targetRoot, "--output", "json"}, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("operation list code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	var operationList struct {
+		Schema string                                    `json:"schema"`
+		Kind   string                                    `json:"kind"`
+		Data   sourceretire.ExecutionOperationListResult `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &operationList); err != nil {
+		t.Fatal(err)
+	}
+	if operationList.Schema != "ptctl.dev/v1" || operationList.Kind != "content.source_retirement.operation_list" ||
+		!operationList.Data.Complete || operationList.Data.WritesPerformed != 0 || len(operationList.Data.Operations) != 1 ||
+		operationList.Data.Operations[0].ID.String() != execution.Data.Operation.ID || operationList.Data.Operations[0].Status != "not_inspected" ||
+		operationList.Data.Warnings == nil {
+		t.Fatalf("unexpected source retirement operation list: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(runArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("terminal rerun code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	rerun := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if rerun.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || rerun.Data.Operation.Status != "historical_complete" || rerun.Data.WritesPerformed != 0 {
+		t.Fatalf("terminal rerun was not local and idempotent: %s", out.String())
+	}
+
+	cleanupArgs := []string{"seed", "retire", "parent-cleanup", "plan",
+		"--target", fixture.materialize.targetRoot,
+		"--retirement-operation", execution.Data.Operation.ID,
+		"--retirement-plan-id", plan.Data.Plan.ID,
+		"--search-root", fixture.materialize.sourceRoot,
+		"--require-cleanable", "--output", "json"}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanup := decodeSourceRetireParentCleanupReport(t, out.Bytes())
+	if cleanup.Schema != "ptctl.dev/v1" || cleanup.Kind != "content.source_retirement.parent_cleanup_plan" ||
+		cleanup.Data.Outcome != sourceretire.ParentCleanupOutcomeEligible || cleanup.Data.WritesPerformed != 0 ||
+		cleanup.Data.DeletionPerformed || cleanup.Data.Plan.CleanupAuthority != "none" || cleanup.Data.Plan.CandidateParents != 1 ||
+		len(cleanup.Data.Plan.Directories) != 1 || cleanup.Data.Plan.Directories[0].Status != "empty_stable_candidate" ||
+		cleanup.Data.Plan.Directories[0].ParentPath != "" || cleanup.Data.Blockers == nil || cleanup.Data.Issues == nil || cleanup.Data.Warnings == nil {
+		t.Fatalf("unexpected parent cleanup report: %s", out.String())
+	}
+	if strings.Contains(out.String(), cleanupParent) || strings.Contains(out.String(), filepath.Base(cleanupParent)) {
+		t.Fatalf("parent cleanup JSON leaked the default-hidden parent: %s", out.String())
+	}
+	if info, err := os.Stat(cleanupParent); err != nil || !info.IsDir() {
+		t.Fatalf("parent cleanup plan changed the empty parent: %v", err)
+	}
+
+	shownCleanup := append([]string(nil), cleanupArgs...)
+	shownCleanup = append(shownCleanup, "--show-absolute-paths")
+	out.Reset()
+	errOut.Reset()
+	if code := Run(shownCleanup, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("shown parent cleanup code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	shownCleanupReport := decodeSourceRetireParentCleanupReport(t, out.Bytes())
+	if shownCleanupReport.Data.Plan.ID != cleanup.Data.Plan.ID || shownCleanupReport.Data.Plan.Directories[0].ParentPath != cleanupParent {
+		t.Fatalf("path display changed cleanup authority or failed to display the parent: %s", out.String())
+	}
+
+	tableCleanup := append([]string(nil), cleanupArgs...)
+	for index := 0; index < len(tableCleanup)-1; index++ {
+		if tableCleanup[index] == "--output" {
+			tableCleanup[index+1] = "table"
+			break
+		}
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(tableCleanup, strings.NewReader(""), &out, &errOut); code != 0 ||
+		!strings.Contains(out.String(), "CLEANUP AUTHORITY") || !strings.Contains(out.String(), "DIRECTORIES") ||
+		!strings.Contains(out.String(), "empty_stable_candidate") || strings.Contains(out.String(), cleanupParent) {
+		t.Fatalf("parent cleanup table code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+
+	cleanupRunArgs := []string{"seed", "retire", "parent-cleanup", "run",
+		"--target", fixture.materialize.targetRoot,
+		"--retirement-operation", execution.Data.Operation.ID,
+		"--retirement-plan-id", plan.Data.Plan.ID,
+		"--search-root", fixture.materialize.sourceRoot,
+		"--expect-cleanup-plan-id", cleanup.Data.Plan.ID,
+		"--acknowledge-empty-parent-removal", "--output", "json"}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupRunArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup run code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanupExecution := decodeSourceRetireParentCleanupExecutionReport(t, out.Bytes())
+	if cleanupExecution.Schema != "ptctl.dev/v1" || cleanupExecution.Kind != "content.source_retirement.parent_cleanup" ||
+		cleanupExecution.Data.Outcome != sourceretire.ParentCleanupExecutionOutcomeRemoved ||
+		!cleanupExecution.Data.DeletionPerformed || cleanupExecution.Data.Writes.DirectoriesRemoved != 1 ||
+		cleanupExecution.Data.Operation.Resumable || len(cleanupExecution.Data.Directories) != 1 ||
+		cleanupExecution.Data.Directories[0].Status != "removed" || cleanupExecution.Data.Directories[0].ParentPath != "" ||
+		cleanupExecution.Data.Blockers == nil || cleanupExecution.Data.Issues == nil || cleanupExecution.Data.Warnings == nil {
+		t.Fatalf("unexpected parent cleanup execution: %s", out.String())
+	}
+	if strings.Contains(out.String(), cleanupParent) || strings.Contains(out.String(), filepath.Base(cleanupParent)) {
+		t.Fatalf("parent cleanup execution leaked the default-hidden parent: %s", out.String())
+	}
+	if _, err := os.Lstat(cleanupParent); !os.IsNotExist(err) {
+		t.Fatalf("parent cleanup execution left its exact empty parent: %v", err)
+	}
+	cleanupStatusArgs := []string{"seed", "retire", "parent-cleanup", "status", "--target", fixture.materialize.targetRoot,
+		"--output", "json", cleanupExecution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run(cleanupStatusArgs, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup status code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	cleanupStatus := decodeSourceRetireParentCleanupExecutionReport(t, out.Bytes())
+	if cleanupStatus.Data.Outcome != sourceretire.ParentCleanupExecutionOutcomeAlreadyRemoved ||
+		cleanupStatus.Data.Operation.Status != "historical_complete" || cleanupStatus.Data.WritesPerformed != 0 ||
+		cleanupStatus.Data.DeletionPerformed {
+		t.Fatalf("unexpected parent cleanup status: %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	cleanupStatusTableArgs := []string{"seed", "retire", "parent-cleanup", "status", "--target", fixture.materialize.targetRoot,
+		cleanupExecution.Data.Operation.ID}
+	if code := Run(cleanupStatusTableArgs, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 ||
+		!strings.Contains(out.String(), "historical_complete") || !strings.Contains(out.String(), "DIRECTORIES") ||
+		strings.Contains(out.String(), cleanupParent) || strings.Contains(out.String(), filepath.Base(cleanupParent)) {
+		t.Fatalf("parent cleanup status table code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	cleanupStatusShownArgs := append([]string(nil), cleanupStatusTableArgs...)
+	cleanupStatusShownArgs = append(cleanupStatusShownArgs[:len(cleanupStatusShownArgs)-1], "--show-absolute-paths", cleanupStatusShownArgs[len(cleanupStatusShownArgs)-1])
+	if code := Run(cleanupStatusShownArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), cleanupParent) {
+		t.Fatalf("shown parent cleanup status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run(cleanupRunArgs, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 {
+		t.Fatalf("idempotent parent cleanup run code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	cleanupRerun := decodeSourceRetireParentCleanupExecutionReport(t, out.Bytes())
+	if cleanupRerun.Data.Outcome != sourceretire.ParentCleanupExecutionOutcomeAlreadyRemoved || cleanupRerun.Data.WritesPerformed != 0 {
+		t.Fatalf("parent cleanup rerun was not journal-local and idempotent: %s", out.String())
+	}
+	cleanupResumeArgs := []string{"seed", "retire", "parent-cleanup", "resume", "--target", fixture.materialize.targetRoot,
+		"--search-root", fixture.materialize.sourceRoot, "--expect-cleanup-plan-id", cleanup.Data.Plan.ID,
+		"--acknowledge-empty-parent-removal", "--output", "json", cleanupExecution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run(cleanupResumeArgs, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup resume code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	cleanupResume := decodeSourceRetireParentCleanupExecutionReport(t, out.Bytes())
+	if cleanupResume.Data.Outcome != sourceretire.ParentCleanupExecutionOutcomeAlreadyRemoved || cleanupResume.Data.WritesPerformed != 0 {
+		t.Fatalf("parent cleanup terminal resume disagrees: %s", out.String())
+	}
+
+	parentCleanupReconcileArgs := []string{
+		"reconcile", "report", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
+		"--target", fixture.materialize.targetRoot, "--materialize-operation", fixture.operation,
+		"--materialize-plan-id", fixture.materialize.planID,
+		"--adoption-operation", adopted.Data.Operation.ID, "--adoption-plan-id", adopted.Data.Plan.ID,
+		"--activation-operation", activationPlan.Data.Operation.ID, "--activation-plan-id", activationPlan.Data.Plan.ID,
+		"--retirement-operation", execution.Data.Operation.ID, "--retirement-plan-id", plan.Data.Plan.ID,
+		"--retirement-search-root", fixture.materialize.sourceRoot,
+		"--parent-cleanup-operation", cleanupExecution.Data.Operation.ID, "--parent-cleanup-plan-id", cleanup.Data.Plan.ID,
+		"--parent-cleanup-search-root", fixture.materialize.sourceRoot,
+		"--driver", "qbittorrent", "--url", server.server.URL, "--username", clientAdoptUser, "--password-stdin",
+		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--timeout", "1m", "--output", "json",
+	}
+	requestsBefore = server.totalRequests()
+	out.Reset()
+	errOut.Reset()
+	if code := Run(parentCleanupReconcileArgs, strings.NewReader(clientAdoptPassword+"\n"), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("parent-cleanup reconciliation code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if delta := server.totalRequests() - requestsBefore; delta != 3 {
+		t.Fatalf("parent-cleanup reconciliation made %d requests; wanted the unchanged login plus two-read bracket: %s", delta, out.String())
+	}
+	var reconciled struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLedger := reconciled.Data.Ledgers.ParentCleanup
+	if reconciled.Data.Outcome != "consistent" || !reconciled.Data.Scope.ParentCleanupRequested ||
+		cleanupLedger.Status != "historical_completion_current_absence_observed" || !cleanupLedger.Historical ||
+		!cleanupLedger.ProcessLocalCompletionProof || !cleanupLedger.ProcessLocalAbsenceProof ||
+		cleanupLedger.Completion == nil || cleanupLedger.CurrentAbsence == nil || cleanupLedger.Completion.RetainedTombstone ||
+		cleanupLedger.Completion.OperationID != cleanupExecution.Data.Operation.ID ||
+		cleanupLedger.CurrentAbsence.OperationID != cleanupLedger.Completion.OperationID ||
+		cleanupLedger.CurrentAbsence.ParentsChecked != cleanupLedger.Completion.ParentsRemoved ||
+		!strings.Contains(reconciled.Data.Assurance, "canonical_historical_parent_cleanup_with_current_removed_parent_absence") ||
+		!strings.Contains(out.String(), "read_parent_cleanup_operation_state") || !strings.Contains(out.String(), "read_removed_parent_name_absence") {
+		t.Fatalf("parent-cleanup axis was not kept separate and currently rebound: %s", out.String())
+	}
+	var cleanupHuman bytes.Buffer
+	if err := writeReconciliationHuman(&cleanupHuman, reconciled.Data); err != nil ||
+		!strings.Contains(cleanupHuman.String(), "PARENT CLEANUP") ||
+		!strings.Contains(cleanupHuman.String(), "PROCESS-LOCAL CURRENT-ABSENCE PROOF  true") ||
+		strings.Index(cleanupHuman.String(), "PARENT CLEANUP") > strings.Index(cleanupHuman.String(), "LEDGERS") {
+		t.Fatalf("parent-cleanup table contract is unclear: err=%v\n%s", err, cleanupHuman.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+	if strings.Contains(out.String(), cleanupParent) || strings.Contains(out.String(), filepath.Base(cleanupParent)) {
+		t.Fatalf("parent-cleanup reconciliation leaked the removed parent: %s", out.String())
+	}
+
+	if err := os.Mkdir(cleanupParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(parentCleanupReconcileArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("reappeared parent code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("reappeared removed parent contacted the downloader")
+	}
+	reconciled = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLedger = reconciled.Data.Ledgers.ParentCleanup
+	if reconciled.Data.Outcome != "conflict" || cleanupLedger.Status != "removed_parent_reappeared" ||
+		cleanupLedger.StopReason != "parent_cleanup_removed_parent_reappeared" || !cleanupLedger.ProcessLocalCompletionProof ||
+		cleanupLedger.ProcessLocalAbsenceProof || cleanupLedger.CurrentAbsence != nil ||
+		!hasReportFindingCLI(reconciled.Data.Blockers, "parent_cleanup.removed_parent_reappeared") {
+		t.Fatalf("reappeared removed parent was not a current conflict: %s", out.String())
+	}
+	if err := os.Remove(cleanupParent); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupPruneArgs := []string{"seed", "retire", "parent-cleanup", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-cleanup-plan-id", cleanup.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json",
+		cleanupExecution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupPruneArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup prune code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanupPruned := decodeSourceRetireParentCleanupRetentionReport(t, out.Bytes())
+	if cleanupPruned.Schema != "ptctl.dev/v1" || cleanupPruned.Kind != "content.source_retirement.parent_cleanup.retention" ||
+		cleanupPruned.Data.Outcome != sourceretire.ParentCleanupRetentionOutcomePruned || !cleanupPruned.Data.Markers.ExactTombstone ||
+		cleanupPruned.Data.WritesPerformed == 0 || cleanupPruned.Data.Operation.Resumable || cleanupPruned.Data.Blockers == nil ||
+		cleanupPruned.Data.Issues == nil || cleanupPruned.Data.Warnings == nil {
+		t.Fatalf("unexpected parent cleanup prune report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	if code := Run(cleanupStatusArgs, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 {
+		t.Fatalf("retained parent cleanup status code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	cleanupRetained := decodeSourceRetireParentCleanupExecutionReport(t, out.Bytes())
+	if cleanupRetained.Data.Outcome != sourceretire.ParentCleanupExecutionOutcomeAlreadyRemoved ||
+		cleanupRetained.Data.Operation.Status != "retained" || cleanupRetained.Data.WritesPerformed != 0 || len(cleanupRetained.Data.Directories) != 0 {
+		t.Fatalf("retained parent cleanup status disagrees: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(parentCleanupReconcileArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("retained parent-cleanup reconciliation code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatal("retained parent-cleanup tombstone contacted the downloader")
+	}
+	reconciled = struct {
+		Data reconcile.Report `json:"data"`
+	}{}
+	if err := json.Unmarshal(out.Bytes(), &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLedger = reconciled.Data.Ledgers.ParentCleanup
+	if reconciled.Data.Outcome != "incomplete" || cleanupLedger.Status != "historical_completion_current_absence_unobserved" ||
+		cleanupLedger.StopReason != "parent_cleanup_current_absence_unavailable" || !cleanupLedger.ProcessLocalCompletionProof ||
+		cleanupLedger.ProcessLocalAbsenceProof || cleanupLedger.Completion == nil || !cleanupLedger.Completion.RetainedTombstone ||
+		cleanupLedger.CurrentAbsence != nil || !hasReportFindingCLI(reconciled.Data.Blockers, "parent_cleanup.current_absence_unavailable") {
+		t.Fatalf("retained parent-cleanup tombstone was treated as current absence proof: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(cleanupPruneArgs, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("idempotent parent cleanup prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	cleanupRepruned := decodeSourceRetireParentCleanupRetentionReport(t, out.Bytes())
+	if cleanupRepruned.Data.Outcome != sourceretire.ParentCleanupRetentionOutcomeAlreadyPruned || cleanupRepruned.Data.WritesPerformed != 0 {
+		t.Fatalf("idempotent parent cleanup prune changed state: %s", out.String())
+	}
+
+	cleanupForgetArgs := []string{"seed", "retire", "parent-cleanup", "forget", "--target", fixture.materialize.targetRoot,
+		"--expect-cleanup-plan-id", cleanup.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json",
+		cleanupExecution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupForgetArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore || errOut.Len() != 0 {
+		t.Fatalf("parent cleanup forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanupForgotten := decodeSourceRetireParentCleanupForgetReport(t, out.Bytes())
+	if cleanupForgotten.Schema != "ptctl.dev/v1" || cleanupForgotten.Kind != "content.source_retirement.parent_cleanup.forget" ||
+		cleanupForgotten.Data.Outcome != sourceretire.ParentCleanupForgetOutcomeForgotten ||
+		!cleanupForgotten.Data.Authority.TargetHistoricalEvidenceErased || cleanupForgotten.Data.Authority.MarkerDurable ||
+		cleanupForgotten.Data.WritesPerformed == 0 || cleanupForgotten.Data.Operation.Resumable || cleanupForgotten.Data.Blockers == nil ||
+		cleanupForgotten.Data.Issues == nil || cleanupForgotten.Data.Warnings == nil {
+		t.Fatalf("unexpected parent cleanup forget report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupForgetArgs, reader, &out, &errOut); code != 1 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("repeated parent cleanup forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	cleanupAbsent := decodeSourceRetireParentCleanupForgetReport(t, out.Bytes())
+	if cleanupAbsent.Data.Outcome != sourceretire.ParentCleanupForgetOutcomeAbsentUnattributed ||
+		cleanupAbsent.Data.WritesPerformed != 0 || cleanupAbsent.Data.Authority.TargetHistoricalEvidenceErased {
+		t.Fatalf("repeated parent cleanup forget claimed historical idempotence: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	resumeArgs := append([]string(nil), runArgs...)
+	resumeArgs[2] = "resume"
+	resumeArgs = append(resumeArgs, execution.Data.Operation.ID)
+	mismatchedResume := append([]string(nil), resumeArgs...)
+	for index := 0; index < len(mismatchedResume)-1; index++ {
+		if mismatchedResume[index] == "--expect-plan-id" {
+			mismatchedResume[index+1] = "sha256:" + strings.Repeat("a", 64)
+			break
+		}
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(mismatchedResume, reader, &out, &errOut); code != 4 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("mismatched resume code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	mismatch := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if mismatch.Data.Outcome != sourceretire.ExecutionOutcomeBlocked || mismatch.Data.WritesPerformed != 0 {
+		t.Fatalf("mismatched resume was not blocked: %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(resumeArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("terminal resume code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	resumed := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if resumed.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || resumed.Data.WritesPerformed != 0 {
+		t.Fatalf("terminal resume was not idempotent: %s", out.String())
+	}
+
+	pruneArgs := []string{"seed", "retire", "prune", "--target", fixture.materialize.targetRoot,
+		"--expect-plan-id", plan.Data.Plan.ID, "--acknowledge-operation-state-deletion", "--output", "json", execution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(pruneArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("prune code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	pruned := decodeSourceRetireRetentionReport(t, out.Bytes())
+	if pruned.Schema != "ptctl.dev/v1" || pruned.Kind != "content.source_retirement.retention" ||
+		pruned.Data.Outcome != sourceretire.ExecutionRetentionOutcomePruned || !pruned.Data.Markers.ExactTombstone ||
+		pruned.Data.Writes.FilesRemoved == 0 || pruned.Data.WritesPerformed == 0 {
+		t.Fatalf("unexpected prune report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	// Pruning deliberately removes the absolute parent paths. The retained
+	// tombstone remains historical evidence but cannot recreate cleanup
+	// authority, and this read-only failure still performs no client request.
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(cleanupArgs, reader, &out, &errOut); code != 4 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("retained parent cleanup code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read,
+			server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	retainedCleanup := decodeSourceRetireParentCleanupReport(t, out.Bytes())
+	if retainedCleanup.Data.Outcome != sourceretire.ParentCleanupOutcomeBlocked || retainedCleanup.Data.WritesPerformed != 0 ||
+		!sourceRetireFinding(retainedCleanup.Data.Blockers, "cleanup.live_path_authority_unavailable") {
+		t.Fatalf("retained tombstone regained cleanup authority: %s", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(statusArgs, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("retained status code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	retained := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if retained.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || retained.Data.Operation.Status != "retained" || retained.Data.WritesPerformed != 0 {
+		t.Fatalf("retained status disagrees: %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(resumeArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("retained resume code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	retainedResume := decodeSourceRetireExecutionReport(t, out.Bytes())
+	if retainedResume.Data.Outcome != sourceretire.ExecutionOutcomeAlreadyRetired || retainedResume.Data.Operation.Status != "retained" || retainedResume.Data.WritesPerformed != 0 {
+		t.Fatalf("retained resume disagrees: %s", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run(pruneArgs, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("idempotent prune code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	repeated := decodeSourceRetireRetentionReport(t, out.Bytes())
+	if repeated.Data.Outcome != sourceretire.ExecutionRetentionOutcomeAlreadyPruned || repeated.Data.WritesPerformed != 0 {
+		t.Fatalf("idempotent prune changed state: %s", out.String())
+	}
+
+	forgetArgs := []string{"seed", "retire", "forget", "--target", fixture.materialize.targetRoot,
+		"--expect-plan-id", plan.Data.Plan.ID, "--acknowledge-historical-evidence-deletion", "--output", "json", execution.Data.Operation.ID}
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 0 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	forgotten := decodeSourceRetireForgetReport(t, out.Bytes())
+	if forgotten.Schema != "ptctl.dev/v1" || forgotten.Kind != "content.source_retirement.forget" ||
+		forgotten.Data.Outcome != sourceretire.ExecutionForgetOutcomeForgotten || !forgotten.Data.Authority.TargetHistoricalEvidenceErased ||
+		forgotten.Data.Authority.MarkerDurable || forgotten.Data.Operation.Resumable || forgotten.Data.WritesPerformed == 0 ||
+		forgotten.Data.Blockers == nil || forgotten.Data.Issues == nil || forgotten.Data.Warnings == nil {
+		t.Fatalf("unexpected forget report: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+
+	out.Reset()
+	errOut.Reset()
+	reader = &trackingReader{}
+	requestsBefore = server.totalRequests()
+	if code := Run(forgetArgs, reader, &out, &errOut); code != 1 || reader.read || server.totalRequests() != requestsBefore {
+		t.Fatalf("repeated forget code/read/requests=%d/%t/%d stdout=%q stderr=%q", code, reader.read, server.totalRequests()-requestsBefore, out.String(), errOut.String())
+	}
+	absent := decodeSourceRetireForgetReport(t, out.Bytes())
+	if absent.Data.Outcome != sourceretire.ExecutionForgetOutcomeAbsentUnattributed || absent.Data.WritesPerformed != 0 || absent.Data.Authority.TargetHistoricalEvidenceErased {
+		t.Fatalf("repeated forget claimed historical idempotence: %s", out.String())
+	}
+	assertSourceRetirePrivate(t, out.Bytes(), fixture, server.server.URL)
+}
+
+func sourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOperation, activationPlanID string) []string {
+	return []string{"seed", "retire", "plan", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
+		"--search-root", fixture.materialize.sourceRoot, "--target", fixture.materialize.targetRoot,
+		"--materialize-operation", fixture.operation, "--materialize-plan-id", fixture.materialize.planID,
+		"--activation-operation", activationOperation, "--activation-plan-id", activationPlanID,
+		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--driver", "qbittorrent", "--url", endpoint, "--username", clientAdoptUser, "--password-stdin",
+		"--timeout", "1m", "--output", "json"}
+}
+
+func transmissionSourceRetireBaseArgs(fixture clientAdoptCLIFixture, endpoint, activationOperation, activationPlanID string) []string {
+	result := sourceRetireBaseArgs(fixture, endpoint, activationOperation, activationPlanID)
+	for index := range result {
+		if index > 0 && result[index-1] == "--driver" {
+			result[index] = "transmission"
+			break
+		}
+	}
+	return result
+}
+
+func transmissionSourceRetireRequests(server *transmissionAdoptServer) int32 {
+	return server.handshake.Load() + server.session.Load() + server.ledger.Load() + server.add.Load() + server.verify.Load() + server.start.Load()
+}
+
+func decodeSourceRetireReport(t *testing.T, raw []byte) sourceRetireJSONEnvelope {
+	t.Helper()
+	var result sourceRetireJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireExecutionReport(t *testing.T, raw []byte) sourceRetireExecutionJSONEnvelope {
+	t.Helper()
+	var result sourceRetireExecutionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement execution report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireRetentionReport(t *testing.T, raw []byte) sourceRetireRetentionJSONEnvelope {
+	t.Helper()
+	var result sourceRetireRetentionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement retention report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireForgetReport(t *testing.T, raw []byte) sourceRetireForgetJSONEnvelope {
+	t.Helper()
+	var result sourceRetireForgetJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement forget report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireParentCleanupReport(t *testing.T, raw []byte) sourceRetireParentCleanupJSONEnvelope {
+	t.Helper()
+	var result sourceRetireParentCleanupJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement parent cleanup report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireParentCleanupExecutionReport(t *testing.T, raw []byte) sourceRetireParentCleanupExecutionJSONEnvelope {
+	t.Helper()
+	var result sourceRetireParentCleanupExecutionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement parent cleanup execution report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireParentCleanupRetentionReport(t *testing.T, raw []byte) sourceRetireParentCleanupRetentionJSONEnvelope {
+	t.Helper()
+	var result sourceRetireParentCleanupRetentionJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement parent cleanup retention report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func decodeSourceRetireParentCleanupForgetReport(t *testing.T, raw []byte) sourceRetireParentCleanupForgetJSONEnvelope {
+	t.Helper()
+	var result sourceRetireParentCleanupForgetJSONEnvelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode source retirement parent cleanup forget report: %v\n%s", err, raw)
+	}
+	return result
+}
+
+func assertSourceRetirePrivate(t *testing.T, raw []byte, fixture clientAdoptCLIFixture, endpoint string) {
+	t.Helper()
+	for _, secret := range []string{fixture.materialize.sourceRoot, fixture.materialize.sourcePath,
+		fixture.materialize.targetRoot, fixture.materialize.finalPath, materializeSourceName,
+		endpoint, clientAdoptRoot, clientAdoptUser, clientAdoptPassword, clientAdoptJobKey} {
+		if secret != "" && bytes.Contains(raw, []byte(secret)) {
+			t.Fatalf("source retirement report leaked %q: %s", secret, raw)
+		}
+	}
+}
+
+func sourceRetireFinding(findings []sourceretire.Finding, code string) bool {
+	for _, finding := range findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
+}

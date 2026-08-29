@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 )
 
@@ -54,6 +55,38 @@ func TestBuildMaterializePlanIsVerifiedAndZeroWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, "bundle")); !os.IsNotExist(err) {
 		t.Fatalf("plan wrote to target: %v", err)
+	}
+}
+
+func TestBuildMaterializePlanWithExactSourceReturnsSameInvocationAuthority(t *testing.T) {
+	content := []byte("exact authority")
+	piece := sha1.Sum(content)
+	meta, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(len(content)), "name": "final.bin", "piece length": int64(len(content)), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := t.TempDir()
+	source := filepath.Join(sourceRoot, "renamed.bin")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	plan, authority, err := BuildMaterializePlanWithExactSource(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := BuildMaterializePlan(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority == nil || !authority.Matches(meta) || !authority.Result().Verified || plan.ID != ordinary.ID ||
+		plan.SourceMode != "exact_root" || plan.SourceRoot != filepath.Clean(source) {
+		t.Fatalf("exact-source plan/authority mismatch: plan=%#v ordinary=%#v", plan, ordinary)
+	}
+	if len(plan.Blockers) == 0 || len(plan.Warnings) == 0 {
+		t.Fatalf("exact-source plan omitted its non-authority boundary: %#v", plan)
 	}
 }
 
@@ -135,6 +168,146 @@ func TestPlanIDNormalizesEquivalentSourcePaths(t *testing.T) {
 	}
 	if absolutePlan.ID != relativePlan.ID || absolutePlan.SourceRoot != relativePlan.SourceRoot {
 		t.Fatalf("equivalent paths changed plan identity: absolute=%#v relative=%#v", absolutePlan, relativePlan)
+	}
+}
+
+func TestPlanIDBindsObservedTargetRootIdentity(t *testing.T) {
+	content := []byte("x")
+	piece := sha1.Sum(content)
+	meta, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(1), "name": "x", "piece length": int64(1), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := t.TempDir()
+	source := filepath.Join(sourceRoot, "x")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	session, info, err := fsbind.BindExisting(target)
+	if err != nil {
+		t.Skipf("target filesystem does not provide a bound identity: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := BuildMaterializePlan(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TargetRootIdentity != info.Identity.String() {
+		t.Fatalf("plan omitted the observed target identity: %#v", first)
+	}
+	detached := filepath.Join(parent, "detached")
+	if err := os.Rename(target, detached); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	second, err := BuildMaterializePlan(context.Background(), meta, source, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.TargetRootIdentity == first.TargetRootIdentity || second.ID == first.ID {
+		t.Fatalf("target replacement retained reviewed plan authority: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestBuildMaterializePlanFromVerifiedScatteredSources(t *testing.T) {
+	content := []byte("abcdef")
+	piece0 := sha1.Sum(content[:4])
+	piece1 := sha1.Sum(content[4:])
+	pieces := append(piece0[:], piece1[:]...)
+	meta, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"files": []any{
+			map[string]any{"length": int64(3), "path": []any{"a.bin"}},
+			map[string]any{"length": int64(3), "path": []any{"b.bin"}},
+		},
+		"name": "bundle", "piece length": int64(4), "pieces": pieces,
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(t.TempDir(), "renamed-a")
+	second := filepath.Join(t.TempDir(), "renamed-b")
+	if err := os.WriteFile(first, content[:3], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, content[3:], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := metafile.VerifySourceMap(context.Background(), meta, metafile.SourceMap{Bindings: []metafile.SourceBinding{
+		{FileIndex: 0, Path: first}, {FileIndex: 1, Path: second},
+	}})
+	if err != nil || !verified.Result().Verified {
+		t.Fatalf("verified=%#v err=%v", verified, err)
+	}
+	target := t.TempDir()
+	plan, err := BuildMaterializePlanFromVerified(context.Background(), meta, verified, target, "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.SourceMode != "discovered_map" || plan.SourceRoot != "" || len(plan.Operations) != 2 || plan.Operations[0].Source != first || plan.Operations[1].Source != second || plan.Operations[0].ManifestIndex != 0 || plan.Operations[1].ManifestIndex != 1 {
+		t.Fatalf("unexpected scattered plan: %#v", plan)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("mapped plan mutated target: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestBuildMaterializePlanUsesVirtualEmptyOperation(t *testing.T) {
+	meta, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(0), "name": "empty", "piece length": int64(1), "pieces": []byte{},
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := metafile.VerifySourceMap(context.Background(), meta, metafile.SourceMap{})
+	if err != nil || !verified.Result().Verified {
+		t.Fatalf("verified=%#v err=%v", verified, err)
+	}
+	plan, err := BuildMaterializePlanFromVerified(context.Background(), meta, verified, t.TempDir(), "copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Operations) != 1 || plan.Operations[0].Kind != "empty" || plan.Operations[0].Source != "" || plan.EstimatedRead != 0 || plan.EstimatedWrite != 0 {
+		t.Fatalf("unexpected empty plan: %#v", plan)
+	}
+}
+
+func TestBuildMaterializePlanRejectsVerifiedTokenFromDifferentVariant(t *testing.T) {
+	content := []byte("content")
+	piece := sha1.Sum(content)
+	first, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(len(content)), "name": "first.bin", "piece length": int64(len(content)), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := metafile.Parse(encode(map[string]any{"info": map[string]any{
+		"length": int64(len(content)), "name": "second.bin", "piece length": int64(len(content)), "pieces": piece[:],
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "renamed")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := metafile.VerifySourceMap(context.Background(), first, metafile.SourceMap{Bindings: []metafile.SourceBinding{{FileIndex: 0, Path: path}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildMaterializePlanFromVerified(context.Background(), second, verified, t.TempDir(), "copy"); err == nil {
+		t.Fatal("plan accepted a verification token from another metafile variant")
 	}
 }
 

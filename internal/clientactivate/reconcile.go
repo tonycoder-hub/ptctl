@@ -1,0 +1,243 @@
+package clientactivate
+
+import (
+	"time"
+
+	"github.com/tonycoder-hub/ptctl/internal/downloader"
+	"github.com/tonycoder-hub/ptctl/internal/reconcile"
+)
+
+// ReconciliationCompletion exposes a bounded public view only while the
+// process-local terminal completion authority remains valid. The returned DTO
+// is historical evidence; it cannot recreate this method's authority.
+func (verified *VerifiedCompletion) ReconciliationCompletion() (reconcile.ClientActivationCompletion, bool) {
+	if !verified.Verified() {
+		return reconcile.ClientActivationCompletion{}, false
+	}
+	observation := verified.Observation()
+	plan := verified.Plan()
+	started, startErr := time.Parse(time.RFC3339Nano, observation.ObservedAtStart)
+	ended, endErr := time.Parse(time.RFC3339Nano, observation.ObservedAtEnd)
+	if startErr != nil || endErr != nil || started.IsZero() || ended.Before(started) {
+		return reconcile.ClientActivationCompletion{}, false
+	}
+	return reconcile.ClientActivationCompletion{
+		Driver: observation.Driver, OperationID: observation.OperationID, PlanID: observation.PlanID,
+		TerminalMarkerID: observation.TerminalMarkerID, Action: observation.Action, TerminalPhase: observation.TerminalPhase,
+		TerminalJobState: observation.JobState, MetafileVariantID: observation.MetafileVariantID,
+		MaterializeOperationID: observation.MaterializeOperationID, MaterializePlanID: observation.MaterializePlanID,
+		AdoptionOperationID: plan.AdoptionOperationID, AdoptionPlanID: plan.AdoptionPlanID,
+		AdoptionCompletionID: plan.AdoptionCompletionID,
+		StopOperationID: func() string {
+			if plan.TerminalStop != nil {
+				return plan.TerminalStop.OperationID
+			}
+			return ""
+		}(),
+		StopPlanID: func() string {
+			if plan.TerminalStop != nil {
+				return plan.TerminalStop.PlanID
+			}
+			return ""
+		}(),
+		StopCompletionID: observation.StopCompletionID,
+		StopCompletionBasis: func() string {
+			if plan.TerminalStop != nil {
+				return plan.TerminalStop.CompletionBasis
+			}
+			return ""
+		}(),
+		ClientConfigID: observation.ClientConfigID, PathMappingID: observation.PathMappingID, JobID: observation.JobID,
+		FinalObjectIdentity: observation.FinalObjectIdentity, ObservedAtStart: started, ObservedAtEnd: ended,
+		Assurance: observation.Assurance,
+	}, true
+}
+
+// ReconcileCurrentUse validates the downloader bracket already read by
+// reconcile. It performs no request and cannot upgrade the independent client,
+// path, or storage axes. Success only binds those current claims to this
+// process-local exact-final and terminal-activation authority.
+func (authority *CurrentUseAuthority) ReconcileCurrentUse(bracket reconcile.ClientBracket) (reconcile.ClientActivationCurrentUse, bool) {
+	if authority == nil || authority.prepared == nil || authority.completion == nil || !authority.completion.Verified() ||
+		authority.plan.Validate() != nil || bracket.Before == nil || bracket.After == nil || !bracket.Requested ||
+		bracket.StopReason != "" || bracket.FileStopReason != "" || bracket.FileLimits != authority.plan.FileLimits ||
+		bracket.FileLayoutMode != "auto" || bracket.RequestsMade < 0 || bracket.FileRequestsMade < 0 {
+		return reconcile.ClientActivationCurrentUse{}, false
+	}
+	beforeLedger, afterLedger := *bracket.Before, *bracket.After
+	descriptor, ok := downloader.DescribeLedgerDriver(authority.plan.Driver)
+	if !ok || bracket.RequestsMade != descriptor.OpenRequests+2+bracket.FileRequestsMade ||
+		beforeLedger.Driver != authority.plan.Driver || afterLedger.Driver != authority.plan.Driver ||
+		!beforeLedger.Complete || !afterLedger.Complete || beforeLedger.Capabilities != afterLedger.Capabilities ||
+		!beforeLedger.Capabilities.TypedInfoHashes || !beforeLedger.Capabilities.ContentPath ||
+		beforeLedger.ObservedAtStart.IsZero() || beforeLedger.ObservedAtEnd.Before(beforeLedger.ObservedAtStart) ||
+		afterLedger.ObservedAtStart.Before(beforeLedger.ObservedAtEnd) || afterLedger.ObservedAtEnd.Before(afterLedger.ObservedAtStart) {
+		return reconcile.ClientActivationCurrentUse{}, false
+	}
+	before, ok := reconciliationLedgerObservation(authority, beforeLedger)
+	if !ok {
+		return reconcile.ClientActivationCurrentUse{}, false
+	}
+	after, ok := reconciliationLedgerObservation(authority, afterLedger)
+	if !ok || !stableReconciliationJob(before.job, after.job) || before.jobID != after.jobID {
+		return reconcile.ClientActivationCurrentUse{}, false
+	}
+
+	if authority.plan.MultiFile {
+		if !beforeLedger.Capabilities.JobFiles || !bracket.FileAttempted || bracket.FileRequestsMade != 2 ||
+			bracket.FilesBefore == nil || bracket.FilesAfter == nil {
+			return reconcile.ClientActivationCurrentUse{}, false
+		}
+		beforeFiles, afterFiles := *bracket.FilesBefore, *bracket.FilesAfter
+		if beforeFiles.Driver != authority.plan.Driver || afterFiles.Driver != authority.plan.Driver ||
+			beforeFiles.JobKey != before.job.Hash || afterFiles.JobKey != after.job.Hash ||
+			beforeFiles.ObservedAtStart.Before(beforeLedger.ObservedAtEnd) ||
+			afterFiles.ObservedAtStart.Before(beforeFiles.ObservedAtEnd) ||
+			afterLedger.ObservedAtStart.Before(afterFiles.ObservedAtEnd) ||
+			!reconciliationFileEnvelope(beforeFiles, before.job) || !reconciliationFileEnvelope(afterFiles, after.job) {
+			return reconcile.ClientActivationCurrentUse{}, false
+		}
+		beforeLayout, beforeSnapshot, beforeSelected, beforeComplete, err := validateFileLayout(authority.prepared, before.job, beforeFiles)
+		if err != nil {
+			return reconcile.ClientActivationCurrentUse{}, false
+		}
+		afterLayout, afterSnapshot, afterSelected, afterComplete, err := validateFileLayout(authority.prepared, after.job, afterFiles)
+		if err != nil || beforeLayout != afterLayout || beforeSnapshot != afterSnapshot ||
+			beforeLayout != authority.plan.ExpectedFileLayoutID || !beforeSelected || !afterSelected || !beforeComplete || !afterComplete {
+			return reconcile.ClientActivationCurrentUse{}, false
+		}
+		before.fileLayoutID, before.completeSnapshotID = beforeLayout, beforeSnapshot
+		after.fileLayoutID, after.completeSnapshotID = afterLayout, afterSnapshot
+	} else {
+		if bracket.FileAttempted || bracket.FileRequestsMade != 0 || bracket.FilesBefore != nil || bracket.FilesAfter != nil {
+			return reconcile.ClientActivationCurrentUse{}, false
+		}
+		beforeLayout, beforeSnapshot, err := singleFileLayoutIdentity(authority.prepared, before.job)
+		if err != nil {
+			return reconcile.ClientActivationCurrentUse{}, false
+		}
+		afterLayout, afterSnapshot, err := singleFileLayoutIdentity(authority.prepared, after.job)
+		if err != nil || beforeLayout != afterLayout || beforeSnapshot != afterSnapshot || beforeLayout != authority.plan.ExpectedFileLayoutID {
+			return reconcile.ClientActivationCurrentUse{}, false
+		}
+		before.fileLayoutID, before.completeSnapshotID = beforeLayout, beforeSnapshot
+		after.fileLayoutID, after.completeSnapshotID = afterLayout, afterSnapshot
+	}
+	if before.fileLayoutID != after.fileLayoutID || before.completeSnapshotID != after.completeSnapshotID ||
+		before.jobID != authority.plan.JobID || before.job.Progress != 1 ||
+		(!completeStoppedState(before.job.State) && !startedState(before.job.State)) {
+		return reconcile.ClientActivationCurrentUse{}, false
+	}
+	useID, err := currentUseID(authority.plan)
+	if err != nil || useID != authority.useID {
+		return reconcile.ClientActivationCurrentUse{}, false
+	}
+	return reconcile.ClientActivationCurrentUse{
+		Driver: authority.plan.Driver, UseID: useID, JobID: before.jobID, FileLayoutID: before.fileLayoutID,
+		CompleteSnapshotID: before.completeSnapshotID,
+		JobState:           before.job.State, JobProgress: before.job.Progress,
+		ObservedAtStart: beforeLedger.ObservedAtStart, ObservedAtEnd: afterLedger.ObservedAtEnd,
+		FinalObjectIdentity: authority.plan.FinalObjectIdentity,
+		Assurance:           "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_activation_and_exact_final_non_atomic",
+	}, true
+}
+
+// ReconcileCurrentAbsence validates that both downloader snapshots already
+// read by reconciliation completely and stably omit the activation plan's
+// exact typed identity. It performs no request and attributes no causality.
+func (authority *CurrentUseAuthority) ReconcileCurrentAbsence(bracket reconcile.ClientBracket) (reconcile.ClientActivationCurrentAbsence, bool) {
+	if authority == nil || authority.prepared == nil || authority.completion == nil || !authority.completion.Verified() ||
+		authority.plan.Validate() != nil || bracket.Before == nil || bracket.After == nil || !bracket.Requested ||
+		bracket.StopReason != "" || bracket.FileStopReason != "" || bracket.FileLimits != authority.plan.FileLimits ||
+		bracket.FileLayoutMode != "auto" || bracket.FileAttempted || bracket.FileRequestsMade != 0 ||
+		bracket.FilesBefore != nil || bracket.FilesAfter != nil || bracket.RequestsMade < 0 {
+		return reconcile.ClientActivationCurrentAbsence{}, false
+	}
+	before, after := *bracket.Before, *bracket.After
+	descriptor, ok := downloader.DescribeLedgerDriver(authority.plan.Driver)
+	if !ok || bracket.RequestsMade != descriptor.OpenRequests+2 || before.Driver != authority.plan.Driver ||
+		after.Driver != authority.plan.Driver || !before.Complete || !after.Complete || before.Capabilities != after.Capabilities ||
+		!before.Capabilities.TypedInfoHashes || before.ObservedAtStart.IsZero() || before.ObservedAtEnd.Before(before.ObservedAtStart) ||
+		after.ObservedAtStart.Before(before.ObservedAtEnd) || after.ObservedAtEnd.Before(after.ObservedAtStart) ||
+		downloader.ValidateLedgerDriverClaims(before) != nil || downloader.ValidateLedgerDriverClaims(after) != nil {
+		return reconcile.ClientActivationCurrentAbsence{}, false
+	}
+	identity := downloader.TypedIdentity{InfoHashV1: authority.plan.InfoHashV1, InfoHashV2: authority.plan.InfoHashV2}
+	beforeAssessment, beforeErr := downloader.AssessLedgerIdentity(before, identity)
+	afterAssessment, afterErr := downloader.AssessLedgerIdentity(after, identity)
+	if beforeErr != nil || afterErr != nil || beforeAssessment.Status != downloader.LedgerIdentityAbsent ||
+		afterAssessment.Status != downloader.LedgerIdentityAbsent || beforeAssessment.ExactJob != nil || afterAssessment.ExactJob != nil ||
+		beforeAssessment.ExactJobCount != 0 || afterAssessment.ExactJobCount != 0 {
+		return reconcile.ClientActivationCurrentAbsence{}, false
+	}
+	useID, err := currentUseID(authority.plan)
+	completeSnapshotID := terminalCompleteSnapshotID(authority.completion)
+	if err != nil || useID != authority.useID || !canonicalSHA256ID(completeSnapshotID) {
+		return reconcile.ClientActivationCurrentAbsence{}, false
+	}
+	return reconcile.ClientActivationCurrentAbsence{
+		Driver: authority.plan.Driver, UseID: useID, JobID: authority.plan.JobID,
+		FileLayoutID: authority.plan.ExpectedFileLayoutID, CompleteSnapshotID: completeSnapshotID,
+		ObservedAtStart: before.ObservedAtStart, ObservedAtEnd: after.ObservedAtEnd,
+		RequestsMade: bracket.RequestsMade, JobsExaminedBefore: beforeAssessment.JobsExamined,
+		JobsExaminedAfter: afterAssessment.JobsExamined, FinalObjectIdentity: authority.plan.FinalObjectIdentity,
+		Assurance: "same_invocation_existing_reconciliation_bracket_bound_to_canonical_terminal_activation_and_exact_final_with_typed_job_absence_non_atomic_without_causality_attribution",
+	}, true
+}
+
+func terminalCompleteSnapshotID(completion *VerifiedCompletion) string {
+	if completion == nil || !completion.Verified() || completion.authority == nil {
+		return ""
+	}
+	if completion.authority.activation != nil {
+		return completion.authority.activation.CompleteFileSnapshotID
+	}
+	if completion.authority.recheck != nil {
+		return completion.authority.recheck.CompleteFileSnapshotID
+	}
+	return ""
+}
+
+func reconciliationLedgerObservation(authority *CurrentUseAuthority, ledger downloader.LedgerSnapshot) (clientObservation, bool) {
+	var result clientObservation
+	if authority == nil || authority.prepared == nil || ledger.Driver != authority.plan.Driver ||
+		downloader.ValidateLedgerDriverClaims(ledger) != nil {
+		return result, false
+	}
+	assessment, err := downloader.AssessLedgerIdentity(ledger, downloader.TypedIdentity{
+		InfoHashV1: authority.plan.InfoHashV1, InfoHashV2: authority.plan.InfoHashV2,
+	})
+	if err != nil || assessment.Status != downloader.LedgerIdentityExactUnique || assessment.ExactJob == nil {
+		return result, false
+	}
+	job := *assessment.ExactJob
+	job.State = normalizedClientState(job.State)
+	result.job, result.jobID = job, opaqueJobID(job.Hash)
+	if validateJobEnvelope(authority.prepared, job, result.jobID) != nil || job.Progress != 1 ||
+		(!completeStoppedState(job.State) && !startedState(job.State)) {
+		return clientObservation{}, false
+	}
+	return result, true
+}
+
+func reconciliationFileEnvelope(snapshot downloader.JobFileLedgerSnapshot, job downloader.Torrent) bool {
+	if !snapshot.Complete || snapshot.Limits.Validate() != nil || snapshot.ObservedAtStart.IsZero() ||
+		snapshot.ObservedAtEnd.Before(snapshot.ObservedAtStart) || snapshot.Used.ResponseBytes <= 0 ||
+		snapshot.Used.ResponseBytes > snapshot.Limits.MaxResponseBytes {
+		return false
+	}
+	switch snapshot.Driver {
+	case downloader.DriverQBittorrent:
+		return snapshot.SavePath == "" && snapshot.ContentPath == ""
+	case downloader.DriverTransmission:
+		return snapshot.SavePath == job.SavePath && snapshot.ContentPath == job.ContentPath
+	default:
+		return false
+	}
+}
+
+func stableReconciliationJob(before, after downloader.Torrent) bool {
+	return before.Hash == after.Hash && before.InfoHashV1 == after.InfoHashV1 && before.InfoHashV2 == after.InfoHashV2 &&
+		before.IdentityStatus == after.IdentityStatus && before.SavePath == after.SavePath && before.ContentPath == after.ContentPath &&
+		before.SizeBytes == after.SizeBytes && before.State == after.State && before.Progress == after.Progress && before.Downloaded == after.Downloaded
+}
