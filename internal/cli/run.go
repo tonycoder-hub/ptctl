@@ -104,7 +104,7 @@ func runWithApp(args []string, a *app) int {
 	case "help", "-h", "--help":
 		a.help()
 		return 0
-	case "version":
+	case "version", "--version":
 		err = a.version(args[1:])
 	case "site":
 		err = a.site(args[1:])
@@ -129,7 +129,7 @@ func runWithApp(args []string, a *app) int {
 	fmt.Fprintf(a.stderr, "error: %s\n", terminalSafe(security.Redact(err.Error())))
 	var usage *usageErr
 	if errors.As(err, &usage) {
-		fmt.Fprintln(a.stderr, "run 'ptctl help' for usage")
+		fmt.Fprintln(a.stderr, "run 'pt help' for usage (ptctl is also supported)")
 		return 2
 	}
 	var integrity *integrityErr
@@ -159,7 +159,16 @@ func (a *app) refreshAndDiscoverFromIndex(
 }
 
 func (a *app) help() {
-	fmt.Fprint(a.stdout, `ptctl — a conservative private-tracker content CLI
+	fmt.Fprint(a.stdout, `pt cli — a conservative private-tracker content CLI
+
+Read-only start (ptctl remains a compatible command):
+  pt version
+  pt torrent inspect FILE.torrent
+  pt torrent verify --content PATH FILE.torrent
+  pt reconcile report --torrent FILE.torrent --source PATH --output json
+
+The local-only reconciliation is partial until a downloader and path mapping
+are supplied. See docs/READ_ONLY_QUICKSTART.md for the short read-only guide.
 
 Usage:
   ptctl site list [--output table|json]
@@ -270,8 +279,8 @@ Safety defaults:
 func (a *app) version(args []string) error {
 	fs := newFlagSet("version")
 	output := fs.String("output", "table", "table or json")
-	if err := fs.Parse(args); err != nil {
-		return usageError("version: %v", err)
+	if done, err := a.parseReadOnlyFlags(fs, args, "version [--output table|json]"); done || err != nil {
+		return err
 	}
 	if fs.NArg() != 0 {
 		return usageError("version takes no positional arguments")
@@ -279,14 +288,14 @@ func (a *app) version(args []string) error {
 	if err := validateOutput(*output); err != nil {
 		return err
 	}
-	data := map[string]string{"version": Version, "commit": Commit}
+	data := map[string]string{"product": "pt cli", "version": Version, "commit": Commit}
 	if *output == "json" {
 		return writeJSON(a.stdout, data, nil)
 	}
 	if *output != "table" {
 		return usageError("--output must be table or json")
 	}
-	fmt.Fprintf(a.stdout, "ptctl %s (%s)\n", terminalSafe(Version), terminalSafe(Commit))
+	fmt.Fprintf(a.stdout, "pt cli %s (%s)\n", terminalSafe(Version), terminalSafe(Commit))
 	return nil
 }
 
@@ -351,7 +360,10 @@ func (a *app) client(args []string) error {
 	endpoint := fs.String("url", "", "downloader API origin or RPC URL")
 	username := fs.String("username", "", "downloader username")
 	passwordStdin := fs.Bool("password-stdin", false, "read password from stdin")
-	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *endpoint == "" {
+	if done, err := a.parseReadOnlyFlags(fs, args[1:], "client "+command+" --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]"); done || err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *endpoint == "" {
 		return usageError("client %s requires --url and no positional arguments", command)
 	}
 	if err := validateOutput(*output); err != nil {
@@ -1955,8 +1967,8 @@ func (a *app) torrent(args []string) error {
 		output := fs.String("output", "table", "table or json")
 		storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
 		variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
-		if err := fs.Parse(args[1:]); err != nil {
-			return usageError("torrent inspect: %v", err)
+		if done, err := a.parseReadOnlyFlags(fs, args[1:], "torrent inspect [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)"); done || err != nil {
+			return err
 		}
 		if err := validateOutput(*output); err != nil {
 			return err
@@ -1982,8 +1994,8 @@ func (a *app) torrent(args []string) error {
 		content := fs.String("content", "", "exact file (single-file) or torrent root directory (multi-file)")
 		storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
 		variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
-		if err := fs.Parse(args[1:]); err != nil {
-			return usageError("torrent verify: %v", err)
+		if done, err := a.parseReadOnlyFlags(fs, args[1:], "torrent verify --content PATH [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)"); done || err != nil {
+			return err
 		}
 		if *content == "" {
 			return usageError("torrent verify requires --content PATH")
@@ -3413,6 +3425,23 @@ func valueOrUnknown(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+// parseReadOnlyFlags handles help before any required-selector, file, or
+// credential checks. Parser diagnostics stay discarded until Run redacts them.
+func (a *app) parseReadOnlyFlags(fs *flag.FlagSet, args []string, syntax string) (bool, error) {
+	err := fs.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintf(a.stdout, "Usage:\n  pt %s\n\nFlags:\n", syntax)
+		fs.SetOutput(a.stdout)
+		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
+		return true, nil
+	}
+	if err != nil {
+		return false, usageError("%s: %v", fs.Name(), err)
+	}
+	return false, nil
 }
 
 func newFlagSet(name string) *flag.FlagSet {

@@ -1,8 +1,16 @@
-# ptctl
+# pt cli
 
-`ptctl` is a conservative, content-first CLI for private BitTorrent trackers.
+**pt cli** is a conservative, content-first CLI for private BitTorrent trackers.
 It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and reconciles them around verifiable torrent metadata.
+
+The primary command is `pt`; `ptctl` remains a compatible entry point. The
+GitHub repository, Go module, private-store formats, and `ptctl.dev/v1` JSON
+schema keep their existing names. Older `ptctl` examples below remain valid.
+
+**Start here: [只读入门 / read-only quickstart](docs/READ_ONLY_QUICKSTART.md)**
+for Windows packages, exact verification, downloader reconciliation, and a
+small credential-free synthetic sample.
 
 > Status: `v0.4.0-alpha` development. Ordinary inspection, downloader reads,
 > content proof, discovery, planning, and reconciliation are intentionally
@@ -52,7 +60,7 @@ domains and reconciles them around verifiable torrent metadata.
 > Reads may still update
 > atime or hydrate an offline placeholder.
 
-中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
+中文简介：**pt cli** 以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
 清晰、可审计的报告与计划。TJUPT 是首个实验性只读站点适配器，而不是写死
 在核心里的唯一站点。
@@ -259,18 +267,26 @@ Cloudflare bypass.
 
 ## Install
 
-Requires Go 1.24 or newer.
+Windows amd64 preview packages are produced by the `ci` workflow after its
+Windows checks and synthetic acceptance pass. Download the matching run's
+`pt-cli-windows-amd64-<commit>-<attempt>` artifact from
+[Actions](https://github.com/tonycoder-hub/ptctl/actions), then follow the
+[checksum and extraction steps](docs/READ_ONLY_QUICKSTART.md). Each package
+includes `pt.exe`, `ptctl.exe`, the short guide, synthetic samples, licenses,
+build identity, and SHA-256 checksums. CI artifacts expire after 14 days and
+are development snapshots, not releases. Runs before this workflow change
+have no downloadable package.
 
-```bash
-go install github.com/tonycoder-hub/ptctl/cmd/ptctl@latest
-```
-
-For a local checkout:
-
-```bash
-go build -trimpath -o ptctl ./cmd/ptctl
-go test ./...
-```
+Go 1.24 or newer is required for source builds. The verification and
+reconciliation core is shared across Windows, macOS, and Linux. Local tests
+and three-platform CI validate the same core; OS paths, permissions, and
+packaging have separate compatibility checks. For local vet, race tests,
+builds, and synthetic binary acceptance, see
+[CONTRIBUTING.md](CONTRIBUTING.md). CI stamps both commands with
+`v0.4.0-alpha+g<commit-prefix>` and the full checked-out commit. On pull requests
+that commit is the tested merge commit, not necessarily the PR head. `pt version`
+and `pt version --output json` show the identity; unstamped source builds report
+`dev` / `unknown`.
 
 ## Quick tour
 
