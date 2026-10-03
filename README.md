@@ -267,15 +267,20 @@ Cloudflare bypass.
 
 ## Install
 
-Windows amd64 preview packages are produced by the `ci` workflow after its
-Windows checks and synthetic acceptance pass. Download the matching run's
-`pt-cli-windows-amd64-<commit>-<attempt>` artifact from
+Windows amd64, Linux amd64, and macOS arm64 preview packages are produced by the
+shared native build workflow after tests and extracted-binary acceptance.
+Download the matching successful `ci` run's
+`pt-cli-bundle-<commit>-<attempt>` artifact from
 [Actions](https://github.com/tonycoder-hub/ptctl/actions), then follow the
 [checksum and extraction steps](docs/READ_ONLY_QUICKSTART.md). Each package
-includes `pt.exe`, `ptctl.exe`, the short guide, synthetic samples, licenses,
-build identity, and SHA-256 checksums. CI artifacts expire after 14 days and
-are development snapshots, not releases. Runs before this workflow change
-have no downloadable package.
+includes both command entry points, the short guide, synthetic samples, licenses,
+build identity, and SHA-256 checksums. The bundle also includes a release manifest
+and checksums for all three archives. CI artifacts expire after 14 days.
+Maintainers can use the [release procedure](docs/RELEASING.md) to build an existing
+version tag and stage its verified assets in an unpublished GitHub Release draft.
+That workflow never publishes a release automatically. No code signing or
+notarization is provided, and this workflow's presence does not mean a release
+has already been created.
 
 Go 1.24 or newer is required for source builds. The verification and
 reconciliation core is shared across Windows, macOS, and Linux. Local tests
@@ -283,7 +288,8 @@ and three-platform CI validate the same core; OS paths, permissions, and
 packaging have separate compatibility checks. For local vet, race tests,
 builds, and synthetic binary acceptance, see
 [CONTRIBUTING.md](CONTRIBUTING.md). CI stamps both commands with
-`v0.4.0-alpha+g<commit-prefix>` and the full checked-out commit. On pull requests
+`<VERSION>+g<commit-prefix>` and the full checked-out commit. Release builds use
+the exact tag matching `VERSION`. On pull requests
 that commit is the tested merge commit, not necessarily the PR head. `pt version`
 and `pt version --output json` show the identity; unstamped source builds report
 `dev` / `unknown`.
