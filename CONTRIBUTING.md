@@ -25,8 +25,13 @@ boundaries, not separate platform-specific core features.
 
 The three-platform workflow runs `go vet ./...`, `go test -race ./...`, builds
 both `cmd/pt` and the compatible `cmd/ptctl` with the same version/commit, and
-runs `scripts/readonly_acceptance.py` against both binaries. Windows additionally
-packages and rechecks the extracted amd64 package before artifact upload.
+runs `scripts/readonly_acceptance.py` against both delivered binaries after native
+system extraction. Every platform compares two builds and byte-identical packages
+before artifact upload; the final assembly checks that all three targets agree
+on version and commit. CI and release calls share `.github/workflows/build.yml`.
+The release controls have standard-library regression tests:
+`python -B -m unittest discover -s scripts/tests -v`.
+See [RELEASING.md](docs/RELEASING.md) for version/tag rules and draft-only delivery.
 For a local snapshot, inject `cli.Version` and `cli.Commit` with the same `-X`
 linker flags used by CI, then run the acceptance script with the two binaries
 and matching `--version` / `--commit` values. Mark uncommitted builds as local

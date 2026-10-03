@@ -6,20 +6,28 @@
 `client list` 和 `reconcile report`；不需要初始化私有 store。
 这些核心命令可用 `--help` 查看参数，帮助不会读取文件、凭据或连接下载器。
 
-## 1. 获取 Windows amd64 预览包
+## 1. 获取并校验包
 
 在 [GitHub Actions](https://github.com/tonycoder-hub/ptctl/actions) 选择目标
-commit **整体成功**的 `ci` run，下载 `pt-cli-windows-amd64-<commit>-<attempt>`
-artifact。PR run 的版本标识是实际测试的 merge commit。旧 run 没有包；
-artifact 保留 14 天，不是正式 release，也没有代码签名。
+commit **整体成功**的 `ci` run，下载 `pt-cli-bundle-<commit>-<attempt>`
+artifact，或单独的 `pt-cli-windows-amd64-<commit>-<attempt>` artifact。
+bundle 同时含 Windows amd64、Linux amd64、macOS arm64 包。PR run 的版本标识
+是实际测试的 merge commit。artifact 保留 14 天。已正式发布的版本可以从
+仓库 Releases 下载对应 ZIP、`SHA256SUMS` 和 `release-manifest.json`；维护者
+创建的 Draft 不等于已公开发布。所有包均无代码签名或 macOS notarization。
 
 先解开 GitHub 下载的 artifact 外层 ZIP；其中是产品 ZIP 和 `SHA256SUMS`。
 在该目录打开 PowerShell，验证并解包：
 
 ```powershell
-$sum = (Get-Content .\SHA256SUMS) -split '  ', 2
-if ((Get-FileHash $sum[1] -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sum[0]) { throw 'ZIP checksum mismatch' }
-Expand-Archive -LiteralPath $sum[1] -DestinationPath .\pt-cli
+$entries = Get-Content .\SHA256SUMS | ForEach-Object {
+    $parts = $_ -split '  ', 2
+    [PSCustomObject]@{ Hash = $parts[0]; Name = $parts[1] }
+}
+$package = @($entries | Where-Object { $_.Name -match '^pt-cli-.*-windows-amd64\.zip$' })
+if ($package.Count -ne 1) { throw 'Expected exactly one Windows amd64 package' }
+if ((Get-FileHash -LiteralPath $package[0].Name -Algorithm SHA256).Hash.ToLowerInvariant() -cne $package[0].Hash) { throw 'ZIP checksum mismatch' }
+Expand-Archive -LiteralPath $package[0].Name -DestinationPath .\pt-cli
 Set-Location .\pt-cli
 Get-Content .\SHA256SUMS | ForEach-Object {
     $entry = $_ -split '  ', 2
@@ -29,9 +37,15 @@ Get-Content .\SHA256SUMS | ForEach-Object {
 .\pt.exe version --output json
 ```
 
-核对输出 `product=pt cli`、`version=v0.4.0-alpha+g<commit-prefix>` 和完整
-`commit`。`build.json` 也包含同样身份。校验值用于检测传输损坏；下载来源
+核对输出 `product=pt cli`、预览版 `version=<VERSION>+g<commit-prefix>`（发布包为
+与 tag 完全一致的版本）和完整 `commit`。`build.json` 也包含同样身份。校验值用于检测传输损坏；下载来源
 仍应是你选择的仓库 CI run。这些 SHA-256 在 CI 生成，源码 checkout 没有预生成二进制。
+
+macOS arm64 选择 `*-darwin-arm64.zip`，Linux amd64 选择 `*-linux-amd64.zip`。
+先用 `shasum -a 256`（macOS）或 `sha256sum`（Linux）核对下载 ZIP 与清单中
+同名项的摘要，再用 `unzip PACKAGE.zip -d pt-cli` 解压。进入目录后执行
+`shasum -a 256 -c SHA256SUMS` 或 `sha256sum -c SHA256SUMS`，然后运行
+`./pt version`。ZIP 保留 Unix 可执行权限；当前不提供 macOS Intel 或其他架构包。
 
 ## 2. 不连下载器，先用 24 字节样本
 
@@ -97,5 +111,5 @@ PowerShell 用 `$LASTEXITCODE` 查看原生程序退出码。自动化应同时�
 本地与三平台 CI 对两个入口使用相同合成验收：帮助、inspect、v1 跨文件 piece
 与空文件、含 piece layer 的 v2、hybrid 双哈希联合校验、同尺寸损坏、退出码 0–4、
 loopback qBittorrent/Transmission 的一致对账及路径冲突、请求白名单、
-默认隐私字段和样本零写入。Windows CI 还会解包、核对文件校验值，重跑交付包验收。
+默认隐私字段和样本零写入。三个平台均使用系统解压工具、核对文件校验值，运行交付包验收。
 验收不连接真实客户端，不提供真实凭据。完整说明见仓库 README。
