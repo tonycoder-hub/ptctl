@@ -7,6 +7,12 @@
 v1 infohash, and content length. The CI package includes the decoded
 `demo.torrent` for immediate inspection and verification.
 
+In an extracted macOS/Linux package, run `sh examples/readonly/try.sh` for a
+five-step offline walkthrough with the bundled binary. It includes expected
+partial-report and corrupt-copy failures, leaves the original samples unchanged,
+and needs no Go, Python, network, or credentials. Use `./pt help config` to learn
+how explicit paths and downloader connection flags work.
+
 If inspecting source without a package, this PowerShell snippet decodes only
 these public synthetic bytes into this directory (an explicit sample-file write):
 

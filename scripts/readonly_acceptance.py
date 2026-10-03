@@ -234,6 +234,13 @@ def accept(binary, version, commit, samples):
     check(invoke(binary, ["--version"]) == f"pt cli {version} ({commit})\n", "version alias differs")
     help_text = invoke(binary, ["help"])
     check(help_text.startswith("pt cli") and "ptctl" in help_text, "brand or compatibility help missing")
+    for group in ("torrent", "client", "reconcile"):
+        direct = invoke(binary, [group, "--help"])
+        check(direct.startswith("Usage:") and direct == invoke(binary, ["help", group]),
+              "group help and topic help must agree")
+    check("no automatic discovery" in invoke(binary, ["help", "config"]), "configuration model is undiscoverable")
+    check("-content" in invoke(binary, ["help", "torrent", "verify"]), "leaf help topic is missing")
+    invoke(binary, ["help", "client", "remove", "run", "--password-stdin"], expected_code=2)
     for prefix in (("version",), ("torrent", "inspect"), ("torrent", "verify"), ("client", "list"), ("client", "status"), ("reconcile", "report")):
         text = invoke(binary, [*prefix, "--help"])
         check(text.startswith("Usage:") and "Flags:" in text, "leaf help is missing")

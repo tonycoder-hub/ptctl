@@ -12,6 +12,10 @@ schema keep their existing names. Older `ptctl` examples below remain valid.
 for Windows packages, exact verification, downloader reconciliation, and a
 small credential-free synthetic sample.
 
+For an extracted macOS/Linux package, run `sh examples/readonly/try.sh` for an
+offline walkthrough. Discover the core commands with `pt torrent --help`,
+`pt help client list`, and `pt help config`.
+
 > Status: `v0.4.0-alpha` development. Ordinary inspection, downloader reads,
 > content proof, discovery, planning, and reconciliation are intentionally
 > zero-write. Persistent writes are confined to explicit private-store/index

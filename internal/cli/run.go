@@ -101,7 +101,9 @@ func runWithApp(args []string, a *app) int {
 	}
 	var err error
 	switch args[0] {
-	case "help", "-h", "--help":
+	case "help":
+		err = a.helpTopic(args[1:])
+	case "-h", "--help":
 		a.help()
 		return 0
 	case "version", "--version":
@@ -163,6 +165,9 @@ func (a *app) help() {
 
 Read-only start (ptctl remains a compatible command):
   pt version
+  pt help torrent
+  pt help client
+  pt help config
   pt torrent inspect FILE.torrent
   pt torrent verify --content PATH FILE.torrent
   pt reconcile report --torrent FILE.torrent --source PATH --output json
@@ -338,6 +343,9 @@ func (a *app) site(args []string) error {
 }
 
 func (a *app) client(args []string) error {
+	if groupHelpRequested(args) {
+		return a.helpTopic([]string{"client"})
+	}
 	if len(args) > 0 && args[0] == "adopt" {
 		return a.clientAdopt(args[1:])
 	}
@@ -404,6 +412,9 @@ func (a *app) client(args []string) error {
 }
 
 func (a *app) reconcileCommand(args []string) error {
+	if groupHelpRequested(args) {
+		return a.helpTopic([]string{"reconcile"})
+	}
 	if len(args) == 0 {
 		return usageError("reconcile requires report or refresh-report")
 	}
@@ -1958,6 +1969,9 @@ func siteReadPublicError(ctx context.Context, command string, err error) error {
 }
 
 func (a *app) torrent(args []string) error {
+	if groupHelpRequested(args) {
+		return a.helpTopic([]string{"torrent"})
+	}
 	if len(args) == 0 {
 		return usageError("torrent subcommand is required")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"strings"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
@@ -40,6 +41,11 @@ func positionalMetafileInput(command string, args []string, storeRoot, variantID
 		return metafileInput{storeRoot: storeRoot, variantID: id}, nil
 	}
 	if len(args) != 1 {
+		for index, arg := range args {
+			if index > 0 && strings.HasPrefix(arg, "-") {
+				return metafileInput{}, usageError("%s: put options before FILE.torrent (for example, --output json FILE.torrent)", command)
+			}
+		}
 		return metafileInput{}, usageError("%s requires one FILE.torrent or --metafile-store with --metafile-variant", command)
 	}
 	return metafileInput{path: args[0]}, nil
