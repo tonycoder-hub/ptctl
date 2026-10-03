@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = (("windows", "amd64"), ("linux", "amd64"), ("darwin", "arm64"))
 DOCUMENTS = ("LICENSE", "NOTICE", "docs/READ_ONLY_QUICKSTART.md",
              "examples/readonly/README.md", "examples/readonly/demo.txt",
-             "examples/readonly/demo.torrent.b64", "examples/readonly/expected.json")
+             "examples/readonly/demo.torrent.b64", "examples/readonly/expected.json",
+             "examples/readonly/try.sh")
 
 
 def require(condition, message):
@@ -136,6 +137,8 @@ def main():
                     "--bin", str(extracted / names[0]), "--legacy-bin", str(extracted / names[1]),
                     "--samples", str(extracted / "examples/readonly"),
                     "--version", args.version, "--commit", args.commit], check=True, timeout=180)
+    if args.goos != "windows":
+        subprocess.run(["sh", "examples/readonly/try.sh"], cwd=extracted, check=True, timeout=90)
     print(f"PASS reproducible native package: {archive.name}, SHA-256 {sha256(data)}")
 
 

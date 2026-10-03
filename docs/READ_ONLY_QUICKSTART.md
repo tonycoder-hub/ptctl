@@ -5,6 +5,7 @@
 本文用 PowerShell 演示，系统路径、权限和打包属于兼容边界。本文只用 `version`、`torrent inspect/verify`、
 `client list` 和 `reconcile report`；不需要初始化私有 store。
 这些核心命令可用 `--help` 查看参数，帮助不会读取文件、凭据或连接下载器。
+也可用 `pt torrent --help`、`pt help torrent verify` 和 `pt help config` 逐层查找。
 
 ## 1. 获取并校验包
 
@@ -47,6 +48,20 @@ macOS arm64 选择 `*-darwin-arm64.zip`，Linux amd64 选择 `*-linux-amd64.zip`
 `shasum -a 256 -c SHA256SUMS` 或 `sha256sum -c SHA256SUMS`，然后运行
 `./pt version`。ZIP 保留 Unix 可执行权限；当前不提供 macOS Intel 或其他架构包。
 
+macOS/Linux 在解压目录里先跑一次离线验收：
+
+```sh
+./pt version
+./pt help config
+./pt torrent --help
+sh examples/readonly/try.sh
+```
+
+脚本依次展示版本、inspect、精确校验、本地只读对账和故意损坏的临时副本。
+最后应显示 `PASS: all five offline checks behaved as expected.`；其中退出码
+4（缺下载器账本）和 3（损坏副本）是预期结果。脚本只创建并清理自己的临时文件，
+原始样本不变，无需 Go、Python、网络或凭据。
+
 ## 2. 不连下载器，先用 24 字节样本
 
 包内 `examples/readonly/demo.torrent` 是合成的单文件 v1 元文件：没有 tracker、
@@ -67,10 +82,23 @@ passkey、账户或真实下载任务。无需 Python、Go 或网络即可运行
 对多文件 torrent 指向包含其相对路径的根目录。把所有选项放在位置参数
 `FILE.torrent` 前面。读取可能更新 atime 或触发云文件下载。
 
-macOS/Linux 使用同一组命令参数：将 `.\pt.exe` 换为 `./pt`，本地路径改用
-对应系统的路径。源代码中的样本以 base64 保存，CI 包附带解码后的 `.torrent`。
+macOS/Linux 可直接复制：
+
+```sh
+./pt torrent inspect --output json examples/readonly/demo.torrent
+./pt torrent verify --content examples/readonly/demo.txt --output json examples/readonly/demo.torrent
+./pt reconcile report --torrent examples/readonly/demo.torrent --source examples/readonly/demo.txt --output json
+```
+
+源代码中的样本以 base64 保存，CI 包附带解码后的 `.torrent`。
 
 ## 3. 下载器只读对账
+
+配置是显式传入的：当前没有 `--config`、保存登录资料或自动搜索家目录/项目目录
+配置的机制，也不自动读取 Keychain。`--driver` 默认 `qbittorrent`，`--url` 没有
+默认值；密码只从 stdin 输入。本地相对路径以当前工作目录为基准，private store
+和 storage profile 都是可选的显式路径功能，不是完成本文流程的前置条件。
+随时用 `pt help config` 或 `pt help client list` 查看这些约定。
 
 先查看账本，再做当前文件、typed infohash 与路径映射的联合对账。以下示例
 假设本机 `D:\Downloads` 对应下载器的 `/downloads`；应按实际挂载关系修改。
@@ -81,6 +109,15 @@ $credential = Get-Credential -UserName 'your-user' -Message 'Downloader read-onl
 $credential.GetNetworkCredential().Password | .\pt.exe client list --driver qbittorrent --url http://127.0.0.1:8080 --username $credential.UserName --password-stdin --output json
 $credential.GetNetworkCredential().Password | .\pt.exe reconcile report --torrent .\release.torrent --source 'D:\Downloads\release.bin' --host-root 'D:\Downloads' --client-root /downloads --client-style posix --driver qbittorrent --url http://127.0.0.1:8080 --username $credential.UserName --password-stdin --require-reconciled --output json
 Remove-Variable credential
+```
+
+macOS 默认 zsh 中可这样交互输入密码（请先替换地址和用户名；以下命令会连接你指定的下载器）：
+
+```zsh
+read -r -s 'pt_password?Downloader password: '
+printf '\n'
+printf '%s\n' "$pt_password" | ./pt client list --driver qbittorrent --url http://127.0.0.1:8080 --username your-user --password-stdin --output json
+unset pt_password
 ```
 
 Transmission 用 `--driver transmission --url http://127.0.0.1:9091/transmission/rpc`；
