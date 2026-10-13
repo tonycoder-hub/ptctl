@@ -54,7 +54,8 @@ fixtures; nothing contacts a real tracker or downloader.
 | `internal/site/httpguard` | The only HTTP client site adapters use: HTTPS, one strict attempt, no redirect following, and bounded responses |
 | `internal/site/sites` | The list of built-in site adapters |
 | `internal/site/sitetest` | Offline conformance suite every site adapter must pass |
-| `internal/site/tjupt` | TJUPT adapter, the reference implementation |
+| `internal/site/mteam` | M-Team adapter: JSON API reads authenticated by an API key |
+| `internal/site/tjupt` | TJUPT adapter, the reference implementation for cookie-authenticated HTML sites |
 | `internal/sitebinding` | Sealed records binding a site fetch to an exact metafile |
 | `internal/bonusexchange` | Durable, at-most-once bonus-exchange state machine |
 | `internal/downloader` | Downloader ports and normalized state; `qbittorrent` and `transmission` subpackages |
@@ -101,11 +102,13 @@ Do not break these. If a task seems to require it, stop and ask.
 
 **Add a site.** Follow [docs/ADDING_A_SITE.md](docs/ADDING_A_SITE.md): it
 covers registration in `internal/site/sites`, the `internal/site/sitetest`
-conformance suite, port contracts, persisted identity, and the known gaps for
-API-token sites such as M-Team. `internal/site/tjupt` and
-[docs/TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md) show a complete adapter. Do not
-extract a shared NexusPHP or "site kit" layer until a second adapter shows
-which behavior is actually shared.
+conformance suite, port contracts, persisted identity, and the remaining gaps
+for API-token sites. `internal/site/tjupt` ([docs/TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md))
+shows a complete cookie and HTML adapter; `internal/site/mteam`
+([docs/MTEAM_ADAPTER.md](docs/MTEAM_ADAPTER.md)) shows a JSON API adapter with
+an API key. The two share only `httpguard` and the `site` ports. Do not extract
+a shared NexusPHP or "site kit" layer until two adapters of the same family
+show which behavior is actually shared.
 
 **Add or change a command.** Wire it into `runWithApp` and `help` in
 `internal/cli/run.go`, implement it in its command-group file, and give any

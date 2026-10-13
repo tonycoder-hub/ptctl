@@ -97,6 +97,7 @@ Per-command details are in
 | Flag | Used by | Stdin content |
 |---|---|---|
 | `--cookie-stdin` | `site` reads, `site bonus exchange submit`, `site metafile fetch` | The complete `Cookie` header value |
+| `--api-key-stdin` | `site status`, `site account`, and `site search` for sites that authenticate with an API key (M-Team) | The site-issued API key |
 | `--password-stdin` | `client` commands, `seed retire` commands that contact a downloader, and `reconcile` with a downloader | The downloader password |
 | `--site-cookie-stdin` | `reconcile report` with a live site observation and no downloader | The complete `Cookie` header value |
 | `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}` |
@@ -108,6 +109,14 @@ Per-command details are in
   and local inputs before reading stdin.
 - Credentials stay in memory. They are never persisted, printed, or forwarded
   in error text.
+- `ptctl site capabilities SITE` lists the authentication methods a site
+  accepts: `cookie_header` takes `--cookie-stdin`, `api_key_header` takes
+  `--api-key-stdin`. Omitting the flag names the one the site needs.
+- A failed ordinary site read prints `site CMD failed`. Adapters that opt in
+  (currently M-Team) append one fixed cause after a colon: the credential has
+  the wrong format, the site rejected the credential, the site rate limited
+  the request, or the host resolved only to blocked addresses. Match on these
+  fixed strings; server-supplied text is never shown.
 
 ## Effects and acknowledgements
 
