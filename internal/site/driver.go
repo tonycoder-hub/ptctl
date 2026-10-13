@@ -19,6 +19,10 @@ func NewCookieCredential(cookie string) (Credential, error) {
 	return NewCredential(domain.AuthMethodCookieHeader, cookie)
 }
 
+func NewAPIKeyCredential(key string) (Credential, error) {
+	return NewCredential(domain.AuthMethodAPIKeyHeader, key)
+}
+
 func NewCredential(method domain.AuthMethod, secret string) (Credential, error) {
 	if method == "" {
 		return Credential{}, fmt.Errorf("empty authentication method")
