@@ -115,6 +115,7 @@ func (a *app) siteRead(command string, args []string) error {
 	fs := newFlagSet("site " + command)
 	output := fs.String("output", "table", "table or json")
 	cookieStdin := fs.Bool("cookie-stdin", false, "read session Cookie header value from stdin")
+	apiKeyStdin := fs.Bool("api-key-stdin", false, "read a site-issued API key from stdin")
 	if err := fs.Parse(args); err != nil {
 		return usageError("site %s: %v", command, err)
 	}
@@ -127,8 +128,11 @@ func (a *app) siteRead(command string, args []string) error {
 	if command == "search" && fs.NArg() < 2 {
 		return usageError("site search requires SITE and QUERY")
 	}
-	if !*cookieStdin {
-		return usageError("--cookie-stdin is required; credentials are never accepted in argv")
+	if *cookieStdin && *apiKeyStdin {
+		return usageError("--cookie-stdin and --api-key-stdin are mutually exclusive")
+	}
+	if !*cookieStdin && !*apiKeyStdin {
+		return usageError("%s is required; credentials are never accepted in argv", requiredCredentialFlag(a.registry, fs.Arg(0)))
 	}
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
@@ -147,8 +151,12 @@ func (a *app) siteRead(command string, args []string) error {
 	if !descriptor.Supports(capability) {
 		return fmt.Errorf("site %q does not declare capability %q", descriptor.ID, capability)
 	}
-	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
-		return fmt.Errorf("site %q does not support cookie_header authentication", descriptor.ID)
+	method, readSecret := domain.AuthMethodCookieHeader, readCredential
+	if *apiKeyStdin {
+		method, readSecret = domain.AuthMethodAPIKeyHeader, readAPIKeyCredential
+	}
+	if !descriptor.SupportsAuth(method) {
+		return fmt.Errorf("site %q does not support %s authentication", descriptor.ID, method)
 	}
 	var read func(context.Context, site.Credential) (any, error)
 	var warnings []string
@@ -193,7 +201,7 @@ func (a *app) siteRead(command string, args []string) error {
 	default:
 		return usageError("unknown site read command %q", command)
 	}
-	credential, err := readCredential(a.stdin)
+	credential, err := readSecret(a.stdin)
 	if err != nil {
 		return err
 	}
@@ -216,7 +224,27 @@ func siteReadPublicError(ctx context.Context, command string, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("site %s timed out: %w", command, context.DeadlineExceeded)
 	}
+	// Adapters opt in to these secret-free causes; everything else keeps the
+	// generic line.
+	for _, cause := range []error{site.ErrCredentialMalformed, site.ErrCredentialRejected, site.ErrRateLimited, site.ErrAddressBlocked} {
+		if errors.Is(err, cause) {
+			return fmt.Errorf("site %s failed: %v", command, cause)
+		}
+	}
 	return fmt.Errorf("site %s failed", command)
+}
+
+// requiredCredentialFlag names the stdin flag a site's read commands need. A
+// site that only accepts API keys gets --api-key-stdin; every other site, and
+// an unknown one, keeps the original --cookie-stdin message.
+func requiredCredentialFlag(registry *site.Registry, id string) string {
+	if adapter, ok := registry.Get(id); ok {
+		descriptor := adapter.Descriptor()
+		if descriptor.SupportsAuth(domain.AuthMethodAPIKeyHeader) && !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
+			return "--api-key-stdin"
+		}
+	}
+	return "--cookie-stdin"
 }
 
 func writeSiteHuman(out io.Writer, command string, data any, warnings []string) error {
@@ -245,13 +273,18 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 		}
 		fmt.Fprintf(w, "BONUS\t%s\nOBSERVED\t%s\n", terminalSafe(valueOrUnknown(account.Bonus)), account.ObservedAt.Format(time.RFC3339))
 	case "search":
-		fmt.Fprintln(w, "REF\tNAME\tSIZE")
-		for _, item := range data.([]domain.TorrentSummary) {
-			size := "unknown"
-			if item.SizeBytes != nil {
-				size = humanBytes(*item.SizeBytes)
+		items := data.([]domain.TorrentSummary)
+		if !reportsSwarmOrPromotion(items) {
+			fmt.Fprintln(w, "REF\tNAME\tSIZE")
+			for _, item := range items {
+				fmt.Fprintf(w, "%s/%s\t%s\t%s\n", terminalSafe(item.Ref.SiteID), terminalSafe(item.Ref.RemoteID), terminalSafe(item.Name), searchSize(item))
 			}
-			fmt.Fprintf(w, "%s/%s\t%s\t%s\n", terminalSafe(item.Ref.SiteID), terminalSafe(item.Ref.RemoteID), terminalSafe(item.Name), size)
+			break
+		}
+		fmt.Fprintln(w, "REF\tNAME\tSIZE\tSEEDERS\tLEECHERS\tPROMOTION")
+		for _, item := range items {
+			fmt.Fprintf(w, "%s/%s\t%s\t%s\t%s\t%s\t%s\n", terminalSafe(item.Ref.SiteID), terminalSafe(item.Ref.RemoteID), terminalSafe(item.Name), searchSize(item),
+				optionalCount(item.Seeders), optionalCount(item.Leechers), terminalSafe(promotionLabel(item.Promotion)))
 		}
 	case "bonus-catalog":
 		catalog := data.(domain.BonusCatalog)
@@ -271,4 +304,57 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 		fmt.Fprintf(out, "warning: %s\n", terminalSafe(warning))
 	}
 	return nil
+}
+
+// reportsSwarmOrPromotion decides whether the search table grows extra
+// columns. Sites that never report these fields keep the original layout.
+func reportsSwarmOrPromotion(items []domain.TorrentSummary) bool {
+	for _, item := range items {
+		if item.Seeders != nil || item.Leechers != nil || item.Promotion != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func searchSize(item domain.TorrentSummary) string {
+	if item.SizeBytes == nil {
+		return "unknown"
+	}
+	return humanBytes(*item.SizeBytes)
+}
+
+func optionalCount(value *int) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprint(*value)
+}
+
+// promotionLabel renders traffic factors, for example "free" or
+// "up 2x, down 0.5x until 2026-10-15T00:00:00Z". Normal traffic prints "-";
+// a promotion the adapter could not recognize prints "unknown".
+func promotionLabel(promotion *domain.Promotion) string {
+	if promotion == nil {
+		return "unknown"
+	}
+	var parts []string
+	if promotion.UploadFactor != "1" {
+		parts = append(parts, "up "+promotion.UploadFactor+"x")
+	}
+	switch promotion.DownloadFactor {
+	case "1":
+	case "0":
+		parts = append(parts, "free")
+	default:
+		parts = append(parts, "down "+promotion.DownloadFactor+"x")
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	label := strings.Join(parts, ", ")
+	if promotion.EndsAt != nil {
+		label += " until " + promotion.EndsAt.UTC().Format(time.RFC3339)
+	}
+	return label
 }

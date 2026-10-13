@@ -25,6 +25,24 @@ func readCredential(reader io.Reader) (site.Credential, error) {
 	return site.NewCookieCredential(value)
 }
 
+func readAPIKeyCredential(reader io.Reader) (site.Credential, error) {
+	if err := rejectTTYSecret(reader); err != nil {
+		return site.Credential{}, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(reader, (64<<10)+1))
+	if err != nil {
+		return site.Credential{}, fmt.Errorf("read API key from stdin: %w", err)
+	}
+	if len(raw) > 64<<10 {
+		return site.Credential{}, fmt.Errorf("API key exceeds 64 KiB")
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" {
+		return site.Credential{}, fmt.Errorf("API key read from stdin is empty")
+	}
+	return site.NewAPIKeyCredential(value)
+}
+
 func readDownloaderCredential(reader io.Reader, username string) (downloader.Credential, error) {
 	if err := rejectTTYSecret(reader); err != nil {
 		return downloader.Credential{}, err

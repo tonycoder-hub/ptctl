@@ -2,7 +2,7 @@
 
 [Command guide](README.md) · [Documentation index](../README.md)
 
-> Fetching an exact private metafile from a site (`site metafile fetch`) and auditing its sealed bindings are described with the private store in [metafiles.md](metafiles.md). The page-level TJUPT contract is in [TJUPT_ADAPTER.md](../TJUPT_ADAPTER.md).
+> Fetching an exact private metafile from a site (`site metafile fetch`) and auditing its sealed bindings are described with the private store in [metafiles.md](metafiles.md). The page-level TJUPT contract is in [TJUPT_ADAPTER.md](../TJUPT_ADAPTER.md), and M-Team is covered in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md).
 
 Read TJUPT without putting a cookie in shell history. Stdin must contain the
 complete `Cookie` header value from a session you control. Interactive TTY
@@ -29,6 +29,19 @@ only `details.php?id=REMOTE_ID`: it does not send `hit=1`, follow the download
 link, fetch the metafile, or persist an observation. Its display title, optional
 peer counts, and matching internal link are current site claims, not metafile
 identity or storage-content proof.
+
+M-Team reads use a site-issued API key instead of a cookie, passed with
+`--api-key-stdin` under the same stdin-only rules. `status`, `account`, and
+`search` each send one read-only POST to M-Team's JSON API and never retry;
+search results add seeders, leechers, and promotion columns. Detail, metafile
+fetch, and bonus commands are not available for M-Team yet. Setup, results,
+and error lines are in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md):
+
+```bash
+printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
+printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
+printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
+```
 
 `site account` reads the authenticated `mybonusapps.php` page and reports only
 the username and canonical bonus balance proved by that page. Uploaded and
