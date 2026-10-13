@@ -7,9 +7,10 @@
 Exit code `0` means a report or requested read succeeded, `1` an operational
 failure, `2` invalid usage, and `3` an explicit integrity mismatch. Discovery
 is report-oriented, so blocked results still print and return `0` by default.
-Add `--require-verified` to return `4` unless `source_outcome` is exactly
-`verified_unique`; target-plan or client-mapping failure does not erase source
-evidence. `torrent verify` prints its result before returning `3`.
+Add `--require-verified` to return `4` unless `source_outcome` is
+`verified_unique`, or `verified_selected` for an explicit
+`--select-source-match`; target-plan or client-mapping failure does not erase
+source evidence. `torrent verify` prints its result before returning `3`.
 Reconciliation is also report-oriented. Add `--require-reconciled` to return
 `4` unless the independently reported local axes are `consistent`; the report
 is still printed first. Storage-index corruption, non-canonical descriptor/data
