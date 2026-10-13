@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	MetafileOrigin  = "https://www.tjupt.org"
+	MetafileOrigin  = Origin
 	MetafileRouteID = "tjupt.download_by_id.v1"
 
 	metafileDownloadPath = "download.php"
@@ -35,7 +35,7 @@ func (a *Adapter) ValidateMetafileRef(ref domain.TorrentRef) error {
 }
 
 func (a *Adapter) MetafileFetchConfig() (site.MetafileFetchConfig, error) {
-	if a == nil || a.baseURL != DefaultBaseURL {
+	if !a.productionOrigin() {
 		return site.MetafileFetchConfig{}, fmt.Errorf("TJUPT metafile fetch is unavailable for this origin")
 	}
 	config, err := site.NewMetafileFetchConfig(MetafileOrigin, MetafileRouteID)
@@ -46,7 +46,7 @@ func (a *Adapter) MetafileFetchConfig() (site.MetafileFetchConfig, error) {
 }
 
 func validateCanonicalTorrentRef(ref domain.TorrentRef) error {
-	if ref.SiteID != "tjupt" || ref.RemoteID == "" || len(ref.RemoteID) > 20 || ref.RemoteID[0] == '0' {
+	if ref.SiteID != SiteID || ref.RemoteID == "" || len(ref.RemoteID) > 20 || ref.RemoteID[0] == '0' {
 		return fmt.Errorf("TJUPT torrent reference is invalid")
 	}
 	for i := 0; i < len(ref.RemoteID); i++ {

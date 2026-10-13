@@ -51,7 +51,7 @@ func (a *Adapter) ValidateBonusExchangeSelector(selector string) error {
 }
 
 func (a *Adapter) BonusExchangeConfig() (site.BonusExchangeConfig, error) {
-	if a == nil || a.baseURL != DefaultBaseURL {
+	if !a.productionOrigin() {
 		return site.BonusExchangeConfig{}, fmt.Errorf("TJUPT bonus exchange is unavailable for this origin")
 	}
 	config, err := site.NewBonusExchangeConfig(BonusReviewOrigin, BonusReviewRouteID, BonusExchangeRouteID)
@@ -160,7 +160,7 @@ func (session *bonusExchangeSession) SubmitFreshBonusExchange(ctx context.Contex
 		receipt.StopReason = "session_unavailable"
 		return nil, completeBonusExchangeReceipt(receipt), fmt.Errorf("TJUPT bonus exchange session is unavailable")
 	}
-	receipt.SiteID = "tjupt"
+	receipt.SiteID = SiteID
 	receipt.Origin = session.config.Origin
 	receipt.ReviewRouteID = session.config.ReviewRouteID
 	receipt.ActionRouteID = session.config.ActionRouteID
@@ -187,7 +187,7 @@ func (session *bonusExchangeSession) SubmitFreshBonusExchange(ctx context.Contex
 	receipt.FreshReviewID = review.ReviewID
 	receipt.Used.ReviewRequestsAttempted = freshReceipt.Used.RequestsAttempted
 	receipt.Used.TotalRequestsAttempted = boundedBonusRequestCount(client.RequestsMade())
-	if !observed.MatchesReceipt(freshReceipt) || !observed.Matches("tjupt", review.Selector, session.config.Origin, session.config.ReviewRouteID) ||
+	if !observed.MatchesReceipt(freshReceipt) || !observed.Matches(SiteID, review.Selector, session.config.Origin, session.config.ReviewRouteID) ||
 		review.ReviewID != expectedReviewID || review.Availability != site.BonusReviewAvailabilityAvailable || review.InputMode != site.BonusReviewInputNone ||
 		review.ActionMethod != "post" || review.ActionRouteID != session.config.ActionRouteID {
 		receipt.StopReason = "fresh_review_mismatch"
