@@ -12,7 +12,14 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/site/httpguard"
 )
 
-const DefaultBaseURL = "https://www.tjupt.org/"
+const (
+	// SiteID is persisted in refs, receipts, and route IDs. Never change it.
+	SiteID = "tjupt"
+	// Origin is the only origin the origin-pinned ports may contact.
+	Origin = "https://www.tjupt.org"
+	// DefaultBaseURL is the base URL that enables the origin-pinned ports.
+	DefaultBaseURL = Origin + "/"
+)
 
 // Adapter implements conservative TJUPT reads plus narrowly reviewed,
 // explicitly acknowledged effectful ports. It never retries requests
@@ -37,7 +44,13 @@ type guardedExchangeClient interface {
 type guardedClientFactory func(string, string, time.Duration) (guardedClient, error)
 
 func newGuardedClient(baseURL, cookie string, minInterval time.Duration) (guardedClient, error) {
-	return httpguard.New(baseURL, cookie, minInterval)
+	client, err := httpguard.New(baseURL, cookie, minInterval)
+	if err != nil {
+		// Return an untyped nil so callers never see a non-nil interface
+		// wrapping a nil *httpguard.Client.
+		return nil, err
+	}
+	return client, nil
 }
 
 func New(baseURL string) *Adapter {
@@ -47,6 +60,13 @@ func New(baseURL string) *Adapter {
 	return &Adapter{baseURL: baseURL, newClient: newGuardedClient}
 }
 
+// productionOrigin reports whether the adapter is bound to exactly
+// DefaultBaseURL. Origin-pinned ports refuse every other base URL, including
+// equivalent spellings, rather than retargeting persisted route IDs.
+func (a *Adapter) productionOrigin() bool {
+	return a != nil && a.baseURL == DefaultBaseURL
+}
+
 func (a *Adapter) Descriptor() domain.SiteDescriptor {
 	capabilities := []domain.Capability{
 		domain.CapabilityAuthCheck,
@@ -54,11 +74,11 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 		domain.CapabilitySearch,
 		domain.CapabilityBonusRead,
 	}
-	if a.baseURL == DefaultBaseURL {
+	if a.productionOrigin() {
 		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview, domain.CapabilityBonusExchange)
 	}
 	return domain.SiteDescriptor{
-		ID:           "tjupt",
+		ID:           SiteID,
 		Name:         "TJUPT / 北洋园PT",
 		BaseURL:      a.baseURL,
 		Stability:    "experimental",
@@ -111,7 +131,7 @@ func (a *Adapter) BonusCatalog(ctx context.Context, credential site.Credential) 
 		return domain.BonusCatalog{}, fmt.Errorf("TJUPT bonus page structure was not recognized; refusing an empty catalog")
 	}
 	return domain.BonusCatalog{
-		SiteID:     "tjupt",
+		SiteID:     SiteID,
 		Balance:    parseBonusBalance(body),
 		Rows:       rows,
 		ObservedAt: time.Now().UTC(),

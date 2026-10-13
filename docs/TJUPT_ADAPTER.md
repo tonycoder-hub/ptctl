@@ -1,5 +1,7 @@
 # TJUPT adapter
 
+[Documentation index](README.md) · [Adding a site](ADDING_A_SITE.md)
+
 TJUPT is the first experimental site implementation, not a special case
 embedded in the content core. It has not had a credentialed live smoke test in
 this repository. The adapter declares six ordinary read capabilities plus two

@@ -252,7 +252,7 @@ func parseSearch(body []byte) []domain.TorrentSummary {
 			continue
 		}
 		seen[id[2]] = struct{}{}
-		summary := domain.TorrentSummary{Ref: domain.TorrentRef{SiteID: "tjupt", RemoteID: id[2]}, Name: name}
+		summary := domain.TorrentSummary{Ref: domain.TorrentRef{SiteID: SiteID, RemoteID: id[2]}, Name: name}
 		if size, ok := sizeAfterDetailsCell(string(row[1])); ok {
 			summary.SizeBytes = &size
 		}

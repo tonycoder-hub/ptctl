@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -148,7 +147,7 @@ func (a *app) siteMetafileFetch(args []string) error {
 	if err != nil || config.Validate() != nil {
 		return fmt.Errorf("site %q has an invalid metafile-fetch configuration", descriptor.ID)
 	}
-	descriptorOrigin, err := canonicalSiteDescriptorOrigin(descriptor.BaseURL)
+	descriptorOrigin, err := site.DescriptorOrigin(descriptor)
 	if err != nil || descriptorOrigin != config.Origin {
 		return fmt.Errorf("site %q has an unsafe metafile-fetch origin", descriptor.ID)
 	}
@@ -515,14 +514,6 @@ func siteMetafileFetchPublicError(ctx context.Context, err error) error {
 		return fmt.Errorf("site metafile fetch was canceled")
 	}
 	return fmt.Errorf("site metafile fetch failed")
-}
-
-func canonicalSiteDescriptorOrigin(value string) (string, error) {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return "", fmt.Errorf("site descriptor origin is invalid")
-	}
-	return "https://" + parsed.Host, nil
 }
 
 func validateSuccessfulMetafileFetch(ref domain.TorrentRef, config site.MetafileFetchConfig, limits site.MetafileFetchLimits, fetched *site.FetchedMetafile, receipt site.MetafileFetchReceipt, requestsMade int) error {
