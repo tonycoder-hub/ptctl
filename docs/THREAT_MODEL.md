@@ -1,5 +1,28 @@
 # Threat model
 
+[Documentation index](README.md) · [Project README](../README.md)
+
+**Reading guide.** Assets and trust boundaries are short and frame everything
+else. The present controls are grouped by threat rather than by command, so a
+change to one command can touch several groups: check secret leakage and
+redirects for any site change, retries for anything that sends requests, and
+filesystem escape for anything that writes. The design behind each control is
+in [ARCHITECTURE.md](ARCHITECTURE.md); vulnerability reporting is in the
+[security policy](../SECURITY.md).
+
+**Contents**
+
+- [Assets](#assets) · [Trust boundaries](#trust-boundaries)
+- [Major threats and present controls](#major-threats-and-present-controls):
+  [Secret leakage](#secret-leakage) ·
+  [SSRF and redirect leakage](#ssrf-and-redirect-leakage) ·
+  [Retry storms and account bans](#retry-storms-and-account-bans) ·
+  [Parser, scanner, and solver exhaustion](#parser-scanner-and-solver-exhaustion) ·
+  [Filesystem escape, races, and corruption](#filesystem-escape-races-and-corruption) ·
+  [Read side effects and remote storage](#read-side-effects-and-remote-storage) ·
+  [Supply chain](#supply-chain)
+- [Known gaps before broader mutation support](#known-gaps-before-broader-mutation-support)
+
 ## Assets
 
 - tracker cookies, RSS keys, auth keys, and passkeys;

@@ -1,5 +1,39 @@
 # Architecture
 
+[Documentation index](README.md) · [Project README](../README.md)
+
+**Reading guide.** The first sections (the four ledgers, ports and adapters,
+capability negotiation, identity, path and file identity, and evidence and
+outcomes) apply everywhere; read them first. Every other section describes one
+feature or durable workflow and stands on its own, so read only the ones you
+are working on. Security controls for the same features are in
+[THREAT_MODEL.md](THREAT_MODEL.md); to add a site, continue with
+[ADDING_A_SITE.md](ADDING_A_SITE.md).
+
+**Contents**
+
+- Foundations: [The four ledgers](#the-four-ledgers) ·
+  [Ports and adapters](#ports-and-adapters) ·
+  [Capability negotiation](#capability-negotiation) · [Identity](#identity) ·
+  [Path and file-identity model](#path-and-file-identity-model) ·
+  [Evidence and outcomes](#evidence-and-outcomes) ·
+  [Plugin direction](#plugin-direction)
+- Reconciliation: [Ledger reconciliation](#ledger-reconciliation)
+- Sites: [Read-only bonus-offer review](#read-only-bonus-offer-review) ·
+  [Durable at-most-once bonus exchange](#durable-at-most-once-bonus-exchange) ·
+  [Read-only torrent detail](#read-only-torrent-detail) ·
+  [B1: effectful site metafile fetch](#b1-effectful-site-metafile-fetch)
+- Metafiles and storage:
+  [Private metafile store](#private-metafile-store) ·
+  [Immutable storage profiles and sealed candidate snapshots](#immutable-storage-profiles-and-sealed-candidate-snapshots) ·
+  [Read-only storage discovery](#read-only-storage-discovery)
+- Content: [Journaled copy-only materialization](#journaled-copy-only-materialization) ·
+  [Source-retirement review and execution](#source-retirement-review-and-execution)
+- Downloader: [Exact stopped-job adoption](#exact-stopped-job-adoption) ·
+  [Explicit client recheck and controlled start](#explicit-client-recheck-and-controlled-start) ·
+  [Exact downloader-job stopped transition](#exact-downloader-job-stopped-transition) ·
+  [Exact downloader-job removal while keeping data](#exact-downloader-job-removal-while-keeping-data)
+
 ## The four ledgers
 
 `ptctl` models PT operations as reconciliation among four independent records:
@@ -47,6 +81,9 @@ internal/site
     optional AuthChecker / AccountReader / TorrentSearcher /
     BonusCatalogReader / BonusReviewReader ports and a capability-gated
     effectful metafile port
+        |-- httpguard   the only HTTP client site adapters use
+        |-- sites       the list of built-in adapters
+        |-- sitetest    offline adapter conformance suite
         `-- tjupt
 
 internal/downloader
@@ -1826,3 +1863,10 @@ adapters are built in and reviewed. If external adapters become necessary
 after several implementations exist, they should use a versioned capability
 protocol in a sandboxed process or WASM runtime with domain and filesystem
 allowlists.
+
+Built-in site adapters are listed in `internal/site/sites`, the only package
+from which the CLI learns which sites exist. Each one must pass the offline
+`internal/site/sitetest` conformance suite, which checks that its descriptor,
+typed ports, pinned configs, and pre-request session failures agree.
+[ADDING_A_SITE.md](ADDING_A_SITE.md) walks through the steps and lists what is
+still missing for API-token sites.
