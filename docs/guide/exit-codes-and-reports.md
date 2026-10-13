@@ -2,6 +2,8 @@
 
 [Command guide](README.md) · [Documentation index](../README.md)
 
+> A compact summary for scripts and agents, including the JSON envelope and every `kind`, is in [AUTOMATION.md](../AUTOMATION.md).
+
 Exit code `0` means a report or requested read succeeded, `1` an operational
 failure, `2` invalid usage, and `3` an explicit integrity mismatch. Discovery
 is report-oriented, so blocked results still print and return `0` by default.
