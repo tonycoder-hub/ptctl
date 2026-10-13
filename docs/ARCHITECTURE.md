@@ -82,6 +82,7 @@ internal/site
     BonusCatalogReader / BonusReviewReader ports and a capability-gated
     effectful metafile port
         |-- httpguard   the only HTTP client site adapters use
+        |-- mteam       M-Team JSON API reads with an API key
         |-- sites       the list of built-in adapters
         |-- sitetest    offline adapter conformance suite
         `-- tjupt
@@ -94,7 +95,8 @@ internal/downloader
 
 The core never imports a concrete site or downloader implementation. Site
 adapters do not receive filesystem handles, and storage code does not receive
-credentials. TJUPT is one adapter, not a special case in the content model.
+credentials. TJUPT and M-Team are adapters, not special cases in the content
+model.
 The ordinary site-read CLI resolves the requested capability to its concrete
 typed port before reading credential stdin; search also rejects a blank query
 at that boundary. Adapter runtime errors are normalized to fixed public codes

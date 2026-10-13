@@ -83,6 +83,12 @@ deliberately does not. For step-by-step usage, see the
 - an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
   bounded GET with no redirect or retry and publishing the strictly validated
   exact response only into an initialized private metafile store;
+- an experimental M-Team session check, account snapshot (username, uploaded
+  and downloaded bytes, ratio, and bonus), and first-page torrent search with
+  seeders, leechers, and promotion factors, through one read-only POST per
+  invocation to the official JSON API, authenticated by a site-issued API key
+  read only from stdin, with no redirect, proxy, or retry; M-Team torrent
+  detail and metafile download are not implemented yet;
 - qBittorrent and Transmission status and torrent-list reads over HTTPS (or
   explicit numeric loopback HTTP), with passwords accepted only through stdin;
 - read-only reconciliation that can first observe one authenticated live site
