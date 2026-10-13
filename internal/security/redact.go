@@ -9,9 +9,9 @@ import (
 const redacted = "[REDACTED]"
 
 var (
-	headerSecret = regexp.MustCompile(`(?i)(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]+`)
+	headerSecret = regexp.MustCompile(`(?i)(authorization|proxy-authorization|cookie|set-cookie|x-api-key)\s*[:=]\s*[^\r\n]+`)
 	querySecret  = regexp.MustCompile(`(?i)(passkey|pass%6bey|authkey|auth%6bey|torrent_pass|rsskey|rss%6bey|sid|token|api[_-]?key|password|passwd|cookie)=([^&\s]+)`)
-	fieldSecret  = regexp.MustCompile(`(?i)((?:["']?(?:password|passwd|cookie|sid|authorization|proxy-authorization)["']?)\s*[:=]\s*["']?)([^"'\s,}&]+)`)
+	fieldSecret  = regexp.MustCompile(`(?i)((?:["']?(?:password|passwd|cookie|sid|authorization|proxy-authorization|x-api-key|api[_-]?key)["']?)\s*[:=]\s*["']?)([^"'\s,}&]+)`)
 	announceURL  = regexp.MustCompile(`(?i)https?://[^\s"']+/(announce|download\.php)(\?[^\s"']*)?`)
 )
 

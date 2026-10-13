@@ -26,10 +26,11 @@ func strictTestClient(t *testing.T, transport http.RoundTripper, cookie string) 
 		t.Fatal(err)
 	}
 	return &Client{
-		base:       base,
-		cookie:     cookie,
-		maxBody:    defaultMaxBody,
-		strictHTTP: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		base:             base,
+		credentialHeader: "Cookie",
+		credentialValue:  cookie,
+		maxBody:          defaultMaxBody,
+		strictHTTP:       &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
 

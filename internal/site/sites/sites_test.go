@@ -5,6 +5,7 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/site"
+	"github.com/tonycoder-hub/ptctl/internal/site/mteam"
 	"github.com/tonycoder-hub/ptctl/internal/site/sites"
 	"github.com/tonycoder-hub/ptctl/internal/site/sitetest"
 	"github.com/tonycoder-hub/ptctl/internal/site/tjupt"
@@ -18,8 +19,13 @@ func samples(t *testing.T) map[string]sitetest.Samples {
 	if err != nil {
 		t.Fatal(err)
 	}
+	apiKey, err := site.NewAPIKeyCredential("SITETEST-API-KEY-CANARY")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return map[string]sitetest.Samples{
 		tjupt.SiteID: {Credential: cookie, RemoteID: "1", BonusSelector: "1"},
+		mteam.SiteID: {Credential: apiKey, RemoteID: "1"},
 	}
 }
 

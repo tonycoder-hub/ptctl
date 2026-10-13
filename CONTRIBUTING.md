@@ -75,8 +75,9 @@ Never commit:
 
 - a real private `.torrent`;
 - an announce, RSS, or download URL containing a passkey/auth key;
-- a site cookie or downloader password;
-- captured HTML containing personal account data;
+- a site cookie, site API key, or downloader password;
+- a signed download URL, such as one returned by M-Team's `genDlToken`;
+- captured HTML or API JSON containing personal account data;
 - a qBittorrent backup/resume file from a real client.
 
 Construct synthetic bencode and HTML in tests. Use obvious canary secrets and

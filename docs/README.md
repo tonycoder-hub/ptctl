@@ -14,17 +14,19 @@ documents that matter to them.
   each exit code means for each command family.
 - [Features](FEATURES.md): everything implemented today and what is
   deliberately not implemented.
+- [M-Team adapter](MTEAM_ADAPTER.md): creating an API key, the three M-Team
+  reads, their error lines, and why download is not supported yet.
 
 ## Contributing code
 
 - [CONTRIBUTING.md](../CONTRIBUTING.md): setup, checks, compatibility rules,
   where documentation goes, fixture policy, and adapter policy.
 - [Adding a site](ADDING_A_SITE.md): step-by-step site adapter guide, port
-  contracts, and the known gaps for API-token sites.
+  contracts, public failure causes, and the remaining gaps for API-token sites.
 - [Architecture](ARCHITECTURE.md): the four ledgers, ports and adapters,
   evidence and outcomes, and each durable workflow's design.
-- [TJUPT adapter](TJUPT_ADAPTER.md): the reference site adapter and its
-  page-level contract.
+- [TJUPT adapter](TJUPT_ADAPTER.md): the reference cookie and HTML site
+  adapter and its page-level contract.
 - [Materialize retention](MATERIALIZE_RETENTION.md): the prune/forget state
   machine for materialize operations.
 

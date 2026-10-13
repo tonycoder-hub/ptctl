@@ -13,11 +13,7 @@ import (
 // commands for the built-in adapters. Site registration may be refactored, but
 // this output is a user-visible contract.
 
-const builtinSiteDescriptorJSON = `{
-  "schema": "ptctl.dev/v1",
-  "kind": "site.descriptor.list",
-  "data": [
-    {
+const tjuptDescriptorJSON = `    {
       "id": "tjupt",
       "name": "TJUPT / 北洋园PT",
       "base_url": "https://www.tjupt.org/",
@@ -35,21 +31,40 @@ const builtinSiteDescriptorJSON = `{
         "bonus.offer.review",
         "bonus.exchange.submit_effectful"
       ]
-    }
-  ]
+    }`
+
+const mteamDescriptorJSON = `    {
+      "id": "mteam",
+      "name": "M-Team / 馒头PT",
+      "base_url": "https://api2.m-team.cc/",
+      "stability": "experimental",
+      "auth_methods": [
+        "api_key_header"
+      ],
+      "capabilities": [
+        "auth.check",
+        "account.read",
+        "torrent.search"
+      ]
+    }`
+
+func descriptorListJSON(entries ...string) string {
+	return "{\n  \"schema\": \"ptctl.dev/v1\",\n  \"kind\": \"site.descriptor.list\",\n  \"data\": [\n" +
+		strings.Join(entries, ",\n") + "\n  ]\n}\n"
 }
-`
 
 func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 	tests := []struct {
 		args []string
 		want string
 	}{
-		{args: []string{"site", "list", "--output", "json"}, want: builtinSiteDescriptorJSON},
-		{args: []string{"site", "capabilities", "--output", "json", "tjupt"}, want: builtinSiteDescriptorJSON},
+		{args: []string{"site", "list", "--output", "json"}, want: descriptorListJSON(mteamDescriptorJSON, tjuptDescriptorJSON)},
+		{args: []string{"site", "capabilities", "--output", "json", "tjupt"}, want: descriptorListJSON(tjuptDescriptorJSON)},
+		{args: []string{"site", "capabilities", "--output", "json", "mteam"}, want: descriptorListJSON(mteamDescriptorJSON)},
 		{args: []string{"site", "list"}, want: "" +
-			"ID     NAME           STABILITY     BASE URL                CAPABILITIES\n" +
-			"tjupt  TJUPT / 北洋园PT  experimental  https://www.tjupt.org/  8\n"},
+			"ID     NAME           STABILITY     BASE URL                 CAPABILITIES\n" +
+			"mteam  M-Team / 馒头PT  experimental  https://api2.m-team.cc/  3\n" +
+			"tjupt  TJUPT / 北洋园PT  experimental  https://www.tjupt.org/   8\n"},
 		{args: []string{"site", "capabilities", "tjupt"}, want: "" +
 			"SITE   KIND        VALUE\n" +
 			"tjupt  auth        cookie_header\n" +
@@ -61,6 +76,12 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 			"tjupt  capability  torrent.metafile.read_effectful\n" +
 			"tjupt  capability  bonus.offer.review\n" +
 			"tjupt  capability  bonus.exchange.submit_effectful\n"},
+		{args: []string{"site", "capabilities", "mteam"}, want: "" +
+			"SITE   KIND        VALUE\n" +
+			"mteam  auth        api_key_header\n" +
+			"mteam  capability  auth.check\n" +
+			"mteam  capability  account.read\n" +
+			"mteam  capability  torrent.search\n"},
 	}
 	for _, test := range tests {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {

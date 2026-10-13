@@ -2,11 +2,13 @@
 
 [Documentation index](README.md) · [Project README](../README.md)
 
-This guide is for contributors adding a built-in site adapter. ptctl ships one
-site today, TJUPT, and [TJUPT_ADAPTER.md](TJUPT_ADAPTER.md) documents it as the
-reference implementation. The extension points below exist and are enforced by
-tests; the [gap list](#gaps-for-api-token-sites) at the end lists what does not
-exist yet for sites that authenticate with an API token instead of a cookie.
+This guide is for contributors adding a built-in site adapter. ptctl ships two
+sites today. TJUPT ([TJUPT_ADAPTER.md](TJUPT_ADAPTER.md)) is the reference for
+cookie-authenticated HTML sites, and M-Team ([MTEAM_ADAPTER.md](MTEAM_ADAPTER.md))
+is the reference for JSON APIs authenticated with an API key. The extension
+points below exist and are enforced by tests; the
+[gap list](#gaps-for-api-token-sites) at the end lists what API-token sites
+still lack.
 
 Read the invariants in [AGENTS.md](../AGENTS.md#invariants) first. They apply
 to every adapter, and the conformance suite checks several of them.
@@ -163,6 +165,23 @@ knows. Any other value collapses into a generic code:
 Reuse an existing stop reason whenever one fits. A new one is a public-contract
 change: add it to the allowlist and to the CLI tests in the same commit.
 
+## Public failure causes
+
+Ordinary reads (`status`, `account`, `search`, `bonus-catalog`) fold every
+adapter error into `site CMD failed`, so an adapter's own error text never
+reaches the user. An adapter may wrap one of the sentinels in
+`internal/site/errors.go` to let the CLI name a fixed, secret-free cause:
+
+| Sentinel | Use when |
+|---|---|
+| `site.ErrCredentialMalformed` | The credential cannot be the format the site uses, checked before any request. |
+| `site.ErrCredentialRejected` | The site positively rejected the credential. |
+| `site.ErrRateLimited` | The site said to slow down. Never retry. |
+| `site.ErrAddressBlocked` | `httpguard.ErrBlockedAddress`: DNS returned only private or reserved addresses, as with fake-IP proxies. |
+
+Wrapping a sentinel changes that adapter's public error text, so add it
+deliberately and pin it in tests. TJUPT wraps none of them.
+
 ## Persisted identity
 
 Site IDs, origins, and route IDs are written into sealed site bindings,
@@ -207,23 +226,23 @@ and do it in a separate behavior-preserving commit.
 | NexusPHP forks, including TJUPT | Cookie sessions match `cookie_header`, and HTML responses match the existing ports. | Page recognition and parsers for that fork, with synthetic fixtures. Forks differ, so do not assume TJUPT's pages. |
 | Unit3D | Cookie-session web pages fit. | Using its token-authenticated API instead runs into the gaps below. |
 | Gazelle-based trackers | Cookie sessions fit; their JSON responses need a JSON parser rather than HTML recognition. | Where an API key replaces the session cookie, the gaps below apply. |
-| M-Team | Does not fit yet. | API key header, separate API host, JSON requests, and a two-step download: all of the gaps below. |
+| M-Team | Status, account, and search are implemented in `internal/site/mteam` over the JSON API with an API key. | Torrent detail and the two-step download: the open gaps below. |
 
 ## Gaps for API-token sites
 
-These are the places that assume a cookie, HTML, or a single origin today.
-Closing them is design work for the pull request that adds the first API-token
-site, where it can be tested against a real API shape. Each item changes a
-public contract or a security control, so it needs its own review.
+These are the places that assumed a cookie, HTML, or a single origin. The
+M-Team adapter closed what its three reads needed; the rest is design work for
+whichever pull request first needs it. Each open item changes a public contract
+or a security control, so it needs its own review.
 
-| Gap | Where | What is needed |
-|---|---|---|
-| Only one auth method exists | `domain.AuthMethod` in `internal/domain/site.go`; `knownAuthMethod` in `internal/site/descriptor.go` | A new method such as `api_key_header`, declared by the adapter. |
-| Credential input is cookie-only | `readCredential` in `internal/cli/credentials.go` behind `--cookie-stdin`; `--site-cookie-stdin` and the bundle's `site_cookie` in `internal/cli/reconcile_credentials.go` | Method-aware stdin input that keeps every existing flag and its behavior unchanged. |
-| The CLI gates on cookies | Six `SupportsAuth(domain.AuthMethodCookieHeader)` checks in `site.go`, `site_detail.go`, `site_bonus.go`, `site_metafile.go`, `site_bonus_exchange.go`, and `reconcile.go` | Checks keyed to the method the caller supplied. |
-| The transport only sends `Cookie` | `httpguard.New(baseURL, cookie, ...)` in `internal/site/httpguard/client.go` | A credential header chosen by auth method, keeping it out of every error and result. |
-| Redaction does not know the header | `security.Redact` covers `Authorization` and `Cookie` header lines, but not a line like `x-api-key: VALUE` | A redaction pattern for the new header, with a `CANARY` test. |
-| No JSON requests | `httpguard` has `GetOnce` and form-encoded `PostFormOnce`; `Get` sends an HTML `Accept` header | A bounded JSON request. If the API exposes reads as POST requests, the read-path guarantees (one request, nothing written) need a threat-model update. |
-| One origin per site | Configs must use the descriptor origin; the suite checks this | Use the API origin as `BaseURL`. A download served from yet another host needs a design decision before that host is contacted. |
-| The download is two requests | `MetafileFetchLimits.MaxRequests` must be exactly one, and the receipt has one route ID | A new port or versioned limits and receipts for token-then-download, and an acknowledgement that names both requests. |
-| Site-specific CLI text | The `site detail` warning in `internal/cli/site_detail.go` names the TJUPT route | Adapter-supplied or conditional text, changed deliberately because it alters TJUPT's output. |
+| Gap | Status | Where | What is left |
+|---|---|---|---|
+| Only one auth method existed | Done | `domain.AuthMethodAPIKeyHeader` (`api_key_header`); `knownAuthMethod` in `internal/site/descriptor.go` | Nothing. |
+| Credential input was cookie-only | Partly done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, and `search` | `site detail`, `site metafile fetch`, bonus commands, and `reconcile` (`--site-cookie-stdin`, the bundle's `site_cookie`) still take cookies only. |
+| The CLI gated on cookies | Partly done | `siteRead` in `internal/cli/site.go` checks the method the caller chose | Five `SupportsAuth(domain.AuthMethodCookieHeader)` checks remain, in `site_detail.go`, `site_bonus.go`, `site_metafile.go`, `site_bonus_exchange.go`, and `reconcile.go`. |
+| The transport only sent `Cookie` | Done | `httpguard.NewWithHeaderCredential` binds one validated, non-reserved header | Nothing. |
+| Redaction did not know the header | Done | `security.Redact` covers `x-api-key` header lines and `apiKey`-style fields | Nothing. |
+| No JSON requests | Done | `httpguard.Client.PostReadOnce`: one bounded, non-replayable POST with no redirect and no retry, covered in the threat model | Nothing for reads. Effectful API calls still need their own acknowledged port. |
+| One origin per site | Done for reads | The API origin is the descriptor `BaseURL` | A download served from another host needs a design decision before that host is contacted. |
+| The download is two requests | Open | `MetafileFetchLimits.MaxRequests` must be exactly one, and the receipt has one route ID | A new port or versioned limits and receipts for token-then-download, an acknowledgement that names both requests, and handling of a signed URL that is itself a secret. See [MTEAM_ADAPTER.md](MTEAM_ADAPTER.md#not-supported-yet). |
+| Site-specific CLI text | Open | The `site detail` warning in `internal/cli/site_detail.go` names the TJUPT route | Adapter-supplied or conditional text, changed deliberately because it alters TJUPT's output. |

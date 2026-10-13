@@ -117,9 +117,9 @@ func (a *app) help() {
 Usage:
   ptctl site list [--output table|json]
   ptctl site capabilities [--output table|json] [SITE]
-  ptctl site status --cookie-stdin [--output table|json] SITE
-  ptctl site account --cookie-stdin [--output table|json] SITE
-  ptctl site search --cookie-stdin [--output table|json] SITE QUERY...
+  ptctl site status (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
+  ptctl site account (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
+  ptctl site search (--cookie-stdin | --api-key-stdin) [--output table|json] SITE QUERY...
   ptctl site detail --cookie-stdin [--output table|json] SITE REMOTE_ID
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
   ptctl site bonus review --cookie-stdin [--output table|json] SITE OPTION
@@ -201,8 +201,8 @@ Usage:
   ptctl version [--output table|json]
 
 Safety defaults:
-  * Ordinary site reads are one bounded GET per invocation. Bonus exchange is one fresh GET plus at most one acknowledged POST after a durable marker. Site requests are never automatically retried.
-  * Session cookies are accepted only through stdin and are never persisted.
+  * Ordinary site reads are one bounded request per invocation: a GET, or a read-only POST for JSON API sites such as M-Team. Bonus exchange is one fresh GET plus at most one acknowledged POST after a durable marker. Site requests are never automatically retried.
+  * Session cookies and site API keys are accepted only through stdin and are never persisted.
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.

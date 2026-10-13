@@ -43,8 +43,8 @@ boundaries. Data crossing one boundary does not grant authority over another.
 
 Secrets are accepted only through stdin, held in memory, and excluded from
 structured output. Tracker URLs are reduced to origins. Error boundaries redact
-cookies, authorization headers, common token keys, announce URLs, and download
-URLs. HTTP response bodies are not included in errors. Torrent-detail reports
+cookies, authorization and `x-api-key` headers, common token keys, announce
+URLs, and download URLs. HTTP response bodies are not included in errors. Torrent-detail reports
 retain only an allowlisted display title, optional peer counts, and fixed
 evidence codes from a positively recognized page; descriptions, raw HTML, and
 request/download URLs are never report fields.
@@ -104,7 +104,9 @@ Anyone who can read the private store can recover the complete historical invent
 Site origins must be HTTPS. DNS answers are checked before dialing and private,
 loopback, link-local, multicast, and unspecified addresses are rejected.
 Redirects are rejected. Proxies are disabled for site reads to avoid silently
-forwarding cookies.
+forwarding cookies or API keys. A local proxy that answers DNS with fake-IP
+addresses (`198.18.0.0/15`) therefore makes site reads fail closed; the CLI
+names that cause instead of dialing the proxy.
 
 The effectful metafile fetch is stricter: it rejects every redirect so that one
 acknowledgement cannot expand into another tracker-visible request. The report
@@ -119,7 +121,9 @@ for an explicit numeric loopback address.
 ### Retry storms and account bans
 
 The TJUPT adapter sends at most one bounded GET per command and never retries.
-HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
+The M-Team adapter sends at most one bounded POST per command to one of two
+read-only JSON API endpoints (`member/profile` and `torrent/search`), with a
+non-replayable body of at most 16 KiB, and never retries. HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
 callers must not loop or parallelize site commands. There is no Cloudflare or
 CAPTCHA bypass.
 
@@ -129,8 +133,9 @@ For the shared ordinary read path (`status`, `account`, `search`, and
 `bonus-catalog`), output mode, site/capability/authentication support, the
 actual typed port, and a nonblank search query are checked before credential
 stdin is consumed. Runtime adapter errors are mapped to fixed diagnostics;
-only cancellation and deadline causes are preserved, never arbitrary cookie,
-URL, header, or response text.
+only cancellation and deadline causes, plus four fixed causes an adapter may
+opt in to (malformed or rejected credential, rate limit, blocked address), are
+preserved, never arbitrary cookie, key, URL, header, or response text.
 The detail route sends
 only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
 parameter and never follows the download reference found in the page.
