@@ -69,7 +69,7 @@ func ValidateDescriptor(descriptor domain.SiteDescriptor) error {
 }
 
 func knownAuthMethod(method domain.AuthMethod) bool {
-	return method == domain.AuthMethodCookieHeader
+	return method == domain.AuthMethodCookieHeader || method == domain.AuthMethodAPIKeyHeader
 }
 
 // capabilityPorts is the single mapping from a declared capability to the

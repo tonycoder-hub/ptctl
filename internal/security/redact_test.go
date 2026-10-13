@@ -17,6 +17,10 @@ func TestRedactCanarySecrets(t *testing.T) {
 		`{"cookie":"` + canary + `"}`,
 		"https://site.invalid/?auth%6bey=" + canary,
 		"SID=" + canary,
+		"x-api-key: " + canary,
+		"X-Api-Key=" + canary,
+		`{"x-api-key": "` + canary + `"}`,
+		`{"apiKey":"` + canary + `"}`,
 	}
 	for _, input := range inputs {
 		got := Redact(input)

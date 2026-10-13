@@ -6,6 +6,7 @@ package sites
 
 import (
 	"github.com/tonycoder-hub/ptctl/internal/site"
+	"github.com/tonycoder-hub/ptctl/internal/site/mteam"
 	"github.com/tonycoder-hub/ptctl/internal/site/tjupt"
 )
 
@@ -14,6 +15,7 @@ import (
 func All() []site.Adapter {
 	return []site.Adapter{
 		tjupt.New(""),
+		mteam.New(),
 	}
 }
 
