@@ -19,7 +19,7 @@ func samples(t *testing.T) map[string]sitetest.Samples {
 		t.Fatal(err)
 	}
 	return map[string]sitetest.Samples{
-		"tjupt": {Credential: cookie, RemoteID: "1", BonusSelector: "1"},
+		tjupt.SiteID: {Credential: cookie, RemoteID: "1", BonusSelector: "1"},
 	}
 }
 
@@ -51,7 +51,7 @@ func TestTJUPTMirrorConformsWithOnlyDirectReads(t *testing.T) {
 			t.Fatalf("capabilities=%v want %v", got, want)
 		}
 	}
-	sitetest.TestAdapter(t, adapter, samples(t)["tjupt"])
+	sitetest.TestAdapter(t, adapter, samples(t)[tjupt.SiteID])
 }
 
 func TestNewRegistryRegistersEveryBuiltinAdapter(t *testing.T) {

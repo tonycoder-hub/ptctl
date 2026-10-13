@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	DetailOrigin  = "https://www.tjupt.org"
+	DetailOrigin  = Origin
 	DetailRouteID = "tjupt.details_by_id_no_hit.v1"
 
 	detailPath   = "details.php"
@@ -51,7 +51,7 @@ func (a *Adapter) ValidateTorrentDetailRef(ref domain.TorrentRef) error {
 }
 
 func (a *Adapter) TorrentDetailConfig() (site.TorrentDetailConfig, error) {
-	if a == nil || a.baseURL != DefaultBaseURL {
+	if !a.productionOrigin() {
 		return site.TorrentDetailConfig{}, fmt.Errorf("TJUPT torrent detail read is unavailable for this origin")
 	}
 	config, err := site.NewTorrentDetailConfig(DetailOrigin, DetailRouteID)
