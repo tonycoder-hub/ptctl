@@ -161,6 +161,17 @@ func TestBlockedAddressKeepsGenericTextButIsDetectable(t *testing.T) {
 	if !errors.Is(err, ErrBlockedAddress) {
 		t.Fatalf("fake-IP range dial err=%v, want ErrBlockedAddress", err)
 	}
+	// Through the real net/http stack too; the dial policy refuses the address
+	// before any packet is sent.
+	live, err := NewWithHeaderCredential("https://198.18.0.1/", "x-api-key", "KEY-CANARY", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	if _, err := live.PostReadOnce(context.Background(), "api/x", "application/json", []byte("{}"), "application/json", 64, 64, 1024); err == nil ||
+		err.Error() != "site request failed" || !errors.Is(err, ErrBlockedAddress) || live.RequestsMade() != 1 {
+		t.Fatalf("live blocked err=%v requests=%d", err, live.RequestsMade())
+	}
 	for name, call := range map[string]func(*Client) error{
 		"GetOnce": func(client *Client) error {
 			_, err := client.GetOnce(context.Background(), "x", nil, "text/html", 64, 1024)
