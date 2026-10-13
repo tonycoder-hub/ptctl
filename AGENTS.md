@@ -99,8 +99,10 @@ Do not break these. If a task seems to require it, stop and ask.
 
 ## Common tasks
 
-**Add a site.** Start from `internal/site/sites/sites.go` and the
-conformance suite in `internal/site/sitetest`; `internal/site/tjupt` and
+**Add a site.** Follow [docs/ADDING_A_SITE.md](docs/ADDING_A_SITE.md): it
+covers registration in `internal/site/sites`, the `internal/site/sitetest`
+conformance suite, port contracts, persisted identity, and the known gaps for
+API-token sites such as M-Team. `internal/site/tjupt` and
 [docs/TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md) show a complete adapter. Do not
 extract a shared NexusPHP or "site kit" layer until a second adapter shows
 which behavior is actually shared.

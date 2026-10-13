@@ -17,8 +17,10 @@ documents that matter to them.
 
 ## Contributing code
 
-- [CONTRIBUTING.md](../CONTRIBUTING.md): checks, fixture policy, and adapter
-  policy.
+- [CONTRIBUTING.md](../CONTRIBUTING.md): setup, checks, compatibility rules,
+  where documentation goes, fixture policy, and adapter policy.
+- [Adding a site](ADDING_A_SITE.md): step-by-step site adapter guide, port
+  contracts, and the known gaps for API-token sites.
 - [Architecture](ARCHITECTURE.md): the four ledgers, ports and adapters,
   evidence and outcomes, and each durable workflow's design.
 - [TJUPT adapter](TJUPT_ADAPTER.md): the reference site adapter and its

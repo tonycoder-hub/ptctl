@@ -115,6 +115,7 @@ and reconciling the result.
 | Understand the design | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Review security assumptions | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [SECURITY.md](SECURITY.md) |
 | Understand the TJUPT boundary | [docs/TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md) |
+| Add support for another site | [docs/ADDING_A_SITE.md](docs/ADDING_A_SITE.md) |
 | Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Work on ptctl with a coding agent | [AGENTS.md](AGENTS.md) |
 | Call ptctl from a script or agent | [docs/AUTOMATION.md](docs/AUTOMATION.md) |
