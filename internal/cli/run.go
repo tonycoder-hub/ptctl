@@ -1743,7 +1743,7 @@ func validateSiteBindingAdapter(registry *site.Registry, binding *sitebinding.Ve
 	if err != nil || config.Validate() != nil || config.Origin != public.Record.Origin || config.RouteID != public.Record.RouteID {
 		return fmt.Errorf("site binding adapter provenance does not match")
 	}
-	descriptorOrigin, err := canonicalSiteDescriptorOrigin(descriptor.BaseURL)
+	descriptorOrigin, err := site.DescriptorOrigin(descriptor)
 	if err != nil || descriptorOrigin != config.Origin {
 		return fmt.Errorf("site binding adapter origin is unsafe")
 	}
