@@ -28,7 +28,7 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/security"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
 	"github.com/tonycoder-hub/ptctl/internal/site"
-	"github.com/tonycoder-hub/ptctl/internal/site/tjupt"
+	"github.com/tonycoder-hub/ptctl/internal/site/sites"
 	"github.com/tonycoder-hub/ptctl/internal/sitebinding"
 	"github.com/tonycoder-hub/ptctl/internal/sourceretire"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
@@ -89,7 +89,7 @@ func newReadOnlyDownloaderDriver(name, endpoint string) (readOnlyDownloaderDrive
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	a := &app{
 		stdin: stdin, stdout: stdout, stderr: stderr,
-		registry: site.NewRegistry(tjupt.New("")),
+		registry: sites.NewRegistry(),
 	}
 	return runWithApp(args, a)
 }
