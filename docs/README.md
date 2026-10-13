@@ -26,6 +26,14 @@ documents that matter to them.
 - [Materialize retention](MATERIALIZE_RETENTION.md): the prune/forget state
   machine for materialize operations.
 
+## Coding agents and automation
+
+- [AGENTS.md](../AGENTS.md): repository map, required checks, invariants, and
+  common tasks for coding agents working on ptctl. `CLAUDE.md` imports it.
+- [Automating ptctl](AUTOMATION.md): the machine-facing contract for scripts
+  and agents that call ptctl: JSON envelope and kinds, exit codes, secret
+  input, and acknowledgement flags.
+
 ## Security review
 
 - [Threat model](THREAT_MODEL.md): assets, trust boundaries, and present

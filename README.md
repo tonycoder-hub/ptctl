@@ -116,6 +116,8 @@ and reconciling the result.
 | Review security assumptions | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [SECURITY.md](SECURITY.md) |
 | Understand the TJUPT boundary | [docs/TJUPT_ADAPTER.md](docs/TJUPT_ADAPTER.md) |
 | Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Work on ptctl with a coding agent | [AGENTS.md](AGENTS.md) |
+| Call ptctl from a script or agent | [docs/AUTOMATION.md](docs/AUTOMATION.md) |
 | Browse everything by audience | [docs/README.md](docs/README.md) |
 
 ## Security model in one paragraph
