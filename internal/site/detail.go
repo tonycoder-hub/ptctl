@@ -182,7 +182,8 @@ func validateObservedTorrentDetail(detail domain.TorrentDetail, receipt TorrentD
 		receipt.Used.RequestsAttempted != 1 || receipt.Used.AutomaticRetries != 0 || receipt.Used.RedirectsFollowed != 0 ||
 		!receipt.Used.ResponseBytesKnown || receipt.Used.ResponseBytesRead <= 0 || receipt.Used.ResponseBytesRead > receipt.Limits.MaxResponseBytes ||
 		configErr != nil || !validObservedDetailTitle(detail.DisplayTitle) ||
-		detail.Seeders != nil && *detail.Seeders < 0 || detail.Leechers != nil && *detail.Leechers < 0 {
+		detail.Seeders != nil && *detail.Seeders < 0 || detail.Leechers != nil && *detail.Leechers < 0 ||
+		detail.SizeBytes != nil && *detail.SizeBytes < 0 || detail.Snatches != nil && *detail.Snatches < 0 {
 		return fmt.Errorf("torrent detail observation is invalid")
 	}
 	wantBasis := []string{DetailBasisAuthenticated, DetailBasisExactRef, DetailBasisOneRequest, DetailBasisSiteClaimOnly}
@@ -225,6 +226,14 @@ func copyTorrentDetail(value domain.TorrentDetail) domain.TorrentDetail {
 	if value.Leechers != nil {
 		leechers := *value.Leechers
 		result.Leechers = &leechers
+	}
+	if value.SizeBytes != nil {
+		size := *value.SizeBytes
+		result.SizeBytes = &size
+	}
+	if value.Snatches != nil {
+		snatches := *value.Snatches
+		result.Snatches = &snatches
 	}
 	return result
 }

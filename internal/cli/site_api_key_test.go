@@ -163,6 +163,43 @@ func TestSiteReadNamesSecretFreeFailureCauses(t *testing.T) {
 	}
 }
 
+func TestSiteAccountHumanShowsReportedPanelFields(t *testing.T) {
+	uploaded := int64(3 << 40)
+	seeding, leeching, invites := 1024, 3, 3
+	observed := time.Date(2026, 10, 15, 1, 2, 3, 0, time.UTC)
+	tests := []struct {
+		account domain.AccountSnapshot
+		want    string
+	}{
+		{account: domain.AccountSnapshot{SiteID: "tjupt", Username: "user", UserClass: "威震一方", UploadedBytes: &uploaded, Seeding: &seeding, Leeching: &leeching,
+			SeedingPoints: "9876.5", Invites: &invites, Bonus: "12345.67", ObservedAt: observed}, want: "" +
+			"SITE            tjupt\n" +
+			"USERNAME        user\n" +
+			"CLASS           威震一方\n" +
+			"UPLOADED        3.00 TiB\n" +
+			"SEEDING         1024\n" +
+			"LEECHING        3\n" +
+			"SEEDING POINTS  9876.5\n" +
+			"INVITES         3\n" +
+			"BONUS           12345.67\n" +
+			"OBSERVED        2026-10-15T01:02:03Z\n"},
+		{account: domain.AccountSnapshot{SiteID: "tjupt", Username: "user", ObservedAt: observed}, want: "" +
+			"SITE      tjupt\n" +
+			"USERNAME  user\n" +
+			"BONUS     unknown\n" +
+			"OBSERVED  2026-10-15T01:02:03Z\n"},
+	}
+	for _, test := range tests {
+		var out bytes.Buffer
+		if err := writeSiteHuman(&out, "account", test.account, nil); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != test.want {
+			t.Fatalf("stdout:\n%s\nwant:\n%s", out.String(), test.want)
+		}
+	}
+}
+
 func TestSiteSearchTableAddsSwarmAndPromotionColumnsOnlyWhenReported(t *testing.T) {
 	size := int64(3 << 30)
 	seeders, leechers := 12, 3

@@ -198,7 +198,36 @@ func TestSiteDetailFailureReportRedactsAdapterReceiptAndErrors(t *testing.T) {
 	}
 }
 
+func TestSiteDetailReportsSizeAndSnatches(t *testing.T) {
+	adapter := successfulFakeTorrentDetail(t)
+	size, snatches := int64(3908420239), 12
+	adapter.detail.SizeBytes, adapter.detail.Snatches = &size, &snatches
+	var out bytes.Buffer
+	a := &app{stdin: strings.NewReader("sid=secret"), stdout: &out, registry: site.NewRegistry(adapter)}
+	if err := a.siteDetail([]string{"--cookie-stdin", "fakept", "42"}); err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if key, value, ok := strings.Cut(line, "  "); ok {
+			fields[key] = strings.TrimSpace(value)
+		}
+	}
+	if fields["SIZE"] != "3.64 GiB" || fields["SNATCHES"] != "12" {
+		t.Fatalf("human output lacks size or snatches: %q", out.String())
+	}
+	out.Reset()
+	a = &app{stdin: strings.NewReader("sid=secret"), stdout: &out, registry: site.NewRegistry(adapter)}
+	if err := a.siteDetail([]string{"--cookie-stdin", "--output", "json", "fakept", "42"}); err != nil {
+		t.Fatal(err)
+	}
+	if text := out.String(); !strings.Contains(text, `"size_bytes": 3908420239`) || !strings.Contains(text, `"snatches": 12`) {
+		t.Fatalf("json lacks size or snatches: %s", text)
+	}
+}
+
 func TestSiteDetailInconsistentReceiptAndCloseFailureFailClosed(t *testing.T) {
+	negative := -1
 	for _, test := range []struct {
 		name   string
 		mutate func(*fakeTorrentDetailAdapter)
@@ -206,6 +235,7 @@ func TestSiteDetailInconsistentReceiptAndCloseFailureFailClosed(t *testing.T) {
 	}{
 		{name: "receipt", mutate: func(adapter *fakeTorrentDetailAdapter) { adapter.receipt.Used.AutomaticRetries = 1 }, stop: "receipt_inconsistent"},
 		{name: "detail evidence", mutate: func(adapter *fakeTorrentDetailAdapter) { adapter.detail.EvidenceBasis[0] = "untrusted" }, stop: "receipt_inconsistent"},
+		{name: "negative snatches", mutate: func(adapter *fakeTorrentDetailAdapter) { adapter.detail.Snatches = &negative }, stop: "receipt_inconsistent"},
 		{name: "close", mutate: func(adapter *fakeTorrentDetailAdapter) { adapter.closeErr = errors.New("CLOSE-CANARY") }, stop: "session_close_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

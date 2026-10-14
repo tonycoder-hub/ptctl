@@ -694,8 +694,23 @@ func TestSiteBonusExchangeHelpAndDispatch(t *testing.T) {
 	}
 	out.Reset()
 	errOut.Reset()
-	if code := Run([]string{"site", "capabilities", "--output", "json", "tjupt"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), string(domain.CapabilityBonusExchange)) {
+	// TJUPT confirms each exchange with the account password, so it keeps
+	// review but no longer declares exchange.
+	if code := Run([]string{"site", "capabilities", "--output", "json", "tjupt"}, strings.NewReader(""), &out, &errOut); code != 0 ||
+		!strings.Contains(out.String(), string(domain.CapabilityBonusReview)) || strings.Contains(out.String(), string(domain.CapabilityBonusExchange)) {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	missing := filepath.Join(t.TempDir(), "MUST-NOT-BE-OPENED")
+	reader := &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"site", "bonus", "exchange", "submit", "--state-store", missing, "--intent-record", "sha256:" + strings.Repeat("a", 64),
+		"--expect-review-id", "sha256:" + strings.Repeat("c", 64), "--cookie-stdin", "--acknowledge-bonus-exchange", "tjupt", "14"}, reader, &out, &errOut); code != 2 ||
+		reader.read || out.Len() != 0 || !strings.Contains(errOut.String(), `site "tjupt" does not support acknowledged bonus exchange`) {
+		t.Fatalf("code=%d read=%t out=%q err=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("an undeclared exchange accessed the store: %v", err)
 	}
 }
 

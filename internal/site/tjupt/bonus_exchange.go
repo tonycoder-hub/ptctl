@@ -54,6 +54,9 @@ func (a *Adapter) BonusExchangeConfig() (site.BonusExchangeConfig, error) {
 	if !a.productionOrigin() {
 		return site.BonusExchangeConfig{}, fmt.Errorf("TJUPT bonus exchange is unavailable for this origin")
 	}
+	if !a.exchangeEnabled {
+		return site.BonusExchangeConfig{}, fmt.Errorf("TJUPT bonus exchange is unavailable: the site confirms each exchange with the account password, which ptctl does not handle")
+	}
 	config, err := site.NewBonusExchangeConfig(BonusReviewOrigin, BonusReviewRouteID, BonusExchangeRouteID)
 	if err != nil {
 		return site.BonusExchangeConfig{}, fmt.Errorf("TJUPT bonus exchange configuration is invalid")

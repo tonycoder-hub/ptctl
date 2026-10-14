@@ -67,6 +67,9 @@ type SessionStatus struct {
 	ObservedAt time.Time           `json:"observed_at"`
 }
 
+// AccountSnapshot holds the account fields a site states. UserClass is the
+// site's own display name for the account's class, and SeedingPoints, like
+// Bonus, is a decimal string.
 type AccountSnapshot struct {
 	SiteID          string    `json:"site_id"`
 	Username        string    `json:"username,omitempty"`
@@ -76,6 +79,9 @@ type AccountSnapshot struct {
 	Bonus           string    `json:"bonus,omitempty"`
 	Seeding         *int      `json:"seeding,omitempty"`
 	Leeching        *int      `json:"leeching,omitempty"`
+	UserClass       string    `json:"user_class,omitempty"`
+	SeedingPoints   string    `json:"seeding_points,omitempty"`
+	Invites         *int      `json:"invites,omitempty"`
 	ObservedAt      time.Time `json:"observed_at"`
 }
 
@@ -120,6 +126,8 @@ type TorrentDetail struct {
 	DisplayTitle              string     `json:"display_title"`
 	Seeders                   *int       `json:"seeders,omitempty"`
 	Leechers                  *int       `json:"leechers,omitempty"`
+	SizeBytes                 *int64     `json:"size_bytes,omitempty"`
+	Snatches                  *int       `json:"snatches,omitempty"`
 	DownloadReferenceObserved bool       `json:"download_reference_observed"`
 	EvidenceBasis             []string   `json:"evidence_basis"`
 }

@@ -44,7 +44,7 @@ func (client *accountFakeClient) Close() error {
 
 func TestAccountCapabilityAndPartialSnapshot(t *testing.T) {
 	const cookie = "sid=COOKIE-CANARY"
-	pageURL, err := url.Parse("https://www.tjupt.org/mybonusapps.php")
+	pageURL, err := url.Parse("https://www.tjupt.org/mybonus.php")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +74,7 @@ func TestAccountCapabilityAndPartialSnapshot(t *testing.T) {
 	}
 	if snapshot.SiteID != "tjupt" || snapshot.Username != "Alice" || snapshot.Bonus != "12345.67" ||
 		snapshot.UploadedBytes != nil || snapshot.DownloadedBytes != nil || snapshot.Ratio != "" || snapshot.Seeding != nil || snapshot.Leeching != nil ||
+		snapshot.UserClass != "" || snapshot.SeedingPoints != "" || snapshot.Invites != nil ||
 		snapshot.ObservedAt.Before(before) || snapshot.ObservedAt.After(after) || snapshot.ObservedAt.Location() != time.UTC {
 		t.Fatalf("snapshot=%#v", snapshot)
 	}
@@ -84,16 +85,63 @@ func TestAccountCapabilityAndPartialSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), cookie) || strings.Contains(string(raw), "mybonusapps.php") {
+	if strings.Contains(string(raw), cookie) || strings.Contains(string(raw), "mybonus.php") {
 		t.Fatalf("snapshot disclosed request authority: %s", raw)
 	}
 }
 
+func TestAccountReadsUserPanel(t *testing.T) {
+	pageURL, _ := url.Parse("https://www.tjupt.org/mybonus.php")
+	client := &accountFakeClient{body: accountPanelPage(tjuptInfoBlock("1,024", "3")), finalURL: pageURL}
+	adapter := New("")
+	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
+	snapshot, err := adapter.Account(context.Background(), mustCredential(t, "sid=secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Username != "Alice" || snapshot.Bonus != "12345.67" || snapshot.UserClass != "威震一方" || snapshot.SeedingPoints != "9876.5" ||
+		snapshot.UploadedBytes == nil || *snapshot.UploadedBytes != 3848290697216 || snapshot.Invites == nil || *snapshot.Invites != 3 ||
+		snapshot.Seeding == nil || *snapshot.Seeding != 1024 || snapshot.Leeching == nil || *snapshot.Leeching != 3 ||
+		snapshot.DownloadedBytes != nil || snapshot.Ratio != "" {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+	raw, _ := json.Marshal(snapshot)
+	for _, private := range []string{"NETWORK-CANARY", "AVATAR-CANARY", "UID-CANARY", "H&R"} {
+		if strings.Contains(string(raw), private) {
+			t.Fatalf("snapshot kept %q: %s", private, raw)
+		}
+	}
+}
+
+func TestUserPanelFieldsAreOptionalAndUnambiguous(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  string
+		check func(infoBlock) bool
+	}{
+		{name: "no panel", body: `<table><tr><td>上传量: 1.00 TiB 等级: [X]</td></tr></table>`, check: func(block infoBlock) bool { return block == infoBlock{} }},
+		{name: "two panels", body: tjuptInfoBlock("1", "0") + tjuptInfoBlock("1", "0"), check: func(block infoBlock) bool { return block == infoBlock{} }},
+		{name: "unclosed panel", body: strings.TrimSuffix(tjuptInfoBlock("1", "0"), "</table>"), check: func(block infoBlock) bool { return block == infoBlock{} }},
+		{name: "conflicting seeding", body: strings.Replace(tjuptInfoBlock("1", "0"), "</td></tr></table></td>", `<img class="arrowup" alt="Torrents seeding" src="pic/trans.gif"/>2</td></tr></table></td>`, 1), check: func(block infoBlock) bool {
+			return block.seeding == nil && block.leeching != nil && block.class == "威震一方"
+		}},
+		{name: "malformed counts", body: tjuptInfoBlock("1,30", "x"), check: func(block infoBlock) bool {
+			return block.seeding == nil && block.leeching == nil && block.uploaded != nil
+		}},
+		{name: "control rune in class", body: strings.Replace(tjuptInfoBlock("1", "0"), "威震一方", "威震&#7;一方", 1), check: func(block infoBlock) bool { return block.class == "" && block.invites != nil }},
+	}
+	for _, test := range tests {
+		if block := parseInfoBlock([]byte(test.body)); !test.check(block) {
+			t.Fatalf("%s: block=%#v", test.name, block)
+		}
+	}
+}
+
 func TestAccountFailsClosedOnUnrecognizedOrUnsafePages(t *testing.T) {
-	accountURL, _ := url.Parse("https://www.tjupt.org/mybonusapps.php")
+	accountURL, _ := url.Parse("https://www.tjupt.org/mybonus.php")
 	wrongURL, _ := url.Parse("https://www.tjupt.org/index.php")
-	wrongOrigin, _ := url.Parse("https://example.invalid/mybonusapps.php")
-	queryURL, _ := url.Parse("https://www.tjupt.org/mybonusapps.php?unexpected=1")
+	wrongOrigin, _ := url.Parse("https://example.invalid/mybonus.php")
+	queryURL, _ := url.Parse("https://www.tjupt.org/mybonus.php?unexpected=1")
 	loginURL, _ := url.Parse("https://www.tjupt.org/login.php")
 	tests := []struct {
 		name string
@@ -164,13 +212,13 @@ func TestLoginRedirectIsAnAuthenticationFailure(t *testing.T) {
 	}
 	// TJUPT's loggedinorreturn answers an expired cookie with a relative
 	// "Location: login.php?returnto=<page>"; NexusPHP forks may send it absolute.
-	for _, raw := range []string{"login.php?returnto=mybonusapps.php", "https://www.tjupt.org/login.php?returnto=torrents.php%3Fsearch%3Dx", "/LOGIN.PHP"} {
+	for _, raw := range []string{"login.php?returnto=mybonus.php", "https://www.tjupt.org/login.php?returnto=torrents.php%3Fsearch%3Dx", "/LOGIN.PHP"} {
 		reference, _ := url.Parse(raw)
 		if id, ok := classifyLoginRedirect(base.ResolveReference(reference)); !ok || id != loginRedirectID {
 			t.Fatalf("%s: id=%q ok=%v", raw, id, ok)
 		}
 	}
-	for _, raw := range []string{"mybonusapps.php?do=upload", "/login.php.bak", "/takelogin.php", "/login.php/extra"} {
+	for _, raw := range []string{"mybonus.php?do=upload", "/login.php.bak", "/takelogin.php", "/login.php/extra"} {
 		reference, _ := url.Parse(raw)
 		if id, ok := classifyLoginRedirect(base.ResolveReference(reference)); ok || id != "" {
 			t.Fatalf("%s: id=%q ok=%v", raw, id, ok)
@@ -225,6 +273,28 @@ func TestLoginRedirectIsAnAuthenticationFailure(t *testing.T) {
 			t.Fatalf("other redirect status=%#v err=%v", status, err)
 		}
 	}
+}
+
+// tjuptInfoBlock follows the live user panel: a nested table whose cell
+// carries the class, balance, seeding points, invites, uploaded total, and
+// active torrent icons, then a 访问网络 line that ptctl must never keep.
+func tjuptInfoBlock(seeding, leeching string) string {
+	return `<table id="info_block" cellpadding="4" cellspacing="0" border="0" width="100%"><tr><td><table width="100%"><tr>
+<td class="bottom"><a href="usercp.php?action=personal#avatar"><img src="https://tjupt.org/bitbucket/AVATAR-CANARY.jpg" id="myavatar" alt="myavatar"></a></td>
+<td class="bottom" style="text-align: left">欢迎, <span class="nowrap"><a href="userdetails.php?id=UID-CANARY" class='VeteranUser_Name'><b><span>Alice</span></b></a></span> [<a href='logout.php'>退出</a>]
+<span class="color_bonus"> 等级: </span>[<a href="/classes.php#6"><span class='VeteranUser_Name' style='font-weight: bold'>威震一方</span></a>]
+<span class='color_bonus'> 魔力值  </span>[<a href="mybonus.php">使用</a>|<a href="mybonusapps.php">茉莉园</a>]: <a href="bonus.php?show=log">12,345.67</a>
+<span class='color_bonus'>做种积分: </span><a href="bonus.php?show=description">9,876.5</a>
+<span class='color_invite'> 邀请: </span> <a href="invite.php?id=UID-CANARY" title="邀请码数量">3</a><br/>
+<span class="color_bonus">H&amp;R积分 </span>[<a href="/hnr_bonus.php">日志</a>]: <a href="/hnr_bonus.php">100</a>
+<span class='color_uploaded'>上传量:</span> 3.5 TiB <span class="color_active"> 上传排名:</span> <a href="/topten.php">7</a>&nbsp;
+<span class='color_active'>活动种子:</span> <img class="arrowup" alt="Torrents seeding" title="当前做种数" src="pic/trans.gif"/>` + seeding + ` <img class="arrowdown" alt="Torrents leeching" title="当前下载数" src="pic/trans.gif"/>` + leeching + `&nbsp;
+<span class='color_connectable'>访问网络: </span>NETWORK-CANARY 天津 IPv4
+</td></tr></table></td></tr></table>`
+}
+
+func accountPanelPage(panel string) []byte {
+	return []byte(`<html><head><title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title></head><body>` + panel + `<table><tr><td class="text">用你的魔力值（当前12,345.67）换东东！</td></tr></table></body></html>`)
 }
 
 func accountPage(username, balance string) []byte {

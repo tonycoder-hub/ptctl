@@ -207,6 +207,47 @@ func TestTorrentDetailCancellationLimitsAndErrorsAreSafe(t *testing.T) {
 	}
 }
 
+// tjuptDetailPage follows the live details.php rows: 基本信息 states the
+// torrent ID and size, and 热度表 links the completion count to
+// viewsnatches.php.
+func tjuptDetailPage(basic, heat string) []byte {
+	return []byte(`<html><a href='logout.php'>退出</a><h1 align="center" id="top">Release</h1><table>
+<tr><td class="rowhead">基本信息</td><td class="rowfollow">` + basic + `</td></tr>
+<tr><td class="rowhead">文件列表</td><td class="rowfollow">a.iso 2.00 GiB</td></tr>
+<tr><td class="rowhead">热度表</td><td class="rowfollow">` + heat + `</td></tr></table>
+<a href="download.php?id=42">下载</a><div id="peercount"><b>2个做种者</b> | <b>0个下载者</b></div></html>`)
+}
+
+const (
+	liveDetailBasic = `<b>种子ID:</b>&nbsp;<a href="javascript:void(0)" class="copy" data-clipboard-text='42'>42</a><script>new ClipboardJS('.copy');</script><span>|</span><b><b>大小</b>:</b>&nbsp;3.64 GiB<span>|</span><b>类型:</b>&nbsp;软件`
+	liveDetailHeat  = `<b><b>完成:</b> </b><a href="viewsnatches.php?id=42"><b>1,234</b>次</a> &lt;--- 点击查看完成详情 <a href="viewsnatches.php?id=42">查看完成详情</a>`
+)
+
+func TestParseTorrentDetailReadsSizeAndSnatches(t *testing.T) {
+	ref := domain.TorrentRef{SiteID: "tjupt", RemoteID: "42"}
+	detail, err := parseTorrentDetail(tjuptDetailPage(liveDetailBasic, liveDetailHeat), ref)
+	if err != nil || detail.SizeBytes == nil || *detail.SizeBytes != 3908420239 || detail.Snatches == nil || *detail.Snatches != 1234 ||
+		detail.Seeders == nil || *detail.Seeders != 2 || detail.Leechers == nil || *detail.Leechers != 0 {
+		t.Fatalf("detail=%#v err=%v", detail, err)
+	}
+	tests := []struct {
+		name, basic, heat string
+		size, snatches    bool
+	}{
+		{name: "other torrent ID", basic: strings.ReplaceAll(liveDetailBasic, "42", "43"), heat: liveDetailHeat, snatches: true},
+		{name: "conflicting sizes", basic: liveDetailBasic + ` 种子ID: 42 | 大小: 1.00 GiB`, heat: liveDetailHeat, snatches: true},
+		{name: "other torrent snatches", basic: liveDetailBasic, heat: strings.ReplaceAll(liveDetailHeat, "id=42", "id=43"), size: true},
+		{name: "conflicting snatches", basic: liveDetailBasic, heat: liveDetailHeat + `<a href="viewsnatches.php?id=42">7次</a>`, size: true},
+		{name: "absent", basic: "", heat: ""},
+	}
+	for _, test := range tests {
+		detail, err := parseTorrentDetail(tjuptDetailPage(test.basic, test.heat), ref)
+		if err != nil || (detail.SizeBytes != nil) != test.size || (detail.Snatches != nil) != test.snatches {
+			t.Fatalf("%s: detail=%#v err=%v", test.name, detail, err)
+		}
+	}
+}
+
 func TestParseTorrentDetailAllowsNoDownloadLinkButRequiresExactBoundLink(t *testing.T) {
 	body := []byte(`<a href="logout.php">logout</a><h1 id='top'>Release</h1><a href="report.php?torrent=42">report</a><div id="peercount-extra"><b>8 seeders</b><b>2 leechers</b></div>`)
 	detail, err := parseTorrentDetail(body, domain.TorrentRef{SiteID: "tjupt", RemoteID: "42"})
