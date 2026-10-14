@@ -31,15 +31,21 @@ var (
 	bonusOption     = regexp.MustCompile(`(?is)<input\b[^>]*name\s*=\s*["']?option["']?`)
 	titlePattern    = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 	usernameInTitle = regexp.MustCompile(`(?i)(PT\s*::\s*)?(.+?)\s*的魔力值`)
-	balancePattern  = regexp.MustCompile(`当前\s*魔力值[^0-9]{0,32}([0-9][0-9,]*(\.[0-9]+)?)`)
-	rowPattern      = regexp.MustCompile(`(?is)<tr\b[^>]*>(.*?)</tr\s*>`)
-	cellPattern     = regexp.MustCompile(`(?is)<t[dh]\b[^>]*>(.*?)</t[dh]\s*>`)
-	detailsPattern  = regexp.MustCompile(`(?is)<a\b[^>]*href\s*=\s*["']?([^"' >]*details\.php\?[^"' >]+)["']?[^>]*>(.*?)</a\s*>`)
-	idPattern       = regexp.MustCompile(`(^|[?&])id=([0-9]+)(&|$)`)
-	tagPattern      = regexp.MustCompile(`(?is)<[^>]+>`)
-	scriptPattern   = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>|<style\b[^>]*>.*?</style\s*>`)
-	spacePattern    = regexp.MustCompile(`\s+`)
-	sizePattern     = regexp.MustCompile(`(?i)([0-9]+(\.[0-9]+)?)\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)\b`)
+	// TJUPT's live mybonusapps.php states the balance as "用你的魔力值（当前N）".
+	// Both forms need their exact separator, so rule text on the same page such
+	// as "如果当前魔力值≥1000" is never read as the balance.
+	balancePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`魔力值\s*[（(]\s*当前\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*[）)]`),
+		regexp.MustCompile(`当前\s*魔力值\s*[:：]\s*([0-9][0-9,]*(?:\.[0-9]+)?)`),
+	}
+	rowPattern     = regexp.MustCompile(`(?is)<tr\b[^>]*>(.*?)</tr\s*>`)
+	cellPattern    = regexp.MustCompile(`(?is)<t[dh]\b[^>]*>(.*?)</t[dh]\s*>`)
+	detailsPattern = regexp.MustCompile(`(?is)<a\b[^>]*href\s*=\s*["']?([^"' >]*details\.php\?[^"' >]+)["']?[^>]*>(.*?)</a\s*>`)
+	idPattern      = regexp.MustCompile(`(^|[?&])id=([0-9]+)(&|$)`)
+	tagPattern     = regexp.MustCompile(`(?is)<[^>]+>`)
+	scriptPattern  = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>|<style\b[^>]*>.*?</style\s*>`)
+	spacePattern   = regexp.MustCompile(`\s+`)
+	sizePattern    = regexp.MustCompile(`(?i)([0-9]+(\.[0-9]+)?)\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)\b`)
 )
 
 func classifyBonusPage(finalURL *url.URL, body []byte) (domain.AuthenticationState, string) {
@@ -105,17 +111,28 @@ func parseUsername(body []byte) string {
 
 func parseBonusBalance(body []byte) string {
 	text := plainText(string(body))
-	match := balancePattern.FindStringSubmatchIndex(text)
-	if len(match) != 6 || match[2] < 0 || match[3] < match[2] {
-		return ""
-	}
-	if match[3] < len(text) {
-		next := text[match[3]]
-		if (next >= '0' && next <= '9') || next == ',' || next == '.' {
-			return ""
+	balance := ""
+	for _, pattern := range balancePatterns {
+		for _, match := range pattern.FindAllStringSubmatchIndex(text, -1) {
+			if len(match) != 4 || match[2] < 0 || match[3] < match[2] {
+				return ""
+			}
+			if match[3] < len(text) {
+				next := text[match[3]]
+				if (next >= '0' && next <= '9') || next == ',' || next == '.' {
+					return ""
+				}
+			}
+			// Every statement of the balance must agree; a page that states
+			// two different balances is not trusted for either.
+			value := canonicalBonusBalance(text[match[2]:match[3]])
+			if value == "" || (balance != "" && value != balance) {
+				return ""
+			}
+			balance = value
 		}
 	}
-	return canonicalBonusBalance(text[match[2]:match[3]])
+	return balance
 }
 
 func validAccountText(value string, maximum int) bool {
