@@ -63,7 +63,17 @@ type storageIndexReport struct {
 	DescriptorPublication metastore.RecordImportReceipt `json:"descriptor_publication"`
 	Scan                  storage.FullInventoryResult   `json:"scan"`
 	StopReasons           []string                      `json:"stop_reasons"`
-	Warnings              []string                      `json:"warnings"`
+	// Retention reports the post-refresh prune of superseded generations
+	// separately; the refresh fields above describe only the publication.
+	Retention *storageindex.PruneResult `json:"retention,omitempty"`
+	Warnings  []string                  `json:"warnings"`
+}
+
+type storageIndexPruneReport struct {
+	kind    string `json:"-"`
+	Outcome string `json:"outcome"`
+	storageindex.PruneResult
+	Warnings []string `json:"warnings"`
 }
 
 type storageIndexInspectReport struct {
@@ -211,7 +221,7 @@ func (a *app) storageProfileInspect(args []string) error {
 
 func (a *app) storageIndexCommand(args []string) error {
 	if len(args) == 0 {
-		return usageError("storage index requires refresh, refresh-discover, or inspect")
+		return usageError("storage index requires refresh, refresh-discover, inspect, or prune")
 	}
 	switch args[0] {
 	case "refresh":
@@ -220,6 +230,8 @@ func (a *app) storageIndexCommand(args []string) error {
 		return a.storageIndexRefreshDiscover(args[1:])
 	case "inspect":
 		return a.storageIndexInspect(args[1:])
+	case "prune":
+		return a.storageIndexPrune(args[1:])
 	default:
 		return usageError("unknown storage index subcommand %q", args[0])
 	}
@@ -342,7 +354,7 @@ func (a *app) storageIndexRefreshDiscover(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	result, discoverErr := seed.RefreshAndDiscoverFromIndex(ctx, repository, meta, selection.Profile, candidateLimits, options, storageindex.RefreshOptions{})
+	result, discoverErr := a.refreshAndDiscoverFromIndex(ctx, repository, meta, selection.Profile, candidateLimits, options, storageindex.RefreshOptions{})
 	if *output == "json" {
 		err = writeJSON(a.stdout, result, nil)
 	} else {
@@ -374,10 +386,11 @@ func (a *app) storageIndexRefresh(args []string) error {
 	output := fs.String("output", "table", "table or json")
 	stateStore := fs.String("state-store", "", "initialized private state/metafile store root")
 	profileSelector := fs.String("profile", "", "storage profile name or immutable ID")
-	timeout := fs.Duration("timeout", time.Hour, "shared inventory and publication wall-clock budget")
+	timeout := fs.Duration("timeout", time.Hour, "shared inventory, publication, and retention wall-clock budget")
+	retain := fs.Int("retain-generations", storageindex.DefaultRetainedSnapshotGenerations, "distinct newest generations of this profile kept after a stored refresh; 0 disables retention")
 	if handled, err := parseStorageFlags(a, fs, args,
-		"ptctl storage index refresh --state-store DIR --profile PROFILE [flags]",
-		"Performs a bounded metadata scan and explicitly writes an immutable data record followed by its descriptor."); handled || err != nil {
+		"ptctl storage index refresh --state-store DIR --profile PROFILE [--retain-generations N] [flags]",
+		"Performs a bounded metadata scan and explicitly writes an immutable data record followed by its descriptor. After a stored refresh it removes this profile's generations older than the retained window (data first, then descriptor)."); handled || err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || *stateStore == "" || *profileSelector == "" {
@@ -385,6 +398,89 @@ func (a *app) storageIndexRefresh(args []string) error {
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
+	}
+	if *timeout <= 0 || *timeout > 7*24*time.Hour {
+		return usageError("--timeout must be greater than zero and no more than 168h")
+	}
+	if *retain < 0 || *retain > storageindex.DefaultLimits().MaxSnapshots {
+		return usageError("--retain-generations must be in 0..%d", storageindex.DefaultLimits().MaxSnapshots)
+	}
+	store, err := metastore.Open(*stateStore)
+	if err != nil {
+		return err
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		return err
+	}
+	selection, err := repository.SelectProfile(context.Background(), *profileSelector)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	refresh, refreshErr := repository.Refresh(ctx, selection.Profile, storageindex.RefreshOptions{})
+	report := publicStorageIndexRefresh(refresh)
+	var retentionErr error
+	if refreshErr == nil && refresh.Status == "stored" && *retain > 0 {
+		// Refresh itself never removes records. Retention runs only after the
+		// new generation is durably stored and protects it explicitly.
+		retention, err := repository.PruneSnapshots(ctx, selection.Profile, storageindex.PruneOptions{
+			RetainGenerations: *retain, Protect: []metastore.RecordID{refresh.DescriptorRecord.ID},
+		})
+		report.Retention = &retention
+		switch {
+		case err != nil:
+			retentionErr = fmt.Errorf("storage index refresh stored generation %d, but retention failed; run ptctl storage index prune: %w", refresh.Generation, err)
+		case retention.Status != "complete":
+			retentionErr = &inconclusiveErr{message: fmt.Sprintf("storage index refresh stored generation %d, but retention saw only a partial listing; run ptctl storage index prune until it is complete", refresh.Generation)}
+		}
+		if retentionErr != nil {
+			report.Warnings = append(report.Warnings, "the new generation is stored, but superseded generations were not all removed; run ptctl storage index prune")
+		}
+	}
+	writeErr := writeStorageIndexReport(a.stdout, *output, report)
+	if writeErr != nil {
+		return writeErr
+	}
+	if refreshErr != nil {
+		return refreshErr
+	}
+	if refresh.Status != "stored" {
+		for _, reason := range refresh.StopReasons {
+			if reason == "snapshot_byte_limit" {
+				return &inconclusiveErr{message: fmt.Sprintf("storage index refresh did not publish a descriptor: the encoded snapshot would exceed %d bytes; narrow the profile roots or create a profile with lower --max-files or --max-path-bytes", storageindex.DefaultLimits().MaxSnapshotBytes)}
+			}
+		}
+		return &inconclusiveErr{message: "storage index refresh did not publish a complete descriptor"}
+	}
+	return retentionErr
+}
+
+func (a *app) storageIndexPrune(args []string) error {
+	fs := newFlagSet("storage index prune")
+	output := fs.String("output", "table", "table or json")
+	stateStore := fs.String("state-store", "", "initialized private state/metafile store root")
+	profileSelector := fs.String("profile", "", "storage profile name or immutable ID")
+	retain := fs.Int("retain-generations", storageindex.DefaultRetainedSnapshotGenerations, "distinct newest generations of this profile kept")
+	acknowledge := fs.Bool("acknowledge-index-prune", false, "acknowledge irreversible removal of superseded index generations")
+	timeout := fs.Duration("timeout", time.Hour, "listing and removal wall-clock budget")
+	if handled, err := parseStorageFlags(a, fs, args,
+		"ptctl storage index prune --state-store DIR --profile PROFILE --acknowledge-index-prune [--retain-generations N] [flags]",
+		"Removes this profile's index generations older than the newest N distinct generations: snapshot data first, then its descriptor. The latest generation, including a tie at it, is never removed. It acts on a verified partial listing, so an index that exceeds the latest-selection budget can recover; rerun until the outcome is complete."); handled || err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *stateStore == "" || *profileSelector == "" {
+		return usageError("storage index prune requires --state-store, --profile, --acknowledge-index-prune, and flags only")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	if !*acknowledge {
+		return usageError("storage index prune requires --acknowledge-index-prune")
+	}
+	if *retain < 1 || *retain > storageindex.DefaultLimits().MaxSnapshots {
+		return usageError("--retain-generations must be in 1..%d", storageindex.DefaultLimits().MaxSnapshots)
 	}
 	if *timeout <= 0 || *timeout > 7*24*time.Hour {
 		return usageError("--timeout must be greater than zero and no more than 168h")
@@ -403,17 +499,22 @@ func (a *app) storageIndexRefresh(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	refresh, refreshErr := repository.Refresh(ctx, selection.Profile, storageindex.RefreshOptions{})
-	report := publicStorageIndexRefresh(refresh)
-	writeErr := writeStorageIndexReport(a.stdout, *output, report)
-	if writeErr != nil {
-		return writeErr
+	result, pruneErr := repository.PruneSnapshots(ctx, selection.Profile, storageindex.PruneOptions{RetainGenerations: *retain})
+	report := storageIndexPruneReport{
+		kind: "storage.index.prune", Outcome: result.Status, PruneResult: result,
+		Warnings: []string{"pruned generations can no longer be read through an explicit --snapshot-record reference"},
 	}
-	if refreshErr != nil {
-		return refreshErr
+	if pruneErr == nil && result.Status != "complete" {
+		report.Warnings = append(report.Warnings, "only a verified subset of descriptor records was listed; rerun prune until the outcome is complete")
 	}
-	if refresh.Status != "stored" {
-		return &inconclusiveErr{message: "storage index refresh did not publish a complete descriptor"}
+	if err := writeStorageIndexPruneReport(a.stdout, *output, report); err != nil {
+		return err
+	}
+	if pruneErr != nil {
+		return pruneErr
+	}
+	if result.Status != "complete" {
+		return &inconclusiveErr{message: "storage index prune handled a partial descriptor listing; rerun it to continue"}
 	}
 	return nil
 }
@@ -571,6 +672,43 @@ func writeStorageIndexReport(out io.Writer, output string, report storageIndexRe
 		terminalSafe(report.DataRecord.ID.String()), terminalSafe(report.DescriptorRecord.ID.String()))
 	if len(report.StopReasons) > 0 {
 		fmt.Fprintf(w, "STOP REASONS\t%s\n", terminalSafe(strings.Join(report.StopReasons, ",")))
+	}
+	if retention := report.Retention; retention != nil {
+		fmt.Fprintf(w, "RETENTION\t%s\nRETENTION WRITES\t%d\nGENERATIONS PRUNED\t%d\n", terminalSafe(retention.Status), retention.WritesPerformed, len(retention.Pruned))
+		if len(retention.StopReasons) > 0 {
+			fmt.Fprintf(w, "RETENTION STOP REASONS\t%s\n", terminalSafe(strings.Join(retention.StopReasons, ",")))
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(out, "warning: %s\n", terminalSafe(warning))
+	}
+	return nil
+}
+
+func writeStorageIndexPruneReport(out io.Writer, output string, report storageIndexPruneReport) error {
+	if output == "json" {
+		return writeJSON(out, report, nil)
+	}
+	retained := make([]string, 0, len(report.RetainedGenerations))
+	for _, generation := range report.RetainedGenerations {
+		retained = append(retained, fmt.Sprintf("%d", generation))
+	}
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "OUTCOME\t%s\nEFFECT\t%s\nWRITES\t%d\nPROFILE\t%s\nLISTING COMPLETE\t%t\nDESCRIPTORS MATCHED\t%d\nRETAINED GENERATIONS\t%s\nGENERATIONS PRUNED\t%d\n",
+		terminalSafe(report.Outcome), terminalSafe(report.Effect), report.WritesPerformed, terminalSafe(report.ProfileID), report.ListingComplete,
+		report.DescriptorsMatched, terminalSafe(strings.Join(retained, ",")), len(report.Pruned))
+	if len(report.StopReasons) > 0 {
+		fmt.Fprintf(w, "STOP REASONS\t%s\n", terminalSafe(strings.Join(report.StopReasons, ",")))
+	}
+	if len(report.Pruned) > 0 {
+		fmt.Fprintln(w, "GENERATION\tDESCRIPTOR RECORD\tDATA RECORD\tDATA\tDESCRIPTOR")
+		for _, entry := range report.Pruned {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", entry.Generation, terminalSafe(entry.DescriptorRecordID.String()), terminalSafe(entry.DataRecordID.String()),
+				terminalSafe(entry.DataRemoval), terminalSafe(entry.DescriptorRemoval))
+		}
 	}
 	if err := w.Flush(); err != nil {
 		return err

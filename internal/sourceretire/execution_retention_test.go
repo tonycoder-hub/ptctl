@@ -17,7 +17,7 @@ func completedRetirementFixture(t *testing.T) (retireFixture, Plan, OperationID)
 	if err != nil || preview.Outcome != OutcomeEligible {
 		t.Fatalf("preview=%#v err=%v", preview, err)
 	}
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
@@ -213,7 +213,7 @@ func TestPruneExecutionRejectsNonterminalAndPredictableBudgetBeforeRetentionWrit
 
 func completedRetirementFixtureFrom(t *testing.T, fixture retireFixture, plan Plan) (retireFixture, Plan, OperationID) {
 	t.Helper()
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 		ExpectedPlanID: plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})

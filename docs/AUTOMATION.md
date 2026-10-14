@@ -54,7 +54,7 @@ Every JSON result is a single object on stdout, indented with two spaces:
 | Bonus exchange | `site.bonus.exchange.prepare`, `site.bonus.exchange.submit`, `site.bonus.exchange.status`, `site.bonus.exchange.operation_list`, `site.bonus.exchange.prune`, `site.bonus.exchange.forget` |
 | Site metafiles | `site.metafile.fetch`, `site.metafile.binding.list`, `site.metafile.binding.inspect` |
 | Metafiles | `metafile.manifest` (`torrent inspect`), `content.verification` (`torrent verify`), `metafile.store.init`, `metafile.store.import`, `metafile.store.inspect` |
-| Storage | `storage.probe`, `storage.path_mapping`, `storage.profile.create`, `storage.profile.inspect`, `storage.index.refresh`, `storage.index.inspect` |
+| Storage | `storage.probe`, `storage.path_mapping`, `storage.profile.create`, `storage.profile.inspect`, `storage.index.refresh`, `storage.index.inspect`, `storage.index.prune` |
 | Discovery and plans | `content.source_discovery` (`seed discover`, `storage index refresh-discover`), `content.layout_plan` (`seed plan`) |
 | Materialize | `content.materialization`, `content.materialization.operation_list`, `content.materialization.retention`, `content.materialization.forget` |
 | Downloader reads | `downloader.status`, `downloader.torrent.list` |
@@ -69,7 +69,7 @@ Every JSON result is a single object on stdout, indented with two spaces:
 |---|---|
 | `0` | The command succeeded, or a report-oriented command produced its report. |
 | `1` | Operational failure: I/O, network, site or downloader error, interruption, or an outcome whose durability or removal is uncertain. |
-| `2` | Invalid usage, including a missing acknowledgement flag. |
+| `2` | Invalid usage, including a missing acknowledgement flag, an unknown `SITE`, or a capability or credential kind the named site does not declare. |
 | `3` | Integrity failure: a content, metafile, journal, record, or store mismatch or corruption. |
 | `4` | Inconclusive or policy-blocked: the report does not meet an explicit requirement, the reviewed plan no longer matches, or a bounded inventory is incomplete. |
 

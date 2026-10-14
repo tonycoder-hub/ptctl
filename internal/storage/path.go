@@ -80,6 +80,23 @@ func ValidateComponents(components [][]byte, semantics PathSemantics) error {
 }
 
 func ValidateManifestPaths(paths [][][]byte, semantics PathSemantics) error {
+	return validateManifestPaths(paths, nil, semantics)
+}
+
+// ValidateManifestPathsWithPadding is ValidateManifestPaths for manifests that
+// contain BEP 47 padding files, flagged by padding[i]. Padding paths are still
+// validated component by component and still collide with real files, but
+// padding paths that are identical under the target semantics may repeat: BEP
+// 47 names padding ".pad/<length>", so equal-length pads always share a path,
+// and padding files are never materialized.
+func ValidateManifestPathsWithPadding(paths [][][]byte, padding []bool, semantics PathSemantics) error {
+	if len(padding) != len(paths) {
+		return fmt.Errorf("padding flags do not match the manifest path count")
+	}
+	return validateManifestPaths(paths, padding, semantics)
+}
+
+func validateManifestPaths(paths [][][]byte, padding []bool, semantics PathSemantics) error {
 	seen := make(map[string]int, len(paths))
 	type indexedKey struct {
 		key   string
@@ -103,6 +120,9 @@ func ValidateManifestPaths(paths [][][]byte, semantics PathSemantics) error {
 		}
 		key := strings.Join(parts, "\x00")
 		if previous, ok := seen[key]; ok {
+			if padding != nil && padding[previous] && padding[index] {
+				continue
+			}
 			return fmt.Errorf("files %d and %d collide under target path semantics", previous, index)
 		}
 		seen[key] = index
@@ -401,19 +421,23 @@ func validateClientRoot(root string, windows bool) (string, error) {
 	return clean, nil
 }
 
+// windowsReserved reports whether Win32 path normalization maps component to
+// a DOS device. Win32 ignores everything after the first dot and the spaces
+// before it, so "CON .txt" is CON. COM0/LPT0 are listed by current Microsoft
+// naming documentation and rejected conservatively.
 func windowsReserved(component string) bool {
 	base := component
 	if dot := strings.IndexByte(base, '.'); dot >= 0 {
 		base = base[:dot]
 	}
-	base = strings.ToUpper(base)
+	base = strings.ToUpper(strings.TrimRight(base, " "))
 	switch base {
-	case "CON", "PRN", "AUX", "NUL", "CLOCK$":
+	case "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$":
 		return true
 	}
 	if strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT") {
 		suffix := []rune(base[3:])
-		if len(suffix) == 1 && ((suffix[0] >= '1' && suffix[0] <= '9') || suffix[0] == '¹' || suffix[0] == '²' || suffix[0] == '³') {
+		if len(suffix) == 1 && ((suffix[0] >= '0' && suffix[0] <= '9') || suffix[0] == '¹' || suffix[0] == '²' || suffix[0] == '³') {
 			return true
 		}
 	}

@@ -1,10 +1,14 @@
 package tjupt
 
 import (
+	"context"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
+	"github.com/tonycoder-hub/ptctl/internal/site"
 )
 
 func TestParseAccountAndBonusCatalog(t *testing.T) {
@@ -42,14 +46,76 @@ func TestBonusCatalogSelectorHintRejectsAmbiguousControls(t *testing.T) {
 	}
 }
 
+// tjuptSearchPage follows TJUPT's torrenttable (include/functions.php): the
+// page sits in the NexusPHP layout table, and each torrent row nests a
+// <table class="torrentname"> (sometimes with a second progress-bar row) in
+// its name cell before the size cell that mksize_compact renders as
+// "1.50<br />GB" with 1024-based units.
+func tjuptSearchPage(rows ...string) []byte {
+	return []byte(`<html><body><table class="mainouter" width="982"><tr><td id="outer" class="outer">
+<a href="logout.php">退出</a><form action="torrents.php"><input name="search"></form>
+<table class="torrents" cellspacing="0" cellpadding="5" width="100%">
+<tr><td class="colhead"><a href="?sort=1&amp;type=desc">标题</a></td><td class="colhead"><a href="?sort=5&amp;type=desc">大小</a></td></tr>
+` + strings.Join(rows, "\n") + `
+</table></td></tr></table></body></html>`)
+}
+
+func tjuptSearchRow(id, name, small, progressRow, size string) string {
+	return `<tr>
+<td class="rowfollow nowrap" valign="middle" style="padding: 0px"><a href="?cat=401"><img class="c_movie" src="pic/cattrans.gif" alt="Movies" /></a></td>
+<td class="rowfollow" width="100%" align="left"><table class="torrentname" width="100%"><tr><td class="embedded"  width="16px"></td><td class="embedded"><a title="` + name + `" href="details.php?id=` + id + `&amp;hit=1">` + name + `</a><br />` + small + `</td><td width="40" class="embedded" style="text-align: right; " valign="middle"><a href="download.php?id=` + id + `"><img class="download" src="pic/trans.gif" alt="download" /></a></td>
+` + progressRow + `</tr></table></td>
+<td class="rowfollow"><a href="details.php?id=` + id + `&amp;hit=1&amp;cmtpage=1#startcomments">3</a></td>
+<td class="rowfollow nowrap"><span title="2024-01-01 00:00:00">1<br />天</span></td>
+<td class="rowfollow">` + size + `</td>
+<td class="rowfollow" align="center"><b><a href="details.php?id=` + id + `&amp;hit=1&amp;dllist=1#seeders">12</a></b></td>
+</tr>`
+}
+
 func TestParseSearch(t *testing.T) {
-	body := []byte(`<a href="logout.php">退出</a><form action="torrents.php"><input name="search"></form><table><tr><td><a href="details.php?id=42&amp;hit=1">A Release 50GB</a></td><td>1.5 GiB</td></tr></table>`)
+	progress := `</tr><tr><td class="embedded" align="center" width="16px"><img src="pic/x.png" align="absmiddle"></td><td class="embedded" align="left"><div class="probar_a" title="100%"><div class="probar_b"></div></div></td><td class="embedded" align="right"></td>`
+	body := tjuptSearchPage(
+		tjuptSearchRow("42", "A Release 50GB", "Remux 4.20 GB", "", "1.50<br />GB"),
+		tjuptSearchRow("43", "B Release", "", progress, "700.00<br />MB"),
+	)
 	got := parseSearch(body)
-	if len(got) != 1 || got[0].Ref.RemoteID != "42" || got[0].Name != "A Release 50GB" {
+	if len(got) != 2 || got[0].Ref.RemoteID != "42" || got[0].Name != "A Release 50GB" || got[1].Ref.RemoteID != "43" || got[1].Name != "B Release" {
 		t.Fatalf("unexpected results: %#v", got)
 	}
 	if got[0].SizeBytes == nil || *got[0].SizeBytes != 1610612736 {
-		t.Fatalf("unexpected size: %#v", got[0].SizeBytes)
+		t.Fatalf("unexpected first size: %#v", got[0].SizeBytes)
+	}
+	if got[1].SizeBytes == nil || *got[1].SizeBytes != 734003200 {
+		t.Fatalf("unexpected second size: %#v", got[1].SizeBytes)
+	}
+	u, _ := url.Parse("https://www.tjupt.org/torrents.php?search=release")
+	if state := classifySearchPage(u, body); state != domain.AuthenticationAuthenticated {
+		t.Fatalf("search page state = %q", state)
+	}
+}
+
+func TestSearchRejectsUnrecognizedResultStructure(t *testing.T) {
+	pageURL, _ := url.Parse("https://www.tjupt.org/torrents.php?search=release")
+	credential, err := site.NewCookieCredential("sid=secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range [][]byte{
+		[]byte(`<a href="logout.php">退出</a><form action="torrents.php"><input name="search"></form><table><tr><td><a href="details.php?id=42&amp;hit=1">A Release</a></td><td>1.50<br />GB</td></tr></table>`),
+		tjuptSearchPage(),
+	} {
+		client := &accountFakeClient{body: body, finalURL: pageURL}
+		adapter := New("")
+		adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
+		if got, err := adapter.Search(context.Background(), credential, "release"); err == nil || got != nil || client.requests != 1 {
+			t.Fatalf("unrecognized result structure got=%#v err=%v requests=%d", got, err, client.requests)
+		}
+	}
+	client := &accountFakeClient{body: tjuptSearchPage(tjuptSearchRow("42", "A Release", "", "", "1.50<br />GB")), finalURL: pageURL}
+	adapter := New("")
+	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
+	if got, err := adapter.Search(context.Background(), credential, "release"); err != nil || len(got) != 1 || got[0].Ref.RemoteID != "42" {
+		t.Fatalf("search got=%#v err=%v", got, err)
 	}
 }
 

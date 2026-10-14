@@ -290,18 +290,21 @@ func TestMetafileResponseAccountingFailsClosed(t *testing.T) {
 
 func TestClassifyMetafileResponseFailsClosed(t *testing.T) {
 	tests := []struct {
-		name      string
-		status    int
-		mediaType string
-		body      string
-		wantStop  string
-		wantOK    bool
+		name       string
+		status     int
+		redirectID string
+		mediaType  string
+		body       string
+		wantStop   string
+		wantOK     bool
 	}{
 		{name: "valid", status: 200, mediaType: "application/x-bittorrent", body: "d1:ae", wantOK: true},
 		{name: "valid no type", status: 200, body: "d7:comment20:captcha is just datae", wantOK: true},
 		{name: "login", status: 200, mediaType: "text/html", body: `<input name="username"><input name="password">`, wantStop: "authentication_required"},
 		{name: "challenge", status: 200, mediaType: "text/html", body: `<div id="cf-chl-widget">CANARY</div>`, wantStop: "challenge_response"},
 		{name: "redirect", status: 302, body: "CANARY", wantStop: "redirect_rejected"},
+		{name: "login redirect", status: 302, redirectID: loginRedirectID, body: "CANARY", wantStop: "authentication_required"},
+		{name: "other classified redirect", status: 302, redirectID: "tjupt.other", body: "CANARY", wantStop: "redirect_rejected"},
 		{name: "unauthorized", status: 403, body: "CANARY", wantStop: "authentication_required"},
 		{name: "rate", status: 429, body: "CANARY", wantStop: "rate_limited"},
 		{name: "server", status: 500, body: "CANARY", wantStop: "http_status_rejected"},
@@ -311,7 +314,7 @@ func TestClassifyMetafileResponseFailsClosed(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stop, err := classifyMetafileResponse(test.status, test.mediaType, []byte(test.body))
+			stop, err := classifyMetafileResponse(test.status, test.redirectID, test.mediaType, []byte(test.body))
 			if test.wantOK {
 				if err != nil || stop != "" {
 					t.Fatalf("stop=%q err=%v", stop, err)

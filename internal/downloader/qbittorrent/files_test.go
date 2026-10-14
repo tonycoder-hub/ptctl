@@ -41,9 +41,11 @@ func TestJobFileLedgerLimits(t *testing.T) {
 
 func TestReadJobFilesHappyPathEncodesOpaqueKeyAndCountsOneRequest(t *testing.T) {
 	const opaqueKey = "opaque&hash=other+%?CANARY-JOB-KEY"
+	// Upstream filesAction attaches the torrent-level is_seed flag only to
+	// the first row; per-file completion must come from per-file progress.
 	body := []byte(`[
-		{"index":7,"name":"bundle/z.bin","size":2,"progress":0.25,"priority":0,"is_seed":false,"availability":-1},
-		{"index":2,"name":"bundle/a.bin","size":3,"progress":1,"priority":7,"is_seed":true}
+		{"index":7,"name":"bundle/z.bin","size":2,"progress":0.25,"priority":0,"is_seed":false,"piece_range":[0,0],"availability":-1},
+		{"index":2,"name":"bundle/a.bin","size":3,"progress":1,"priority":7,"piece_range":[0,1],"availability":1}
 	]`)
 	var requests atomic.Int32
 	queries := make(chan []string, 1)
@@ -88,8 +90,33 @@ func TestReadJobFilesHappyPathEncodesOpaqueKeyAndCountsOneRequest(t *testing.T) 
 	}
 }
 
+func TestJobFileIsSeedIsOptionalAndCompletionIsPerFile(t *testing.T) {
+	// Shape emitted by qBittorrent 4.6.x-5.2.x for a finished torrent with a
+	// skipped partial file: is_seed appears on row 0 only and describes the
+	// torrent, not the file.
+	body := []byte(`[
+		{"index":0,"name":"bundle/a.bin","size":4,"progress":0.5,"priority":0,"is_seed":true,"piece_range":[0,0],"availability":0},
+		{"index":1,"name":"bundle/b.bin","size":3,"progress":1,"priority":1,"piece_range":[0,1],"availability":0},
+		{"index":2,"name":"bundle/empty.txt","size":0,"progress":1,"priority":1,"piece_range":[1,1],"availability":0},
+		{"index":3,"name":"bundle/c.bin","size":5,"progress":0.9999999,"priority":1,"piece_range":[1,2],"availability":0}
+	]`)
+	files, used, err := decodeJobFileTestBody(t, body, downloader.DefaultJobFileLedgerLimits())
+	if err != nil {
+		t.Fatalf("upstream multi-file shape was rejected: %v", err)
+	}
+	if used.FilesConsidered != 4 || len(files) != 4 {
+		t.Fatalf("used=%#v files=%#v", used, files)
+	}
+	wantComplete := []bool{false, true, true, false}
+	for index, file := range files {
+		if file.Index != index || file.Complete != wantComplete[index] {
+			t.Fatalf("file %d complete=%t, want %t: %#v", index, file.Complete, wantComplete[index], file)
+		}
+	}
+}
+
 func TestJobFileRequiredFieldsAndStrictTypes(t *testing.T) {
-	required := []string{"index", "name", "size", "progress", "priority", "is_seed"}
+	required := []string{"index", "name", "size", "progress", "priority"}
 	for _, field := range required {
 		t.Run("missing_"+field, func(t *testing.T) {
 			row := validJobFileRow(0, "x")
@@ -124,6 +151,7 @@ func TestJobFileRequiredFieldsAndStrictTypes(t *testing.T) {
 		{name: "progress above one", field: "progress", value: 1.1},
 		{name: "priority string", field: "priority", value: "1"},
 		{name: "is seed number", field: "is_seed", value: 1},
+		{name: "is seed null", field: "is_seed", value: nil},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

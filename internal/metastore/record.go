@@ -62,6 +62,11 @@ var (
 	// callback did not prove that it consumed the complete value.
 	ErrRecordConsumerIncomplete = errors.New("sealed record consumer did not reach EOF")
 
+	// ErrRecordListIncomplete identifies a sealed-record listing that stopped
+	// at a budget before it observed the whole objects directory. See
+	// RecordListResult.IncompleteError.
+	ErrRecordListIncomplete = errors.New("sealed record listing is incomplete")
+
 	errRecordByteLimit = errors.New("sealed record byte limit exceeded")
 )
 
@@ -197,6 +202,31 @@ type RecordListResult struct {
 	StopReason string          `json:"stop_reason,omitempty"`
 }
 
+// IncompleteError returns nil for a complete listing. Otherwise it returns an
+// error wrapping ErrRecordListIncomplete that names the exhausted budget and
+// the operator's options. ListRecords itself still reports a budget stop as an
+// incomplete result rather than an error; callers that require a complete
+// inventory use this to fail closed with an actionable message. The objects
+// directory is flat and shared by every artifact and record kind, so the
+// entry budget counts all of them, not just records of the listed kind.
+func (result RecordListResult) IncompleteError() error {
+	if result.Complete {
+		return nil
+	}
+	switch result.StopReason {
+	case "entry_limit":
+		return fmt.Errorf("%w: the store objects directory holds more than %d entries (metafile artifacts and every sealed record kind share one flat directory); raise the sealed record entry budget (at most %d) or keep large metafile collections in a separate store", ErrRecordListIncomplete, result.Limits.MaxEntries, hardMaxEntries)
+	case "record_limit":
+		return fmt.Errorf("%w: more than %d %s records exist; raise the sealed record budget (at most %d) or retire old records", ErrRecordListIncomplete, result.Limits.MaxRecords, result.Kind, hardMaxRecords)
+	case "path_limit":
+		return fmt.Errorf("%w: object names exceed the %d-byte path budget; raise it (at most %d)", ErrRecordListIncomplete, result.Limits.MaxPathBytes, hardMaxPathBytes)
+	case "context_cancelled":
+		return fmt.Errorf("%w: the listing was cancelled", ErrRecordListIncomplete)
+	default:
+		return ErrRecordListIncomplete
+	}
+}
+
 type RecordConsumer func(io.Reader) error
 
 // ComputeRecordRef derives the exact domain-separated sealed-record identity
@@ -239,6 +269,9 @@ func (s *Store) ImportRecord(ctx context.Context, kind RecordKind, reader io.Rea
 		return RecordRef{}, receipt, safeError("import sealed record", err)
 	}
 	defer session.Close()
+	// Bound protocol sessions keep their exact operation order; only this
+	// standalone write collects stale staging residue.
+	collectStagingResidue(ctx, session)
 	return s.importRecordSession(ctx, session, kind, reader, limits)
 }
 

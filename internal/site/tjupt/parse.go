@@ -234,8 +234,8 @@ func bonusSelectorFromRow(raw string) string {
 func parseSearch(body []byte) []domain.TorrentSummary {
 	results := make([]domain.TorrentSummary, 0, 32)
 	seen := make(map[string]struct{})
-	for _, row := range rowPattern.FindAllSubmatch(body, 500) {
-		link := detailsPattern.FindSubmatch(row[1])
+	for _, row := range searchRows(body, 500) {
+		link := detailsPattern.FindSubmatch(row)
 		if len(link) != 3 {
 			continue
 		}
@@ -253,12 +253,86 @@ func parseSearch(body []byte) []domain.TorrentSummary {
 		}
 		seen[id[2]] = struct{}{}
 		summary := domain.TorrentSummary{Ref: domain.TorrentRef{SiteID: SiteID, RemoteID: id[2]}, Name: name}
-		if size, ok := sizeAfterDetailsCell(string(row[1])); ok {
+		if size, ok := sizeAfterDetailsCell(string(row)); ok {
 			summary.SizeBytes = &size
 		}
 		results = append(results, summary)
 	}
 	return results
+}
+
+// searchRows returns the complete markup of each row of a NexusPHP
+// <table class="torrents">. TJUPT's torrenttable (include/functions.php)
+// nests a <table class="torrentname"> inside the name cell, so a non-greedy
+// <tr>...</tr> match would stop at that nested row and lose the later size
+// cell. Rows of nested tables stay inside their enclosing row. A tokenizer
+// error other than EOF returns no rows, which the caller treats as an
+// unrecognized page.
+func searchRows(body []byte, limit int) [][]byte {
+	tokenizer := xhtml.NewTokenizer(bytes.NewReader(body))
+	rows := make([][]byte, 0, 32)
+	var torrentTables []bool
+	offset, start, rowDepth := 0, -1, 0
+	closeRow := func(end int) {
+		if start >= 0 {
+			rows = append(rows, body[start:end])
+			start = -1
+		}
+	}
+	for len(rows) < limit {
+		tokenType := tokenizer.Next()
+		if tokenType == xhtml.ErrorToken {
+			if !errors.Is(tokenizer.Err(), io.EOF) {
+				return nil
+			}
+			closeRow(offset)
+			break
+		}
+		begin := offset
+		offset += len(tokenizer.Raw())
+		if tokenType != xhtml.StartTagToken && tokenType != xhtml.EndTagToken {
+			continue
+		}
+		name, hasAttributes := tokenizer.TagName()
+		switch {
+		case tokenType == xhtml.StartTagToken && string(name) == "table":
+			torrentTables = append(torrentTables, hasAttributes && tagHasClass(tokenizer, "torrents"))
+		case tokenType == xhtml.StartTagToken && string(name) == "tr":
+			depth := len(torrentTables)
+			if depth > 0 && torrentTables[depth-1] && (start < 0 || rowDepth == depth) {
+				closeRow(begin)
+				start, rowDepth = begin, depth
+			}
+		case tokenType == xhtml.EndTagToken && string(name) == "tr":
+			if start >= 0 && rowDepth == len(torrentTables) {
+				closeRow(offset)
+			}
+		case tokenType == xhtml.EndTagToken && string(name) == "table":
+			if len(torrentTables) > 0 {
+				if start >= 0 && rowDepth == len(torrentTables) {
+					closeRow(begin)
+				}
+				torrentTables = torrentTables[:len(torrentTables)-1]
+			}
+		}
+	}
+	return rows
+}
+
+func tagHasClass(tokenizer *xhtml.Tokenizer, class string) bool {
+	for {
+		key, value, more := tokenizer.TagAttr()
+		if string(key) == "class" {
+			for _, field := range strings.Fields(string(value)) {
+				if field == class {
+					return true
+				}
+			}
+		}
+		if !more {
+			return false
+		}
+	}
 }
 
 func sizeAfterDetailsCell(raw string) (int64, bool) {
@@ -312,10 +386,9 @@ func firstSize(cells []string) (int64, bool) {
 			continue
 		}
 		unit := strings.ToUpper(match[3])
-		base := float64(1000)
-		if strings.Contains(unit, "IB") {
-			base = 1024
-		}
+		// NexusPHP's mksize/mksize_compact label 1024-based units KB, MB,
+		// GB, and TB, so both spellings use base 1024 here.
+		base := float64(1024)
 		power := 1
 		switch unit[0] {
 		case 'K':

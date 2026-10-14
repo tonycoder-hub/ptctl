@@ -162,6 +162,16 @@ func (session *Session) ReserveAttempt(ctx context.Context, intent *VerifiedInte
 	if !intent.validFor(session) || !freshReviewMatchesIntent(intent.record, observed, reviewReceipt) {
 		return AttemptRecord{}, nil, receipt, fmt.Errorf("%w: fresh review authority does not match intent", ErrInvalidExchange)
 	}
+	// Prune removes the intent before the attempt marker. A stale holder of a
+	// VerifiedIntent must still observe the exact intent before publishing, so
+	// a pruned chain is neither re-reserved nor resurrected as an orphan marker.
+	intentPresent, err := session.recordPresent(ctx, intent.ref)
+	if err != nil {
+		return AttemptRecord{}, nil, receipt, err
+	}
+	if !intentPresent {
+		return AttemptRecord{}, nil, receipt, fmt.Errorf("%w: intent is no longer present; it may have been pruned", ErrRetentionPolicy)
+	}
 	attempt := attemptFromIntent(intent.record, intent.ref)
 	raw, err := EncodeAttempt(attempt, session.repository.limits)
 	if err != nil {
@@ -429,7 +439,7 @@ func (session *Session) ListOperations(ctx context.Context) (OperationListResult
 	}
 	if !before.Complete {
 		result.StopReason = "intent_inventory_" + before.StopReason
-		return result, ErrStatusIncomplete
+		return result, fmt.Errorf("%w: %w", ErrStatusIncomplete, before.IncompleteError())
 	}
 
 	seenOperations := make(map[OperationID]struct{}, len(before.Records))
@@ -462,7 +472,7 @@ func (session *Session) ListOperations(ctx context.Context) (OperationListResult
 	}
 	if !after.Complete {
 		result.StopReason = "intent_inventory_" + after.StopReason
-		return result, ErrStatusIncomplete
+		return result, fmt.Errorf("%w: %w", ErrStatusIncomplete, after.IncompleteError())
 	}
 	if !sameRecordRefs(before.Records, after.Records) {
 		result.StopReason = "intent_inventory_changed"
@@ -630,7 +640,7 @@ func (session *Session) scanOutcomes(ctx context.Context, intent IntentRecord, i
 		return nil, nil, usage, "", err
 	}
 	if !listed.Complete {
-		return nil, nil, usage, "outcome_inventory_" + listed.StopReason, ErrStatusIncomplete
+		return nil, nil, usage, "outcome_inventory_" + listed.StopReason, fmt.Errorf("%w: %w", ErrStatusIncomplete, listed.IncompleteError())
 	}
 	var matchedRecord *OutcomeRecord
 	var matchedRef *metastore.RecordRef

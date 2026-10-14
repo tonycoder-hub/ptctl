@@ -265,6 +265,9 @@ type Entry struct {
 type ListUsage struct {
 	EntriesExamined int   `json:"entries_examined"`
 	NameBytes       int64 `json:"name_bytes"`
+	// Unrepresentable counts entries omitted by ListRootForDiscovery because
+	// no bound Path can name them. Every other listing fails closed instead.
+	Unrepresentable int `json:"unrepresentable,omitempty"`
 }
 
 type ListResult struct {
@@ -480,6 +483,9 @@ func (session *Session) openPrivateSubtree(name string, expected Identity, requi
 
 // OpenPublishedRoot rebinds an explicitly named root publication to its
 // journaled identity. No latest lookup or path-derived authority is accepted.
+// Published objects have left the private operation subtree, so on POSIX the
+// view tolerates later group/other read/execute bits and extra hard links
+// while keeping ownership, kind, filesystem, and exact identity binding.
 func (session *Session) OpenPublishedRoot(finalName string, expected Identity) (*Published, error) {
 	if validateSingleComponent(finalName) != nil || expected.IsZero() {
 		return nil, ErrInvalidPath
@@ -487,7 +493,7 @@ func (session *Session) OpenPublishedRoot(finalName string, expected Identity) (
 	if err := session.check("before_published_open"); err != nil {
 		return nil, err
 	}
-	native, raw, kind, err := platformInspectObject(session, session.root, finalName)
+	native, raw, kind, err := platformInspectPublishedObject(session, session.root, finalName)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +504,7 @@ func (session *Session) OpenPublishedRoot(finalName string, expected Identity) (
 	published := &Published{session: session, name: finalName, kind: kind, raw: raw}
 	if kind == ObjectKindDirectory {
 		_ = native.Close()
-		directory, openErr := platformOpenPrivateDirectory(session, session.root, finalName)
+		directory, openErr := platformOpenPublishedDirectory(session, session.root, finalName)
 		if openErr != nil || directory.raw != raw {
 			if directory != nil {
 				_ = directory.file.Close()
@@ -551,7 +557,7 @@ func (published *Published) Check() error {
 	if err := published.checkBinding("published_explicit_check"); err != nil {
 		return err
 	}
-	return checkBoundDirectoryMap(published.session, published.dirs)
+	return checkBoundDirectoryMap(published.session, published.dirs, platformOpenPublishedDirectory)
 }
 
 // OpenRegular opens a regular file relative to the published object. A zero
@@ -585,7 +591,7 @@ func (published *Published) OpenRegular(ctx context.Context, path Path) (*File, 
 		}
 		name = path.components[len(path.components)-1]
 	}
-	native, raw, err := platformOpenPrivateRegularReadOnly(published.session, parent, name)
+	native, raw, err := platformOpenPublishedRegularReadOnly(published.session, parent, name)
 	if err != nil {
 		return nil, err
 	}
@@ -614,7 +620,7 @@ func (published *Published) Inspect(ctx context.Context, path Path) (ObjectInfo,
 		return ObjectInfo{}, err
 	}
 	if len(path.components) == 0 {
-		native, raw, kind, err := platformInspectObject(published.session, published.session.root, published.name)
+		native, raw, kind, err := platformInspectPublishedObject(published.session, published.session.root, published.name)
 		if err != nil || raw != published.raw || kind != published.kind {
 			if native != nil {
 				_ = native.Close()
@@ -642,7 +648,7 @@ func (published *Published) Inspect(ctx context.Context, path Path) (ObjectInfo,
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	native, raw, kind, err := platformInspectObject(published.session, parent, path.components[len(path.components)-1])
+	native, raw, kind, err := platformInspectPublishedObject(published.session, parent, path.components[len(path.components)-1])
 	if err != nil {
 		return ObjectInfo{}, err
 	}
@@ -698,7 +704,7 @@ func (published *Published) checkBinding(stage string) error {
 	if err := published.session.check(stage); err != nil {
 		return err
 	}
-	native, raw, kind, err := platformInspectObject(published.session, published.session.root, published.name)
+	native, raw, kind, err := platformInspectPublishedObject(published.session, published.session.root, published.name)
 	if native != nil {
 		_ = native.Close()
 	}
@@ -721,7 +727,7 @@ func (published *Published) resolveDirectory(components []string) (*boundDirecto
 		if parent == nil {
 			return nil, ErrUnsafeObject
 		}
-		directory, err := platformOpenPrivateDirectory(published.session, parent, name)
+		directory, err := platformOpenPublishedDirectory(published.session, parent, name)
 		if err != nil {
 			return nil, err
 		}
@@ -781,7 +787,7 @@ func (subtree *Subtree) Check() error {
 	if err := subtree.checkBinding("subtree_explicit_check"); err != nil {
 		return err
 	}
-	return checkBoundDirectoryMap(subtree.session, subtree.dirs)
+	return checkBoundDirectoryMap(subtree.session, subtree.dirs, platformOpenPrivateDirectory)
 }
 
 // CheckPaths revalidates the named root, operation subtree, operation lock,
@@ -813,7 +819,7 @@ func (subtree *Subtree) CheckPaths(paths ...Path) error {
 	for key := range keys {
 		selected = append(selected, key)
 	}
-	return checkBoundDirectoryKeys(subtree.session, subtree.dirs, selected)
+	return checkBoundDirectoryKeys(subtree.session, subtree.dirs, selected, platformOpenPrivateDirectory)
 }
 
 func (subtree *Subtree) MkdirAll(ctx context.Context, path Path) (MkdirReceipt, error) {
@@ -996,6 +1002,27 @@ func (session *Session) ListRoot(ctx context.Context, limits ListLimits) (ListRe
 		return result, err
 	}
 	return listBoundDirectory(ctx, session, session.root, limits, "after_root_list")
+}
+
+// ListRootForDiscovery is ListRoot for discovering operation subtrees in a
+// shared target root that also holds unrelated user files. An entry whose name
+// no bound Path can represent (invalid UTF-8, a control character, or another
+// platform-rejected component) can never be an fsbind-created object, so it is
+// counted in Used.Unrepresentable and omitted instead of failing the whole
+// inventory. It still consumes the entry and name-byte budgets. Callers that
+// must prove an exact or empty namespace use ListRoot, which fails closed.
+func (session *Session) ListRootForDiscovery(ctx context.Context, limits ListLimits) (ListResult, error) {
+	result := ListResult{Limits: limits, Entries: []Entry{}}
+	if err := limits.Validate(); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if err := session.check("before_root_list"); err != nil {
+		return result, err
+	}
+	return listBoundDirectoryEntries(ctx, session, session.root, limits, "after_root_list", true)
 }
 
 // InspectRoot checks one explicit publication name without following links.
@@ -1213,6 +1240,10 @@ func (session *Session) RemoveRootEmptyDirectoryExact(ctx context.Context, name 
 }
 
 func listBoundDirectory(ctx context.Context, session *Session, directory *boundDirectory, limits ListLimits, afterStage string) (ListResult, error) {
+	return listBoundDirectoryEntries(ctx, session, directory, limits, afterStage, false)
+}
+
+func listBoundDirectoryEntries(ctx context.Context, session *Session, directory *boundDirectory, limits ListLimits, afterStage string, skipUnrepresentable bool) (ListResult, error) {
 	result := ListResult{Limits: limits, Entries: []Entry{}}
 	entries, err := platformReadDirectory(directory, limits.MaxEntries+1)
 	if err != nil {
@@ -1238,6 +1269,10 @@ func listBoundDirectory(ctx context.Context, session *Session, directory *boundD
 		}
 		if name != operationLockName {
 			if _, err := PathFromComponents([]string{name}); err != nil {
+				if skipUnrepresentable {
+					result.Used.Unrepresentable++
+					continue
+				}
 				result.StopReason = "unsafe_entry"
 				result.Entries = nil
 				return result, ErrUnsafeObject
@@ -1535,7 +1570,9 @@ func (subtree *Subtree) checkBinding(stage string) error {
 // that full cached-directory scans occur only on explicit Check calls.
 var boundDirectoryCheckHook func(key string)
 
-func checkBoundDirectoryMap(session *Session, directories map[string]*boundDirectory) error {
+type boundDirectoryOpener func(session *Session, parent *boundDirectory, name string) (*boundDirectory, error)
+
+func checkBoundDirectoryMap(session *Session, directories map[string]*boundDirectory, open boundDirectoryOpener) error {
 	if len(directories) <= 1 {
 		return nil
 	}
@@ -1545,10 +1582,10 @@ func checkBoundDirectoryMap(session *Session, directories map[string]*boundDirec
 			keys = append(keys, key)
 		}
 	}
-	return checkBoundDirectoryKeys(session, directories, keys)
+	return checkBoundDirectoryKeys(session, directories, keys, open)
 }
 
-func checkBoundDirectoryKeys(session *Session, directories map[string]*boundDirectory, keys []string) error {
+func checkBoundDirectoryKeys(session *Session, directories map[string]*boundDirectory, keys []string, open boundDirectoryOpener) error {
 	sort.Slice(keys, func(i, j int) bool {
 		leftDepth, rightDepth := strings.Count(keys[i], "\x00"), strings.Count(keys[j], "\x00")
 		if leftDepth != rightDepth {
@@ -1566,7 +1603,7 @@ func checkBoundDirectoryKeys(session *Session, directories map[string]*boundDire
 		if parent == nil || expected == nil {
 			return ErrBindingChanged
 		}
-		current, err := platformOpenPrivateDirectory(session, parent, components[len(components)-1])
+		current, err := open(session, parent, components[len(components)-1])
 		if err != nil {
 			return ErrBindingChanged
 		}
@@ -1728,11 +1765,15 @@ func (file *File) Close() error {
 	if file.closed {
 		return nil
 	}
-	file.closed = true
+	// closed is written under both locks: handle methods read it under
+	// file.mu and hasOpenIdentity reads it under session.mu.
 	if file.session != nil {
 		file.session.mu.Lock()
+		file.closed = true
 		delete(file.session.files, file)
 		file.session.mu.Unlock()
+	} else {
+		file.closed = true
 	}
 	return file.file.Close()
 }

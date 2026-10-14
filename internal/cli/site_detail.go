@@ -61,14 +61,14 @@ func (a *app) siteDetail(args []string) error {
 	}
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
-		return fmt.Errorf("unknown site %q", fs.Arg(0))
+		return usageError("unknown site %q", fs.Arg(0))
 	}
 	descriptor := adapter.Descriptor()
 	if !descriptor.Supports(domain.CapabilityDetail) {
-		return fmt.Errorf("site %q does not declare capability %q", descriptor.ID, domain.CapabilityDetail)
+		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityDetail)
 	}
 	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
-		return fmt.Errorf("site %q does not support cookie_header authentication", descriptor.ID)
+		return usageError("site %q does not support cookie_header authentication", descriptor.ID)
 	}
 	reader, ok := adapter.(site.TorrentDetailReader)
 	if !ok {

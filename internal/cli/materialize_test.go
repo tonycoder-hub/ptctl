@@ -632,6 +632,37 @@ func TestSeedMaterializeInputFailureIsReportFirstAndPrivate(t *testing.T) {
 	}
 }
 
+func TestSeedMaterializeDiscoveryFailureIsReportFirstAndZeroWrite(t *testing.T) {
+	fixture := newMaterializeCLIFixture(t)
+	missingStore := filepath.Join(physicalCLITempDir(t), "PTCTL-MATERIALIZE-MISSING-STATE-STORE-CANARY")
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"seed", "materialize", "run", "--torrent", fixture.torrentPath,
+		"--state-store", missingStore, "--storage-profile", "profile",
+		"--snapshot-record", "sha256:" + strings.Repeat("5", 64), "--select-source-match", "sha256:" + strings.Repeat("6", 64),
+		"--target", fixture.targetRoot, "--expect-plan-id", fixture.planID, "--acknowledge-filesystem-write", "--output", "json",
+	}, strings.NewReader(""), &out, &errOut)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	report := decodeMaterializeReport(t, out.Bytes())
+	if report.Data.Outcome != materialize.OutcomeInterrupted || report.Data.WritesPerformed != 0 || report.Data.WritesUncertain ||
+		report.Data.Operation.Status != "not_created" || len(report.Data.Blockers) != 0 ||
+		report.Data.Source.Outcome != "incomplete" || len(report.Data.Issues) == 0 ||
+		report.Data.Issues[len(report.Data.Issues)-1].Code != "source.discovery_failed" {
+		t.Fatalf("unexpected discovery failure report: %s", out.String())
+	}
+	assertMaterializeArrays(t, report.Data)
+	assertMaterializeJSONPrivate(t, out.Bytes(), fixture, missingStore)
+	entries, err := os.ReadDir(fixture.targetRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("discovery failure touched the target root: entries=%v err=%v", entries, err)
+	}
+	if _, err := os.Stat(missingStore); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("discovery failure created the state store: %v", err)
+	}
+}
+
 func TestSeedMaterializeUsagePrecedesFilesystemAndSecretInput(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "PTCTL-MATERIALIZE-MUST-NOT-BE-READ")
 	validOperationID := "sha256:" + strings.Repeat("1", 64)

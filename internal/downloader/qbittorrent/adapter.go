@@ -389,10 +389,28 @@ func (s *readSession) login(ctx context.Context, credential downloader.Credentia
 	if err != nil {
 		return fmt.Errorf("read qBittorrent login response: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK || len(body) > 1024 || strings.TrimSpace(string(body)) != "Ok." {
+	if !loginAccepted(resp.StatusCode, body) {
 		return fmt.Errorf("qBittorrent rejected the login")
 	}
 	return nil
+}
+
+// loginAccepted recognizes exactly the two upstream success shapes:
+// qBittorrent 4.x through 5.1.x answer 200 "Ok.", while 5.2.x (WebAPI 2.14+)
+// sets no result and therefore answers 204 with an empty body. Bad
+// credentials are 200 "Fails." before 5.2 and 401 from 5.2 on.
+func loginAccepted(status int, body []byte) bool {
+	if len(body) > 1024 {
+		return false
+	}
+	switch status {
+	case http.StatusOK:
+		return strings.TrimSpace(string(body)) == "Ok."
+	case http.StatusNoContent:
+		return len(body) == 0
+	default:
+		return false
+	}
 }
 
 func (s *readSession) getText(ctx context.Context, path string) (string, error) {

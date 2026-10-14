@@ -97,7 +97,14 @@ final object must then remain on that same reviewed local filesystem; POSIX uses
 handle-relative operations and Windows pins the path namespace with no-delete
 directory guards. A rename, replacement, mount change, or volume change fails
 closed. Volatile memory filesystems such as tmpfs and ramfs are not accepted as
-durable stores.
+durable stores. A store path whose existing prefix contains a symbolic link is
+rejected; use the resolved physical path (for example `/private/tmp/...` rather
+than `/tmp/...` on macOS).
+
+A killed import can leave a private staging file in the store's `tmp`
+directory. Later imports remove such files once they are more than 24 hours old,
+a few at a time and only when the name exactly matches ptctl's own random
+staging names; nothing else in `tmp` is ever deleted.
 
 Publication assurance is invocation-scoped. A newly initialized store or newly
 stored object can report `confirmed_this_invocation`. Read-only inspection and

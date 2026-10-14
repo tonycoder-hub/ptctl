@@ -630,6 +630,108 @@ func TestHybridRequiresExactPieceAlignmentPadding(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsRepeatedSameSizePaddingFiles(t *testing.T) {
+	pad := map[string]any{"attr": "p", "length": int64(16383), "path": []any{".pad", "16383"}}
+	fileA := map[string]any{"length": int64(1), "path": []any{"a"}}
+	fileB := map[string]any{"length": int64(1), "path": []any{"b"}}
+	fileC := map[string]any{"length": int64(1), "path": []any{"c"}}
+	var v1Pieces []byte
+	for _, piece := range [][]byte{append([]byte{'a'}, make([]byte, 16383)...), append([]byte{'b'}, make([]byte, 16383)...), {'c'}} {
+		sum := sha1.Sum(piece)
+		v1Pieces = append(v1Pieces, sum[:]...)
+	}
+	v1Only := map[string]any{
+		"files": []any{fileA, pad, fileB, pad, fileC},
+		"name":  "bundle", "piece length": int64(16384), "pieces": v1Pieces,
+	}
+	if meta, err := Parse(bencode(map[string]any{"info": v1Only})); err != nil || meta.Validation != "v1_manifest_structural" || len(meta.Files) != 5 {
+		t.Fatalf("v1 torrent with repeated BEP 47 padding rejected: meta=%#v err=%v", meta, err)
+	}
+
+	hybrid := cloneMap(v1Only)
+	hybrid["meta version"] = int64(2)
+	fileTree := map[string]any{}
+	for _, name := range []string{"a", "b", "c"} {
+		root := sha256.Sum256([]byte(name))
+		fileTree[name] = map[string]any{"": map[string]any{"length": int64(1), "pieces root": root[:]}}
+	}
+	hybrid["file tree"] = fileTree
+	meta, err := Parse(bencode(map[string]any{"info": hybrid}))
+	if err != nil || meta.Validation != "hybrid_layout_consistent" {
+		t.Fatalf("hybrid torrent with repeated BEP 47 padding rejected: meta=%#v err=%v", meta, err)
+	}
+	contentRoot := t.TempDir()
+	for _, name := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(filepath.Join(contentRoot, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Verify(context.Background(), meta, contentRoot)
+	if err != nil || !result.Verified || result.PaddingBytes != 2*16383 {
+		t.Fatalf("hybrid torrent with repeated padding did not verify: result=%#v err=%v", result, err)
+	}
+
+	for name, badPad := range map[string]map[string]any{
+		"collides with a real file": {"attr": "p", "length": int64(16383), "path": []any{"b"}},
+		"is a real file prefix":     {"attr": "p", "length": int64(16383), "path": []any{"b", "16383"}},
+		"traverses":                 {"attr": "p", "length": int64(16383), "path": []any{"..", "16383"}},
+	} {
+		bad := cloneMap(v1Only)
+		bad["files"] = []any{fileA, badPad, fileB, pad, fileC}
+		if _, err := Parse(bencode(map[string]any{"info": bad})); err == nil || !strings.Contains(err.Error(), "unsafe torrent manifest") {
+			t.Fatalf("padding that %s was not rejected: %v", name, err)
+		}
+	}
+}
+
+func TestParseHybridAcceptsTailPadding(t *testing.T) {
+	rootA := sha256.Sum256([]byte{'a'})
+	rootB := sha256.Sum256([]byte{'b'})
+	piece0 := sha1.Sum(append([]byte{'a'}, make([]byte, 16383)...))
+	piece1 := sha1.Sum(append([]byte{'b'}, make([]byte, 16383)...))
+	fileA := map[string]any{"length": int64(1), "path": []any{"a"}}
+	fileB := map[string]any{"length": int64(1), "path": []any{"b"}}
+	pad := map[string]any{"attr": "p", "length": int64(16383), "path": []any{".pad", "16383"}}
+	base := map[string]any{
+		"file tree": map[string]any{
+			"a": map[string]any{"": map[string]any{"length": int64(1), "pieces root": rootA[:]}},
+			"b": map[string]any{"": map[string]any{"length": int64(1), "pieces root": rootB[:]}},
+		},
+		"meta version": int64(2), "name": "bundle", "piece length": int64(16384),
+		"pieces": append(append([]byte(nil), piece0[:]...), piece1[:]...),
+	}
+
+	// libtorrent >= 2.0.8 pads the last file of a multi-file hybrid torrent.
+	tailPadded := cloneMap(base)
+	tailPadded["files"] = []any{fileA, pad, fileB, pad}
+	meta, err := Parse(bencode(map[string]any{"info": tailPadded}))
+	if err != nil || meta.Validation != "hybrid_layout_consistent" || meta.TotalLength != 32768 || meta.V1PieceCount != 2 {
+		t.Fatalf("tail-padded hybrid rejected: meta=%#v err=%v", meta, err)
+	}
+	contentRoot := t.TempDir()
+	for _, name := range []string{"a", "b"} {
+		if err := os.WriteFile(filepath.Join(contentRoot, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Verify(context.Background(), meta, contentRoot)
+	if err != nil || !result.Verified || result.PaddingBytes != 2*16383 {
+		t.Fatalf("tail-padded hybrid did not verify: result=%#v err=%v", result, err)
+	}
+
+	for name, files := range map[string][]any{
+		"wrong tail length": {fileA, pad, fileB, map[string]any{"attr": "p", "length": int64(1), "path": []any{".pad", "1"}}},
+		"second tail pad":   {fileA, pad, fileB, pad, map[string]any{"attr": "p", "length": int64(16384), "path": []any{".pad", "16384"}}},
+		"leading pad":       {pad, fileA, pad, fileB, pad},
+	} {
+		bad := cloneMap(base)
+		bad["files"] = files
+		if _, err := Parse(bencode(map[string]any{"info": bad})); err == nil || !strings.Contains(err.Error(), "hybrid v1 padding file") {
+			t.Fatalf("%s accepted or rejected for the wrong reason: %v", name, err)
+		}
+	}
+}
+
 func cloneMap(input map[string]any) map[string]any {
 	result := make(map[string]any, len(input))
 	for key, value := range input {

@@ -14,7 +14,15 @@ type PreparedPlan struct {
 	request downloader.ExistingJobMutationRequest
 }
 
+// BuildPlan reviews a v2 plan that binds the normalized started phase rather
+// than one raw downloader substate.
 func BuildPlan(current *clientactivate.VerifiedCurrentUse, descriptor downloader.ExistingJobStopDescriptor) (*PreparedPlan, error) {
+	return buildPlan(current, descriptor, PlanSchemaV2)
+}
+
+// buildPlan rebuilds a plan in the schema of an existing journal so legacy v1
+// operations keep their exact reviewed-substate identity on resume.
+func buildPlan(current *clientactivate.VerifiedCurrentUse, descriptor downloader.ExistingJobStopDescriptor, schema string) (*PreparedPlan, error) {
 	if current == nil || !current.Verified() || !current.JobStarted() || descriptor.Validate() != nil {
 		return nil, fmt.Errorf("%w: started current-use or stop authority is unavailable", ErrPolicy)
 	}
@@ -23,12 +31,16 @@ func BuildPlan(current *clientactivate.VerifiedCurrentUse, descriptor downloader
 	if !ok || request.JobKey == "" || descriptor.Driver != observation.Driver {
 		return nil, fmt.Errorf("%w: current-use stop authority is unavailable", ErrPolicy)
 	}
+	reviewedJobState := ReviewedJobPhaseStarted
+	if schema == PlanSchemaV1 {
+		reviewedJobState = observation.JobState
+	}
 	final := observation.Final
 	plan := Plan{
-		Schema: PlanSchemaV1, Action: ActionStopExactJob, Driver: observation.Driver,
+		Schema: schema, Action: ActionStopExactJob, Driver: observation.Driver,
 		ClientConfigID: observation.ClientConfigID, Stop: descriptor, UseID: observation.UseID,
 		JobID: observation.JobID, FileLayoutID: observation.FileLayoutID,
-		CompleteFileSnapshotID: observation.CompleteFileSnapshotID, ReviewedJobState: observation.JobState,
+		CompleteFileSnapshotID: observation.CompleteFileSnapshotID, ReviewedJobState: reviewedJobState,
 		PathMappingID: observation.PathMappingID, ActivationOperationID: observation.ActivationOperationID,
 		ActivationPlanID: observation.ActivationPlanID, ActivationTerminalID: observation.TerminalMarkerID,
 		MetafileVariantID: final.MetafileVariantID, InfoHashV1: final.InfoHashV1, InfoHashV2: final.InfoHashV2,
@@ -66,7 +78,7 @@ func (prepared *PreparedPlan) validate() error {
 	if err != nil || computed != prepared.planID {
 		return fmt.Errorf("%w: prepared client stop plan changed", ErrIntegrity)
 	}
-	currentPlan, err := BuildPlan(prepared.current, prepared.plan.Stop)
+	currentPlan, err := buildPlan(prepared.current, prepared.plan.Stop, prepared.plan.Schema)
 	if err != nil || currentPlan.planID != prepared.planID || currentPlan.request.JobKey != prepared.request.JobKey {
 		return fmt.Errorf("%w: current-use authority differs from the stop plan", ErrIntegrity)
 	}

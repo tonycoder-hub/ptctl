@@ -56,6 +56,15 @@ type RedirectClassifier func(*url.URL) (string, bool)
 // expose this cause only through errors.Is.
 var ErrBlockedAddress = errors.New("site host resolved only to blocked address ranges")
 
+// RedirectError reports a rejected, unfollowed redirect whose single
+// same-origin Location an explicit classifier recognized. Only the allowlisted
+// classifier ID is retained; the raw Location never crosses this boundary.
+type RedirectError struct {
+	ID string
+}
+
+func (err *RedirectError) Error() string { return "site redirect was rejected" }
+
 type Client struct {
 	base             *url.URL
 	credentialHeader string
@@ -182,11 +191,19 @@ func newStrictTransport() *http.Transport {
 }
 
 func (c *Client) Get(ctx context.Context, relativePath string, query url.Values) ([]byte, *url.URL, error) {
+	return c.GetClassified(ctx, relativePath, query, nil)
+}
+
+// GetClassified is Get with an explicit same-origin redirect classifier. It
+// still never follows a redirect: a 3xx answer whose single Location the
+// classifier accepts fails with *RedirectError, and every other redirect keeps
+// the generic rejection.
+func (c *Client) GetClassified(ctx context.Context, relativePath string, query url.Values, classify RedirectClassifier) ([]byte, *url.URL, error) {
 	target, err := c.target(relativePath, query)
 	if err != nil {
 		return nil, nil, err
 	}
-	response, err := c.GetOnce(ctx, relativePath, query, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", c.maxBody, hardMaxResponseHeaders)
+	response, err := c.GetOnceClassified(ctx, relativePath, query, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", c.maxBody, hardMaxResponseHeaders, classify)
 	if err != nil {
 		return nil, nil, fmt.Errorf("site read failed: %w", err)
 	}
@@ -194,6 +211,9 @@ func (c *Client) Get(ctx context.Context, relativePath string, query url.Values)
 		return nil, target, fmt.Errorf("site rate limited the request (HTTP 429); retry manually after the server-specified interval")
 	}
 	if response.StatusCode >= 300 && response.StatusCode <= 399 {
+		if response.RedirectID != "" {
+			return nil, target, &RedirectError{ID: response.RedirectID}
+		}
 		return nil, target, fmt.Errorf("site redirect was rejected")
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
@@ -206,6 +226,13 @@ func (c *Client) Get(ctx context.Context, relativePath string, query url.Values)
 // response headers and body. The caller should use a freshly-created Client;
 // Fetch sessions enforce that this method is invoked at most once.
 func (c *Client) GetOnce(ctx context.Context, relativePath string, query url.Values, accept string, maxBody, maxHeaderBytes int64) (StrictResponse, error) {
+	return c.GetOnceClassified(ctx, relativePath, query, accept, maxBody, maxHeaderBytes, nil)
+}
+
+// GetOnceClassified is GetOnce with an explicit redirect classifier. The
+// redirect is never followed; an accepted same-origin Location is reported
+// only as StrictResponse.RedirectID.
+func (c *Client) GetOnceClassified(ctx context.Context, relativePath string, query url.Values, accept string, maxBody, maxHeaderBytes int64, classify RedirectClassifier) (StrictResponse, error) {
 	var result StrictResponse
 	if maxBody <= 0 || maxBody > 32<<20 || maxHeaderBytes <= 0 || maxHeaderBytes > hardMaxResponseHeaders {
 		return result, fmt.Errorf("site response budget is invalid")
@@ -234,7 +261,7 @@ func (c *Client) GetOnce(ctx context.Context, relativePath string, query url.Val
 	// The dedicated fresh H1-only transport neither pools the connection nor
 	// follows redirects, so this effect cannot be replayed by the transport.
 	req.Close = true
-	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, nil)
+	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, classify)
 }
 
 // PostFormOnce performs one non-following, non-retrying form POST. The request
@@ -592,6 +619,12 @@ func publicIP(ip net.IP) bool {
 			return false
 		}
 	}
+	if wellKnownNAT64.Contains(ip) {
+		// RFC 6052: a NAT64 gateway forwards to the embedded IPv4 address,
+		// so that address must itself be public.
+		embedded := ip.To16()
+		return publicIP(net.IPv4(embedded[12], embedded[13], embedded[14], embedded[15]))
+	}
 	return true
 }
 
@@ -618,8 +651,20 @@ var blockedNetworks = mustNetworks(
 	"198.51.100.0/24",
 	"203.0.113.0/24",
 	"240.0.0.0/4",
+	"192.88.99.0/24", // deprecated 6to4 relay anycast
+	"::/96",          // deprecated IPv4-compatible IPv6
+	"64:ff9b:1::/48", // local-use NAT64
+	"100::/64",       // discard-only
+	"100:0:0:1::/64", // dummy prefix
+	"2001::/23",      // IETF protocol assignments, including Teredo 2001::/32
 	"2001:db8::/32",
+	"2002::/16", // 6to4, which embeds an arbitrary IPv4 address
+	"3fff::/20",
+	"5f00::/16", // SRv6 SIDs
+	"fec0::/10", // deprecated site-local
 )
+
+var wellKnownNAT64 = mustNetworks("64:ff9b::/96")[0]
 
 func mustNetworks(cidrs ...string) []*net.IPNet {
 	result := make([]*net.IPNet, 0, len(cidrs))

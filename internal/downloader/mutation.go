@@ -236,6 +236,10 @@ func MarshalExistingJobMutationRequest(descriptor ExistingJobControlDescriptor, 
 		if requestID != 0 {
 			return nil, fmt.Errorf("downloader existing-job request ID is invalid")
 		}
+		// qBittorrent treats hashes=all as every job and splits hashes on '|'.
+		if jobKey == "all" || strings.ContainsRune(jobKey, '|') {
+			return nil, fmt.Errorf("downloader existing-job selector is invalid")
+		}
 		return []byte(url.Values{"hashes": {jobKey}}.Encode()), nil
 	}
 	if !canonicalHex(jobKey, 40) || requestID <= 0 {

@@ -103,6 +103,58 @@ func TestPruneRecoversEveryPostTombstoneCrashBoundary(t *testing.T) {
 	}
 }
 
+func TestStaleIntentCannotReserveAtAnyPruneCrashBoundary(t *testing.T) {
+	for _, stop := range []string{"retention_durable", "original_0_removed", "original_1_removed", "original_2_removed", "complete"} {
+		t.Run(stop, func(t *testing.T) {
+			fixture := newExchangeFixture(t)
+			ctx := context.Background()
+			// The stale process verified the intent while it was still prepared
+			// and then stalled before reserving its attempt marker.
+			stale, err := fixture.repository.OpenSession(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = stale.Close() })
+			staleIntent, _, err := stale.LoadIntent(ctx, fixture.intentRef.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, attemptRef, outcomeRef := completeExchangeForRetention(t, &fixture, site.BonusExchangeOutcomeConfirmed)
+			sentinel := errors.New("transition stopped")
+			fixture.repository.retentionTransitionHook = func(stage string) error {
+				if stage == stop {
+					return sentinel
+				}
+				return nil
+			}
+			pruned, err := fixture.session.Prune(ctx, fixture.intentRef.ID, fixture.intentRecord.OperationID)
+			if stop == "complete" {
+				if err != nil || !pruned.Complete {
+					t.Fatalf("pruned=%#v err=%v", pruned, err)
+				}
+			} else if !errors.Is(err, sentinel) || pruned.Complete {
+				t.Fatalf("pruned=%#v err=%v", pruned, err)
+			}
+			fixture.repository.retentionTransitionHook = nil
+
+			_, reserved, reserveReceipt, reserveErr := stale.ReserveAttempt(ctx, staleIntent, fixture.review, fixture.reviewReceipt)
+			if reserveErr == nil || reserved != nil || reserveReceipt.Acquired || reserveReceipt.WritesPerformed != 0 {
+				t.Fatalf("stale intent re-reserved a pruned exchange at %s: receipt=%#v err=%v", stop, reserveReceipt, reserveErr)
+			}
+
+			recovered, err := fixture.session.Prune(ctx, fixture.intentRef.ID, fixture.intentRecord.OperationID)
+			if err != nil || !recovered.Complete || recovered.State != StatePruned {
+				t.Fatalf("recovered=%#v err=%v", recovered, err)
+			}
+			for _, ref := range []metastore.RecordRef{fixture.intentRef, attemptRef, outcomeRef} {
+				if recordStillPresent(t, fixture.session, ref) {
+					t.Fatalf("original record remained after recovery: %#v", ref)
+				}
+			}
+		})
+	}
+}
+
 func TestForgetCrashBoundariesPreserveHonestEvidence(t *testing.T) {
 	for _, stop := range []string{"forget_durable", "forget_0_removed"} {
 		t.Run(stop, func(t *testing.T) {

@@ -161,6 +161,7 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 	}
 
 	files := make([]SourceFile, 0, len(bindings))
+	sourcePaths := make([]string, 0, len(bindings))
 	seenRefs := make(map[string]struct{}, len(bindings))
 	for _, binding := range bindings {
 		if err := ctx.Err(); err != nil {
@@ -185,7 +186,14 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		if !found || finalLength != manifestFile.Length {
 			return failIntegrity(&report, "materialized final file mapping disagrees with the metafile")
 		}
-		if pathWithin(finalRoot, binding.Path) {
+		within, withinErr := pathWithin(finalRoot, binding.Path)
+		if withinErr != nil {
+			report.Outcome = OutcomeIncomplete
+			report.addIssue("filesystem.reobserve_failed", "a named source or final path could not be resolved for overlap checks")
+			report.finalize()
+			return report, fmt.Errorf("%w: source/final overlap could not be resolved", ErrIncomplete)
+		}
+		if within {
 			report.Outcome = OutcomeBlocked
 			report.addBlocker("source.overlaps_final", "a selected source name is inside the exact materialized final")
 			report.finalize()
@@ -230,6 +238,7 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 			file.SourcePath = filepath.Clean(binding.Path)
 		}
 		files = append(files, file)
+		sourcePaths = append(sourcePaths, binding.Path)
 	}
 	if options.ClientUse == nil || options.ClientSession == nil {
 		report.Outcome = OutcomeBlocked
@@ -237,14 +246,25 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		report.finalize()
 		return report, nil
 	}
+	// The recorder lets the same complete ledger response that proves current
+	// use of the plan job also prove that no other job uses a source name.
+	session := recordLedgerSession(options.ClientSession)
 	report.Effect = append(report.Effect, "read_live_downloader_ledger")
-	clientBefore, beforeObservation, clientErr := clientactivate.VerifyCurrentUse(ctx, options.ClientUse, options.ClientSession)
+	readsBefore := session.reads
+	clientBefore, beforeObservation, clientErr := clientactivate.VerifyCurrentUse(ctx, options.ClientUse, session)
 	report.ClientUse.Before = beforeObservation
-	report.ClientUse.RequestsMade = options.ClientSession.RequestsMade()
+	report.ClientUse.RequestsMade = session.RequestsMade()
 	if clientErr != nil {
 		return failClientProof(&report, clientErr, "the live downloader could not prove current use of the exact final before source planning")
 	}
 	report.ClientUse.Status = "before_observed"
+	otherUse, guardErr := newOtherClientUseGuard(freshFinal, options.Activation, clientBefore)
+	if guardErr == nil {
+		guardErr = otherUse.checkRecorded(ctx, session, readsBefore, sourcePaths)
+	}
+	if guardErr != nil {
+		return failOtherClientUse(&report, guardErr)
+	}
 	// Discovery proved uniqueness earlier in this invocation. Re-read and
 	// cryptographically verify that selected named mapping after its identity
 	// and alias checks so metadata-only stability is not mistaken for current
@@ -278,9 +298,10 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		return failIntegrity(&report, "materialized final identity changed during source retirement planning")
 	}
 	report.Final = finalAfter
-	clientAfter, afterObservation, clientErr := clientactivate.VerifyCurrentUse(ctx, options.ClientUse, options.ClientSession)
+	readsBefore = session.reads
+	clientAfter, afterObservation, clientErr := clientactivate.VerifyCurrentUse(ctx, options.ClientUse, session)
 	report.ClientUse.After = afterObservation
-	report.ClientUse.RequestsMade = options.ClientSession.RequestsMade()
+	report.ClientUse.RequestsMade = session.RequestsMade()
 	if clientErr != nil {
 		return failClientProof(&report, clientErr, "the live downloader could not prove current use of the exact final after source planning")
 	}
@@ -297,6 +318,9 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		report.addBlocker("client.current_use_unstable", "live downloader identity, state, layout, or effective paths changed across source planning")
 		report.finalize()
 		return report, nil
+	}
+	if err := otherUse.checkRecorded(ctx, session, readsBefore, sourcePaths); err != nil {
+		return failOtherClientUse(&report, err)
 	}
 	report.ClientUse.Status, report.ClientUse.Stable = "observed_stable", true
 	report.ClientUse.Assurance = "same_session_before_after_typed_job_and_effective_path_claims_bracketed_with_exact_final_reverification_non_atomic"
@@ -321,6 +345,7 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 			"same_session_before_after_live_typed_job_and_effective_path_observation",
 			"named_source_identity_reobservation",
 			"source_final_object_non_alias_observation",
+			"same_session_complete_job_ledger_other_job_non_overlap",
 			"bracketed_non_atomic",
 		},
 	}
@@ -329,25 +354,28 @@ func Build(ctx context.Context, options BuildOptions) (Report, error) {
 		return failIntegrity(&report, "source retirement plan could not be canonicalized")
 	}
 	report.Outcome = OutcomeEligible
-	report.execution = &reviewExecutionAuthority{clientBefore: clientAfter, currentUse: options.ClientUse}
+	report.execution = &reviewExecutionAuthority{clientBefore: clientAfter, currentUse: options.ClientUse, session: session, otherUse: otherUse}
 	report.finalize()
 	return report, nil
 }
 
-func pathWithin(base, path string) bool {
+// pathWithin reports whether path resolves inside base. Resolution failures
+// are returned rather than treated as "outside", so overlap checks fail closed.
+func pathWithin(base, path string) (bool, error) {
 	resolvedBase, err := filepath.EvalSymlinks(base)
 	if err != nil {
-		return false
+		return false, err
 	}
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return false
+		return false, err
 	}
 	relative, err := filepath.Rel(filepath.Clean(resolvedBase), filepath.Clean(resolvedPath))
 	if err != nil || relative == "" || filepath.IsAbs(relative) {
-		return false
+		// Rel fails only across volumes, which cannot nest.
+		return false, nil
 	}
-	return relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	return relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)), nil
 }
 
 func failProof(report *Report, err error, message string) (Report, error) {
@@ -377,6 +405,20 @@ func failClientProof(report *Report, err error, message string) (Report, error) 
 		report.finalize()
 		return *report, err
 	}
+}
+
+func failOtherClientUse(report *Report, err error) (Report, error) {
+	code, message, blocked := otherClientUseFinding(err)
+	if blocked {
+		report.Outcome = OutcomeBlocked
+		report.addBlocker(code, message)
+		report.finalize()
+		return *report, nil
+	}
+	report.Outcome = OutcomeIncomplete
+	report.addBlocker(code, message)
+	report.finalize()
+	return *report, err
 }
 
 func failIntegrity(report *Report, message string) (Report, error) {

@@ -265,6 +265,18 @@ func TestBonusReviewRejectsXHTMLSemantics(t *testing.T) {
 	}
 }
 
+func TestBonusReviewLoginRedirectRequiresAuthentication(t *testing.T) {
+	response := strictBonusResponse(nil, time.Now().UTC())
+	response.StatusCode = http.StatusFound
+	if stop, err := classifyBonusReviewResponse(response); err == nil || stop != "redirect_rejected" {
+		t.Fatalf("unclassified stop=%q err=%v", stop, err)
+	}
+	response.RedirectID = loginRedirectID
+	if stop, err := classifyBonusReviewResponse(response); err == nil || stop != "authentication_required" {
+		t.Fatalf("login stop=%q err=%v", stop, err)
+	}
+}
+
 func bonusReviewPage(forms string) []byte {
 	return []byte(`<html><head><title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title></head><body><a href="logout.php">退出</a><div>当前魔力值：12,345.67</div><table>` + forms + `</table></body></html>`)
 }
