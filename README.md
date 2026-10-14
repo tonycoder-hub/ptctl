@@ -50,7 +50,8 @@ capabilities at the edge, not assumptions in the core domain model.
 - **Content proof:** v1 piece and v2 Merkle verification, bounded discovery of
   renamed or scattered bytes, and copy-only, journaled materialization.
 - **Sites:** an experimental TJUPT adapter with session, account, search,
-  detail, and bonus reads, plus acknowledged metafile fetch and bonus exchange;
+  detail, and bonus reads, plus acknowledged metafile fetch (its bonus exchange
+  is withheld because TJUPT confirms each exchange with the account password);
   and an experimental M-Team adapter with session, account, and search reads
   through the official API and a site-issued API key.
 - **Downloaders:** qBittorrent and Transmission reads, plus reviewed stopped

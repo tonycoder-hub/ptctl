@@ -12,14 +12,16 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/site"
 )
 
-const accountPath = "mybonusapps.php"
+const accountPath = bonusPagePath
 
 var _ site.AccountReader = (*Adapter)(nil)
 
-// Account returns the bounded public account fields that the authenticated
-// bonus page itself proves. TJUPT does not expose uploaded/downloaded totals,
-// ratio, or peer counts through this adapter, so those optional fields remain
-// absent rather than being inferred from unrelated markup.
+// Account returns the account fields that the authenticated bonus page
+// proves: the username and balance from the page itself, and the class,
+// uploaded total, active torrents, seeding points, and invites from the user
+// panel. The panel's fields are optional and stay absent when it does not
+// state them unambiguously. TJUPT's panel shows no downloaded total or ratio,
+// so those fields are never set.
 func (a *Adapter) Account(ctx context.Context, credential site.Credential) (domain.AccountSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.AccountSnapshot{}, err
@@ -49,11 +51,18 @@ func (a *Adapter) Account(ctx context.Context, credential site.Credential) (doma
 		if !validAccountText(username, 256) || bonus == "" {
 			return domain.AccountSnapshot{}, fmt.Errorf("TJUPT account page fields were invalid")
 		}
+		panel := parseInfoBlock(body)
 		return domain.AccountSnapshot{
-			SiteID:     SiteID,
-			Username:   username,
-			Bonus:      bonus,
-			ObservedAt: time.Now().UTC(),
+			SiteID:        SiteID,
+			Username:      username,
+			UploadedBytes: panel.uploaded,
+			Bonus:         bonus,
+			Seeding:       panel.seeding,
+			Leeching:      panel.leeching,
+			UserClass:     panel.class,
+			SeedingPoints: panel.seedingPoints,
+			Invites:       panel.invites,
+			ObservedAt:    time.Now().UTC(),
 		}, nil
 	default:
 		return domain.AccountSnapshot{}, fmt.Errorf("TJUPT returned an unrecognized account page; parser is fail-closed")

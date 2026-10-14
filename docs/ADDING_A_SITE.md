@@ -204,7 +204,7 @@ records are loaded. Changing one strands every existing record.
   surface to test. A new adapter should bind to its production origin and
   inject a fake transport in tests instead.
 - **Site-specific heuristics.** TJUPT's login, logout, and page recognition
-  rules, its decimal size units, and its `mybonusapps.php` flow are facts about
+  rules, its decimal size units, and its `mybonus.php` flow are facts about
   TJUPT, not about NexusPHP in general. Re-derive them for each site.
 - **Ordering quirks.** TJUPT's sessions check their failure conditions in
   slightly different orders, and those orders are pinned by tests. Match the

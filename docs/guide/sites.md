@@ -27,8 +27,12 @@ Each read-only TJUPT command above performs at most one bounded GET and never
 retries. Do not loop or parallelize site reads. `site detail` also refuses redirects and sends
 only `details.php?id=REMOTE_ID`: it does not send `hit=1`, follow the download
 link, fetch the metafile, or persist an observation. Its display title, optional
-peer counts, and matching internal link are current site claims, not metafile
-identity or storage-content proof.
+peer counts, size, and snatch count, and its matching internal link are current
+site claims, not metafile identity or storage-content proof.
+
+TJUPT search results also carry the category ID, publish time (in UTC),
+seeders, leechers, snatches, and promotion when the results table has its
+usual shape; otherwise a result keeps only its name and size.
 
 M-Team reads use a site-issued API key instead of a cookie, passed with
 `--api-key-stdin` under the same stdin-only rules. `status`, `account`, and
@@ -43,17 +47,20 @@ printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
 printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
 ```
 
-`site account` reads the authenticated `mybonusapps.php` page and reports only
-the username and canonical bonus balance proved by that page. Uploaded and
-downloaded totals, ratio, and active peer counts remain absent rather than
-being guessed from unrelated markup. The snapshot is a point-in-time site
-claim, not a signed ledger or proof of a bonus exchange.
+`site account` reads the authenticated `mybonus.php` page and reports the
+username and canonical bonus balance, plus what the page's user panel states:
+uploaded total, user class, seeding points, invites, and seeding/leeching
+counts. A panel field that is missing or stated inconsistently stays absent.
+TJUPT shows no downloaded total or ratio, so those are never reported. The
+snapshot is a point-in-time site claim, not a signed ledger or proof of a
+bonus exchange.
 
-`bonus-catalog` now exposes a bounded selector hint when its compatibility
-parser can identify one exact hidden numeric `option`; a missing selector is
-shown as unknown and a row number is never treated as authority. `site bonus
-review` selects that canonical decimal option from a fresh live
-`mybonusapps.php` page. It reports retained site-defined text columns, balance,
+`bonus-catalog` lists one row per exchange form on `mybonus.php`: the form's
+hidden `option` as its selector, the offer name, price, submit label, and a
+status (`available`, `available, requires input`, `disabled`, or `unknown`).
+The displayed row number is dropped because TJUPT numbers rows differently
+from options. `site bonus review` selects that canonical decimal option from a
+fresh live `mybonus.php` page. It reports retained site-defined text columns, balance,
 current submit availability, whether extra user input is required, the
 allowlisted action route, and one-way form-shape/review IDs. Hidden field values,
 raw HTML, and form URLs are not emitted. The action route is a static HTML
@@ -63,6 +70,11 @@ deliberately non-authoritative; the separate exchange workflow therefore
 fetches a fresh page, reproduces the reviewed semantics, and crosses an
 explicit acknowledgement and recovery boundary.
 
+TJUPT currently withholds bonus exchange: the site confirms each exchange with
+the account password, which ptctl does not take, so `submit` refuses `tjupt`
+before reading stdin. The workflow below applies to a site that declares
+`bonus.exchange.submit_effectful`; no built-in site does today.
+
 To cross that boundary, first initialize a private state store (the same
 versioned owner-only store format used by metafile artifacts), review the exact
 option, and prepare a local intent from the review ID:
@@ -70,13 +82,13 @@ option, and prepare a local intent from the review ID:
 ```bash
 ptctl metafile store init --store "$PTCTL_STATE"
 
-printf '%s' "$TJUPT_COOKIE" | \
-  ptctl site bonus review --cookie-stdin --output json tjupt OPTION
+printf '%s' "$SITE_COOKIE" | \
+  ptctl site bonus review --cookie-stdin --output json SITE OPTION
 
 ptctl site bonus exchange prepare \
   --state-store "$PTCTL_STATE" \
   --expect-review-id REVIEW_ID \
-  tjupt OPTION
+  SITE OPTION
 ```
 
 `prepare` performs no network request and prints an explicit intent record ID.
@@ -84,14 +96,14 @@ Submitting requires that exact record, the same site/option/review selectors,
 and a separate acknowledgement:
 
 ```bash
-printf '%s' "$TJUPT_COOKIE" | \
+printf '%s' "$SITE_COOKIE" | \
   ptctl site bonus exchange submit \
     --state-store "$PTCTL_STATE" \
     --intent-record INTENT_RECORD_ID \
     --expect-review-id REVIEW_ID \
     --cookie-stdin \
     --acknowledge-bonus-exchange \
-    tjupt OPTION
+    SITE OPTION
 
 ptctl site bonus exchange status \
   --state-store "$PTCTL_STATE" \

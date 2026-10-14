@@ -5,6 +5,8 @@ import "testing"
 // Site ID, origins, and route IDs are persisted in metastore records, sealed
 // site bindings, and bonus exchange journals. Changing any of them strands
 // existing records, so a new route shape must get a new ".vN" ID instead.
+// The bonus routes moved from mybonusapps.php, the games page, to mybonus.php;
+// the old route IDs never reviewed an offer and stay retired.
 func TestPersistedIdentityIsFrozen(t *testing.T) {
 	frozen := map[string][2]string{
 		"SiteID":                  {SiteID, "tjupt"},
@@ -15,13 +17,20 @@ func TestPersistedIdentityIsFrozen(t *testing.T) {
 		"BonusReviewOrigin":       {BonusReviewOrigin, "https://www.tjupt.org"},
 		"DetailRouteID":           {DetailRouteID, "tjupt.details_by_id_no_hit.v1"},
 		"MetafileRouteID":         {MetafileRouteID, "tjupt.download_by_id.v1"},
-		"BonusReviewRouteID":      {BonusReviewRouteID, "tjupt.mybonusapps_offer_review.v1"},
-		"BonusExchangeRouteID":    {BonusExchangeRouteID, "tjupt.mybonusapps_exchange_post.v1"},
+		"BonusReviewRouteID":      {BonusReviewRouteID, "tjupt.mybonus_offer_review.v1"},
+		"BonusExchangeRouteID":    {BonusExchangeRouteID, "tjupt.mybonus_exchange_post.v1"},
 		"bonusUnknownActionRoute": {bonusUnknownActionRoute, "tjupt.bonus_action_unrecognized.v1"},
 	}
 	for name, pair := range frozen {
 		if pair[0] != pair[1] {
 			t.Errorf("%s=%q, want frozen %q", name, pair[0], pair[1])
+		}
+	}
+	for _, retired := range []string{"tjupt.mybonusapps_offer_review.v1", "tjupt.mybonusapps_exchange_post.v1"} {
+		for name, pair := range frozen {
+			if pair[0] == retired {
+				t.Errorf("%s reuses retired route ID %q", name, retired)
+			}
 		}
 	}
 }

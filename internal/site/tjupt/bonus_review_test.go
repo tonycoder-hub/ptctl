@@ -99,7 +99,7 @@ func TestParseBonusReviewClassifiesInputAndAvailability(t *testing.T) {
 		inputMode    string
 		route        string
 	}{
-		{name: "direct", form: `<form action="mybonusapps.php" method="post"><input type="hidden" name="option" value="1"><td>A</td><td>100</td><input type="submit"></form>`, availability: site.BonusReviewAvailabilityAvailable, inputMode: site.BonusReviewInputNone, route: BonusExchangeRouteID},
+		{name: "direct", form: `<form action="mybonus.php" method="post"><input type="hidden" name="option" value="1"><td>A</td><td>100</td><input type="submit"></form>`, availability: site.BonusReviewAvailabilityAvailable, inputMode: site.BonusReviewInputNone, route: BonusExchangeRouteID},
 		{name: "user input", form: `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><td>Gift</td><td>100</td><input name="username"><input type="submit"></form>`, availability: site.BonusReviewAvailabilityAvailable, inputMode: site.BonusReviewInputRequired, route: BonusExchangeRouteID},
 		{name: "disabled", form: `<form action="?action=exchange" method="post"><input type="hidden" name="option" value="1"><td>VIP</td><td>5000</td><input type="submit" disabled></form>`, availability: site.BonusReviewAvailabilityDisabled, inputMode: site.BonusReviewInputNone, route: BonusExchangeRouteID},
 		{name: "fieldset semantics", form: `<form action="?action=exchange" method="post"><fieldset><input type="hidden" name="option" value="1"><td>VIP</td><td>5000</td><input type="submit"></fieldset></form>`, availability: site.BonusReviewAvailabilityUnknown, inputMode: site.BonusReviewInputUnsupported, route: BonusExchangeRouteID},
@@ -245,7 +245,7 @@ func TestBonusReviewParserFailsClosedOnAmbiguityAndBudgets(t *testing.T) {
 
 func TestBonusReviewSessionErrorsAreSafe(t *testing.T) {
 	adapter := New("")
-	client := &fakeGuardedClient{err: fmt.Errorf("https://www.tjupt.org/mybonusapps.php Cookie=COOKIE-CANARY HIDDEN-FIELD-CANARY")}
+	client := &fakeGuardedClient{err: fmt.Errorf("https://www.tjupt.org/mybonus.php Cookie=COOKIE-CANARY HIDDEN-FIELD-CANARY")}
 	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
 	session, err := adapter.OpenBonusReviewSession(context.Background(), mustCredential(t, "sid=secret"))
 	if err != nil {
@@ -274,6 +274,44 @@ func TestBonusReviewLoginRedirectRequiresAuthentication(t *testing.T) {
 	response.RedirectID = loginRedirectID
 	if stop, err := classifyBonusReviewResponse(response); err == nil || stop != "authentication_required" {
 		t.Fatalf("login stop=%q err=%v", stop, err)
+	}
+}
+
+// TestBonusCatalogReadsLiveOfferRows uses the live mybonus.php shapes: option
+// values that differ from the displayed numbers, an <h1> offer name, a
+// disabled submit, an offer whose inputs sit in a nested table, and a
+// navigation tooltip that breaks lines with &#10;.
+func TestBonusCatalogReadsLiveOfferRows(t *testing.T) {
+	nested := `<table width="100%"><tr><td class="embedded">比例<select name="ratiocharity"><option value="0.1">0.1</option><option value="0.3" selected="selected">0.3</option></select></td><td class="embedded"><b>数量</b><select name="bonuscharity" id="charityselect"><option value="1000">1,000</option></select></td></tr></table>`
+	scripted := `<select name="bonusgift" onchange="update();"><option value="25">25</option></select>`
+	body := bonusReviewPage(`<tr><td><ul><li><a href='jc_currentbet_L.php' title='当前进行中的竞猜：&#10;A&#10;B'>竞猜</a></li></ul></td></tr>` +
+		tjuptBonusRow("1", "1", "H&amp;R积分", `购买数量：<input type='number' name='hnr_scores' />点`, "10,000/点", `<input type="submit" name="submit" value="H&amp;R积分已满" disabled="disabled" />`) +
+		tjuptBonusRow("12", "11", "慈善捐赠", "将你的魔力值送与有需要的用户群体。"+nested, "最少1,000<br />最多50,000", `<input type="submit" name="submit" value="慈善捐赠" />`) +
+		tjuptBonusRow("11", "10", "赠送魔力值", scripted, "最少25<br />最多50,000", `<input type="submit" name="submit" value="赠送" />`) +
+		tjuptBonusRow("14", "13", "7天不显示广告", "换取一定期限内不显示广告的权限。", "7,000", `<input type="submit" name="submit" value="交换" />`))
+	rows, err := parseBonusCatalog(body)
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+	want := map[string]string{
+		"1":  "H&R积分|10,000/点|H&R积分已满|disabled",
+		"12": "慈善捐赠|最少1,000 最多50,000|慈善捐赠|available, requires input",
+		// A script handler can rewrite the submission, so the offer is never
+		// claimed to be understood.
+		"11": "赠送魔力值|最少25 最多50,000|赠送|unknown",
+		"14": "7天不显示广告|7,000|交换|available",
+	}
+	for _, row := range rows {
+		if got := strings.Join(row.Columns, "|"); got != want[row.Selector] {
+			t.Fatalf("selector %s columns %q, want %q", row.Selector, got, want[row.Selector])
+		}
+	}
+	review, _, err := parseBonusOfferReview(body, "14", site.DefaultBonusReviewLimits())
+	if err != nil || review.Availability != site.BonusReviewAvailabilityAvailable || review.InputMode != site.BonusReviewInputNone || review.ActionRouteID != BonusExchangeRouteID {
+		t.Fatalf("review=%#v err=%v", review, err)
+	}
+	if _, _, err := parseBonusOfferReview(bonusReviewPage(`<tr><td><input type="hidden" name="x" value="a&#10;b"></td></tr>`+tjuptBonusRow("14", "13", "A", "a", "1", `<input type="submit">`)), "14", site.DefaultBonusReviewLimits()); bonusParseStopReason(err) != "invalid_html" {
+		t.Fatalf("control rune in a submitted value: err=%v", err)
 	}
 }
 
