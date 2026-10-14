@@ -27,6 +27,9 @@ func TestStandaloneWritesCollectOnlyStaleOwnStagingResidue(t *testing.T) {
 	store := newTestStore(t)
 	staging := filepath.Join(store.root, temporaryDir)
 	random := strings.Repeat("0123456789abcdef", 2)
+	// Upper-case hex must not be collected. It uses its own digits so it
+	// cannot fold onto a collected name on case-insensitive filesystems.
+	upperRandom := strings.ToUpper(strings.Repeat("fedcba9876543210", 2))
 	pending := filepath.Base(recordRemovalStagingPath(RecordRef{Kind: RecordKindStorageProfileV1, ID: expectedRecordID(RecordKindStorageProfileV1, []byte("pending"))}))
 	collected := []string{
 		placeStagingTestFile(t, filepath.Join(staging, ".import-"+random+".torrent"), true),
@@ -37,7 +40,7 @@ func TestStandaloneWritesCollectOnlyStaleOwnStagingResidue(t *testing.T) {
 		placeStagingTestFile(t, filepath.Join(staging, ".import-"+strings.Repeat("f", 32)+".torrent"), false),
 		placeStagingTestFile(t, filepath.Join(staging, pending), true),
 		placeStagingTestFile(t, filepath.Join(staging, "OPAQUE-STAGING-CANARY"), true),
-		placeStagingTestFile(t, filepath.Join(staging, ".import-"+strings.ToUpper(random)+".torrent"), true),
+		placeStagingTestFile(t, filepath.Join(staging, ".import-"+upperRandom+".torrent"), true),
 		placeStagingTestFile(t, filepath.Join(staging, ".import-"+random[:31]+".torrent"), true),
 		placeStagingTestFile(t, filepath.Join(staging, ".import-"+random+".torrent.bak"), true),
 	}
