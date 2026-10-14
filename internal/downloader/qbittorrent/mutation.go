@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -189,7 +190,8 @@ func (s *readSession) mutateExistingJob(ctx context.Context, effect string, requ
 	if err := ctx.Err(); err != nil {
 		return fail("context_cancelled", err)
 	}
-	if request.JobKey == "" || len(request.JobKey) > maxOpaqueJobKeyBytes || hasUnsafeJobKeyByte(request.JobKey) {
+	if request.JobKey == "" || len(request.JobKey) > maxOpaqueJobKeyBytes || hasUnsafeJobKeyByte(request.JobKey) ||
+		request.JobKey == "all" || strings.ContainsRune(request.JobKey, '|') {
 		return fail("job_locator_invalid", fmt.Errorf("qBittorrent job locator is invalid"))
 	}
 	s.mu.Lock()
@@ -294,6 +296,9 @@ func (s *readSession) AddStopped(ctx context.Context, request downloader.AddStop
 	if payloadBytes <= 0 || payloadBytes > maxAddMetafileBytes || !canonicalAddVariantID(variantID) {
 		return fail("payload_invalid", fmt.Errorf("qBittorrent add payload is invalid"))
 	}
+	if err := request.Identity.Validate(); err != nil {
+		return fail("payload_invalid", fmt.Errorf("qBittorrent add identity is invalid"))
+	}
 	if err := validateAddSavePath(request.SavePath); err != nil {
 		return fail("save_path_invalid", err)
 	}
@@ -337,7 +342,7 @@ func (s *readSession) AddStopped(ctx context.Context, request downloader.AddStop
 	if response.StatusCode != http.StatusOK {
 		return fail("http_rejected", fmt.Errorf("qBittorrent rejected the add request"))
 	}
-	if int64(len(rawResponse)) > maxAddResponseBytes || strings.TrimSpace(string(rawResponse)) != "Ok." {
+	if int64(len(rawResponse)) > maxAddResponseBytes || !acceptedAddResponse(rawResponse, request.Identity) {
 		return fail("response_invalid", fmt.Errorf("qBittorrent add response was not accepted"))
 	}
 	if err := ctx.Err(); err != nil {
@@ -348,6 +353,70 @@ func (s *readSession) AddStopped(ctx context.Context, request downloader.AddStop
 	receipt.BytesSubmittedKnown = true
 	receipt.ObservedAtEnd = time.Now().UTC()
 	return receipt, nil
+}
+
+// acceptedAddResponse recognizes exactly one accepted add of the reviewed
+// identity. qBittorrent 4.x through 5.1.x answer 200 "Ok." ("Fails." when
+// nothing was added). WebAPI 2.14 (qBittorrent 5.2) answers 200 with a JSON
+// summary instead, 202 while an add is pending, and 409 when every add failed;
+// the non-200 statuses are rejected before this check.
+func acceptedAddResponse(raw []byte, identity downloader.TypedIdentity) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if string(trimmed) == "Ok." {
+		return true
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' || validateStrictJSONStrings(trimmed, 4) != nil {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return false
+	}
+	fields := make(map[string]json.RawMessage, 4)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || !validDecodedJSONFieldKey(key) {
+			return false
+		}
+		if _, duplicate := fields[key]; duplicate {
+			return false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+		fields[key] = value
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return false
+	}
+	var succeeded, failed, pending int64
+	if decodeJSONInt64(fields["success_count"], &succeeded) != nil || decodeJSONInt64(fields["failure_count"], &failed) != nil ||
+		decodeJSONInt64(fields["pending_count"], &pending) != nil || succeeded != 1 || failed != 0 || pending != 0 {
+		return false
+	}
+	rawIDs := bytes.TrimSpace(fields["added_torrent_ids"])
+	var ids []json.RawMessage
+	if len(rawIDs) == 0 || rawIDs[0] != '[' || json.Unmarshal(rawIDs, &ids) != nil || len(ids) != 1 {
+		return false
+	}
+	addedID, err := decodeStrictJSONStringValue(ids[0])
+	return err == nil && addedTorrentIDMatches(addedID, identity)
+}
+
+// addedTorrentIDMatches compares qBittorrent's TorrentID, which is
+// libtorrent's best hash: the v1 infohash for v1 jobs, and the first 20 bytes
+// of the v2 infohash for v2 or hybrid jobs (v1 for hybrid jobs on
+// libtorrent 1.2 builds).
+func addedTorrentIDMatches(value string, identity downloader.TypedIdentity) bool {
+	if identity.Validate() != nil || len(value) != 40 {
+		return false
+	}
+	return value == identity.InfoHashV1 || identity.InfoHashV2 != "" && value == identity.InfoHashV2[:40]
 }
 
 func canonicalAddVariantID(value string) bool {
@@ -377,8 +446,13 @@ func validateAddSavePath(value string) error {
 func addMultipartEnvelope(savePath string) ([]byte, []byte, string, error) {
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
+	// Placement must not depend on client defaults: autoTMM=false keeps the
+	// explicit savepath (4.1+), contentLayout=Original keeps the metafile's
+	// own layout (4.3.2+), and root_folder=true is its 4.1-4.3.1 equivalent.
+	// qBittorrent ignores parameters a version does not know.
 	for _, field := range []struct{ name, value string }{
-		{"savepath", savePath}, {"paused", "true"}, {"stopped", "true"}, {"skip_checking", "false"},
+		{"savepath", savePath}, {"autoTMM", "false"}, {"contentLayout", "Original"}, {"root_folder", "true"},
+		{"paused", "true"}, {"stopped", "true"}, {"skip_checking", "false"},
 	} {
 		if err := writer.WriteField(field.name, field.value); err != nil {
 			return nil, nil, "", err

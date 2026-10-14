@@ -172,11 +172,7 @@ func Parse(data []byte) (*MetaInfo, error) {
 		}
 		meta.Validation = "v2_manifest_structural"
 	}
-	manifestPaths := make([][][]byte, len(meta.Files))
-	for i := range meta.Files {
-		manifestPaths[i] = meta.Files[i].RawPath
-	}
-	if err := storage.ValidateManifestPaths(manifestPaths, storage.PathSemantics{CaseSensitive: true}); err != nil {
+	if err := validateManifestPaths(meta.Files, storage.PathSemantics{CaseSensitive: true}); err != nil {
 		return nil, fmt.Errorf("unsafe torrent manifest: %w", err)
 	}
 	meta.V1PieceCount = len(meta.pieceHashes)
@@ -357,8 +353,11 @@ func reconcileHybridLayouts(v1, v2 *MetaInfo) error {
 	for fileIndex := range v1.Files {
 		file := &v1.Files[fileIndex]
 		if strings.Contains(file.Attribute, "p") {
-			if nonPaddingIndex == 0 || nonPaddingIndex >= len(v2Files) || offset%v1.PieceLength == 0 {
-				return fmt.Errorf("hybrid v1 padding file %d is leading, trailing, or starts at an aligned offset", fileIndex)
+			// A pad may follow the last real file: libtorrent >= 2.0.8 emits
+			// this BEP 52 tail padding by default and accepts it on load. The
+			// aligned-offset check still rejects a second consecutive pad.
+			if nonPaddingIndex == 0 || offset%v1.PieceLength == 0 {
+				return fmt.Errorf("hybrid v1 padding file %d is leading or starts at an aligned offset", fileIndex)
 			}
 			expected := v1.PieceLength - (offset % v1.PieceLength)
 			if file.Length != expected {
@@ -387,6 +386,18 @@ func reconcileHybridLayouts(v1, v2 *MetaInfo) error {
 		return fmt.Errorf("hybrid v1 layout is missing non-padding files")
 	}
 	return nil
+}
+
+// validateManifestPaths validates every manifest path, padding included, but
+// lets BEP 47 padding files repeat each other's path (".pad/<length>").
+func validateManifestPaths(files []File, semantics storage.PathSemantics) error {
+	paths := make([][][]byte, len(files))
+	padding := make([]bool, len(files))
+	for i := range files {
+		paths[i] = files[i].RawPath
+		padding[i] = strings.Contains(files[i].Attribute, "p")
+	}
+	return storage.ValidateManifestPathsWithPadding(paths, padding, semantics)
 }
 
 func nonPaddingFiles(files []File) []*File {

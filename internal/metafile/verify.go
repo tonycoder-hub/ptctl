@@ -632,11 +632,7 @@ func sameSnapshotPath(a, b string) bool {
 
 func resolveFiles(ctx context.Context, meta *MetaInfo, contentPath string) ([]fileSpec, error) {
 	semantics := storage.CurrentSemantics()
-	manifestPaths := make([][][]byte, len(meta.Files))
-	for i := range meta.Files {
-		manifestPaths[i] = meta.Files[i].RawPath
-	}
-	if err := storage.ValidateManifestPaths(manifestPaths, semantics); err != nil {
+	if err := validateManifestPaths(meta.Files, semantics); err != nil {
 		return nil, fmt.Errorf("unsafe torrent manifest: %w", err)
 	}
 

@@ -146,6 +146,58 @@ func TestActivationJournalAlreadyPresentRemovesMatchingPendingMarker(t *testing.
 	}
 }
 
+func TestActivationJournalRecoveryDiscardsUnpublishedAttempt(t *testing.T) {
+	root := t.TempDir()
+	plan := testActivationPlan(t, root)
+	planID, _ := PlanID(plan)
+	handle, _, err := createJournal(context.Background(), root, plan, planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	raw, _, err := encodeAttempt(Attempt{
+		Schema: AttemptSchemaV1, OperationID: OperationIDForPlan(planID), Action: AttemptActionRecheck, Sequence: 1,
+		PlanID: planID, PrerequisiteID: plan.AdoptionCompletionID, ObservedAtStart: now, ObservedAtEnd: now.Add(time.Millisecond),
+		JobID: plan.JobID, BeforeState: "stoppedUP", BeforeProgress: 1, FileLayoutID: plan.ExpectedFileLayoutID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The attempt is published before the recheck request is sent, so a
+	// staged but unpublished attempt proves the request was never sent.
+	destination := attemptFileName(AttemptActionRecheck, 1)
+	pendingPath, _ := fsbind.PathFromComponents([]string{scratchDirectory, pendingName(destination)})
+	file, err := handle.subtree.CreateRegular(context.Background(), pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, receipt, err := openJournal(context.Background(), root, OperationIDForPlan(planID), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	destinationPath, _ := fsbind.PathFromComponents([]string{destination})
+	_, destinationErr := recovered.subtree.Inspect(context.Background(), destinationPath)
+	_, pendingErr := recovered.subtree.Inspect(context.Background(), pendingPath)
+	if len(recovered.state.RecheckAttempts) != 0 || recovered.state.Pending != "" || receipt.Marker.Publication.Published ||
+		!receipt.Marker.TemporaryRemoved || receipt.Marker.TemporaryRemovalUncertain ||
+		!errors.Is(destinationErr, fsbind.ErrNotFound) || !errors.Is(pendingErr, fsbind.ErrNotFound) {
+		t.Fatalf("state=%#v receipt=%#v destination=%v pending=%v", recovered.state, receipt, destinationErr, pendingErr)
+	}
+}
+
 func TestActivationJournalPublicationRejectsUnexpectedScratchNamespace(t *testing.T) {
 	root := t.TempDir()
 	plan := testActivationPlan(t, root)

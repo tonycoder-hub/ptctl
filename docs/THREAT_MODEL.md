@@ -102,7 +102,10 @@ Anyone who can read the private store can recover the complete historical invent
 ### SSRF and redirect leakage
 
 Site origins must be HTTPS. DNS answers are checked before dialing and private,
-loopback, link-local, multicast, and unspecified addresses are rejected.
+loopback, link-local, multicast, and unspecified addresses are rejected, as are
+other non-global special-purpose ranges (CGNAT, benchmarking, documentation,
+reserved, 6to4, Teredo, local-use NAT64). A well-known-prefix NAT64 address
+(`64:ff9b::/96`) is accepted only when its embedded IPv4 address is public.
 Redirects are rejected. Proxies are disabled for site reads to avoid silently
 forwarding cookies or API keys. A local proxy that answers DNS with fake-IP
 addresses (`198.18.0.0/15`) therefore makes site reads fail closed; the CLI
@@ -528,7 +531,11 @@ and then `fsync`s the final directory; Windows uses no-replace `MoveFileEx` with
 write-through. The source is never moved, rewritten, or deleted, although its
 read may update atime, hydrate a placeholder, or incur remote-filesystem cost.
 A concurrent identical import is idempotent; a digest or content disagreement
-is an integrity failure, never permission to overwrite.
+is an integrity failure, never permission to overwrite. Standalone imports
+also remove a bounded number of stale staging names left by killed processes:
+only exact generated one-shot staging names older than 24 hours that still
+validate as private regular files on the bound filesystem; the deterministic
+record-removal recovery name and all other `tmp/` entries are never touched.
 
 After an initialization root exists, validation and store-layout/artifact
 mutation are tied to one operation-bound root identity. POSIX uses held
@@ -685,12 +692,22 @@ durable before the POST. qBittorrent uses one login request; Transmission uses a
 two-request CSRF/version handshake. The effectful add is then one HTTP/1.1-only,
 fresh/no-keepalive, proxy-free, redirect-free, bounded, serial, non-retried
 request. A lost response is initially unknown even if the body may have reached
-the client. qBittorrent recovery may later combine the durable attempt and
+the client, even when an exact job is observed in the same invocation. A
+qBittorrent answer that does not accept the add (its duplicate `Fails.` body or
+an HTTP rejection) is reported as a blocked, non-resumable rejection and the
+exact job observed afterward is not attributed; the rejection itself is not
+journaled, so the operator must remove that job before any resume. qBittorrent
+recovery may later combine the durable attempt and
 complete absence-before observation with one current exact stopped job;
 Transmission is stricter and requires the same invocation's explicit
 accepted-add response, so a duplicate response or later same-hash job does not
 establish attribution. Resume reads the current ledger first and does not repeat
-without both acknowledgements.
+without both acknowledgements. Effectful recovery of adoption, activation, and
+stop journals publishes a staged intent, response, or completion marker, but
+discards a staged attempt marker whose destination is absent: attempts are
+published before their request is sent, so an unpublished attempt proves that
+no request was sent and must neither consume attempt budget nor support
+attribution of a later observation.
 Read-only status validates the canonical marker namespace but does not infer a
 historical directory-fsync result. Effectful resume refreshes that durability
 boundary before it reads the client ledger or relies on a marker.
@@ -763,6 +780,8 @@ closed. `run` requires `--acknowledge-client-recheck`; optional start requires
 `--acknowledge-client-start`. Repeating an inconclusive request additionally
 requires the matching repeat acknowledgement. No acknowledgement grants pause,
 move, removal, deletion, source retirement, or a different job selector.
+qBittorrent recheck and start reject the all-job selector and `|`-joined
+multi-hash selectors before any request, like stop and removal.
 
 An attributed terminal client stop can authorize a later start-only activation
 without granting another recheck. This path accepts only the process-local
@@ -937,22 +956,43 @@ For every content-bearing source name, the planner places named regular-file
 reobservation, post-selection exact source reverification, and exact final
 verification between the two live-client observations.
 It rejects a source path inside the final namespace and rejects a source/final
-`SameFile` alias. Source paths are not opened for writing and downloader paths
-are never used as host paths. Default reports retain only domain-separated path
-references; explicit path disclosure does not change the plan ID. The result
-does not cover empty files, padding, directories, symlink targets, cleanup, or
-unlink semantics. Unselected hardlink or alias names may remain, and no space
-reclamation is claimed. The qBittorrent and Transmission effective paths are
-parsed only as remote lexical claims and are never passed to host filesystem
-APIs. The plan is non-atomic review evidence, not a promise that a later delete
-is safe.
+`SameFile` alias; a source or final that cannot be resolved for the namespace
+check makes the plan incomplete rather than eligible. Source paths are not opened for writing. Default reports
+retain only domain-separated path references; explicit path disclosure does not
+change the plan ID. The result does not cover empty files, padding, directories,
+symlink targets, cleanup, or unlink semantics. Unselected hardlink or alias
+names that no downloader job claims may remain, and no space reclamation is
+claimed. The plan job's effective paths are compared only as remote lexical
+claims. The plan is non-atomic review evidence, not a promise that a later
+delete is safe.
+
+Every other job in the same complete ledger responses is a potential user of
+the source. Its content root (or save path when it claims none) is an untrusted
+claim that is translated only through the exact reviewed host/client mapping,
+which is reproduced by matching the reviewed path-mapping ID and save-path
+reference; it must lie inside the reviewed client root, have components valid
+for both namespaces, and stay confined below the resolved host root. The
+translated host path is then used only for metadata-only symlink resolution and
+`stat`; it is never opened, listed, or written. A root that lexically equals,
+contains, or lies inside a source name, is the same file object as a source, or
+is the same directory as a source parent blocks with
+`source.other_client_job_overlap`. A job outside the reviewed mapping blocks
+with `source.other_client_job_unmapped`. A truncated, contradictory, or failed
+ledger, a missing plan job, a repeated job key, or a host observation failure
+other than absence yields `client.other_use_enumeration_incomplete`. Links or
+mounts nested inside another job's directory tree are not traversed, and other
+ptctl records are not consulted because finals are independent byte copies.
 
 Source-retirement execution is a distinct irreversible boundary. `run` and
 `resume` require `--acknowledge-source-deletion`, a full reviewed SHA-256 plan
 ID, the same metafile/final/activation/mapping/client selectors, and explicit
 source roots. `run` repeats the complete source/final/client proof and compares
 the fresh plan ID before its first write. It ignores any path-disclosure request
-and never parses plan JSON as authority. `resume` first validates the explicit
+and never parses plan JSON as authority. Immediately before the first unlink of
+each `run` or `resume` invocation, one additional complete ledger read repeats
+the other-job check for every name not yet retired; any blocker or incomplete
+enumeration leaves all remaining names in place and the operation resumable.
+`resume` first validates the explicit
 private journal, root scope, and all local authorities before password stdin or
 network access. Status reads only one explicit journal or retained tombstone
 and never reads source roots or credentials. `prune` has a different
@@ -983,9 +1023,17 @@ only if the durable attempt already exists; otherwise it is unexplained loss
 and fails integrity. An ambiguous unlink or durability failure retains its
 attempt/receipt and returns partial rather than retrying blindly.
 
-After all names, the exact materialized final is reverified and the same
-authenticated downloader session reobserves the exact typed job/effective
-layout before the terminal marker. These brackets do not freeze a remote client
+A read error during a source/final byte comparison is an interrupted
+observation, not an integrity verdict; only differing bytes or lengths are.
+
+After all names, the same authenticated downloader session reobserves the exact
+typed job/effective layout and the exact materialized final is then reverified;
+the terminal marker follows both. Because the session is never re-authenticated
+or retried, an expired or failed session after a removal yields a journaled,
+resumable partial; resume needs a fresh session and does not repeat removals.
+Resume verifies remaining source bytes before its first downloader read. Resume
+of a terminal operation treats a removed source parent as absence of its
+retired names; a present parent must keep its recorded identity. These brackets do not freeze a remote client
 or filesystem after the last check. Source-name retirement does not remove a
 source parent, empty/padding entry, unselected hardlink name, final, client job,
 or private metafile. Its outcome does not promise block reclamation, parent
@@ -1091,8 +1139,11 @@ magnet URI, or tracker material.
 A successful request receipt is not a recheck or start completion receipt.
 Recheck completion requires a durable checking observation followed by a
 complete stopped observation, or a same-invocation incomplete-to-complete edge
-after a durable request intent. A fast check with neither observable edge stays
-unknown. Start completion requires a durable recheck completion and start
+after a durable request intent; that edge may be taken from a bounded
+read-only settle observation in the same invocation, never from a repeated
+request. A fast check with neither observable edge stays unknown, and once the
+recheck attempt budget is exhausted the operation is reported blocked and
+non-resumable rather than retried. Start completion requires a durable recheck completion and start
 attempt, complete started state, exact file-layout claims, and another current
 final proof. Cancellation or an unreadable after-ledger leaves an attempted
 request unknown. Resume observes first and never automatically replays it.
@@ -1127,13 +1178,26 @@ metafile. Recovery before stage verification therefore requires new live
 discovery; recovery after it trusts neither a historical source locator nor
 journaled hashes alone and reopens the staged/final objects. This detects
 ordinary replacement and corruption but does not make concurrent filesystem
-mutation atomic.
+mutation atomic. Stage and scratch objects must stay owner-private and
+single-linked. Once an object has left the operation subtree through no-replace
+publication, POSIX final proof additionally tolerates group/other read/execute
+bits and extra same-filesystem hard links (for example downloader access or
+cross-seeding), but still requires the current owner, exact journaled
+identities, namespace, sizes, and content, and rejects group/other write
+access and special mode bits. Windows keeps the owner-only DACL and
+single-link checks for published objects.
 
 Publication intent is durable before the no-replace final transition. Any
 ambiguous attempt or failed durability confirmation is reported with its actual
 or uncertain write receipt and is not deleted as rollback. `abandon` is allowed
 only before publication intent, appends one terminal event, and retains stage
-and scratch bytes. It must never be described as cleanup or rollback. Source
+and scratch bytes. It must never be described as cleanup or rollback. A copy
+that fails before its scratch object is published removes only that object, by
+exact scratch name and creation identity. Immediately before the `committed`
+event, after the final layout has been reverified, the lock-holding run removes
+each object of one complete canonical scratch inventory by its observed
+identity and size; unexpected names, kinds, links, or drift fail closed, and
+`status` and `abandon` still never delete scratch. Source
 files are only read: materialize does not move, rewrite, link, or delete them,
 although their reads can still update atime or hydrate placeholders.
 
@@ -1337,7 +1401,9 @@ interruptible. Users should narrow roots and budgets before scanning mounted
 remote storage.
 
 `metafile store init`, `metafile store import`, `storage profile create`,
-`storage index refresh`, `storage index refresh-discover`, `reconcile refresh-report`, the artifact/binding
+`storage index refresh` (including its post-refresh retention of superseded
+generations), acknowledged `storage index prune`,
+`storage index refresh-discover`, `reconcile refresh-report`, the artifact/binding
 phases of `site metafile fetch`,
 acknowledged materialize operations, acknowledged exact stopped-job
 adoption/activation, acknowledged exact current-job stop, and acknowledged

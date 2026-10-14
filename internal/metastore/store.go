@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 )
@@ -218,7 +219,7 @@ func (s *Store) ImportFile(ctx context.Context, path string, limits Limits) (*me
 	if namedBefore.Size() < 0 || namedBefore.Size() > limits.MaxArtifactBytes {
 		return nil, ArtifactRef{}, receipt, fmt.Errorf("%w: artifact exceeds its byte limit", ErrInvalidMetafile)
 	}
-	file, err := os.Open(clean)
+	file, err := platformOpenSourceFile(clean)
 	if err != nil {
 		return nil, ArtifactRef{}, receipt, fmt.Errorf("import private metafile: open source failed")
 	}
@@ -294,6 +295,7 @@ func (s *Store) importStream(ctx context.Context, reader io.Reader, limits Limit
 		return nil, ArtifactRef{}, receipt, safeError("import private metafile", err)
 	}
 	defer session.Close()
+	collectStagingResidue(ctx, session)
 
 	temporaryName, err := randomRelativeName(temporaryDir, ".import-", ".torrent")
 	if err != nil {
@@ -823,6 +825,93 @@ func randomRelativeName(directory, prefix, suffix string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(directory, prefix+hex.EncodeToString(value[:])+suffix), nil
+}
+
+// Staging residue is a one-shot random staging name left in tmp/ when a
+// process is killed before its deferred cleanup runs. It is never read back,
+// so it only consumes space; standalone writes to an initialized store
+// collect it on a best-effort basis.
+const (
+	stagingResidueMinimumAge  = 24 * time.Hour
+	stagingResidueScanLimit   = 256
+	stagingResidueRemoveLimit = 16
+	stagingResidueRandomHex   = 32
+)
+
+// stagingResiduePatterns lists exactly the random names produced through
+// randomRelativeName. The deterministic record-removal recovery name and every
+// other tmp/ entry stay opaque and are never collected.
+var stagingResiduePatterns = [...]struct{ prefix, suffix string }{
+	{".import-", ".torrent"},
+	{".init-", ".marker"},
+	{".record-import-", recordSuffix},
+}
+
+func isStagingResidueName(name string) bool {
+	for _, pattern := range stagingResiduePatterns {
+		if len(name) != len(pattern.prefix)+stagingResidueRandomHex+len(pattern.suffix) ||
+			!strings.HasPrefix(name, pattern.prefix) || !strings.HasSuffix(name, pattern.suffix) {
+			continue
+		}
+		for _, character := range name[len(pattern.prefix) : len(name)-len(pattern.suffix)] {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// collectStagingResidue removes a bounded number of stale staging names from
+// tmp/ through the bound session. It never affects the caller's result and
+// fails closed per entry: a candidate must carry an exact generated name, open
+// as a private regular file on the reviewed filesystem, and be older than
+// stagingResidueMinimumAge, so no live operation can still own it. Removal
+// only unlinks the tmp/ name; residue that is a second link to an already
+// published object (a crash between publication and staging cleanup) leaves
+// that object intact. Only the first stagingResidueScanLimit directory entries
+// are inspected per call.
+func collectStagingResidue(ctx context.Context, session *rootSession) {
+	if session == nil || session.root == nil {
+		return
+	}
+	directory, _, err := session.openValidated(temporaryDir, true)
+	if err != nil {
+		return
+	}
+	entries, _, readErr := readDirectoryPrefix(directory, stagingResidueScanLimit)
+	if closeErr := directory.Close(); readErr != nil || closeErr != nil {
+		return
+	}
+	cutoff := time.Now().Add(-stagingResidueMinimumAge)
+	removed := 0
+	for _, entry := range entries {
+		if removed >= stagingResidueRemoveLimit || ctx.Err() != nil {
+			return
+		}
+		if !isStagingResidueName(entry.Name()) {
+			continue
+		}
+		relative := filepath.Join(temporaryDir, entry.Name())
+		// The named pre-check avoids opening a live operation's fresh staging
+		// file, which on Windows could block that operation's own cleanup.
+		named, err := session.root.Lstat(relative)
+		if err != nil || !named.Mode().IsRegular() || !named.ModTime().Before(cutoff) {
+			continue
+		}
+		file, info, err := session.openValidated(relative, false)
+		if err != nil {
+			continue
+		}
+		closeErr := file.Close()
+		if closeErr != nil || !os.SameFile(named, info) || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if session.removePrivate(relative) == nil {
+			removed++
+		}
+	}
 }
 
 func markerBytes(storeID string) []byte {

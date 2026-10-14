@@ -348,7 +348,7 @@ func TestTransmissionSeedRetirePlanAndRunExactSourceDeletion(t *testing.T) {
 	if execution.Data.Outcome != sourceretire.ExecutionOutcomeRetired || !execution.Data.DeletionPerformed ||
 		execution.Data.Writes.NamesRemoved != 1 || execution.Data.Operation.Resumable ||
 		execution.Data.ClientUse.Before.Driver != "transmission" || execution.Data.ClientUse.After.Driver != "transmission" ||
-		execution.Data.ClientUse.RequestsMade != 5 || transmissionSourceRetireRequests(server)-requestsBefore != 5 {
+		execution.Data.ClientUse.RequestsMade != 6 || transmissionSourceRetireRequests(server)-requestsBefore != 6 {
 		t.Fatalf("unexpected Transmission retirement execution: %s", out.String())
 	}
 	if _, err := os.Lstat(fixture.materialize.sourcePath); !os.IsNotExist(err) {
@@ -572,7 +572,7 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 	if execution.Schema != "ptctl.dev/v1" || execution.Kind != "content.source_retirement" ||
 		execution.Data.Outcome != sourceretire.ExecutionOutcomeRetired || !execution.Data.DeletionPerformed ||
 		execution.Data.Writes.NamesRemoved != 1 || execution.Data.Operation.Resumable ||
-		server.totalRequests()-requestsBefore != 4 {
+		server.totalRequests()-requestsBefore != 5 {
 		t.Fatalf("unexpected execution report: %s", out.String())
 	}
 	if _, err := os.Lstat(fixture.materialize.sourcePath); !os.IsNotExist(err) {
@@ -680,6 +680,50 @@ func TestSeedRetireRunResumeAndStatusJournalExactDeletion(t *testing.T) {
 		!strings.Contains(out.String(), "CLEANUP AUTHORITY") || !strings.Contains(out.String(), "DIRECTORIES") ||
 		!strings.Contains(out.String(), "empty_stable_candidate") || strings.Contains(out.String(), cleanupParent) {
 		t.Fatalf("parent cleanup table code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+
+	// While the retired name's parent still exists, the retirement gate passes
+	// on its own; an unknown parent-cleanup operation then fails only the
+	// parent-cleanup gate. The credential must stay unread and the downloader
+	// must not be contacted, not even by a login with an empty credential.
+	unknownCleanupPlan := "sha256:" + strings.Repeat("2", 64)
+	unknownCleanupOperation, err := sourceretire.ParentCleanupOperationIDForPlanID(unknownCleanupPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownCleanupArgs := []string{
+		"reconcile", "report", "--metafile-store", fixture.storeRoot, "--metafile-variant", fixture.variantID,
+		"--target", fixture.materialize.targetRoot, "--materialize-operation", fixture.operation,
+		"--materialize-plan-id", fixture.materialize.planID,
+		"--adoption-operation", adopted.Data.Operation.ID, "--adoption-plan-id", adopted.Data.Plan.ID,
+		"--activation-operation", activationPlan.Data.Operation.ID, "--activation-plan-id", activationPlan.Data.Plan.ID,
+		"--retirement-operation", execution.Data.Operation.ID, "--retirement-plan-id", plan.Data.Plan.ID,
+		"--retirement-search-root", fixture.materialize.sourceRoot,
+		"--parent-cleanup-operation", unknownCleanupOperation.String(), "--parent-cleanup-plan-id", unknownCleanupPlan,
+		"--parent-cleanup-search-root", fixture.materialize.sourceRoot,
+		"--driver", "qbittorrent", "--url", server.server.URL, "--username", clientAdoptUser, "--password-stdin",
+		"--host-root", fixture.materialize.targetRoot, "--client-root", clientAdoptRoot, "--client-style", "posix",
+		"--timeout", "1m", "--output", "json",
+	}
+	requestsBefore = server.totalRequests()
+	reader = &trackingReader{}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(unknownCleanupArgs, reader, &out, &errOut); code != 0 || errOut.Len() != 0 || reader.read {
+		t.Fatalf("unknown parent cleanup code/read=%d/%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+	}
+	if server.totalRequests() != requestsBefore {
+		t.Fatalf("failed parent-cleanup gate contacted the downloader: %s", out.String())
+	}
+	var unknownCleanup struct {
+		Data reconcile.Report `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &unknownCleanup); err != nil {
+		t.Fatal(err)
+	}
+	if unknownCleanup.Data.Outcome == "consistent" ||
+		unknownCleanup.Data.Ledgers.ParentCleanup.StopReason != "parent_cleanup_completion_load_failed" {
+		t.Fatalf("unknown parent cleanup was not a parent-cleanup gate failure: %s", out.String())
 	}
 
 	cleanupRunArgs := []string{"seed", "retire", "parent-cleanup", "run",

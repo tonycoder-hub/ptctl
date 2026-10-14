@@ -183,6 +183,8 @@ type Report struct {
 type reviewExecutionAuthority struct {
 	clientBefore *clientactivate.VerifiedCurrentUse
 	currentUse   *clientactivate.CurrentUseAuthority
+	session      *recordingLedgerSession
+	otherUse     otherClientUseGuard
 }
 
 func newReport() Report {

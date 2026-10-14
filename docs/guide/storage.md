@@ -30,6 +30,11 @@ ptctl storage index refresh-discover \
 ptctl storage index inspect \
   --state-store "D:\Private\ptctl-metafiles" \
   --profile media
+
+ptctl storage index prune \
+  --state-store "D:\Private\ptctl-metafiles" \
+  --profile media \
+  --acknowledge-index-prune
 ```
 
 Profiles bind exact roots, platform/path semantics, mount/network policy, and
@@ -44,9 +49,39 @@ record first and publishes a small descriptor only after the enumeration and
 data publication are complete. After descriptor publication, both immutable
 records are digest-verified together under one operation-bound physical store
 root before the result can be `stored`. A failed descriptor publication can
-leave an orphan data record, but latest selection lists descriptors only. Concurrent
-writers that produce the same maximum generation are reported as ambiguous;
-they are never ordered by wall-clock time.
+leave an orphan data record, but latest selection lists descriptors only.
+
+There is no store-wide lock, so generation publication is optimistic. Refresh
+chooses one more than the highest published generation of the exact profile
+and re-lists that profile's descriptors immediately before and after its
+descriptor commit. A refresh that sees a competing descriptor at its
+generation fails with a `generation_conflict` stop reason and is never
+reported `stored`; rerun it. If two concurrent writers did publish the same
+maximum generation, latest selection reports it as ambiguous (never ordered by
+wall-clock time) until the next successful refresh publishes a strictly newer
+generation, which is the recovery.
+
+Index generations are retained per profile. After a `stored` refresh,
+`storage index refresh` removes that profile's generations older than the
+newest `--retain-generations` distinct generations (default 3; `0` disables
+it) and reports the removal under `retention`, separately from the two
+publication writes. `storage index refresh-discover` and `reconcile
+refresh-report` do not prune; run `storage index prune --acknowledge-index-prune`
+for those workflows. Prune removes a superseded snapshot's data record first
+and then its descriptor; rerunning it after an interruption finishes the job.
+It never removes the latest generation (or either side of a tie at it),
+protected records, or other profiles' records. Latest selection lists at most
+256 descriptors across all profiles; an index already over that budget reports
+`record_listing_incomplete` and asks for prune. Refresh and prune use a larger
+maintenance listing (10,000 records), and prune also acts on a verified partial
+listing (outcome `partial`, exit 4), so repeat it until the outcome is
+`complete` for each profile. A pruned generation can no longer be read through
+an explicit `--snapshot-record`; those commands fail closed.
+
+A sealed descriptor that no longer decodes fails closed for every profile
+unless its digest-verified bytes carry one exact top-level `profile_id` that
+names a different valid profile; such records are counted as
+`foreign_invalid_descriptors` and only block the profile they name.
 
 `storage index refresh-discover` is the explicit combined write/read boundary.
 Before writing, it validates the immutable profile, metafile, mapping, and all

@@ -327,7 +327,10 @@ version. Its complete 40-hex [`hash_string`](https://github.com/transmission/tra
 is an explicit v1/SHA-1 claim only: it is never truncated, length-guessed into
 v2, or allowed to make a pure-v2 or hybrid job exact. A later 409, redirect,
 unknown protocol major, or server that omits the opening CSRF handshake fails
-closed without replay.
+closed without replay. The ledger also reads each job's integer `error` code:
+a local error (3: missing data, disk full, permissions) is reported as state
+`error`, like qBittorrent's, instead of as a complete stopped job; tracker
+warnings and errors leave the state unchanged.
 
 A declared
 `--site-ref` does not contact the site and is never presented as a verified

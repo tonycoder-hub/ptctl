@@ -21,10 +21,18 @@ is the only form-submission surface: it sends one fresh review GET and at most
 one POST after a durable attempt marker. All site transports use the configured
 TJUPT HTTPS origin, do not retry, and refuse to follow redirects. Each
 effectful acknowledgement is therefore scoped to a fixed request count.
-Page recognition is fail-closed: a login page is unauthenticated, a positively
+Page recognition is fail-closed: a login page is unauthenticated, and so is a
+GET answered with an unfollowed redirect to the same origin's `login.php`
+(TJUPT's expired-cookie response; `site status` reports `unauthenticated`
+and strict reads stop with `authentication_required`). Any other redirect stays
+`redirect_rejected`. A positively
 recognized bonus/search/detail page is accepted, and maintenance, challenge,
 or unknown HTML is indeterminate/an error rather than a successful empty
-result.
+result. Search rows are read from the NexusPHP `<table class="torrents">`
+with each row's nested `torrentname` table kept intact, so the later size
+cell is not cut off; sizes use NexusPHP's 1024-based `KB`/`MB`/`GB`/`TB`
+labels. A results page whose rows cannot be recognized is an error, not an
+empty result.
 Ordinary site reads perform no intentional filesystem write. TJUPT-related
 local store mutations are `metafile store init`, `metafile store import`, and
 the store phase of `site metafile fetch`, plus the intent/attempt/outcome record
@@ -183,8 +191,10 @@ record to status.
 Prune and forget are local state-store protocols, not TJUPT adapter requests.
 Prune requires a separate acknowledgement and exact intent/operation selector,
 accepts only a complete terminal outcome, writes one deterministic
-non-executable tombstone first, and then removes the exact outcome, attempt, and
-intent records. A prepared or submission-unknown operation is never pruned.
+non-executable tombstone first, and then removes the exact intent, attempt, and
+outcome records in that order, so no interruption leaves an intent without its
+at-most-once attempt marker. A prepared or submission-unknown operation is
+never pruned.
 Forget requires a second irreversible acknowledgement and exact
 retention/operation selector. It writes a deterministic recovery marker before
 removing the tombstone and removes that marker last. Once the last marker is

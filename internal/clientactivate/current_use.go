@@ -324,6 +324,24 @@ func (verified *VerifiedCurrentUse) Reobserve(ctx context.Context, session downl
 	return after, observation, nil
 }
 
+// ReobserveStarted is Reobserve for a complete started job whose raw substate
+// may legitimately move between started substates (for example uploading and
+// stalledUP) between two observations. Both observations must be started and
+// every other claim compared by StableWith must remain stable.
+func (verified *VerifiedCurrentUse) ReobserveStarted(ctx context.Context, session downloader.LedgerSession) (*VerifiedCurrentUse, CurrentUseObservation, error) {
+	if !verified.JobStarted() || !verified.SameSession(session) {
+		return nil, CurrentUseObservation{}, fmt.Errorf("%w: started current-use session authority is unavailable", ErrPolicy)
+	}
+	after, observation, err := VerifyCurrentUse(ctx, verified.authority, session)
+	if err != nil {
+		return nil, observation, err
+	}
+	if !after.JobStarted() || !verified.stableIgnoringStartedSubstate(after) {
+		return nil, observation, fmt.Errorf("%w: current downloader use changed across the current-use bracket", ErrPolicy)
+	}
+	return after, observation, nil
+}
+
 // VerifyCurrentJobStopped closes a same-session stop bracket. The job state is
 // allowed to move from a complete started state to a complete stopped state;
 // every identity, layout, selection, progress, and final-filesystem claim must
@@ -340,6 +358,28 @@ func VerifyCurrentJobStopped(ctx context.Context, before *VerifiedCurrentUse, se
 		return nil, observation, fmt.Errorf("%w: downloader job did not make a stable transition to stopped", ErrPolicy)
 	}
 	return after, observation, nil
+}
+
+// ProbeCurrentJobStopped is a cheap, read-only settle probe used after an
+// accepted stop response: downloaders such as qBittorrent apply a stop
+// asynchronously and publish the stopped state on a later status refresh. It
+// performs one bounded ledger observation of the same session and reports
+// whether the reviewed exact job now claims a complete stopped state. It is
+// never proof by itself; callers must still prove the transition with
+// VerifyCurrentJobStopped, which also re-verifies the exact final.
+func ProbeCurrentJobStopped(ctx context.Context, before *VerifiedCurrentUse, session downloader.LedgerSession) (bool, error) {
+	if before == nil || !before.JobStarted() || !before.SameSession(session) || before.authority == nil {
+		return false, fmt.Errorf("%w: started current-use authority is unavailable", ErrPolicy)
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	observed, err := observeClientBounded(ctx, before.authority.prepared, session)
+	if err != nil {
+		return false, err
+	}
+	return observed.jobID == before.authority.plan.JobID && observed.fileLayoutID == before.authority.plan.ExpectedFileLayoutID &&
+		completeStoppedState(observed.job.State), nil
 }
 
 // VerifyExpectedJobStopped is the recovery form of VerifyCurrentJobStopped.
@@ -473,6 +513,15 @@ func (verified *VerifiedCurrentUse) StableWith(after *VerifiedCurrentUse) bool {
 		beforeObservation.TerminalMarkerID == afterObservation.TerminalMarkerID &&
 		beforeObservation.JobState == afterObservation.JobState && beforeObservation.JobProgress == afterObservation.JobProgress &&
 		beforeObservation.Final == afterObservation.Final && !after.started.Before(verified.ended)
+}
+
+func (verified *VerifiedCurrentUse) stableIgnoringStartedSubstate(after *VerifiedCurrentUse) bool {
+	if !verified.JobStarted() || !after.JobStarted() {
+		return false
+	}
+	normalized := *after
+	normalized.observation.JobState = verified.observation.JobState
+	return verified.StableWith(&normalized)
 }
 
 func (verified *VerifiedCurrentUse) stableAcrossStop(after *VerifiedCurrentUse) bool {

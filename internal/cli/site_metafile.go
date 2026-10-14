@@ -130,14 +130,14 @@ func (a *app) siteMetafileFetch(args []string) error {
 
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
-		return fmt.Errorf("unknown site %q", fs.Arg(0))
+		return usageError("unknown site %q", fs.Arg(0))
 	}
 	descriptor := adapter.Descriptor()
 	if !descriptor.Supports(domain.CapabilityMetafile) {
-		return fmt.Errorf("site %q does not declare capability %q", descriptor.ID, domain.CapabilityMetafile)
+		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityMetafile)
 	}
 	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
-		return fmt.Errorf("site %q does not support cookie_header authentication", descriptor.ID)
+		return usageError("site %q does not support cookie_header authentication", descriptor.ID)
 	}
 	fetcher, ok := adapter.(site.MetafileFetcher)
 	if !ok {

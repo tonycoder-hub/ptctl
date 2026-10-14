@@ -77,6 +77,7 @@ type WriteReport struct {
 	JournalDurabilityConfirms  int   `json:"journal_durability_confirmations"`
 	ScratchFilesCreated        int   `json:"scratch_files_created"`
 	ScratchBytesWritten        int64 `json:"scratch_bytes_written"`
+	ScratchFilesRemoved        int   `json:"scratch_files_removed"`
 	StagedFiles                int   `json:"staged_files"`
 	StagePublicationAttempts   int   `json:"stage_publication_attempts"`
 	StagedDirectories          int   `json:"staged_directories"`

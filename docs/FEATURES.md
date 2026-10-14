@@ -8,7 +8,9 @@ deliberately does not. For step-by-step usage, see the
 
 ## Implemented today
 
-- strict, bounded bencode parsing;
+- strict, bounded bencode parsing that accepts only the BEP 3 canonical
+  encoding (no `+`, `-0`, or leading zeros; strictly increasing dictionary
+  keys, so duplicate keys, including duplicate empty keys, are rejected);
 - exact v1 infohash calculation from the original `info` byte slice;
 - exact whole-metafile SHA-256 variant identity, kept distinct from infohashes;
 - a versioned private metafile store with explicit initialization, exact-byte
@@ -29,14 +31,19 @@ deliberately does not. For step-by-step usage, see the
   whole-metafile variant ID;
 - structural v1/v2 validation, including cryptographic reduction of each v2
   piece layer back to its file `pieces root`;
-- hybrid inspection that parses both layouts and rejects disagreements;
+- hybrid inspection that parses both layouts and rejects disagreements; each
+  v1 padding file must exactly fill the gap to the next piece boundary,
+  including the optional tail pad after the last file that libtorrent 2.0.8+
+  emits;
 - exact v1 SHA-1 verification across multi-file boundaries;
 - streaming v2 SHA-256 Merkle verification with 16 KiB leaves and BEP 52 EOF
   padding rules, independently for each file;
 - conjunctive hybrid verification: one physical read feeds both the v1 piece
   stream and v2 file tree for every file;
 - virtual zeros for v1 padding files; v2 padding and symbolic-link leaves fail
-  closed until their distinct semantics are implemented;
+  closed until their distinct semantics are implemented. Padding paths are
+  validated like any other path, but only padding entries may repeat a path
+  (BEP 47 names every equal-length pad `.pad/<length>`);
 - bounded, deterministic discovery across repeatable storage roots, retaining
   only regular files of required sizes and never following symlinks, Windows
   reparse points, or mount boundaries;

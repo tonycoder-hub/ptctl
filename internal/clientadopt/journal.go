@@ -598,6 +598,9 @@ func (handle *journalHandle) recoverPending(ctx context.Context, name string) (m
 		if attempt.Sequence > 1 && attempt.PreviousAttemptID != handle.state.AttemptIDs[len(handle.state.AttemptIDs)-1].String() {
 			return markerWriteReceipt{}, fmt.Errorf("%w: pending adoption attempt chain differs", ErrIntegrity)
 		}
+		if discarded, receipt, discardErr := handle.discardUnpublishedAttempt(ctx, name, destination, raw); discarded || discardErr != nil {
+			return receipt, discardErr
+		}
 		id = parsedID
 	case destination == completionFileName:
 		completion, parsedID, decodeErr := decodeCompletion(bytes.NewReader(raw))
@@ -611,6 +614,38 @@ func (handle *journalHandle) recoverPending(ctx context.Context, name string) (m
 		return markerWriteReceipt{}, fmt.Errorf("%w: pending adoption marker has an invalid destination", ErrIntegrity)
 	}
 	return handle.writeMarker(ctx, destination, raw, id)
+}
+
+// discardUnpublishedAttempt removes a staged attempt marker whose destination
+// was never published. An attempt is durably published before its request or
+// observation proceeds, so an unpublished attempt proves nothing was sent.
+// Publishing it during recovery would invent an attempt that consumes the
+// attempt budget and lets a later unrelated job look attributable. When the
+// destination already exists the caller keeps the ordinary publication path.
+func (handle *journalHandle) discardUnpublishedAttempt(ctx context.Context, name, destination string, raw []byte) (bool, markerWriteReceipt, error) {
+	var receipt markerWriteReceipt
+	destinationPath, _ := fsbind.PathFromComponents([]string{destination})
+	if _, err := handle.subtree.Inspect(ctx, destinationPath); err == nil {
+		return false, receipt, nil
+	} else if !errors.Is(err, fsbind.ErrNotFound) {
+		return false, receipt, classifyJournalError(err)
+	}
+	identity, err := handle.verifyNamedBytes(ctx, []string{scratchDirectory, name}, raw)
+	if err != nil {
+		return false, receipt, err
+	}
+	pendingPath, _ := fsbind.PathFromComponents([]string{scratchDirectory, name})
+	removal, err := handle.subtree.RemoveRegularExact(ctx, pendingPath, identity, int64(len(raw)))
+	receipt.TemporaryRemovalAttempted = removal.Attempted
+	receipt.TemporaryRemoved = err == nil && removal.Removed
+	receipt.TemporaryRemovalUncertain = err != nil || (removal.Attempted && (!removal.Removed || removal.Durability != "confirmed"))
+	if err != nil {
+		return false, receipt, err
+	}
+	if receipt.TemporaryRemovalUncertain || !removal.Removed {
+		return false, receipt, fmt.Errorf("%w: unpublished adoption attempt could not be discarded durably", ErrIntegrity)
+	}
+	return true, receipt, nil
 }
 
 func (handle *journalHandle) appendAttempt(ctx context.Context, assessment downloaderAssessment, job *downloader.Torrent) (markerWriteReceipt, error) {

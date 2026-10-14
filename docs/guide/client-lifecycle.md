@@ -83,10 +83,17 @@ ptctl client activate forget \
 Activation never treats a successful POST as a completed recheck. It records
 the request intent first, then requires either a durable observation of a
 checking state followed by a complete stopped observation, or an incomplete to
-complete transition bracketed by the same invocation's request. A fast recheck
-that starts and finishes between observations can therefore remain
+complete transition bracketed by the same invocation's request. Because
+qBittorrent publishes recheck and start effects only on its next periodic
+refresh, an accepted request whose first after-observation is not yet
+conclusive is followed by at most four read-only, same-session observations over
+about 2.5 seconds; they never repeat the request or spend an attempt. A fast
+recheck that starts and finishes between observations can therefore remain
 `recheck_request_result_unknown`; repeating it requires both
-`--acknowledge-client-recheck` and `--acknowledge-repeat-recheck`. Start has the
+`--acknowledge-client-recheck` and `--acknowledge-repeat-recheck`. After three
+recorded recheck attempts without either edge, status and resume report
+`attempt_budget_exhausted` as blocked and non-resumable instead of resumable
+forever; no further recheck is sent. Start has the
 same non-replay rule and its own repeat acknowledgement. qBittorrent 4.x uses
 the reviewed `resume` route while 5.x uses `start`; an unknown major is
 unsupported rather than guessed. Transmission RPC 5.3 binds the legacy
@@ -194,8 +201,21 @@ route (`pause` for qBittorrent 4, `stop` for qBittorrent 5, or
 job locator never enters JSON. HTTP acceptance is only request evidence:
 completion also requires the same authenticated session to observe the exact
 job in a complete stopped state with the same layout and a fresh exact final
-proof. Unknown transport results remain resumable but are never repeated
+proof. Because qBittorrent applies a stop asynchronously and publishes the
+stopped state on a later status refresh, an accepted response whose first
+observation still shows the job started is followed by a bounded same-session
+settle (at most four read-only probes over about 2.5 seconds, never another
+stop request); only if the exact stopped state is then proven does the
+completion keep the attributed `accepted_response_then_exact_stopped` basis.
+Unknown transport results remain resumable but are never repeated
 automatically. JSON kind is `client.stop`.
+
+New stop plans (`ptctl.client-stop-plan/v2`) record the reviewed job state as
+the normalized phase `started`, so ordinary seeding substate changes such as
+`uploading` to `stalledUP`, `queuedUP`, or `forcedUP` between `plan` and `run`
+do not change the plan ID; any non-started state still blocks. Journals written
+with the older `v1` plan schema keep their exact reviewed substate on resume,
+and a `v1` plan ID that was reviewed but never run must be planned again.
 
 Stop pruning is a distinct local deletion authority. It requires one full stop
 operation ID, the reviewed stop plan ID, and

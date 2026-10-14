@@ -90,3 +90,19 @@ func TestLedgerDriverSupportsIdentityFamilies(t *testing.T) {
 		t.Fatal("unknown drivers and invalid identities must fail closed")
 	}
 }
+
+func TestMarshalExistingJobMutationRequestRejectsBroadQBittorrentSelectors(t *testing.T) {
+	descriptor := ExistingJobControlDescriptor{Driver: DriverQBittorrent, Protocol: ControlProtocolQBittorrentV5,
+		RecheckRouteID: "qbittorrent.torrents.recheck.v1", StartRouteID: "qbittorrent.torrents.start.v1"}
+	for _, effect := range []string{ControlEffectRecheck, ControlEffectStart} {
+		for _, job := range []string{"", "all", "a|b", "|", "a b", "a\x00b"} {
+			if _, err := MarshalExistingJobMutationRequest(descriptor, effect, job, 0); err == nil {
+				t.Fatalf("%s accepted job selector %q", effect, job)
+			}
+		}
+		body, err := MarshalExistingJobMutationRequest(descriptor, effect, "opaque&a=b", 0)
+		if err != nil || string(body) != "hashes=opaque%26a%3Db" {
+			t.Fatalf("%s body=%q err=%v", effect, body, err)
+		}
+	}
+}

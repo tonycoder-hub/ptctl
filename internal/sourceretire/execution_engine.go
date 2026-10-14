@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
@@ -47,7 +48,8 @@ func Run(ctx context.Context, options RunOptions) (ExecutionReport, error) {
 	if review.Plan.ID != options.ExpectedPlanID {
 		return executionBlocked(&report, "plan.id_mismatch", "the same-invocation live review does not reproduce the expected plan ID")
 	}
-	if review.execution == nil || review.execution.clientBefore == nil || !review.execution.clientBefore.Verified() || review.execution.currentUse == nil {
+	if review.execution == nil || review.execution.clientBefore == nil || !review.execution.clientBefore.Verified() || review.execution.currentUse == nil ||
+		review.execution.session == nil || review.execution.otherUse.jobKey == "" {
 		return executionIntegrity(&report, "the live source-retirement review did not retain process-local execution authority")
 	}
 	roots, scopeID, err := normalizeExecutionRoots(ctx, options.SearchRoots, options.AllowNetwork)
@@ -101,7 +103,7 @@ func Run(ctx context.Context, options RunOptions) (ExecutionReport, error) {
 	defer journal.close()
 	populateExecutionFromJournal(&report, journal)
 	return continueSourceRetirement(ctx, &report, journal, sources, options.Review.Meta, options.Review.Final,
-		review.execution.currentUse, options.Review.ClientSession, review.execution.clientBefore)
+		review.execution.currentUse, review.execution.session, review.execution.clientBefore, review.execution.otherUse)
 }
 
 // Resume continues only an explicit operation. It does not rediscover source
@@ -157,11 +159,6 @@ func Resume(ctx context.Context, options ResumeOptions) (ExecutionReport, error)
 		return mapExecutionError(&report, err, "source retirement resume authorities disagree with the durable intent")
 	}
 	report.addEffect("read_source_metadata", "read_exact_materialized_final")
-	sources, err := bindIntentSources(ctx, journal.state, roots)
-	if err != nil {
-		return mapExecutionError(&report, err, "durable source names could not be rebound")
-	}
-	defer sources.close()
 	freshFinal, finalObservation, err := options.Final.Reverify(ctx)
 	if err != nil {
 		return mapFinalExecutionError(&report, err, "the materialized final could not be reverified before resume")
@@ -171,17 +168,29 @@ func Resume(ctx context.Context, options ResumeOptions) (ExecutionReport, error)
 	}
 	report.Final = finalObservation
 	if journal.state.CompletePresent {
-		if err := requireRetiredNamesAbsent(ctx, journal.state, sources); err != nil {
+		// A completed operation must not depend on rebinding source parents:
+		// parent cleanup may legitimately have removed them since completion.
+		if err := requireCompletedSourceNamesAbsent(ctx, journal.state, roots); err != nil {
 			return mapExecutionError(&report, err, "a retired source name reappeared")
 		}
 		report.Outcome, report.Operation.Status, report.Operation.Phase, report.Operation.Resumable = ExecutionOutcomeAlreadyRetired, "complete", "complete", false
 		report.finalize()
 		return report, nil
 	}
+	sources, err := bindIntentSources(ctx, journal.state, roots)
+	if err != nil {
+		return mapExecutionError(&report, err, "durable source names could not be rebound")
+	}
+	defer sources.close()
 	if options.ClientSession == nil || options.ClientUse == nil {
 		return executionBlocked(&report, "client.authority_unavailable", "resume requires one live client-use authority and read session")
 	}
 	report.addEffect("read_source_content", "read_live_downloader_ledger")
+	// Long source/final reads run before the first downloader read so they do
+	// not sit inside the authenticated session's before/after window.
+	if err := verifyRemainingBoundSources(ctx, journal.state, sources, options.Meta, freshFinal); err != nil {
+		return mapExecutionError(&report, err, "remaining source bytes could not be reverified")
+	}
 	before, beforeObservation, err := clientactivate.VerifyCurrentUse(ctx, options.ClientUse, options.ClientSession)
 	report.ClientUse.Before = beforeObservation
 	report.ClientUse.RequestsMade = options.ClientSession.RequestsMade()
@@ -193,10 +202,11 @@ func Resume(ctx context.Context, options ResumeOptions) (ExecutionReport, error)
 		journal.state.Intent.ActivationOperationID, journal.state.Intent.ActivationPlanID, journal.state.Intent.ClientCompletionID) {
 		return executionIntegrity(&report, "the live downloader authority does not match the durable retirement intent")
 	}
-	if err := verifyRemainingBoundSources(ctx, journal.state, sources, options.Meta, freshFinal); err != nil {
-		return mapExecutionError(&report, err, "remaining source bytes could not be reverified")
+	otherUse, err := newOtherClientUseGuard(freshFinal, options.Activation, before)
+	if err != nil {
+		return mapOtherClientUseExecutionError(&report, err)
 	}
-	return continueSourceRetirement(ctx, &report, journal, sources, options.Meta, freshFinal, options.ClientUse, options.ClientSession, before)
+	return continueSourceRetirement(ctx, &report, journal, sources, options.Meta, freshFinal, options.ClientUse, options.ClientSession, before, otherUse)
 }
 
 // Status reads only the explicit private journal or retained tombstone. It
@@ -247,7 +257,7 @@ func Status(ctx context.Context, options StatusOptions) (ExecutionReport, error)
 
 func continueSourceRetirement(ctx context.Context, report *ExecutionReport, journal *executionJournal, sources *boundSourceSet, meta *metafile.MetaInfo,
 	final *materialize.VerifiedFinal, currentUse *clientactivate.CurrentUseAuthority, session downloader.LedgerSession,
-	before *clientactivate.VerifiedCurrentUse) (ExecutionReport, error) {
+	before *clientactivate.VerifiedCurrentUse, otherUse otherClientUseGuard) (ExecutionReport, error) {
 	if journal.state.CompletePresent {
 		if err := requireRetiredNamesAbsent(ctx, journal.state, sources); err != nil {
 			return mapExecutionError(report, err, "a retired source name reappeared")
@@ -257,6 +267,7 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 		return *report, nil
 	}
 	report.addEffect("write_private_source_retirement_journal", "unlink_explicit_source_names")
+	otherUseChecked := false
 	for sequence, file := range journal.state.Intent.Files {
 		if err := ctx.Err(); err != nil {
 			return executionInterrupted(report, err, "source retirement was interrupted")
@@ -324,6 +335,15 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 				return mapExecutionError(report, err, "source bytes changed after their durable deletion attempt")
 			}
 		}
+		if !otherUseChecked {
+			// Other jobs are re-enumerated with one fresh complete ledger read
+			// after all long source reads and immediately before the first
+			// unlink of this invocation; any doubt leaves every name in place.
+			if err := checkOtherClientUseBeforeRemoval(ctx, report, journal, session, otherUse); err != nil {
+				return mapOtherClientUseExecutionError(report, err)
+			}
+			otherUseChecked = true
+		}
 		if beforeSourceRemovalHook != nil {
 			if err := beforeSourceRemovalHook(sequence); err != nil {
 				return executionInterrupted(report, err, "source retirement was interrupted before source-name removal")
@@ -347,14 +367,10 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 		}
 		populateExecutionFromJournal(report, journal)
 	}
-	freshFinal, finalObservation, err := final.Reverify(ctx)
-	if err != nil {
-		return mapFinalExecutionError(report, err, "the materialized final could not be reverified after source deletion")
-	}
-	if freshFinal == nil || finalObservation.FinalObjectIdentity != journal.state.Intent.FinalObjectIdentity {
-		return executionIntegrity(report, "the materialized final identity changed during source retirement")
-	}
-	report.Final = finalObservation
+	// Read the live downloader first, right after the last unlink, so a
+	// client session that expires during the full final reverification below
+	// cannot strand a completed deletion; any failure here leaves a resumable
+	// partial operation and completion is journaled only after both checks.
 	after, afterObservation, err := clientactivate.VerifyCurrentUse(ctx, currentUse, session)
 	report.ClientUse.After = afterObservation
 	report.ClientUse.RequestsMade = session.RequestsMade()
@@ -367,6 +383,14 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 		report.ClientUse.Status = "unstable"
 		return executionPartial(report, nil, "client.current_use_unstable", "the live downloader identity, state, layout, or paths changed across deletion")
 	}
+	freshFinal, finalObservation, err := final.Reverify(ctx)
+	if err != nil {
+		return mapFinalExecutionError(report, err, "the materialized final could not be reverified after source deletion")
+	}
+	if freshFinal == nil || finalObservation.FinalObjectIdentity != journal.state.Intent.FinalObjectIdentity {
+		return executionIntegrity(report, "the materialized final identity changed during source retirement")
+	}
+	report.Final = finalObservation
 	report.ClientUse.Status, report.ClientUse.Stable = "observed_stable", true
 	report.ClientUse.Assurance = "same_session_before_after_typed_job_and_effective_path_claims_bracketed_with_deletion_and_exact_final_reverification_non_atomic"
 	_, markerReceipt, err := journal.publishComplete(ctx, afterObservation.CompleteFileSnapshotID)
@@ -378,6 +402,35 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 	report.Outcome, report.Operation.Status, report.Operation.Phase, report.Operation.Resumable = ExecutionOutcomeRetired, "complete", "complete", false
 	report.finalize()
 	return *report, nil
+}
+
+func checkOtherClientUseBeforeRemoval(ctx context.Context, report *ExecutionReport, journal *executionJournal, session downloader.LedgerSession,
+	otherUse otherClientUseGuard) error {
+	if session == nil {
+		return fmt.Errorf("%w: the downloader read session is unavailable", errOtherClientUseIncomplete)
+	}
+	remaining := make([]string, 0, len(journal.state.Intent.Files))
+	for sequence, file := range journal.state.Intent.Files {
+		if !journal.state.DeletedPresent[sequence] {
+			remaining = append(remaining, filepath.Join(file.ParentPath, file.Name))
+		}
+	}
+	report.addEffect("read_live_downloader_ledger")
+	snapshot, err := session.ReadLedger(ctx)
+	report.ClientUse.RequestsMade = session.RequestsMade()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errOtherClientUseIncomplete, err)
+	}
+	return otherUse.check(ctx, snapshot, remaining)
+}
+
+func mapOtherClientUseExecutionError(report *ExecutionReport, err error) (ExecutionReport, error) {
+	code, message, blocked := otherClientUseFinding(err)
+	if blocked {
+		return executionBlocked(report, code, message)
+	}
+	report.addBlocker(code, message)
+	return executionInterrupted(report, err, "other downloader jobs could not be ruled out before source-name removal")
 }
 
 func mapReviewFailure(report *ExecutionReport, err error) (ExecutionReport, error) {

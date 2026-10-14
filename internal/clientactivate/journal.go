@@ -657,7 +657,45 @@ func (handle *journalHandle) recoverPending(ctx context.Context, name string) (m
 	if err := handle.validatePendingDestination(destination, raw); err != nil {
 		return markerWriteReceipt{}, err
 	}
+	if strings.HasPrefix(destination, "recheck-attempt-") || strings.HasPrefix(destination, "start-attempt-") {
+		if discarded, receipt, discardErr := handle.discardUnpublishedAttempt(ctx, name, destination, raw); discarded || discardErr != nil {
+			return receipt, discardErr
+		}
+	}
 	return handle.writeMarker(ctx, destination, raw)
+}
+
+// discardUnpublishedAttempt removes a staged attempt marker whose destination
+// was never published. An attempt is durably published before its client
+// request is sent, so an unpublished attempt proves the request was never
+// sent. Publishing it during recovery would invent an attempt that consumes the
+// attempt budget and would let an unrelated later checking or started state be
+// recorded against it. When the destination already exists the caller keeps
+// the ordinary publication path.
+func (handle *journalHandle) discardUnpublishedAttempt(ctx context.Context, name, destination string, raw []byte) (bool, markerWriteReceipt, error) {
+	var receipt markerWriteReceipt
+	destinationPath, _ := fsbind.PathFromComponents([]string{destination})
+	if _, err := handle.subtree.Inspect(ctx, destinationPath); err == nil {
+		return false, receipt, nil
+	} else if !errors.Is(err, fsbind.ErrNotFound) {
+		return false, receipt, classifyJournalError(err)
+	}
+	identity, err := handle.verifyNamedBytes(ctx, []string{scratchDirectory, name}, raw)
+	if err != nil {
+		return false, receipt, err
+	}
+	pendingPath, _ := fsbind.PathFromComponents([]string{scratchDirectory, name})
+	removal, err := handle.subtree.RemoveRegularExact(ctx, pendingPath, identity, int64(len(raw)))
+	receipt.TemporaryRemovalAttempted = removal.Attempted
+	receipt.TemporaryRemoved = err == nil && removal.Removed
+	receipt.TemporaryRemovalUncertain = err != nil || (removal.Attempted && (!removal.Removed || removal.Durability != "confirmed"))
+	if err != nil {
+		return false, receipt, err
+	}
+	if receipt.TemporaryRemovalUncertain || !removal.Removed {
+		return false, receipt, fmt.Errorf("%w: unpublished activation attempt could not be discarded durably", ErrIntegrity)
+	}
+	return true, receipt, nil
 }
 
 func (handle *journalHandle) validatePendingDestination(destination string, raw []byte) error {

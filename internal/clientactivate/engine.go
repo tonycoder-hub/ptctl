@@ -4,12 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientadopt"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 )
+
+// actionSettleDelays bounds the same-invocation re-observation after an
+// accepted recheck or start response whose first observation is inconclusive.
+// qBittorrent publishes the effect of both requests on its next status refresh
+// (about 1.5s by default), so the first observation can still show the
+// pre-request state. The probes are read-only; the action is never repeated
+// and no attempt budget is spent.
+var actionSettleDelays = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, 750 * time.Millisecond, time.Second}
 
 type RunOptions struct {
 	Authority          *PreparedAuthority
@@ -476,6 +485,10 @@ func continueOperation(ctx context.Context, prepared *PreparedPlan, handle *jour
 		if checkingState(observed.job.State) {
 			return recordRecheckStarted(ctx, prepared, handle, observed, report)
 		}
+		if len(state.RecheckAttempts) >= maximumActionAttempts {
+			applyRecheckBudgetExhausted(report)
+			return fmt.Errorf("%w: recheck attempt budget is exhausted without an observed checking or completion edge", ErrPolicy)
+		}
 		if !(options.AcknowledgeRecheck && options.RepeatRecheck) {
 			report.Outcome = OutcomeRecheckRequestUnknown
 			report.Operation.Status, report.Operation.Resumable = "active", true
@@ -617,6 +630,27 @@ func executeAction(ctx context.Context, prepared *PreparedPlan, handle *journalH
 	if after.jobID != prepared.plan.JobID || after.fileLayoutID != prepared.plan.ExpectedFileLayoutID {
 		return fmt.Errorf("%w: downloader job identity or layout changed across the action", ErrIntegrity)
 	}
+	for index := 0; mutationErr == nil && !actionObservationConclusive(action, before, after) && index < len(actionSettleDelays); index++ {
+		if !waitSettleDelay(ctx, actionSettleDelays[index]) {
+			break
+		}
+		probe, probeErr := observeClientBounded(ctx, prepared.authority, session)
+		report.recordClientObservationUsage(probe)
+		if errors.Is(probeErr, ErrIntegrity) {
+			return probeErr
+		}
+		if probeErr != nil {
+			break
+		}
+		if probe.ledger.ObservedAtStart.Before(before.ledger.ObservedAtEnd) {
+			return fmt.Errorf("%w: downloader observations are not ordered across the action", ErrIntegrity)
+		}
+		if probe.jobID != prepared.plan.JobID || probe.fileLayoutID != prepared.plan.ExpectedFileLayoutID {
+			return fmt.Errorf("%w: downloader job identity or layout changed across the action", ErrIntegrity)
+		}
+		report.observeClient(probe)
+		after = probe
+	}
 	if action == AttemptActionRecheck {
 		if checkingState(after.job.State) {
 			if mutationErr != nil {
@@ -644,6 +678,29 @@ func executeAction(ctx context.Context, prepared *PreparedPlan, handle *journalH
 	report.Outcome = OutcomeStartRequestUnknown
 	report.Operation.Status, report.Operation.Resumable = "active", true
 	return errors.Join(ErrRequestUnknown, mutationErr)
+}
+
+func waitSettleDelay(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// actionObservationConclusive mirrors the evidence accepted below: a checking
+// state or an incomplete-to-complete stopped edge for recheck, and a complete
+// started state for start.
+func actionObservationConclusive(action string, before, after clientObservation) bool {
+	complete := after.job.Progress == 1 && after.allSelected && after.allComplete
+	if action == AttemptActionStart {
+		return startedState(after.job.State) && complete
+	}
+	return checkingState(after.job.State) || completeStoppedState(after.job.State) && complete &&
+		(before.job.Progress < 1 || !completeStoppedState(before.job.State))
 }
 
 func recordRecheckStarted(ctx context.Context, prepared *PreparedPlan, handle *journalHandle, observed clientObservation, report *Report) error {
@@ -795,6 +852,8 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 	case handle.state.RecheckStarted != nil:
 		report.Outcome = OutcomeRecheckInProgress
 		report.Operation.Status, report.Operation.Resumable = "active", true
+	case len(handle.state.RecheckAttempts) >= maximumActionAttempts:
+		applyRecheckBudgetExhausted(&report)
 	case len(handle.state.RecheckAttempts) > 0:
 		report.Outcome = OutcomeRecheckRequestUnknown
 		report.Operation.Status, report.Operation.Resumable = "active", true
@@ -805,6 +864,18 @@ func Status(ctx context.Context, options StatusOptions) (Report, error) {
 	report.Operation.PhaseBefore, report.Operation.PhaseAfter = phase, phase
 	report.finalize()
 	return report, nil
+}
+
+// applyRecheckBudgetExhausted reports a recheck journal whose explicit attempt
+// budget is spent without an observed checking state or same-invocation
+// completion edge. Neither qBittorrent nor Transmission exposes a later proof
+// that a fast check ran, so the journal cannot complete and is reported as
+// blocked instead of resumable; another recheck is never sent.
+func applyRecheckBudgetExhausted(report *Report) {
+	report.Outcome = OutcomeBlocked
+	report.Operation.Status, report.Operation.Resumable = "attempt_budget_exhausted", false
+	report.addBlocker("client_activation.recheck_attempt_budget_exhausted",
+		"every explicit recheck attempt finished without an observable checking state or completion edge; no further recheck is sent")
 }
 
 func reportFromState(report *Report, state journalState) {

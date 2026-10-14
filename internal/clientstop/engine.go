@@ -5,12 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 )
+
+// acceptedStopSettleDelays bounds the same-session re-observation after an
+// accepted stop response whose first exact observation is still started.
+// qBittorrent applies a stop asynchronously and publishes the stopped state on
+// its next status refresh (about 1.5s by default), so the immediate observation
+// can lag. The schedule adds read-only ledger probes only; it never repeats the
+// stop request or consumes the stop attempt budget.
+var acceptedStopSettleDelays = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, 750 * time.Millisecond, time.Second}
 
 type RunOptions struct {
 	TargetRoot      string
@@ -75,14 +84,14 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 	defer handle.Close()
 	report.Operation.Status, report.Operation.Phase, report.Operation.Resumable = "active", "journaled", true
 
-	current, currentObservation, err := options.Prepared.current.Reobserve(ctx, options.Session)
+	current, currentObservation, err := options.Prepared.current.ReobserveStarted(ctx, options.Session)
 	if err != nil {
 		report.classify(err)
 		return report, err
 	}
 	if !current.JobStarted() || currentObservation.UseID != plan.UseID || currentObservation.JobID != plan.JobID ||
 		currentObservation.FileLayoutID != plan.FileLayoutID || currentObservation.CompleteFileSnapshotID != plan.CompleteFileSnapshotID ||
-		currentObservation.JobState != plan.ReviewedJobState {
+		!reviewedJobStateMatches(plan, currentObservation.JobState) {
 		err = fmt.Errorf("%w: current downloader use differs from the reviewed client stop plan", ErrPolicy)
 		report.classify(err)
 		return report, err
@@ -163,6 +172,10 @@ func executeAttempt(ctx context.Context, handle *journalHandle, current *clienta
 		return *report, unknown
 	}
 	stopped, stoppedObservation, stoppedErr := clientactivate.VerifyCurrentJobStopped(ctx, current, session)
+	if stoppedErr != nil && mutationReceipt.Complete && mutationErr == nil && errors.Is(stoppedErr, clientactivate.ErrPolicy) &&
+		stoppedObservation.JobID != "" && awaitAcceptedStopSettled(ctx, current, session) {
+		stopped, stoppedObservation, stoppedErr = clientactivate.VerifyCurrentJobStopped(ctx, current, session)
+	}
 	if stoppedErr != nil {
 		report.Stopped.Status = "not_proven"
 		if errors.Is(stoppedErr, clientactivate.ErrIntegrity) || errors.Is(stoppedErr, materialize.ErrIntegrity) {
@@ -189,6 +202,29 @@ func executeAttempt(ctx context.Context, handle *journalHandle, current *clienta
 	}
 	return completeStopped(ctx, handle, plan, planID, attemptID, responseID, mutationReceipt.Complete && mutationErr == nil,
 		stopped, stoppedObservation, report)
+}
+
+// awaitAcceptedStopSettled waits on acceptedStopSettleDelays for the same
+// session to report the exact job as stopped. A probe error, cancellation, or
+// an exhausted schedule leaves the original not-stopped result in force.
+func awaitAcceptedStopSettled(ctx context.Context, current *clientactivate.VerifiedCurrentUse, session downloader.ExistingJobStopSession) bool {
+	for _, delay := range acceptedStopSettleDelays {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		stopped, err := clientactivate.ProbeCurrentJobStopped(ctx, current, session)
+		if err != nil {
+			return false
+		}
+		if stopped {
+			return true
+		}
+	}
+	return false
 }
 
 func completeStopped(ctx context.Context, handle *journalHandle, plan Plan, planID string, attemptID, responseID MarkerID,
@@ -235,8 +271,11 @@ func completeStopped(ctx context.Context, handle *journalHandle, plan Plan, plan
 
 func validateRunOptions(options RunOptions) error {
 	if options.TargetRoot == "" || options.Prepared == nil || options.Session == nil || !options.AcknowledgeStop ||
-		!canonicalPlanID(options.ExpectedPlanID) || options.ExpectedPlanID != options.Prepared.planID {
+		!canonicalPlanID(options.ExpectedPlanID) {
 		return fmt.Errorf("%w: client stop run options are invalid or unacknowledged", ErrPolicy)
+	}
+	if options.ExpectedPlanID != options.Prepared.planID {
+		return fmt.Errorf("%w: expected client stop plan ID differs from the live reviewed plan; review a fresh plan (plans reviewed before %s cannot be run)", ErrPolicy, PlanSchemaV2)
 	}
 	if err := options.Prepared.validate(); err != nil {
 		return err
