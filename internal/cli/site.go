@@ -256,6 +256,9 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 	case "account":
 		account := data.(domain.AccountSnapshot)
 		fmt.Fprintf(w, "SITE\t%s\nUSERNAME\t%s\n", terminalSafe(account.SiteID), terminalSafe(account.Username))
+		if account.UserClass != "" {
+			fmt.Fprintf(w, "CLASS\t%s\n", terminalSafe(account.UserClass))
+		}
 		if account.UploadedBytes != nil {
 			fmt.Fprintf(w, "UPLOADED\t%s\n", humanBytes(*account.UploadedBytes))
 		}
@@ -270,6 +273,12 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 		}
 		if account.Leeching != nil {
 			fmt.Fprintf(w, "LEECHING\t%d\n", *account.Leeching)
+		}
+		if account.SeedingPoints != "" {
+			fmt.Fprintf(w, "SEEDING POINTS\t%s\n", terminalSafe(account.SeedingPoints))
+		}
+		if account.Invites != nil {
+			fmt.Fprintf(w, "INVITES\t%d\n", *account.Invites)
 		}
 		fmt.Fprintf(w, "BONUS\t%s\nOBSERVED\t%s\n", terminalSafe(valueOrUnknown(account.Bonus)), account.ObservedAt.Format(time.RFC3339))
 	case "search":

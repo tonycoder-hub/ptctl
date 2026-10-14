@@ -11,9 +11,9 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/site"
 )
 
-// The live wording is shaped like TJUPT's mybonusapps.php: the balance is in
-// the intro sentence, and the luck game's rule text mentions an unrelated
-// "当前魔力值≥1000".
+// The live wording is shaped like TJUPT's bonus pages: mybonus.php states the
+// balance as "用你的魔力值（当前N）换东东！", and the luck game's rule text on
+// mybonusapps.php mentions an unrelated "当前魔力值≥1000".
 func TestParseBonusBalanceReadsLiveWordingAndIgnoresRuleText(t *testing.T) {
 	const live = `<title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title>
 <span class='color_bonus'> 魔力值 </span>[<a href="mybonus.php">使用</a>|<a href="mybonusapps.php">茉莉园</a>]: <a href="bonus.php?show=log">1,439,363.7</a>
@@ -33,37 +33,34 @@ func TestParseBonusBalanceReadsLiveWordingAndIgnoresRuleText(t *testing.T) {
 }
 
 func TestParseAccountAndBonusCatalog(t *testing.T) {
-	body := []byte(`<!doctype html><html><head><title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title></head>
-	<body><div>当前魔力值：12,345.67</div><table>
-<tr><td>上传量兑换</td><td>10 GiB</td><td>1000</td><td><form action="mybonusapps.php" method="post"><input type="hidden" name="option" value="1"><input type="submit" value="兑换"></form></td></tr>
-	<tr><td>普通导航</td><td>不应进入目录</td></tr></table></body></html>`)
+	body := bonusReviewPage(tjuptBonusRow("1", "1", "上传量兑换", "用魔力值兑换 10.0 GiB 上传量。", "1,000", `<input type="submit" name="submit" value="交换" />`) +
+		`<tr><td>普通导航</td><td>不应进入目录</td></tr>`)
 	if got := parseUsername(body); got != "Alice" {
 		t.Fatalf("username = %q", got)
 	}
 	if got := parseBonusBalance(body); got != "12345.67" {
 		t.Fatalf("balance = %q", got)
 	}
-	rows := parseBonusRows(body)
-	if len(rows) != 1 || len(rows[0].Columns) < 3 {
-		t.Fatalf("unexpected rows: %#v", rows)
+	rows, err := parseBonusCatalog(body)
+	if err != nil || len(rows) != 1 || rows[0].Selector != "1" || strings.Join(rows[0].Columns, "|") != "上传量兑换|1,000|交换|available" {
+		t.Fatalf("rows=%#v err=%v", rows, err)
 	}
-	if rows[0].Selector != "1" {
-		t.Fatalf("bonus selector = %q", rows[0].Selector)
-	}
-	u, _ := url.Parse("https://www.tjupt.org/mybonusapps.php")
+	u, _ := url.Parse("https://www.tjupt.org/mybonus.php")
 	state, username := classifyBonusPage(u, body)
 	if state != domain.AuthenticationAuthenticated || username != "Alice" {
 		t.Fatalf("bonus classification state=%q username=%q", state, username)
 	}
 }
 
-func TestBonusCatalogSelectorHintRejectsAmbiguousControls(t *testing.T) {
-	body := []byte(`<table><tr><td>A</td><td>100</td><td><form action="mybonusapps.php" method="post">
-<input type="hidden" name="option" value="1"><input type="hidden" name="option" value="2"><input type="submit">
-</form></td></tr></table>`)
-	rows := parseBonusRows(body)
-	if len(rows) != 1 || rows[0].Selector != "" {
-		t.Fatalf("rows=%#v", rows)
+func TestBonusCatalogRejectsAmbiguousSelectors(t *testing.T) {
+	for name, rows := range map[string]string{
+		"two selectors in one form": `<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="hidden" name="option" value="2"><input type="submit"></form></tr>`,
+		"repeated selector":         tjuptBonusRow("1", "1", "A", "a", "100", `<input type="submit">`) + tjuptBonusRow("1", "2", "B", "b", "200", `<input type="submit">`),
+		"visible selector":          `<tr><td>设置</td><td><form action="settings.php"><input name="option"></form></td></tr>`,
+	} {
+		if got, err := parseBonusCatalog(bonusReviewPage(rows)); err == nil || bonusParseStopReason(err) != "selector_ambiguous" {
+			t.Fatalf("%s: rows=%#v err=%v", name, got, err)
+		}
 	}
 }
 
@@ -141,7 +138,11 @@ func TestSearchRejectsUnrecognizedResultStructure(t *testing.T) {
 }
 
 func TestPageClassificationFailsClosed(t *testing.T) {
-	bonusURL, _ := url.Parse("https://www.tjupt.org/mybonusapps.php")
+	gamesURL, _ := url.Parse("https://www.tjupt.org/mybonusapps.php")
+	if state, _ := classifyBonusPage(gamesURL, bonusReviewPage("")); state != domain.AuthenticationIndeterminate {
+		t.Fatalf("games page state = %q", state)
+	}
+	bonusURL, _ := url.Parse("https://www.tjupt.org/mybonus.php")
 	for _, body := range [][]byte{
 		[]byte(`<html><title>Maintenance</title></html>`),
 		[]byte(`<html><title>Just a moment...</title><div id="cf-chl-widget"></div></html>`),
@@ -205,16 +206,26 @@ func TestSearchShellWithMaintenanceBodyIsIndeterminate(t *testing.T) {
 	}
 }
 
-func TestBonusCatalogRejectsUnrelatedForms(t *testing.T) {
-	body := []byte(`<html><head><title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title></head><body>
-	<div>当前魔力值：12,345.67</div><table><tr><td>设置</td><td><form action="settings.php"><input name="option"></form></td></tr></table></body></html>`)
-	if rows := parseBonusRows(body); len(rows) != 0 {
-		t.Fatalf("unrelated form became bonus rows: %#v", rows)
+func TestBonusCatalogSkipsUnrelatedForms(t *testing.T) {
+	body := bonusReviewPage(`<tr><td>设置</td><td><form action="settings.php"><input name="theme"></form></td></tr>`)
+	if rows, err := parseBonusCatalog(body); err == nil || bonusParseStopReason(err) != "selector_not_found" {
+		t.Fatalf("unrelated form became bonus rows: %#v err=%v", rows, err)
+	}
+	body = bonusReviewPage(`<tr><td>设置</td><td><form action="settings.php"><input name="theme"></form></td></tr>` + tjuptBonusRow("3", "3", "C", "c", "300", `<input type="submit" value="交换">`))
+	if rows, err := parseBonusCatalog(body); err != nil || len(rows) != 1 || rows[0].Selector != "3" {
+		t.Fatalf("rows=%#v err=%v", rows, err)
 	}
 }
 
+// tjuptBonusRow follows mybonus.php: each offer is a <tr> whose <form> wraps
+// the display-number, description, price, and submit cells, and whose name is
+// the description cell's <h1>.
+func tjuptBonusRow(option, display, name, description, price, submit string) string {
+	return `<tr><form action="?action=exchange" method="post"><td class="rowhead_center"><input type="hidden" name="option" value="` + option + `" /><b>` + display + `</b></td><td class="rowfollow" align='left'><h1>` + name + `</h1>` + description + `</td><td class="rowfollow" align='center'>` + price + `</td><td class="rowfollow" align="center">` + submit + `</td></form></tr>`
+}
+
 func TestDetectLoginPage(t *testing.T) {
-	u, _ := url.Parse("https://www.tjupt.org/login.php?returnto=mybonusapps.php")
+	u, _ := url.Parse("https://www.tjupt.org/login.php?returnto=mybonus.php")
 	if !isLoginPage(u, []byte(`<input name="username"><input name="password">`)) {
 		t.Fatal("login page not detected")
 	}

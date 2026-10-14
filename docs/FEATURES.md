@@ -71,15 +71,18 @@ deliberately does not. For step-by-step usage, see the
 - traversal, separator, Windows device-name, case-collision, and conservative
   Unicode-normalization checks;
 - typed, capability-checked site ports instead of a monolithic driver;
-- an experimental TJUPT session check, bounded partial account snapshot,
-  torrent search, torrent-detail observation, bonus catalog parser, and
-  exact-option zero-write bonus review
+- an experimental TJUPT session check, bounded account snapshot (bonus plus
+  the user panel's uploaded total, class, seeding points, invites, and peer
+  counts), torrent search with category, publish time, peer and snatch counts,
+  and promotion, torrent-detail observation with size and snatch count, bonus
+  catalog parser, and exact-option zero-write bonus review
   through one bounded, same-origin HTTPS GET per invocation, with fail-closed
   page recognition, no redirect, and no retry; detail requests deliberately
   omit NexusPHP's view-counting `hit` parameter; bonus review records a bounded
   form-shape digest and semantic review ID but never submits the form; both
   remain site claims only;
-- an explicitly acknowledged, durable TJUPT bonus-exchange state machine:
+- an explicitly acknowledged, durable bonus-exchange state machine (withheld
+  for TJUPT, which confirms each exchange with the account password):
   private reviewed intent, fresh exact-option re-observation, deterministic
   no-clobber attempt marker, at most one non-retried POST, and a separately
   sealed confirmed/rejected/unknown outcome; its credential-free bounded
