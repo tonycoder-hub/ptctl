@@ -111,7 +111,12 @@ func (a *Adapter) Search(ctx context.Context, credential site.Credential, query 
 	case domain.AuthenticationIndeterminate:
 		return nil, fmt.Errorf("TJUPT returned an unrecognized search page; refusing to treat it as an empty result")
 	}
-	return parseSearch(body), nil
+	results := parseSearch(body)
+	if len(results) == 0 && !emptySearch.Match(body) {
+		// Links to details.php were present but none formed a result row.
+		return nil, fmt.Errorf("TJUPT returned an unrecognized search page; refusing to treat it as an empty result")
+	}
+	return results, nil
 }
 
 func (a *Adapter) BonusCatalog(ctx context.Context, credential site.Credential) (domain.BonusCatalog, error) {
