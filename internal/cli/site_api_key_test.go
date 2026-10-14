@@ -132,7 +132,7 @@ func TestSiteCommandsReportUnknownSitesAndUndeclaredCapabilitiesAsUsage(t *testi
 			secret := &trackingReader{}
 			var out, errOut bytes.Buffer
 			application := &app{stdin: secret, stdout: &out, stderr: &errOut, registry: site.NewRegistry(&apiKeySiteAdapter{})}
-			if code := runWithApp(test.args, application); code != 2 || out.Len() != 0 || secret.read || !strings.Contains(errOut.String(), test.want) || !strings.Contains(errOut.String(), "run 'ptctl help' for usage") {
+			if code := runWithApp(test.args, application); code != 2 || out.Len() != 0 || secret.read || !strings.Contains(errOut.String(), test.want) || !strings.Contains(errOut.String(), "run 'pt help' for usage") {
 				t.Fatalf("code=%d stdout=%q stderr=%q secretRead=%t", code, out.String(), errOut.String(), secret.read)
 			}
 		})

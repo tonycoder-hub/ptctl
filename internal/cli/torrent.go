@@ -11,6 +11,9 @@ import (
 )
 
 func (a *app) torrent(args []string) error {
+	if groupHelpRequested(args) {
+		return a.helpTopic([]string{"torrent"})
+	}
 	if len(args) == 0 {
 		return usageError("torrent subcommand is required")
 	}
@@ -20,8 +23,8 @@ func (a *app) torrent(args []string) error {
 		output := fs.String("output", "table", "table or json")
 		storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
 		variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
-		if err := fs.Parse(args[1:]); err != nil {
-			return usageError("torrent inspect: %v", err)
+		if done, err := a.parseReadOnlyFlags(fs, args[1:], "torrent inspect [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)"); done || err != nil {
+			return err
 		}
 		if err := validateOutput(*output); err != nil {
 			return err
@@ -47,8 +50,8 @@ func (a *app) torrent(args []string) error {
 		content := fs.String("content", "", "exact file (single-file) or torrent root directory (multi-file)")
 		storeRoot := fs.String("metafile-store", "", "private metafile store root; pair with --metafile-variant")
 		variantID := fs.String("metafile-variant", "", "whole-metafile sha256 artifact ID; pair with --metafile-store")
-		if err := fs.Parse(args[1:]); err != nil {
-			return usageError("torrent verify: %v", err)
+		if done, err := a.parseReadOnlyFlags(fs, args[1:], "torrent verify --content PATH [--output table|json] (FILE.torrent | --metafile-store DIR --metafile-variant ID)"); done || err != nil {
+			return err
 		}
 		if *content == "" {
 			return usageError("torrent verify requires --content PATH")

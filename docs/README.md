@@ -8,6 +8,9 @@ documents that matter to them.
 
 ## Using ptctl
 
+- [Read-only quickstart](READ_ONLY_QUICKSTART.md): install a preview package,
+  verify checksums, and try inspection, verification, and reconciliation on
+  synthetic samples without credentials.
 - [Command guide](guide/README.md): every command family in workflow order,
   with examples, plus the complete status and write-boundary statement.
 - [Exit codes and report-first results](guide/exit-codes-and-reports.md): what
@@ -29,6 +32,8 @@ documents that matter to them.
   adapter and its page-level contract.
 - [Materialize retention](MATERIALIZE_RETENTION.md): the prune/forget state
   machine for materialize operations.
+- [Releasing](RELEASING.md): VERSION and tag rules, and the draft-only release
+  workflow.
 
 ## Coding agents and automation
 
