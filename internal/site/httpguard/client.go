@@ -505,6 +505,12 @@ func strictResponseMediaType(values []string) (string, error) {
 		return "", nil
 	}
 	mediaType, parameters, err := mime.ParseMediaType(strings.TrimSpace(values[0]))
+	if errors.Is(err, mime.ErrInvalidMediaParameter) {
+		// TJUPT sends "text/html; charset=utf-8; Cache-control:private". Parse
+		// again without such segments, so a charset after one is still checked
+		// and a duplicate parameter is still rejected.
+		mediaType, parameters, err = mime.ParseMediaType(withoutMalformedMediaParams(strings.TrimSpace(values[0])))
+	}
 	if err != nil {
 		return "", fmt.Errorf("site response content type was invalid")
 	}
@@ -515,6 +521,21 @@ func strictResponseMediaType(values []string) (string, error) {
 		}
 	}
 	return mediaType, nil
+}
+
+// withoutMalformedMediaParams keeps the media type and each ";"-separated
+// parameter segment that contains "=" or names a charset. A malformed charset
+// segment is kept so the second parse rejects it instead of dropping it, and a
+// quoted value split at ";" fails the second parse the same way.
+func withoutMalformedMediaParams(value string) string {
+	segments := strings.Split(value, ";")
+	kept := []string{segments[0]}
+	for _, segment := range segments[1:] {
+		if strings.Contains(segment, "=") || strings.Contains(strings.ToLower(segment), "charset") {
+			kept = append(kept, segment)
+		}
+	}
+	return strings.Join(kept, ";")
 }
 
 func safeRedirectTarget(base *url.URL, raw string) (*url.URL, bool) {
