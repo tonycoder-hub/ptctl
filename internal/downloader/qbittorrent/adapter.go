@@ -390,7 +390,7 @@ func (s *readSession) login(ctx context.Context, credential downloader.Credentia
 		return fmt.Errorf("read qBittorrent login response: %w", err)
 	}
 	if !loginAccepted(resp.StatusCode, body) {
-		return fmt.Errorf("qBittorrent rejected the login")
+		return loginRejected(resp.StatusCode, body)
 	}
 	return nil
 }
@@ -402,6 +402,24 @@ func (s *readSession) login(ctx context.Context, credential downloader.Credentia
 func loginAccepted(status int, body []byte) bool {
 	return status == http.StatusOK && len(body) <= 1024 && strings.TrimSpace(string(body)) == "Ok." ||
 		status == http.StatusNoContent && len(body) == 0
+}
+
+// loginRejected names the usual cause of a refused login without echoing the
+// response. qBittorrent 5.2+ answers bad credentials with 401, but every
+// version also answers 401 when the Host header's port differs from the WebUI
+// port, as through a Docker port mapping that changes it. 403 means the
+// address is banned after repeated failed logins, whatever is sent now.
+func loginRejected(status int, body []byte) error {
+	switch {
+	case status == http.StatusOK && strings.TrimSpace(string(body)) == "Fails.":
+		return fmt.Errorf("qBittorrent rejected the username or password")
+	case status == http.StatusUnauthorized:
+		return fmt.Errorf("qBittorrent rejected the login (HTTP 401): check the username and password; qBittorrent also answers 401 when the URL's port differs from its WebUI port, as through a Docker port mapping, and then logs \"Invalid Host header\"")
+	case status == http.StatusForbidden:
+		return fmt.Errorf("qBittorrent refused the login (HTTP 403): it bans an address after repeated failed logins; wait for the ban to expire or restart qBittorrent")
+	default:
+		return fmt.Errorf("qBittorrent rejected the login (HTTP %d)", status)
+	}
 }
 
 func (s *readSession) getText(ctx context.Context, path string) (string, error) {

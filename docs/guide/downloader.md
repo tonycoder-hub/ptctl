@@ -31,6 +31,19 @@ printf '%s' "$TRANSMISSION_PASSWORD" | ptctl client list \
   --password-stdin
 ```
 
+If the downloader refuses the login, the error names the usual cause:
+
+- qBittorrent answers HTTP 401 both to a wrong password (5.2 and later) and to
+  a URL whose port differs from its WebUI port. Behind Docker, publish the
+  WebUI on the same port inside and outside the container (with the official
+  image, `-e QBT_WEBUI_PORT=8090 -p 8090:8090`); otherwise its log says
+  "Invalid Host header".
+- qBittorrent answers HTTP 403 once repeated failed logins have banned the
+  address. Wait for the ban to expire or restart qBittorrent.
+- Transmission answers HTTP 403 before checking the password when
+  `rpc-whitelist` does not include the caller (behind Docker that is the bridge
+  gateway, not 127.0.0.1) or while its anti-brute-force lock is active.
+
 Adopt one exact materialized layout into qBittorrent or Transmission without
 starting it. The default action adds an absent stopped job:
 
