@@ -18,6 +18,11 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 )
 
+// bonusPagePath is TJUPT's bonus exchange page. mybonusapps.php is the
+// unrelated games page (茉莉园), which also states the balance but offers no
+// exchange forms.
+const bonusPagePath = "mybonus.php"
+
 var (
 	loginUserField  = regexp.MustCompile(`(?is)name\s*=\s*["']?username["']?`)
 	loginPassField  = regexp.MustCompile(`(?is)name\s*=\s*["']?password["']?`)
@@ -26,26 +31,21 @@ var (
 	authenticatedUI = regexp.MustCompile(`(?is)<a\b[^>]*href\s*=\s*["']?[^"' >]*logout\.php(?:[?"' >])`)
 	// TJUPT torrents.php prints lang_torrents std_try_again for an empty
 	// search and std_nothing_found when the search string is PHP-empty.
-	emptySearch     = regexp.MustCompile(`(?is)(没有找到(?:任何)?种子|没有符合条件的种子|没有种子。请用准确的关键字重试|沒有種子。請用準確的關鍵字重試|没有结果！|沒有結果！|no torrents? found|nothing found)`)
-	bonusForm       = regexp.MustCompile(`(?is)<form\b[^>]*action\s*=\s*["']?[^"' >]*mybonusapps\.php[^"' >]*["']?[^>]*>`)
-	bonusOption     = regexp.MustCompile(`(?is)<input\b[^>]*name\s*=\s*["']?option["']?`)
-	titlePattern    = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-	usernameInTitle = regexp.MustCompile(`(?i)(PT\s*::\s*)?(.+?)\s*的魔力值`)
-	// TJUPT's live mybonusapps.php states the balance as "用你的魔力值（当前N）".
+	emptySearch  = regexp.MustCompile(`(?is)(没有找到(?:任何)?种子|没有符合条件的种子|没有种子。请用准确的关键字重试|沒有種子。請用準確的關鍵字重試|没有结果！|沒有結果！|no torrents? found|nothing found)`)
+	titlePattern = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	// TJUPT's live mybonus.php states the balance as "用你的魔力值（当前N）".
 	// Both forms need their exact separator, so rule text on the same page such
 	// as "如果当前魔力值≥1000" is never read as the balance.
 	balancePatterns = []*regexp.Regexp{
 		regexp.MustCompile(`魔力值\s*[（(]\s*当前\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*[）)]`),
 		regexp.MustCompile(`当前\s*魔力值\s*[:：]\s*([0-9][0-9,]*(?:\.[0-9]+)?)`),
 	}
-	rowPattern     = regexp.MustCompile(`(?is)<tr\b[^>]*>(.*?)</tr\s*>`)
-	cellPattern    = regexp.MustCompile(`(?is)<t[dh]\b[^>]*>(.*?)</t[dh]\s*>`)
 	detailsPattern = regexp.MustCompile(`(?is)<a\b[^>]*href\s*=\s*["']?([^"' >]*details\.php\?[^"' >]+)["']?[^>]*>(.*?)</a\s*>`)
 	idPattern      = regexp.MustCompile(`(^|[?&])id=([0-9]+)(&|$)`)
 	tagPattern     = regexp.MustCompile(`(?is)<[^>]+>`)
 	scriptPattern  = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>|<style\b[^>]*>.*?</style\s*>`)
 	spacePattern   = regexp.MustCompile(`\s+`)
-	sizePattern    = regexp.MustCompile(`(?i)([0-9]+(\.[0-9]+)?)\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)\b`)
+	sizePattern    = regexp.MustCompile(`(?i)([0-9]+(\.[0-9]+)?)\s*(KiB|MiB|GiB|TiB|PiB|KB|MB|GB|TB|PB)\b`)
 )
 
 func classifyBonusPage(finalURL *url.URL, body []byte) (domain.AuthenticationState, string) {
@@ -55,7 +55,7 @@ func classifyBonusPage(finalURL *url.URL, body []byte) (domain.AuthenticationSta
 	if challengeMarker.Match(body) {
 		return domain.AuthenticationIndeterminate, ""
 	}
-	if finalURL == nil || !strings.HasSuffix(strings.ToLower(finalURL.Path), "/mybonusapps.php") || finalURL.RawQuery != "" || !utf8.Valid(body) {
+	if finalURL == nil || !strings.HasSuffix(strings.ToLower(finalURL.Path), "/"+bonusPagePath) || finalURL.RawQuery != "" || !utf8.Valid(body) {
 		return domain.AuthenticationIndeterminate, ""
 	}
 	username := parseUsername(body)
@@ -191,95 +191,6 @@ func decimalDigits(value string) bool {
 	return true
 }
 
-func parseBonusRows(body []byte) []domain.BonusCatalogRow {
-	rows := make([]domain.BonusCatalogRow, 0, 16)
-	for _, match := range rowPattern.FindAllSubmatch(body, 200) {
-		raw := string(match[1])
-		if !bonusForm.MatchString(raw) || !bonusOption.MatchString(raw) {
-			continue
-		}
-		cells := cellsFromRow(raw)
-		if len(cells) < 2 {
-			continue
-		}
-		rows = append(rows, domain.BonusCatalogRow{Selector: bonusSelectorFromRow(raw), Columns: cells})
-		if len(rows) >= 100 {
-			break
-		}
-	}
-	return rows
-}
-
-func bonusSelectorFromRow(raw string) string {
-	tokenizer := xhtml.NewTokenizer(bytes.NewBufferString(raw))
-	selector := ""
-	count := 0
-	complete := false
-	for tokens := 0; tokens < 512; tokens++ {
-		tokenType := tokenizer.Next()
-		if tokenType == xhtml.ErrorToken {
-			if errors.Is(tokenizer.Err(), io.EOF) {
-				complete = true
-				break
-			}
-			return ""
-		}
-		if tokenType != xhtml.StartTagToken && tokenType != xhtml.SelfClosingTagToken {
-			continue
-		}
-		token := tokenizer.Token()
-		if !strings.EqualFold(token.Data, "input") {
-			continue
-		}
-		attrs, err := strictBonusAttributes(token.Attr)
-		if err != nil || attrs["name"] != "option" {
-			if err != nil {
-				return ""
-			}
-			continue
-		}
-		count++
-		if strings.ToLower(attrs["type"]) != "hidden" || validateBonusSelector(attrs["value"]) != nil {
-			return ""
-		}
-		selector = attrs["value"]
-	}
-	if !complete || count != 1 {
-		return ""
-	}
-	return selector
-}
-
-func parseSearch(body []byte) []domain.TorrentSummary {
-	results := make([]domain.TorrentSummary, 0, 32)
-	seen := make(map[string]struct{})
-	for _, row := range searchRows(body, 500) {
-		link := detailsPattern.FindSubmatch(row)
-		if len(link) != 3 {
-			continue
-		}
-		href := html.UnescapeString(string(link[1]))
-		id := idPattern.FindStringSubmatch(href)
-		if len(id) != 4 {
-			continue
-		}
-		if _, exists := seen[id[2]]; exists {
-			continue
-		}
-		name := plainText(string(link[2]))
-		if name == "" {
-			continue
-		}
-		seen[id[2]] = struct{}{}
-		summary := domain.TorrentSummary{Ref: domain.TorrentRef{SiteID: SiteID, RemoteID: id[2]}, Name: name}
-		if size, ok := sizeAfterDetailsCell(string(row)); ok {
-			summary.SizeBytes = &size
-		}
-		results = append(results, summary)
-	}
-	return results
-}
-
 // searchRows returns the complete markup of each row of a NexusPHP
 // <table class="torrents">. TJUPT's torrenttable (include/functions.php)
 // nests a <table class="torrentname"> inside the name cell, so a non-greedy
@@ -354,38 +265,6 @@ func tagHasClass(tokenizer *xhtml.Tokenizer, class string) bool {
 	}
 }
 
-func sizeAfterDetailsCell(raw string) (int64, bool) {
-	cells := cellPattern.FindAllStringSubmatch(raw, 64)
-	detailsCell := -1
-	for i, cell := range cells {
-		if detailsPattern.MatchString(cell[1]) {
-			detailsCell = i
-			break
-		}
-	}
-	if detailsCell < 0 {
-		return 0, false
-	}
-	for _, cell := range cells[detailsCell+1:] {
-		if value, ok := firstSize([]string{plainText(cell[1])}); ok {
-			return value, true
-		}
-	}
-	return 0, false
-}
-
-func cellsFromRow(raw string) []string {
-	matches := cellPattern.FindAllStringSubmatch(raw, 64)
-	cells := make([]string, 0, len(matches))
-	for _, match := range matches {
-		text := plainText(match[1])
-		if text != "" {
-			cells = append(cells, text)
-		}
-	}
-	return cells
-}
-
 func plainText(raw string) string {
 	raw = scriptPattern.ReplaceAllString(raw, " ")
 	raw = tagPattern.ReplaceAllString(raw, " ")
@@ -406,7 +285,7 @@ func firstSize(cells []string) (int64, bool) {
 		}
 		unit := strings.ToUpper(match[3])
 		// NexusPHP's mksize/mksize_compact label 1024-based units KB, MB,
-		// GB, and TB, so both spellings use base 1024 here.
+		// GB, TB, and PB, so both spellings use base 1024 here.
 		base := float64(1024)
 		power := 1
 		switch unit[0] {
@@ -418,6 +297,8 @@ func firstSize(cells []string) (int64, bool) {
 			power = 3
 		case 'T':
 			power = 4
+		case 'P':
+			power = 5
 		}
 		bytes := value * math.Pow(base, float64(power))
 		if bytes >= 0 && bytes <= math.MaxInt64 {

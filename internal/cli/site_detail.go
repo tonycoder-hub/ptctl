@@ -167,7 +167,8 @@ func validateSuccessfulTorrentDetail(ref domain.TorrentRef, config site.TorrentD
 		receipt.ObservedAtStart.IsZero() || receipt.ObservedAtEnd.IsZero() || receipt.ObservedAtEnd.Before(receipt.ObservedAtStart) ||
 		requestsMade != 1 || receipt.Used.RequestsAttempted != 1 || receipt.Used.AutomaticRetries != 0 || receipt.Used.RedirectsFollowed != 0 ||
 		!receipt.Used.ResponseBytesKnown || receipt.Used.ResponseBytesRead <= 0 || receipt.Used.ResponseBytesRead > limits.MaxResponseBytes ||
-		!validPublicDetailTitle(detail.DisplayTitle) || detail.Seeders != nil && *detail.Seeders < 0 || detail.Leechers != nil && *detail.Leechers < 0 {
+		!validPublicDetailTitle(detail.DisplayTitle) || detail.Seeders != nil && *detail.Seeders < 0 || detail.Leechers != nil && *detail.Leechers < 0 ||
+		detail.SizeBytes != nil && *detail.SizeBytes < 0 || detail.Snatches != nil && *detail.Snatches < 0 {
 		return fmt.Errorf("detail receipt is invalid")
 	}
 	wantBasis := []string{site.DetailBasisAuthenticated, site.DetailBasisExactRef, site.DetailBasisOneRequest, site.DetailBasisSiteClaimOnly}
@@ -271,6 +272,12 @@ func writeSiteDetailHuman(out io.Writer, report siteDetailReport) error {
 		}
 		if detail.Leechers != nil {
 			fmt.Fprintf(w, "LEECHERS\t%d\n", *detail.Leechers)
+		}
+		if detail.SizeBytes != nil {
+			fmt.Fprintf(w, "SIZE\t%s\n", humanBytes(*detail.SizeBytes))
+		}
+		if detail.Snatches != nil {
+			fmt.Fprintf(w, "SNATCHES\t%d\n", *detail.Snatches)
 		}
 		fmt.Fprintf(w, "EVIDENCE BASIS\t%s\n", terminalSafe(strings.Join(detail.EvidenceBasis, ",")))
 	}

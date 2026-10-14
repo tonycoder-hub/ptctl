@@ -144,8 +144,10 @@ only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
 parameter and never follows the download reference found in the page.
 Bonus review sends only the one GET and has no POST-capable transport surface.
 The account projection accepts only the exact authenticated bonus-page route,
-valid UTF-8, a bounded username, and a canonical bonus decimal. Fields absent
-from that page remain unknown, and the snapshot cannot confirm exchange
+valid UTF-8, a bounded username, and a canonical bonus decimal. Optional
+fields come only from the page's single user-panel table, and only when every
+statement of a field agrees; the panel's network-access line is never read.
+Fields absent from that page remain unknown, and the snapshot cannot confirm exchange
 causality or a continuously current balance.
 
 The separate bonus-exchange command has a fixed two-request ceiling: one fresh

@@ -67,8 +67,41 @@ func (client *exchangeFakeClient) Close() error {
 	return nil
 }
 
+// newExchangeTestAdapter enables the exchange port that New leaves disabled,
+// so the port's fail-closed checks stay covered while TJUPT's password
+// confirmation keeps it out of production.
+func newExchangeTestAdapter(baseURL string) *Adapter {
+	adapter := New(baseURL)
+	adapter.exchangeEnabled = true
+	return adapter
+}
+
+func TestBonusExchangeIsDisabledInProduction(t *testing.T) {
+	adapter := New("")
+	factoryCalls := 0
+	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) {
+		factoryCalls++
+		return &exchangeFakeClient{}, nil
+	}
+	if adapter.Descriptor().Supports(domain.CapabilityBonusExchange) {
+		t.Fatal("production adapter declared bonus exchange")
+	}
+	if !adapter.Descriptor().Supports(domain.CapabilityBonusReview) {
+		t.Fatal("production adapter lost bonus review")
+	}
+	if _, err := adapter.BonusExchangeConfig(); err == nil || !strings.Contains(err.Error(), "password") {
+		t.Fatalf("config err=%v", err)
+	}
+	if err := adapter.ValidateBonusExchangeSelector("1"); err == nil {
+		t.Fatal("disabled exchange accepted a selector")
+	}
+	if session, err := adapter.OpenBonusExchangeSession(context.Background(), mustCredential(t, "sid=secret")); err == nil || session != nil || factoryCalls != 0 {
+		t.Fatalf("session=%v err=%v factoryCalls=%d", session, err, factoryCalls)
+	}
+}
+
 func TestBonusExchangeCapabilityAndConfigAreCredentialFree(t *testing.T) {
-	trusted := New("")
+	trusted := newExchangeTestAdapter("")
 	if !trusted.Descriptor().Supports(domain.CapabilityBonusExchange) {
 		t.Fatal("trusted production adapter did not declare bonus exchange")
 	}
@@ -82,7 +115,7 @@ func TestBonusExchangeCapabilityAndConfigAreCredentialFree(t *testing.T) {
 	if err := trusted.ValidateBonusExchangeSelector("01"); err == nil {
 		t.Fatal("non-canonical selector accepted")
 	}
-	custom := New("https://www.tjupt.org")
+	custom := newExchangeTestAdapter("https://www.tjupt.org")
 	if custom.Descriptor().Supports(domain.CapabilityBonusExchange) {
 		t.Fatal("custom origin declared bonus exchange")
 	}
@@ -91,7 +124,7 @@ func TestBonusExchangeCapabilityAndConfigAreCredentialFree(t *testing.T) {
 	}
 
 	readOnlyClient := &fakeGuardedClient{}
-	missingWritePort := New("")
+	missingWritePort := newExchangeTestAdapter("")
 	missingWritePort.newClient = func(string, string, time.Duration) (guardedClient, error) {
 		return readOnlyClient, nil
 	}
@@ -111,9 +144,9 @@ func TestBonusExchangeUsesFreshOpaqueFormExactlyOnce(t *testing.T) {
 			StatusCode: http.StatusFound, ObservedAtStart: start.Add(2 * time.Second), ObservedAtEnd: start.Add(3 * time.Second),
 			ResponseBytesKnown: true,
 		},
-		redirectLocation: "https://www.tjupt.org/mybonusapps.php?do=upload",
+		redirectLocation: "https://www.tjupt.org/mybonus.php?do=upload",
 	}
-	adapter := New("")
+	adapter := newExchangeTestAdapter("")
 	adapter.newClient = func(baseURL, gotCookie string, interval time.Duration) (guardedClient, error) {
 		if baseURL != DefaultBaseURL || gotCookie != cookie || interval != 2*time.Second {
 			t.Fatalf("factory base=%q cookie=%q interval=%s", baseURL, gotCookie, interval)
@@ -138,7 +171,7 @@ func TestBonusExchangeUsesFreshOpaqueFormExactlyOnce(t *testing.T) {
 		t.Fatalf("reviewReceipt=%#v receipt=%#v err=%v fields=%#v", reviewReceipt, receipt, err, client.postFields)
 	}
 	raw, _ := json.Marshal(receipt)
-	for _, secret := range []string{cookie, hidden, "mybonusapps.php"} {
+	for _, secret := range []string{cookie, hidden, "mybonus.php"} {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("receipt disclosed secret %q: %s", secret, raw)
 		}
@@ -178,7 +211,7 @@ func TestBonusExchangeRejectsMismatchedOrSerializedReviewBeforePOST(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := &exchangeFakeClient{getResponse: strictBonusResponse(page, start)}
-			adapter := New("")
+			adapter := newExchangeTestAdapter("")
 			adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
 			session, err := adapter.OpenBonusExchangeSession(context.Background(), mustCredential(t, "sid=secret"))
 			if err != nil {
@@ -203,7 +236,7 @@ func TestBonusExchangeRejectsMismatchedOrSerializedReviewBeforePOST(t *testing.T
 
 func TestBonusExchangePersistsConservativeResponseLattice(t *testing.T) {
 	start := time.Now().UTC()
-	page := bonusReviewPage(`<tr><form action="mybonusapps.php" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="submit"></form></tr>`)
+	page := bonusReviewPage(`<tr><form action="mybonus.php" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="submit"></form></tr>`)
 	tests := []struct {
 		name     string
 		response httpguard.StrictResponse
@@ -212,15 +245,15 @@ func TestBonusExchangePersistsConservativeResponseLattice(t *testing.T) {
 		outcome  string
 		stop     string
 	}{
-		{name: "duplicate rejected", response: completeExchangeResponse(start, http.StatusFound), redirect: "https://www.tjupt.org/mybonusapps.php?do=duplicated", outcome: site.BonusExchangeOutcomeRejected, stop: "server_duplicate_lock"},
-		{name: "malformed redirect query", response: completeExchangeResponse(start, http.StatusFound), redirect: "https://www.tjupt.org/mybonusapps.php?do=upload&bad=a;b", outcome: site.BonusExchangeOutcomeUnknown, stop: "submission_response_unrecognized"},
+		{name: "duplicate rejected", response: completeExchangeResponse(start, http.StatusFound), redirect: "https://www.tjupt.org/mybonus.php?do=duplicated", outcome: site.BonusExchangeOutcomeRejected, stop: "server_duplicate_lock"},
+		{name: "malformed redirect query", response: completeExchangeResponse(start, http.StatusFound), redirect: "https://www.tjupt.org/mybonus.php?do=upload&bad=a;b", outcome: site.BonusExchangeOutcomeUnknown, stop: "submission_response_unrecognized"},
 		{name: "unknown HTML", response: completeExchangeResponse(start, http.StatusOK), outcome: site.BonusExchangeOutcomeUnknown, stop: "submission_response_unrecognized"},
 		{name: "transport uncertain", response: httpguard.StrictResponse{ObservedAtStart: start.Add(time.Second), ObservedAtEnd: start.Add(2 * time.Second)}, postErr: errors.New("COOKIE-CANARY HIDDEN-CANARY"), outcome: site.BonusExchangeOutcomeUnknown, stop: "submission_transport_uncertain"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			client := &exchangeFakeClient{getResponse: strictBonusResponse(page, start), postResponse: test.response, postErr: test.postErr, redirectLocation: test.redirect}
-			adapter := New("")
+			adapter := newExchangeTestAdapter("")
 			adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
 			session, err := adapter.OpenBonusExchangeSession(context.Background(), mustCredential(t, "sid=secret"))
 			if err != nil {
@@ -242,7 +275,7 @@ func TestBonusExchangePersistsConservativeResponseLattice(t *testing.T) {
 func TestBonusExchangeRequiredInputNeverProducesSubmissionAuthority(t *testing.T) {
 	page := bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>Gift</td><td>100</td><input type="hidden" name="option" value="1"><input name="username"><input type="submit"></form></tr>`)
 	client := &exchangeFakeClient{getResponse: strictBonusResponse(page, time.Now().UTC())}
-	adapter := New("")
+	adapter := newExchangeTestAdapter("")
 	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
 	session, err := adapter.OpenBonusExchangeSession(context.Background(), mustCredential(t, "sid=secret"))
 	if err != nil {
@@ -257,7 +290,7 @@ func TestBonusExchangeRequiredInputNeverProducesSubmissionAuthority(t *testing.T
 func TestBonusExchangeFormBudgetFailsBeforeAttemptAuthority(t *testing.T) {
 	page := bonusReviewPage(`<tr><form action="?action=exchange" method="post"><td>A</td><td>100</td><input type="hidden" name="option" value="1"><input type="submit"></form></tr>`)
 	client := &exchangeFakeClient{getResponse: strictBonusResponse(page, time.Now().UTC())}
-	adapter := New(DefaultBaseURL)
+	adapter := newExchangeTestAdapter(DefaultBaseURL)
 	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
 	session, err := adapter.OpenBonusExchangeSession(context.Background(), mustCredential(t, "sid=secret"))
 	if err != nil {
@@ -296,7 +329,7 @@ func encodeTestForm(fields []httpguard.FormField) string {
 }
 
 func TestBonusExchangeOpenErrorsDoNotEchoCredential(t *testing.T) {
-	adapter := New("")
+	adapter := newExchangeTestAdapter("")
 	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) {
 		return nil, fmt.Errorf("COOKIE-CANARY")
 	}

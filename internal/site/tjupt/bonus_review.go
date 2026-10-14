@@ -26,10 +26,10 @@ import (
 
 const (
 	BonusReviewOrigin        = Origin
-	BonusReviewRouteID       = "tjupt.mybonusapps_offer_review.v1"
-	BonusExchangeRouteID     = "tjupt.mybonusapps_exchange_post.v1"
+	BonusReviewRouteID       = "tjupt.mybonus_offer_review.v1"
+	BonusExchangeRouteID     = "tjupt.mybonus_exchange_post.v1"
 	bonusUnknownActionRoute  = "tjupt.bonus_action_unrecognized.v1"
-	bonusReviewPath          = "mybonusapps.php"
+	bonusReviewPath          = bonusPagePath
 	bonusReviewAccept        = "text/html"
 	maxBonusSelectorDigits   = 10
 	maxBonusAttributesPerTag = 64
@@ -313,7 +313,9 @@ type parsedBonusForm struct {
 	formShape        []string
 	target           bonusFormTarget
 	submissionFields []httpguard.FormField
+	submitLabel      string
 	cells            []string
+	summary          []string
 	cellsOverflow    bool
 	row              *bonusRowState
 	looseText        strings.Builder
@@ -331,8 +333,17 @@ type bonusFormSubmission struct {
 
 type bonusRowState struct {
 	cells         []string
+	summary       []string
 	cellsOverflow bool
-	cellStack     []strings.Builder
+	cellStack     []bonusCellState
+}
+
+// bonusCellState collects one open cell. heading holds the text of the
+// cell's headings, so the catalog can name an offer without its rules.
+type bonusCellState struct {
+	text     strings.Builder
+	heading  strings.Builder
+	headings int
 }
 
 type bonusParseError struct{ reason string }
@@ -350,203 +361,12 @@ func parseBonusOfferReviewWithSubmission(body []byte, selector string, limits si
 }
 
 func parseBonusOfferReviewInto(body []byte, selector string, limits site.BonusReviewLimits, capture **bonusFormSubmission) (domain.BonusOfferReview, bonusParseUsage, error) {
-	var usage bonusParseUsage
-	if err := limits.Validate(); err != nil {
+	forms, usage, err := parseBonusPage(body, limits)
+	if err != nil {
 		return domain.BonusOfferReview{}, usage, err
-	}
-	pageURL := &url.URL{Scheme: "https", Host: "www.tjupt.org", Path: "/" + bonusReviewPath}
-	state, _ := classifyBonusPage(pageURL, body)
-	if !utf8.Valid(body) || state != domain.AuthenticationAuthenticated {
-		return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "unrecognized_response"}
-	}
-	tokenizer := html.NewTokenizer(bytes.NewReader(body))
-	var current *parsedBonusForm
-	forms := make([]*parsedBonusForm, 0, 16)
-	rows := make([]*bonusRowState, 0, 4)
-	skipTextDepth := 0
-	logoutSeen := false
-	for {
-		tokenType := tokenizer.Next()
-		if tokenType == html.ErrorToken {
-			if errors.Is(tokenizer.Err(), io.EOF) {
-				break
-			}
-			return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "invalid_html"}
-		}
-		usage.tokens++
-		if usage.tokens > limits.MaxTokens {
-			return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "token_budget_exceeded"}
-		}
-		token := tokenizer.Token()
-		switch tokenType {
-		case html.StartTagToken, html.SelfClosingTagToken:
-			name := strings.ToLower(token.Data)
-			attrs, attrsErr := strictBonusAttributes(token.Attr)
-			if attrsErr != nil {
-				return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "invalid_html"}
-			}
-			if name == "base" || name == "template" {
-				return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "ambiguous_form_structure"}
-			}
-			if isBonusFormControl(name) || strings.Contains(name, "-") {
-				if _, hasExternalOwner := attrs["form"]; hasExternalOwner {
-					// Controls with an explicit form owner can live anywhere in the
-					// document and participate in another form's submission. The
-					// bounded tokenizer deliberately does not implement HTML's global
-					// ID/owner resolution, so accepting one could omit an effectful
-					// successful control from the captured POST.
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "ambiguous_form_structure"}
-				}
-			}
-			if name == "script" || name == "style" {
-				if tokenType == html.StartTagToken {
-					skipTextDepth++
-				}
-				continue
-			}
-			if skipTextDepth > 0 {
-				continue
-			}
-			if name == "a" && isExactBonusLogout(attrs["href"]) {
-				logoutSeen = true
-			}
-			if name == "tr" {
-				if len(rows) >= 16 {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "invalid_html"}
-				}
-				rows = append(rows, &bonusRowState{cells: make([]string, 0, 4), cellStack: make([]strings.Builder, 0, 2)})
-				continue
-			}
-			if name == "form" {
-				if current != nil {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "ambiguous_form_structure"}
-				}
-				usage.forms++
-				if usage.forms > limits.MaxForms {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "form_budget_exceeded"}
-				}
-				method, route, target, supported := classifyBonusFormAction(attrs)
-				current = &parsedBonusForm{method: method, actionRouteID: route, actionSupported: supported, target: target, cells: make([]string, 0, 4)}
-				if len(rows) > 0 {
-					current.row = rows[len(rows)-1]
-				}
-				forms = append(forms, current)
-				continue
-			}
-			if current != nil && name == "fieldset" {
-				// Fieldset-disabledness, including the first-legend exception, is
-				// browser tree semantics rather than a local control attribute. Keep
-				// the observation usable as a review, but never claim its inputs or
-				// submit availability are understood.
-				current.unsupportedInput = true
-			}
-			if current != nil && isUnmodeledBonusFormControl(name) {
-				// These form-associated elements are intentionally outside the
-				// captured successful-control model. Retain a review, but never
-				// expose submission authority for the form.
-				current.unsupportedInput = true
-			}
-			if current != nil && strings.Contains(name, "-") {
-				// A form-associated custom element can contribute opaque entries
-				// through ElementInternals. The tokenizer cannot prove whether a
-				// custom element is form-associated, so it must never authorize an
-				// effectful replay.
-				current.unsupportedInput = true
-			}
-			if (name == "td" || name == "th") && len(rows) > 0 {
-				row := rows[len(rows)-1]
-				if len(row.cellStack) != 0 {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "ambiguous_form_structure"}
-				}
-				row.cellStack = append(row.cellStack, strings.Builder{})
-				continue
-			}
-			if current == nil {
-				continue
-			}
-			switch name {
-			case "input", "button", "select", "textarea":
-				usage.fields++
-				if usage.fields > limits.MaxFields {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "field_budget_exceeded"}
-				}
-				observeBonusControl(current, name, attrs)
-			}
-		case html.EndTagToken:
-			name := strings.ToLower(token.Data)
-			if name == "script" || name == "style" {
-				if skipTextDepth == 0 {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "invalid_html"}
-				}
-				skipTextDepth--
-				continue
-			}
-			if skipTextDepth > 0 {
-				continue
-			}
-			if (name == "td" || name == "th") && len(rows) > 0 {
-				row := rows[len(rows)-1]
-				if len(row.cellStack) > 0 {
-					last := len(row.cellStack) - 1
-					appendBonusRowCell(row, row.cellStack[last].String())
-					row.cellStack = row.cellStack[:last]
-				}
-				continue
-			}
-			if name == "tr" && len(rows) > 0 {
-				row := rows[len(rows)-1]
-				if current != nil && current.row == row {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "ambiguous_form_structure"}
-				}
-				for len(row.cellStack) > 0 {
-					last := len(row.cellStack) - 1
-					appendBonusRowCell(row, row.cellStack[last].String())
-					row.cellStack = row.cellStack[:last]
-				}
-				rows = rows[:len(rows)-1]
-				continue
-			}
-			if name == "form" {
-				if current == nil {
-					return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "invalid_html"}
-				}
-				if current.row == nil {
-					appendBonusCell(current, current.looseText.String())
-				}
-				current = nil
-			}
-		case html.TextToken:
-			if skipTextDepth > 0 {
-				continue
-			}
-			if current == nil && len(rows) == 0 {
-				continue
-			}
-			text := token.Data
-			usage.visibleTextBytes += int64(len(text))
-			if usage.visibleTextBytes > limits.MaxVisibleTextBytes {
-				return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "visible_text_budget_exceeded"}
-			}
-			if len(rows) > 0 && len(rows[len(rows)-1].cellStack) > 0 {
-				row := rows[len(rows)-1]
-				_, _ = row.cellStack[len(row.cellStack)-1].WriteString(text)
-			} else if current != nil {
-				_, _ = current.looseText.WriteString(text)
-			}
-		}
-	}
-	if current != nil || len(rows) != 0 || skipTextDepth != 0 {
-		return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "invalid_html"}
-	}
-	if !logoutSeen {
-		return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "unrecognized_response"}
 	}
 	matches := make([]*parsedBonusForm, 0, 1)
 	for _, form := range forms {
-		if form.row != nil {
-			form.cells = append([]string(nil), form.row.cells...)
-			form.cellsOverflow = form.row.cellsOverflow
-		}
 		if form.selectorCount > 1 {
 			return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "selector_ambiguous"}
 		}
@@ -572,21 +392,7 @@ func parseBonusOfferReviewInto(body []byte, selector string, limits site.BonusRe
 	if !match.actionSupported || match.method != "post" {
 		return domain.BonusOfferReview{}, usage, &bonusParseError{reason: "unrecognized_offer"}
 	}
-	availability := site.BonusReviewAvailabilityUnknown
-	if match.submitSeen {
-		availability = site.BonusReviewAvailabilityDisabled
-		if match.enabledSubmit {
-			availability = site.BonusReviewAvailabilityAvailable
-		}
-	}
-	inputMode := site.BonusReviewInputNone
-	if match.requiresInput {
-		inputMode = site.BonusReviewInputRequired
-	}
-	if match.unsupportedInput || match.submitCount > 1 {
-		inputMode = site.BonusReviewInputUnsupported
-		availability = site.BonusReviewAvailabilityUnknown
-	}
+	availability, inputMode := bonusFormState(match)
 	review := domain.BonusOfferReview{
 		SiteID:        SiteID,
 		Selector:      selector,
@@ -622,6 +428,319 @@ func parseBonusOfferReviewInto(body []byte, selector string, limits site.BonusRe
 	return review, usage, nil
 }
 
+// bonusFormState reports a form's submit availability and input mode. A form
+// whose controls the parser does not fully model is never claimed available.
+func bonusFormState(form *parsedBonusForm) (string, string) {
+	availability := site.BonusReviewAvailabilityUnknown
+	if form.submitSeen {
+		availability = site.BonusReviewAvailabilityDisabled
+		if form.enabledSubmit {
+			availability = site.BonusReviewAvailabilityAvailable
+		}
+	}
+	inputMode := site.BonusReviewInputNone
+	if form.requiresInput {
+		inputMode = site.BonusReviewInputRequired
+	}
+	if form.unsupportedInput || form.submitCount > 1 {
+		inputMode = site.BonusReviewInputUnsupported
+		availability = site.BonusReviewAvailabilityUnknown
+	}
+	return availability, inputMode
+}
+
+// parseBonusCatalog lists every offer form of the bonus page. A row holds the
+// offer heading and the row's other visible cells, the submit label, and a
+// status in bonus review's vocabulary. The leading display number is dropped
+// because TJUPT numbers rows differently from the option selector that bonus
+// review takes.
+func parseBonusCatalog(body []byte) ([]domain.BonusCatalogRow, error) {
+	forms, _, err := parseBonusPage(body, site.DefaultBonusReviewLimits())
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]domain.BonusCatalogRow, 0, len(forms))
+	seen := make(map[string]struct{}, len(forms))
+	for _, form := range forms {
+		if form.selectorCount == 0 {
+			continue
+		}
+		if form.selectorCount != 1 || form.selector == "" {
+			return nil, &bonusParseError{reason: "selector_ambiguous"}
+		}
+		if _, duplicate := seen[form.selector]; duplicate {
+			return nil, &bonusParseError{reason: "selector_ambiguous"}
+		}
+		seen[form.selector] = struct{}{}
+		if form.cellsOverflow || len(form.summary) < 2 {
+			return nil, &bonusParseError{reason: "unrecognized_offer"}
+		}
+		columns := append([]string(nil), form.summary...)
+		if len(columns) > 2 && decimalDigits(columns[0]) {
+			columns = columns[1:]
+		}
+		if label := normalizeBonusVisibleText(form.submitLabel); label != "" && len(label) <= 256 && form.submitCount == 1 {
+			columns = append(columns, label)
+		}
+		columns = append(columns, bonusCatalogStatus(form))
+		rows = append(rows, domain.BonusCatalogRow{Selector: form.selector, Columns: columns})
+	}
+	if len(rows) == 0 {
+		return nil, &bonusParseError{reason: "selector_not_found"}
+	}
+	return rows, nil
+}
+
+func bonusCatalogStatus(form *parsedBonusForm) string {
+	availability, inputMode := bonusFormState(form)
+	switch {
+	case !form.actionSupported || form.method != "post" || inputMode == site.BonusReviewInputUnsupported:
+		return site.BonusReviewAvailabilityUnknown
+	case availability == site.BonusReviewAvailabilityAvailable && inputMode == site.BonusReviewInputRequired:
+		return availability + ", requires input"
+	default:
+		return availability
+	}
+}
+
+// parseBonusPage reads every form of the authenticated bonus page in one
+// bounded token pass. The catalog and the single-offer review share it, so
+// both see exactly the same forms, cells, and controls.
+func parseBonusPage(body []byte, limits site.BonusReviewLimits) ([]*parsedBonusForm, bonusParseUsage, error) {
+	var usage bonusParseUsage
+	if err := limits.Validate(); err != nil {
+		return nil, usage, err
+	}
+	pageURL := &url.URL{Scheme: "https", Host: "www.tjupt.org", Path: "/" + bonusReviewPath}
+	state, _ := classifyBonusPage(pageURL, body)
+	if !utf8.Valid(body) || state != domain.AuthenticationAuthenticated {
+		return nil, usage, &bonusParseError{reason: "unrecognized_response"}
+	}
+	tokenizer := html.NewTokenizer(bytes.NewReader(body))
+	var current *parsedBonusForm
+	forms := make([]*parsedBonusForm, 0, 16)
+	rows := make([]*bonusRowState, 0, 4)
+	skipTextDepth := 0
+	headingDepth := 0
+	logoutSeen := false
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			if errors.Is(tokenizer.Err(), io.EOF) {
+				break
+			}
+			return nil, usage, &bonusParseError{reason: "invalid_html"}
+		}
+		usage.tokens++
+		if usage.tokens > limits.MaxTokens {
+			return nil, usage, &bonusParseError{reason: "token_budget_exceeded"}
+		}
+		token := tokenizer.Token()
+		switch tokenType {
+		case html.StartTagToken, html.SelfClosingTagToken:
+			name := strings.ToLower(token.Data)
+			attrs, attrsErr := strictBonusAttributes(token.Attr)
+			if attrsErr != nil {
+				return nil, usage, &bonusParseError{reason: "invalid_html"}
+			}
+			if name == "base" || name == "template" {
+				return nil, usage, &bonusParseError{reason: "ambiguous_form_structure"}
+			}
+			if isBonusFormControl(name) || strings.Contains(name, "-") {
+				if _, hasExternalOwner := attrs["form"]; hasExternalOwner {
+					// Controls with an explicit form owner can live anywhere in the
+					// document and participate in another form's submission. The
+					// bounded tokenizer deliberately does not implement HTML's global
+					// ID/owner resolution, so accepting one could omit an effectful
+					// successful control from the captured POST.
+					return nil, usage, &bonusParseError{reason: "ambiguous_form_structure"}
+				}
+			}
+			if name == "script" || name == "style" {
+				if tokenType == html.StartTagToken {
+					skipTextDepth++
+				}
+				continue
+			}
+			if skipTextDepth > 0 {
+				continue
+			}
+			if name == "a" && isExactBonusLogout(attrs["href"]) {
+				logoutSeen = true
+			}
+			if name == "br" && len(rows) > 0 {
+				if row := rows[len(rows)-1]; len(row.cellStack) > 0 {
+					// A line break separates displayed words, as in TJUPT's
+					// 最少25<br />最多50,000 price cell.
+					cell := &row.cellStack[len(row.cellStack)-1]
+					_, _ = cell.text.WriteString(" ")
+					if headingDepth > 0 {
+						_, _ = cell.heading.WriteString(" ")
+					}
+				}
+			}
+			if isBonusHeading(name) && tokenType == html.StartTagToken {
+				headingDepth++
+				if len(rows) > 0 {
+					if row := rows[len(rows)-1]; len(row.cellStack) > 0 {
+						row.cellStack[len(row.cellStack)-1].headings++
+					}
+				}
+				continue
+			}
+			if name == "tr" {
+				if len(rows) >= 16 {
+					return nil, usage, &bonusParseError{reason: "invalid_html"}
+				}
+				rows = append(rows, &bonusRowState{cells: make([]string, 0, 4), summary: make([]string, 0, 4), cellStack: make([]bonusCellState, 0, 2)})
+				continue
+			}
+			if name == "form" {
+				if current != nil {
+					return nil, usage, &bonusParseError{reason: "ambiguous_form_structure"}
+				}
+				usage.forms++
+				if usage.forms > limits.MaxForms {
+					return nil, usage, &bonusParseError{reason: "form_budget_exceeded"}
+				}
+				method, route, target, supported := classifyBonusFormAction(attrs)
+				current = &parsedBonusForm{method: method, actionRouteID: route, actionSupported: supported, target: target, cells: make([]string, 0, 4)}
+				if len(rows) > 0 {
+					current.row = rows[len(rows)-1]
+				}
+				forms = append(forms, current)
+				continue
+			}
+			if current != nil && name == "fieldset" {
+				// Fieldset-disabledness, including the first-legend exception, is
+				// browser tree semantics rather than a local control attribute. Keep
+				// the observation usable as a review, but never claim its inputs or
+				// submit availability are understood.
+				current.unsupportedInput = true
+			}
+			if current != nil && isUnmodeledBonusFormControl(name) {
+				// These form-associated elements are intentionally outside the
+				// captured successful-control model. Retain a review, but never
+				// expose submission authority for the form.
+				current.unsupportedInput = true
+			}
+			if current != nil && strings.Contains(name, "-") {
+				// A form-associated custom element can contribute opaque entries
+				// through ElementInternals. The tokenizer cannot prove whether a
+				// custom element is form-associated, so it must never authorize an
+				// effectful replay.
+				current.unsupportedInput = true
+			}
+			if (name == "td" || name == "th") && len(rows) > 0 {
+				row := rows[len(rows)-1]
+				if len(row.cellStack) != 0 {
+					return nil, usage, &bonusParseError{reason: "ambiguous_form_structure"}
+				}
+				row.cellStack = append(row.cellStack, bonusCellState{})
+				continue
+			}
+			if current == nil {
+				continue
+			}
+			switch name {
+			case "input", "button", "select", "textarea":
+				usage.fields++
+				if usage.fields > limits.MaxFields {
+					return nil, usage, &bonusParseError{reason: "field_budget_exceeded"}
+				}
+				observeBonusControl(current, name, attrs)
+			}
+		case html.EndTagToken:
+			name := strings.ToLower(token.Data)
+			if name == "script" || name == "style" {
+				if skipTextDepth == 0 {
+					return nil, usage, &bonusParseError{reason: "invalid_html"}
+				}
+				skipTextDepth--
+				continue
+			}
+			if skipTextDepth > 0 {
+				continue
+			}
+			if isBonusHeading(name) {
+				if headingDepth > 0 {
+					headingDepth--
+				}
+				continue
+			}
+			if (name == "td" || name == "th") && len(rows) > 0 {
+				row := rows[len(rows)-1]
+				if len(row.cellStack) > 0 {
+					last := len(row.cellStack) - 1
+					appendBonusRowCell(row, &row.cellStack[last])
+					row.cellStack = row.cellStack[:last]
+				}
+				continue
+			}
+			if name == "tr" && len(rows) > 0 {
+				row := rows[len(rows)-1]
+				if current != nil && current.row == row {
+					return nil, usage, &bonusParseError{reason: "ambiguous_form_structure"}
+				}
+				for len(row.cellStack) > 0 {
+					last := len(row.cellStack) - 1
+					appendBonusRowCell(row, &row.cellStack[last])
+					row.cellStack = row.cellStack[:last]
+				}
+				rows = rows[:len(rows)-1]
+				continue
+			}
+			if name == "form" {
+				if current == nil {
+					return nil, usage, &bonusParseError{reason: "invalid_html"}
+				}
+				if current.row == nil {
+					appendBonusCell(current, current.looseText.String())
+				}
+				current = nil
+			}
+		case html.TextToken:
+			if skipTextDepth > 0 {
+				continue
+			}
+			if current == nil && len(rows) == 0 {
+				continue
+			}
+			text := token.Data
+			usage.visibleTextBytes += int64(len(text))
+			if usage.visibleTextBytes > limits.MaxVisibleTextBytes {
+				return nil, usage, &bonusParseError{reason: "visible_text_budget_exceeded"}
+			}
+			if len(rows) > 0 && len(rows[len(rows)-1].cellStack) > 0 {
+				row := rows[len(rows)-1]
+				cell := &row.cellStack[len(row.cellStack)-1]
+				_, _ = cell.text.WriteString(text)
+				if headingDepth > 0 {
+					_, _ = cell.heading.WriteString(text)
+				}
+			} else if current != nil {
+				_, _ = current.looseText.WriteString(text)
+			}
+		}
+	}
+	if current != nil || len(rows) != 0 || skipTextDepth != 0 {
+		return nil, usage, &bonusParseError{reason: "invalid_html"}
+	}
+	if !logoutSeen {
+		return nil, usage, &bonusParseError{reason: "unrecognized_response"}
+	}
+	for _, form := range forms {
+		if form.row != nil {
+			form.cells = append([]string(nil), form.row.cells...)
+			form.summary = append([]string(nil), form.row.summary...)
+			form.cellsOverflow = form.row.cellsOverflow
+		} else {
+			form.summary = append([]string(nil), form.cells...)
+		}
+	}
+	return forms, usage, nil
+}
+
 func strictBonusAttributes(attrs []html.Attribute) (map[string]string, error) {
 	if len(attrs) > maxBonusAttributesPerTag {
 		return nil, fmt.Errorf("too many attributes")
@@ -629,7 +748,13 @@ func strictBonusAttributes(attrs []html.Attribute) (map[string]string, error) {
 	result := make(map[string]string, len(attrs))
 	for _, attr := range attrs {
 		key := strings.ToLower(attr.Key)
-		if key == "" || len(key) > 128 || len(attr.Val) > 16<<10 || !utf8.ValidString(key) || !utf8.ValidString(attr.Val) || hasBonusControlRune(key) || hasBonusControlRune(attr.Val) {
+		value := attr.Val
+		if key == "title" || key == "alt" {
+			// Advisory text is never bound or submitted, and TJUPT's
+			// navigation tooltips break lines with &#10;.
+			value = strings.NewReplacer("\t", " ", "\n", " ", "\f", " ", "\r", " ").Replace(value)
+		}
+		if key == "" || len(key) > 128 || len(attr.Val) > 16<<10 || !utf8.ValidString(key) || !utf8.ValidString(attr.Val) || hasBonusControlRune(key) || hasBonusControlRune(value) {
 			return nil, fmt.Errorf("invalid attribute")
 		}
 		if _, exists := result[key]; exists {
@@ -785,6 +910,7 @@ func observeBonusControl(form *parsedBonusForm, tag string, attrs map[string]str
 			return
 		case "submit":
 			form.formShape = append(form.formShape, "submit-value\x00"+attrs["value"])
+			form.submitLabel = attrs["value"]
 			if bonusSubmitOverridesAction(attrs) {
 				form.actionSupported = false
 			}
@@ -861,8 +987,8 @@ func appendBonusCell(form *parsedBonusForm, raw string) {
 	form.cells = append(form.cells, text)
 }
 
-func appendBonusRowCell(row *bonusRowState, raw string) {
-	text := normalizeBonusVisibleText(raw)
+func appendBonusRowCell(row *bonusRowState, cell *bonusCellState) {
+	text := normalizeBonusVisibleText(cell.text.String())
 	if text == "" {
 		return
 	}
@@ -870,7 +996,21 @@ func appendBonusRowCell(row *bonusRowState, raw string) {
 		row.cellsOverflow = true
 		return
 	}
+	summary := text
+	if heading := normalizeBonusVisibleText(cell.heading.String()); cell.headings == 1 && heading != "" {
+		summary = heading
+	}
 	row.cells = append(row.cells, text)
+	row.summary = append(row.summary, summary)
+}
+
+func isBonusHeading(name string) bool {
+	switch name {
+	case "h1", "h2", "h3", "h4", "h5", "h6":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeBonusVisibleText(raw string) string {

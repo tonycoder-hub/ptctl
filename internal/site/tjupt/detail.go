@@ -36,6 +36,12 @@ var (
 	divPattern           = regexp.MustCompile(`(?is)<div\b([^>]*)>(.*?)</div\s*>`)
 	peerIDAttribute      = regexp.MustCompile(`(?i)(?:^|\s)id\s*=\s*(?:"peercount"|'peercount'|peercount)(?:\s|$)`)
 	decimalPattern       = regexp.MustCompile(`[0-9]+`)
+	anchorPattern        = regexp.MustCompile(`(?is)<a\b([^>]*)>(.*?)</a\s*>`)
+	// The 基本信息 row states "种子ID: N | 大小: SIZE". Binding the size to the
+	// torrent ID keeps sizes elsewhere on the page, such as in the file list
+	// or in related torrents, from being read as this torrent's size.
+	detailSizePattern  = regexp.MustCompile(`(?i)种子ID\s*[:：]\s*([0-9]+)\s*\|\s*大小\s*[:：]\s*([0-9]+(?:\.[0-9]+)?\s*(?:KiB|MiB|GiB|TiB|PiB|KB|MB|GB|TB|PB))\b`)
+	snatchCountPattern = regexp.MustCompile(`^([0-9][0-9,]*)\s*次?$`)
 )
 
 var (
@@ -268,6 +274,8 @@ func parseTorrentDetail(body []byte, ref domain.TorrentRef) (domain.TorrentDetai
 		return domain.TorrentDetail{}, fmt.Errorf("detail reference marker is missing")
 	}
 	seeders, leechers := parseDetailPeerCounts(body)
+	size := parseDetailSize(body, ref.RemoteID)
+	snatches := parseDetailSnatches(body, ref.RemoteID)
 	basis := []string{
 		site.DetailBasisAuthenticated,
 		site.DetailBasisExactRef,
@@ -282,6 +290,8 @@ func parseTorrentDetail(body []byte, ref domain.TorrentRef) (domain.TorrentDetai
 		DisplayTitle:              title,
 		Seeders:                   seeders,
 		Leechers:                  leechers,
+		SizeBytes:                 size,
+		Snatches:                  snatches,
 		DownloadReferenceObserved: downloadBound,
 		EvidenceBasis:             basis,
 	}, nil
@@ -338,6 +348,60 @@ func detailLinksForRef(body []byte, remoteID string) (bool, bool) {
 		downloadBound = downloadBound || base == "download.php"
 	}
 	return idBound, downloadBound
+}
+
+// parseDetailSize returns the size the 基本信息 row states for remoteID. Every
+// such statement must agree.
+func parseDetailSize(body []byte, remoteID string) *int64 {
+	var size *int64
+	for _, match := range detailSizePattern.FindAllStringSubmatch(plainText(string(body)), 4) {
+		if match[1] != remoteID {
+			return nil
+		}
+		value, ok := firstSize([]string{match[2]})
+		if !ok || size != nil && *size != value {
+			return nil
+		}
+		size = &value
+	}
+	return size
+}
+
+// parseDetailSnatches returns the completion count from the 热度表 link to
+// viewsnatches.php for remoteID. Links with other text, such as "查看完成详情",
+// are skipped; numeric ones must agree.
+func parseDetailSnatches(body []byte, remoteID string) *int {
+	var snatches *int
+	for _, anchor := range anchorPattern.FindAllSubmatch(body, 4096) {
+		match := hrefAttribute.FindSubmatch(anchor[1])
+		if len(match) == 0 {
+			continue
+		}
+		raw := ""
+		for _, candidate := range match[1:] {
+			if len(candidate) != 0 {
+				raw = string(candidate)
+				break
+			}
+		}
+		parsed, err := url.Parse(html.UnescapeString(raw))
+		if err != nil || exactInternalRoute(parsed) != "viewsnatches.php" {
+			continue
+		}
+		if ids := parsed.Query()["id"]; len(ids) != 1 || ids[0] != remoteID {
+			continue
+		}
+		count := snatchCountPattern.FindStringSubmatch(plainText(string(anchor[2])))
+		if len(count) != 2 {
+			continue
+		}
+		value := siteCount(count[1])
+		if value == nil || snatches != nil && *snatches != *value {
+			return nil
+		}
+		snatches = value
+	}
+	return snatches
 }
 
 func parseDetailPeerCounts(body []byte) (*int, *int) {

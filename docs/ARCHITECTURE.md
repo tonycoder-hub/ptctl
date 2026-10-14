@@ -359,10 +359,11 @@ and durable action schemas. They are not forced into universal fields. The effec
 metafile capability is instead a tracker-visible GET plus a private-store
 publication boundary; it grants no general site-write or detail-read authority.
 
-The TJUPT `account.read` port is deliberately partial. One authenticated,
-bounded `mybonusapps.php` response supplies only a validated username and
-canonical bonus balance. Optional uploaded/downloaded totals, ratio, and peer
-counts stay absent. This observation is a current site claim and is not reused
+The TJUPT `account.read` port reads one authenticated, bounded `mybonus.php`
+response: a validated username and canonical bonus balance, plus the uploaded
+total, class, seeding points, invites, and peer counts from the page's single
+user panel when every statement of a field agrees. TJUPT shows no downloaded
+total or ratio, so those stay absent. This observation is a current site claim and is not reused
 as submission authority or as proof that an exchange changed the balance.
 
 ## Read-only bonus-offer review
@@ -370,7 +371,7 @@ as submission authority or as proof that an exchange changed the balance.
 `site bonus review` is the first concrete `bonus.offer.review` port. It pins the
 built-in production origin, stable read route, canonical decimal option, fixed
 request/parser budgets, and cookie method before credential input. One fresh
-HTTP/1.1 GET observes the authenticated `mybonusapps.php` form. The adapter
+HTTP/1.1 GET observes the authenticated `mybonus.php` form. The adapter
 selects exactly one option, bounds forms, fields, tokens, and retained textual
 text, and rejects duplicate attributes/options, nested forms, unknown action
 routes, and malformed or ambiguous structure.
@@ -392,7 +393,10 @@ non-authoritative.
 ## Durable at-most-once bonus exchange
 
 `site bonus exchange prepare|submit|status|list|prune|forget` is the first concrete
-`bonus.exchange.submit_effectful` workflow. `prepare` stores one canonical
+`bonus.exchange.submit_effectful` workflow. Its TJUPT implementation is
+currently withheld: TJUPT confirms each exchange with the account password,
+which ptctl does not take, so the production adapter does not declare the
+capability. `prepare` stores one canonical
 private intent containing a random operation ID, the exact reviewed semantic
 ID, canonical site/option/origin/route identifiers, and fixed review/submit
 budgets. It performs no site request. `submit` revalidates the installed

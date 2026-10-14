@@ -28,6 +28,11 @@ const (
 type Adapter struct {
 	baseURL   string
 	newClient guardedClientFactory
+	// exchangeEnabled gates the bonus exchange port. New never sets it:
+	// TJUPT answers the first exchange POST with a page that asks for the
+	// account password, so the single reviewed POST cannot complete an
+	// exchange. Tests set it to keep the port's fail-closed checks covered.
+	exchangeEnabled bool
 }
 
 type guardedClient interface {
@@ -106,7 +111,10 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 		domain.CapabilityBonusRead,
 	}
 	if a.productionOrigin() {
-		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview, domain.CapabilityBonusExchange)
+		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview)
+		if a.exchangeEnabled {
+			capabilities = append(capabilities, domain.CapabilityBonusExchange)
+		}
 	}
 	return domain.SiteDescriptor{
 		ID:           SiteID,
@@ -119,7 +127,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 }
 
 func (a *Adapter) CheckSession(ctx context.Context, credential site.Credential) (domain.SessionStatus, error) {
-	body, finalURL, err := a.get(ctx, credential, "mybonusapps.php", nil)
+	body, finalURL, err := a.get(ctx, credential, bonusPagePath, nil)
 	if errors.Is(err, errLoginRedirect) {
 		return domain.SessionStatus{State: domain.AuthenticationUnauthenticated, ObservedAt: time.Now().UTC()}, nil
 	}
@@ -153,7 +161,7 @@ func (a *Adapter) Search(ctx context.Context, credential site.Credential, query 
 }
 
 func (a *Adapter) BonusCatalog(ctx context.Context, credential site.Credential) (domain.BonusCatalog, error) {
-	body, finalURL, err := a.get(ctx, credential, "mybonusapps.php", nil)
+	body, finalURL, err := a.get(ctx, credential, bonusPagePath, nil)
 	if err != nil {
 		return domain.BonusCatalog{}, err
 	}
@@ -164,8 +172,8 @@ func (a *Adapter) BonusCatalog(ctx context.Context, credential site.Credential) 
 	if state != domain.AuthenticationAuthenticated {
 		return domain.BonusCatalog{}, fmt.Errorf("TJUPT returned an unrecognized bonus page; parser is fail-closed")
 	}
-	rows := parseBonusRows(body)
-	if len(rows) == 0 {
+	rows, err := parseBonusCatalog(body)
+	if err != nil || len(rows) == 0 {
 		return domain.BonusCatalog{}, fmt.Errorf("TJUPT bonus page structure was not recognized; refusing an empty catalog")
 	}
 	return domain.BonusCatalog{
