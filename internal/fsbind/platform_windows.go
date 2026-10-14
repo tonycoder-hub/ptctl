@@ -93,7 +93,16 @@ func platformBindExisting(root string) (*Session, RootInfo, error) {
 			desired = windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE
 		}
 		guard, guardErr := openWindowsAbsoluteDirectory(path, desired)
-		if guardErr != nil || guard.raw.volume != uint64(serial) {
+		if errors.Is(guardErr, ErrNotFound) {
+			// Like the POSIX binding: a missing root or ancestor is absence,
+			// which callers may treat differently from an unsafe object.
+			return nil, RootInfo{}, ErrNotFound
+		}
+		if guardErr != nil {
+			return nil, RootInfo{}, ErrUnsafeObject
+		}
+		if guard.raw.volume != uint64(serial) {
+			_ = guard.file.Close()
 			return nil, RootInfo{}, ErrUnsafeObject
 		}
 		state.data.guards = append(state.data.guards, guard)
