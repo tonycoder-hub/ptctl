@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,18 +14,24 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 )
 
-// cancelAfterCopyScratch reports cancellation from the moment a copy scratch
-// object exists, i.e. after the copy target is created and before any byte of
-// it is consumed.
+// cancelAfterCopyScratch reports cancellation from the copy's first check of
+// its verified source, i.e. after the copy target (scratch) is created and
+// before any byte of it is consumed. It recognizes that check by its callers
+// rather than by listing the scratch directory: on Windows a running engine
+// holds its directories open with DELETE access, and os.Open, which
+// filepath.Glob uses, does not share delete access, so a listing sees nothing.
 type cancelAfterCopyScratch struct {
 	context.Context
-	pattern  string
 	canceled atomic.Bool
 }
 
 func (ctx *cancelAfterCopyScratch) Err() error {
 	if !ctx.canceled.Load() {
-		if matches, _ := filepath.Glob(ctx.pattern); len(matches) == 0 {
+		var callers [2]uintptr
+		frames := runtime.CallersFrames(callers[:runtime.Callers(2, callers[:])])
+		consumer, _ := frames.Next()
+		copier, _ := frames.Next()
+		if !strings.HasSuffix(consumer.Function, ".(*VerifiedSource).ConsumeVerifiedFile") || !strings.HasSuffix(copier.Function, ".stageManifestFile") {
 			return nil
 		}
 		ctx.canceled.Store(true)
@@ -35,10 +42,7 @@ func (ctx *cancelAfterCopyScratch) Err() error {
 func TestCancelledCopyRemovesItsOwnScratch(t *testing.T) {
 	content := []byte("scratch discard on cancellation")
 	meta, discovery, _, targetRoot := singleMaterializeFixture(t, context.Background(), "final.bin", content)
-	ctx := &cancelAfterCopyScratch{
-		Context: context.Background(),
-		pattern: filepath.Join(targetRoot, operationDirectoryPrefix+"*", scratchDirectoryName, "copy-*.pending"),
-	}
+	ctx := &cancelAfterCopyScratch{Context: context.Background()}
 	report, err := Run(ctx, runOptionsFor(t, meta, &discovery, targetRoot))
 	if !errors.Is(err, context.Canceled) || report.Outcome != OutcomeInterrupted || report.Writes.ScratchFilesRemoved != 1 {
 		t.Fatalf("cancelled copy did not remove its own scratch: %#v %v", report, err)
