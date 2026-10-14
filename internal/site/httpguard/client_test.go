@@ -135,6 +135,22 @@ func TestGetOnceUsesExactURLAndSafeHeaders(t *testing.T) {
 	}
 }
 
+// TJUPT sends this exact header on authenticated pages.
+func TestGetOnceIgnoresMalformedMediaParameterSegment(t *testing.T) {
+	client := strictTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        http.Header{"Content-Type": {"text/html; charset=utf-8; Cache-control:private"}},
+			Body:          io.NopCloser(strings.NewReader("<html></html>")),
+			ContentLength: -1,
+		}, nil
+	}), "")
+	response, err := client.GetOnce(context.Background(), "mybonusapps.php", nil, "text/html", 1024, 1024)
+	if err != nil || response.MediaType != "text/html" || string(response.Body) != "<html></html>" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+}
+
 func TestGetOncePreCanceledMakesNoRequest(t *testing.T) {
 	calls := 0
 	client := strictTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -273,6 +289,9 @@ func TestGetOnceResponseBudgetsAndEncodingFailClosed(t *testing.T) {
 		{name: "trailer", body: "CANARY-TRAILER", bodyLimit: 1024, headLimit: 1024, trailer: http.Header{"X-Trailer": {"value"}}},
 		{name: "malformed content type", header: http.Header{"Content-Type": {"not a media type ;;;"}}, body: "x", bodyLimit: 1024, headLimit: 1024},
 		{name: "unsupported HTML charset", header: http.Header{"Content-Type": {"text/html; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
+		{name: "unsupported charset after malformed parameter", header: http.Header{"Content-Type": {"text/html; Cache-control:private; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
+		{name: "malformed charset parameter", header: http.Header{"Content-Type": {"text/html; charset:gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
+		{name: "duplicate charset beside malformed parameter", header: http.Header{"Content-Type": {"text/html; charset=utf-8; Cache-control:private; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -358,6 +377,9 @@ func TestPostFormOnceResponseBudgetsAndEncodingFailClosed(t *testing.T) {
 		{name: "trailer", body: "CANARY-TRAILER", bodyLimit: 1024, headLimit: 1024, trailer: http.Header{"X-Trailer": {"value"}}},
 		{name: "malformed content type", header: http.Header{"Content-Type": {"not a media type ;;;"}}, body: "x", bodyLimit: 1024, headLimit: 1024},
 		{name: "unsupported HTML charset", header: http.Header{"Content-Type": {"text/html; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
+		{name: "unsupported charset after malformed parameter", header: http.Header{"Content-Type": {"text/html; Cache-control:private; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
+		{name: "malformed charset parameter", header: http.Header{"Content-Type": {"text/html; charset:gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
+		{name: "duplicate charset beside malformed parameter", header: http.Header{"Content-Type": {"text/html; charset=utf-8; Cache-control:private; charset=gbk"}}, body: "CANARY-CHARSET", bodyLimit: 1024, headLimit: 1024},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
