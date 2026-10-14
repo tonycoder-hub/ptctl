@@ -400,17 +400,8 @@ func (s *readSession) login(ctx context.Context, credential downloader.Credentia
 // sets no result and therefore answers 204 with an empty body. Bad
 // credentials are 200 "Fails." before 5.2 and 401 from 5.2 on.
 func loginAccepted(status int, body []byte) bool {
-	if len(body) > 1024 {
-		return false
-	}
-	switch status {
-	case http.StatusOK:
-		return strings.TrimSpace(string(body)) == "Ok."
-	case http.StatusNoContent:
-		return len(body) == 0
-	default:
-		return false
-	}
+	return status == http.StatusOK && len(body) <= 1024 && strings.TrimSpace(string(body)) == "Ok." ||
+		status == http.StatusNoContent && len(body) == 0
 }
 
 func (s *readSession) getText(ctx context.Context, path string) (string, error) {

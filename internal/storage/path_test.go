@@ -30,10 +30,10 @@ func TestWindowsReservedDeviceNames(t *testing.T) {
 	semantics := PathSemantics{Windows: true, CaseSensitive: false}
 	for _, name := range []string{
 		"CON", "con.txt", "CON .txt", "Con  .tar.gz", "nul.", "AUX", "PRN.log",
-		"CONIN$", "conin$.txt", "CONOUT$", "conout$ .log", "CLOCK$",
+		"CONIN$", "conin$.txt", "CONOUT$", "conout$ .log", "CLOCK$", "clock$", "Com1 .x.y",
 		"COM1", "com9.txt", "COM0", "LPT0.log", "COM¹", "com².txt", "LPT³", "lpt¹ .txt",
 	} {
-		if !windowsReserved(name) {
+		if !WindowsReservedDeviceName(name) {
 			t.Fatalf("%q was not treated as a reserved device name", name)
 		}
 		if err := ValidateComponents([][]byte{[]byte(name)}, semantics); err == nil {
@@ -41,9 +41,9 @@ func TestWindowsReservedDeviceNames(t *testing.T) {
 		}
 	}
 	for _, name := range []string{
-		"CONSOLE", "CON_", " CON", "CONIN", "CONOUT", "COM10", "LPT", "COM", "COM⁴", "COM1x.txt", "x.CON", "NULL.txt",
+		"CONSOLE", "CON_", " CON", "CONIN", "CONOUT", "COM10", "LPT", "COM", "COM⁴", "LPT¹0", "COM1x.txt", "x.CON", "data.nul", "NULL.txt",
 	} {
-		if windowsReserved(name) {
+		if WindowsReservedDeviceName(name) {
 			t.Fatalf("%q was treated as a reserved device name", name)
 		}
 		if err := ValidateComponents([][]byte{[]byte(name)}, semantics); err != nil {

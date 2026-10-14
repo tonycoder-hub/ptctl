@@ -158,8 +158,12 @@ func bindRunSources(ctx context.Context, meta *metafile.MetaInfo, discovery *see
 			SourceObjectIdentity: observed.Identity.String()}
 		intentFiles[sequence], set.files[sequence] = intent, boundSourceFile{intent: intent, session: session}
 	}
+	fresh, _, err := final.Reverify(ctx)
+	if err != nil {
+		return fail(classifyFinalProofError(err))
+	}
 	state := executionJournalState{Intent: ExecutionIntent{Files: intentFiles}}
-	if err := verifyRemainingBoundSources(ctx, state, set, meta, final); err != nil {
+	if err := verifyRemainingBoundSources(ctx, state, set, meta, fresh); err != nil {
 		return fail(err)
 	}
 	return set, intentFiles, nil
@@ -212,6 +216,8 @@ func bindIntentSources(ctx context.Context, state executionJournalState, roots [
 	return set, nil
 }
 
+// verifyRemainingBoundSources compares every name not yet retired with final,
+// which the caller must have just reverified, and then reverifies final again.
 func verifyRemainingBoundSources(ctx context.Context, state executionJournalState, sources *boundSourceSet, meta *metafile.MetaInfo, final *materialize.VerifiedFinal) error {
 	if meta == nil || final == nil || !final.Verified() || len(sources.files) != len(state.Intent.Files) {
 		return fmt.Errorf("%w: source verification authority is unavailable", ErrExecutionPolicy)
@@ -229,18 +235,13 @@ func verifyRemainingBoundSources(ctx context.Context, state executionJournalStat
 		remaining = append(remaining, sequence)
 	}
 	if len(remaining) == 0 {
-		// No source bytes remain to compare. The caller has just reverified
-		// the final and reverifies it again before journaling completion, so
-		// two more full reads here would observe nothing additional.
+		// No source bytes remain to compare, and the final is reverified
+		// again before completion is journaled.
 		return nil
-	}
-	fresh, _, err := final.Reverify(ctx)
-	if err != nil {
-		return classifyFinalProofError(err)
 	}
 	for _, sequence := range remaining {
 		file := state.Intent.Files[sequence]
-		finalPath, size, ok := fresh.ProcessFilePath(file.ManifestIndex)
+		finalPath, size, ok := final.ProcessFilePath(file.ManifestIndex)
 		if !ok || size != file.SizeBytes {
 			return fmt.Errorf("%w: final file mapping disagrees", ErrExecutionIntegrity)
 		}
@@ -248,8 +249,7 @@ func verifyRemainingBoundSources(ctx context.Context, state executionJournalStat
 			return err
 		}
 	}
-	_, _, err = fresh.Reverify(ctx)
-	if err != nil {
+	if _, _, err := final.Reverify(ctx); err != nil {
 		return classifyFinalProofError(err)
 	}
 	return nil

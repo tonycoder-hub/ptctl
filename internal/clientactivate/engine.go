@@ -13,8 +13,8 @@ import (
 )
 
 // actionSettleDelays bounds the same-invocation re-observation after an
-// accepted recheck or start response whose first observation is inconclusive.
-// qBittorrent publishes the effect of both requests on its next status refresh
+// accepted recheck, start, or stop response whose first observation is
+// inconclusive. qBittorrent publishes these effects on its next status refresh
 // (about 1.5s by default), so the first observation can still show the
 // pre-request state. The probes are read-only; the action is never repeated
 // and no attempt budget is spent.
@@ -616,40 +616,33 @@ func executeAction(ctx context.Context, prepared *PreparedPlan, handle *journalH
 	if err := ctx.Err(); err != nil {
 		return errors.Join(ErrRequestUnknown, err)
 	}
-	after, observeErr := observeClientBounded(ctx, prepared.authority, session)
-	report.recordClientObservationUsage(after)
-	if observeErr != nil {
-		report.Client.Status = "observation_incomplete"
-		report.Client.Assurance = "client_state_not_established"
-		return errors.Join(ErrRequestUnknown, mutationErr, observeErr)
-	}
-	report.observeClient(after)
-	if after.ledger.ObservedAtStart.Before(before.ledger.ObservedAtEnd) {
-		return fmt.Errorf("%w: downloader observations are not ordered across the action", ErrIntegrity)
-	}
-	if after.jobID != prepared.plan.JobID || after.fileLayoutID != prepared.plan.ExpectedFileLayoutID {
-		return fmt.Errorf("%w: downloader job identity or layout changed across the action", ErrIntegrity)
-	}
-	for index := 0; mutationErr == nil && !actionObservationConclusive(action, before, after) && index < len(actionSettleDelays); index++ {
-		if !waitSettleDelay(ctx, actionSettleDelays[index]) {
+	var after clientObservation
+	for probe := 0; ; probe++ {
+		observed, observeErr := observeClientBounded(ctx, prepared.authority, session)
+		report.recordClientObservationUsage(observed)
+		if observeErr != nil && probe == 0 {
+			report.Client.Status = "observation_incomplete"
+			report.Client.Assurance = "client_state_not_established"
+			return errors.Join(ErrRequestUnknown, mutationErr, observeErr)
+		}
+		if errors.Is(observeErr, ErrIntegrity) {
+			return observeErr
+		}
+		if observeErr != nil {
 			break
 		}
-		probe, probeErr := observeClientBounded(ctx, prepared.authority, session)
-		report.recordClientObservationUsage(probe)
-		if errors.Is(probeErr, ErrIntegrity) {
-			return probeErr
-		}
-		if probeErr != nil {
-			break
-		}
-		if probe.ledger.ObservedAtStart.Before(before.ledger.ObservedAtEnd) {
+		report.observeClient(observed)
+		if observed.ledger.ObservedAtStart.Before(before.ledger.ObservedAtEnd) {
 			return fmt.Errorf("%w: downloader observations are not ordered across the action", ErrIntegrity)
 		}
-		if probe.jobID != prepared.plan.JobID || probe.fileLayoutID != prepared.plan.ExpectedFileLayoutID {
+		if observed.jobID != prepared.plan.JobID || observed.fileLayoutID != prepared.plan.ExpectedFileLayoutID {
 			return fmt.Errorf("%w: downloader job identity or layout changed across the action", ErrIntegrity)
 		}
-		report.observeClient(probe)
-		after = probe
+		after = observed
+		if mutationErr != nil || actionObservationConclusive(action, before, after) || probe == len(actionSettleDelays) ||
+			!waitSettleDelay(ctx, actionSettleDelays[probe]) {
+			break
+		}
 	}
 	if action == AttemptActionRecheck {
 		if checkingState(after.job.State) {

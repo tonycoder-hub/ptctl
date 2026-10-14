@@ -337,8 +337,10 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 		}
 		if !otherUseChecked {
 			// Other jobs are re-enumerated with one fresh complete ledger read
-			// after all long source reads and immediately before the first
-			// unlink of this invocation; any doubt leaves every name in place.
+			// for every remaining name, after this name's long source reads and
+			// immediately before the first unlink of this invocation; any doubt
+			// leaves every name in place. Later names are compared again below
+			// but not re-enumerated (non-atomic, like the bracketing reads).
 			if err := checkOtherClientUseBeforeRemoval(ctx, report, journal, session, otherUse); err != nil {
 				return mapOtherClientUseExecutionError(report, err)
 			}
@@ -367,10 +369,11 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 		}
 		populateExecutionFromJournal(report, journal)
 	}
-	// Read the live downloader first, right after the last unlink, so a
-	// client session that expires during the full final reverification below
-	// cannot strand a completed deletion; any failure here leaves a resumable
-	// partial operation and completion is journaled only after both checks.
+	// The live downloader is read right after the last unlink, before its
+	// exact final reverification, so an expiring session cannot strand a
+	// completed deletion; any failure leaves a resumable partial operation.
+	// The final proof is part of that verified observation (bound to the
+	// intent's final identity below), so completion needs no separate read.
 	after, afterObservation, err := clientactivate.VerifyCurrentUse(ctx, currentUse, session)
 	report.ClientUse.After = afterObservation
 	report.ClientUse.RequestsMade = session.RequestsMade()
@@ -383,14 +386,7 @@ func continueSourceRetirement(ctx context.Context, report *ExecutionReport, jour
 		report.ClientUse.Status = "unstable"
 		return executionPartial(report, nil, "client.current_use_unstable", "the live downloader identity, state, layout, or paths changed across deletion")
 	}
-	freshFinal, finalObservation, err := final.Reverify(ctx)
-	if err != nil {
-		return mapFinalExecutionError(report, err, "the materialized final could not be reverified after source deletion")
-	}
-	if freshFinal == nil || finalObservation.FinalObjectIdentity != journal.state.Intent.FinalObjectIdentity {
-		return executionIntegrity(report, "the materialized final identity changed during source retirement")
-	}
-	report.Final = finalObservation
+	report.Final = afterObservation.Final
 	report.ClientUse.Status, report.ClientUse.Stable = "observed_stable", true
 	report.ClientUse.Assurance = "same_session_before_after_typed_job_and_effective_path_claims_bracketed_with_deletion_and_exact_final_reverification_non_atomic"
 	_, markerReceipt, err := journal.publishComplete(ctx, afterObservation.CompleteFileSnapshotID)

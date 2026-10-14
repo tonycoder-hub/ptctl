@@ -338,16 +338,6 @@ func validReviewedJobState(schema, reviewed string) bool {
 	}
 }
 
-// reviewedJobStateMatches reports whether one live job state still satisfies
-// the reviewed plan: any complete started substate for v2, the exact reviewed
-// substate for v1.
-func reviewedJobStateMatches(plan Plan, live string) bool {
-	if !startedState(live) || !validReviewedJobState(plan.Schema, plan.ReviewedJobState) {
-		return false
-	}
-	return plan.Schema == PlanSchemaV2 || live == plan.ReviewedJobState
-}
-
 func validStopReason(value string) bool {
 	switch value {
 	case "", "context_cancelled", "job_locator_invalid", "stop_descriptor_unavailable", "session_unavailable",

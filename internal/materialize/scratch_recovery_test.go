@@ -7,10 +7,47 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 )
+
+// cancelAfterCopyScratch reports cancellation from the moment a copy scratch
+// object exists, i.e. after the copy target is created and before any byte of
+// it is consumed.
+type cancelAfterCopyScratch struct {
+	context.Context
+	pattern  string
+	canceled atomic.Bool
+}
+
+func (ctx *cancelAfterCopyScratch) Err() error {
+	if !ctx.canceled.Load() {
+		if matches, _ := filepath.Glob(ctx.pattern); len(matches) == 0 {
+			return nil
+		}
+		ctx.canceled.Store(true)
+	}
+	return context.Canceled
+}
+
+func TestCancelledCopyRemovesItsOwnScratch(t *testing.T) {
+	content := []byte("scratch discard on cancellation")
+	meta, discovery, _, targetRoot := singleMaterializeFixture(t, context.Background(), "final.bin", content)
+	ctx := &cancelAfterCopyScratch{
+		Context: context.Background(),
+		pattern: filepath.Join(targetRoot, operationDirectoryPrefix+"*", scratchDirectoryName, "copy-*.pending"),
+	}
+	report, err := Run(ctx, runOptionsFor(t, meta, &discovery, targetRoot))
+	if !errors.Is(err, context.Canceled) || report.Outcome != OutcomeInterrupted || report.Writes.ScratchFilesRemoved != 1 {
+		t.Fatalf("cancelled copy did not remove its own scratch: %#v %v", report, err)
+	}
+	entries, readErr := os.ReadDir(filepath.Join(onlyOperationDirectory(t, targetRoot), scratchDirectoryName))
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("cancelled copy left scratch residue: %d %v", len(entries), readErr)
+	}
+}
 
 func TestFailedCopyRemovesOnlyItsOwnScratchByIdentity(t *testing.T) {
 	ctx := context.Background()

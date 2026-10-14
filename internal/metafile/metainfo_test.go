@@ -221,6 +221,19 @@ func TestParseV2SingleFile(t *testing.T) {
 	if meta.Version != "v2" || meta.MultiFile || len(meta.Files) != 1 || meta.Files[0].Path[0] != "one.bin" {
 		t.Fatalf("unexpected v2 metadata: %#v", meta)
 	}
+	leaf := map[string]any{"": map[string]any{"length": int64(1), "pieces root": rootHash}}
+	renamed := bencode(map[string]any{"info": map[string]any{
+		"file tree": map[string]any{"one.bin": leaf}, "meta version": int64(2), "name": "other", "piece length": int64(16384),
+	}})
+	if _, err := Parse(renamed); err == nil || !strings.Contains(err.Error(), "differs from name") {
+		t.Fatalf("v2 single file stored under a key other than name was accepted: %v", err)
+	}
+	withDirectory := bencode(map[string]any{"info": map[string]any{
+		"file tree": map[string]any{"one.bin": leaf, "empty": map[string]any{}}, "meta version": int64(2), "name": "one.bin", "piece length": int64(16384),
+	}})
+	if meta, err := Parse(withDirectory); err != nil || !meta.MultiFile || len(meta.Files) != 1 || meta.Files[0].Path[0] != "one.bin" {
+		t.Fatalf("v2 tree with a sibling directory is not multi-file: %#v %v", meta, err)
+	}
 }
 
 func TestVerifyV2BoundarySizes(t *testing.T) {

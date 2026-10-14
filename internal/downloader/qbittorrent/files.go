@@ -33,10 +33,6 @@ const (
 	jobFileHasSize
 	jobFileHasProgress
 	jobFileHasPriority
-	jobFileHasIsSeed
-	// is_seed is a torrent-level flag that upstream attaches only to the
-	// first row (torrentscontroller.cpp filesAction), so it is optional and
-	// never used as per-file completion; it is still type-checked if present.
 	jobFileRequiredFields = jobFileHasIndex | jobFileHasName | jobFileHasSize | jobFileHasProgress | jobFileHasPriority
 )
 
@@ -48,7 +44,6 @@ type rawJobFile struct {
 	Size     int64
 	Progress float64
 	Priority int
-	IsSeed   bool
 }
 
 func (item *rawJobFile) UnmarshalJSON(data []byte) error {
@@ -120,10 +115,12 @@ func (item *rawJobFile) UnmarshalJSON(data []byte) error {
 			}
 			item.present |= jobFileHasPriority
 		case "is_seed":
-			if err := decodeJSONBool(raw, &item.IsSeed); err != nil {
+			// Upstream filesAction attaches this torrent-level flag only to
+			// the first row, so it is optional and only type-checked.
+			var isSeed bool
+			if err := decodeJSONBool(raw, &isSeed); err != nil {
 				return fmt.Errorf("decode qBittorrent file object field")
 			}
-			item.present |= jobFileHasIsSeed
 		}
 	}
 	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
@@ -133,7 +130,7 @@ func (item *rawJobFile) UnmarshalJSON(data []byte) error {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return fmt.Errorf("decode qBittorrent file object")
 	}
-	if item.present&jobFileRequiredFields != jobFileRequiredFields {
+	if item.present != jobFileRequiredFields {
 		return fmt.Errorf("qBittorrent file object is missing required fields")
 	}
 	return nil
@@ -309,9 +306,7 @@ func normalizeJobFile(item rawJobFile) (downloader.JobFile, string, int64, error
 		SizeBytes:          item.Size,
 		Progress:           item.Progress,
 		Selection:          selection,
-		// qBittorrent reports per-file progress as exactly 1 when every byte
-		// of the file is present (or the file is empty), matching the
-		// Transmission adapter's bytesCompleted == length rule.
+		// qBittorrent reports exactly 1 once every byte of the file is present.
 		Complete: item.Progress == 1,
 	}, strings.Join(components, "\x00"), pathBytes, nil
 }

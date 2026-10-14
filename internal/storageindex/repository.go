@@ -246,7 +246,7 @@ func (repository *Repository) SelectSnapshot(ctx context.Context, profile Profil
 	if !listing.complete {
 		result.Status = "incomplete"
 		result.StopReason = "record_listing_incomplete"
-		return result, incompleteDescriptorListingError(listing, repository.limits.MaxSnapshots)
+		return result, repository.incompleteDescriptorListingError(listing, repository.limits.MaxSnapshots)
 	}
 	matches := make([]loadedDescriptor, 0)
 	for _, descriptor := range listing.descriptors {
@@ -365,13 +365,13 @@ func (repository *Repository) listDescriptors(ctx context.Context, profileID str
 			result.descriptors = append(result.descriptors, cached)
 			continue
 		}
-		loaded, foreign, err := repository.loadListedDescriptor(ctx, ref, profileID)
-		if err != nil {
-			return result, err
-		}
-		if foreign {
+		loaded, owner, err := repository.loadDescriptorAttributed(ctx, ref)
+		if owner != "" && owner != profileID {
 			result.foreignInvalid++
 			continue
+		}
+		if err != nil {
+			return result, err
 		}
 		if cache != nil {
 			cache[ref.ID] = loaded
@@ -386,21 +386,9 @@ func (repository *Repository) loadDescriptor(ctx context.Context, observed metas
 	return loaded, err
 }
 
-// loadListedDescriptor is loadDescriptor for latest-selection listings. It
-// reports foreign=true only for a record whose digest verified, whose content
-// failed descriptor decoding, and whose exact profile_id names a valid profile
-// other than profileID. Store-level corruption, unattributable content, and
-// invalid records of the selected profile still fail closed.
-func (repository *Repository) loadListedDescriptor(ctx context.Context, observed metastore.RecordRef, profileID string) (loadedDescriptor, bool, error) {
-	loaded, owner, err := repository.loadDescriptorAttributed(ctx, observed)
-	if err != nil && errors.Is(err, ErrIntegrity) && owner != "" && owner != profileID {
-		return loadedDescriptor{}, true, nil
-	}
-	return loaded, false, err
-}
-
-// loadDescriptorAttributed returns, alongside a decode failure, the profile ID
-// named by the record's verified sealed bytes when that is unambiguous.
+// loadDescriptorAttributed returns, alongside a decode failure (ErrIntegrity),
+// the profile ID named by the record's verified sealed bytes when that is
+// unambiguous; the owner is empty for every other outcome.
 func (repository *Repository) loadDescriptorAttributed(ctx context.Context, observed metastore.RecordRef) (loadedDescriptor, string, error) {
 	var descriptor SnapshotDescriptor
 	var decodeErr error
@@ -476,23 +464,16 @@ func (capture *boundedCapture) Write(value []byte) (int, error) {
 	return len(value), nil
 }
 
-// incompleteDescriptorListingError explains an incomplete descriptor listing.
-// Only a record_limit stop means that too many descriptors exist, which prune
-// can fix; entry and path limits are store-wide budgets.
-func incompleteDescriptorListingError(listing descriptorListing, maxRecords int) error {
-	// ErrSnapshotSelectionIncomplete stays the classified cause; the metastore
-	// cause is wrapped too so callers can match ErrRecordListIncomplete.
+// incompleteDescriptorListingError explains an incomplete descriptor listing
+// and wraps ErrRecordListIncomplete as well. Only a record_limit stop means
+// that too many descriptors exist, which prune can fix; entry and path limits
+// are store-wide budgets explained by the metastore.
+func (repository *Repository) incompleteDescriptorListingError(listing descriptorListing, maxRecords int) error {
 	if listing.stopReason == "record_limit" {
-		return fmt.Errorf("%w: more than %d descriptor records are present; run ptctl storage index prune for each profile to remove superseded generations (%w)", ErrSnapshotSelectionIncomplete, maxRecords, metastore.ErrRecordListIncomplete)
+		return fmt.Errorf("%w: more than %d descriptor records exist across all profiles; run ptctl storage index prune --acknowledge-index-prune for each profile, with --retain-generations at most %d divided by the number of profiles (%w)",
+			ErrSnapshotSelectionIncomplete, maxRecords, repository.limits.MaxSnapshots, metastore.ErrRecordListIncomplete)
 	}
-	if listing.incompleteErr != nil {
-		return fmt.Errorf("%w: descriptor listing stopped at the private store budget: %w", ErrSnapshotSelectionIncomplete, listing.incompleteErr)
-	}
-	reason := listing.stopReason
-	if reason == "" {
-		reason = "unknown"
-	}
-	return fmt.Errorf("%w: descriptor listing stopped at the private store budget (%s)", ErrSnapshotSelectionIncomplete, reason)
+	return fmt.Errorf("%w: descriptor listing stopped at the private store budget: %w", ErrSnapshotSelectionIncomplete, listing.incompleteErr)
 }
 
 func descriptorMatchesProfile(descriptor SnapshotDescriptor, profile Profile) bool {
@@ -509,10 +490,7 @@ func (repository *Repository) maintenanceMaxRecords() int {
 	if repository.maintenanceRecords > 0 {
 		budget = repository.maintenanceRecords
 	}
-	if budget < repository.limits.MaxSnapshots {
-		budget = repository.limits.MaxSnapshots
-	}
-	return budget
+	return max(budget, repository.limits.MaxSnapshots)
 }
 
 func (repository *Repository) recordLimits(maxRecords int) metastore.RecordLimits {

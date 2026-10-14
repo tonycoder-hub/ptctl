@@ -544,7 +544,14 @@ func TestTransmissionActivationUsesExactV1ControlAndCompletesAcrossResume(t *tes
 	}
 }
 
+func shortenActionSettleDelays(t *testing.T) {
+	previous := actionSettleDelays
+	actionSettleDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { actionSettleDelays = previous })
+}
+
 func TestActivationDoesNotReplayUnknownRecheckWithoutExplicitRepeat(t *testing.T) {
+	shortenActionSettleDelays(t)
 	fixture := makeActivationFixture(t)
 	now := time.Now().UTC()
 	complete := fixture.job("stoppedUP", 1)
@@ -616,9 +623,7 @@ func TestActivationSettlesLaggingRecheckObservationWithinOneInvocation(t *testin
 }
 
 func TestActivationReportsExhaustedRecheckBudgetWithoutAnotherRequest(t *testing.T) {
-	previousDelays := actionSettleDelays
-	actionSettleDelays = []time.Duration{time.Millisecond}
-	defer func() { actionSettleDelays = previousDelays }()
+	shortenActionSettleDelays(t)
 	fixture := makeActivationFixture(t)
 	now := time.Now().UTC()
 	complete := fixture.job("stoppedUP", 1)

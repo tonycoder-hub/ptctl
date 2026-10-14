@@ -766,7 +766,7 @@ func openFileSpec(spec fileSpec) (SourceFile, error) {
 	if spec.open != nil {
 		return spec.open()
 	}
-	return os.Open(spec.path)
+	return storage.OpenRegular(spec.path)
 }
 
 func statOpenedContentPath(path string, file SourceFile) (os.FileInfo, error) {

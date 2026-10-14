@@ -30,7 +30,9 @@ deliberately does not. For step-by-step usage, see the
   reconciliation commands: an ordinary file, or an initialized store plus its
   whole-metafile variant ID;
 - structural v1/v2 validation, including cryptographic reduction of each v2
-  piece layer back to its file `pieces root`;
+  piece layer back to its file `pieces root`; as in libtorrent, a pure v2 tree
+  is single-file only when its top level is one file, and that file's key must
+  equal `name` because clients store it under the key;
 - hybrid inspection that parses both layouts and rejects disagreements; each
   v1 padding file must exactly fill the gap to the next piece boundary,
   including the optional tail pad after the last file that libtorrent 2.0.8+

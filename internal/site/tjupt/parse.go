@@ -24,7 +24,9 @@ var (
 	challengeMarker = regexp.MustCompile(`(?is)(cf-chl-|just a moment|attention required|captcha|cloudflare ray id)`)
 	searchField     = regexp.MustCompile(`(?is)<input\b[^>]*name\s*=\s*["']?search["']?`)
 	authenticatedUI = regexp.MustCompile(`(?is)<a\b[^>]*href\s*=\s*["']?[^"' >]*logout\.php(?:[?"' >])`)
-	emptySearch     = regexp.MustCompile(`(?is)(没有找到(?:任何)?种子|没有符合条件的种子|no torrents? found|nothing found)`)
+	// TJUPT torrents.php prints lang_torrents std_try_again for an empty
+	// search and std_nothing_found when the search string is PHP-empty.
+	emptySearch     = regexp.MustCompile(`(?is)(没有找到(?:任何)?种子|没有符合条件的种子|没有种子。请用准确的关键字重试|沒有種子。請用準確的關鍵字重試|没有结果！|沒有結果！|no torrents? found|nothing found)`)
 	bonusForm       = regexp.MustCompile(`(?is)<form\b[^>]*action\s*=\s*["']?[^"' >]*mybonusapps\.php[^"' >]*["']?[^>]*>`)
 	bonusOption     = regexp.MustCompile(`(?is)<input\b[^>]*name\s*=\s*["']?option["']?`)
 	titlePattern    = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)

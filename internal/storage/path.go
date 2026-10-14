@@ -64,7 +64,7 @@ func ValidateComponents(components [][]byte, semantics PathSemantics) error {
 			if strings.ContainsAny(component, `<>:"|?*`) || strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") {
 				return fmt.Errorf("Windows path component %d has a forbidden character or trailing dot/space", index)
 			}
-			if windowsReserved(component) {
+			if WindowsReservedDeviceName(component) {
 				return fmt.Errorf("Windows path component %d uses a reserved device name", index)
 			}
 		}
@@ -421,11 +421,12 @@ func validateClientRoot(root string, windows bool) (string, error) {
 	return clean, nil
 }
 
-// windowsReserved reports whether Win32 path normalization maps component to
-// a DOS device. Win32 ignores everything after the first dot and the spaces
-// before it, so "CON .txt" is CON. COM0/LPT0 are listed by current Microsoft
-// naming documentation and rejected conservatively.
-func windowsReserved(component string) bool {
+// WindowsReservedDeviceName reports whether Win32 path normalization maps
+// component to a DOS device. Win32 ignores everything after the first dot and
+// the spaces before it, so "CON .txt" is CON. COM0/LPT0 are listed by current
+// Microsoft naming documentation and rejected conservatively. The rule is
+// platform-neutral so every host can test what Windows bindings enforce.
+func WindowsReservedDeviceName(component string) bool {
 	base := component
 	if dot := strings.IndexByte(base, '.'); dot >= 0 {
 		base = base[:dot]

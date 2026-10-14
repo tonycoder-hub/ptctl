@@ -49,7 +49,8 @@ record first and publishes a small descriptor only after the enumeration and
 data publication are complete. After descriptor publication, both immutable
 records are digest-verified together under one operation-bound physical store
 root before the result can be `stored`. A failed descriptor publication can
-leave an orphan data record, but latest selection lists descriptors only.
+leave an orphan data record, but latest selection lists descriptors only, and
+prune collects it once newer generations supersede it.
 
 There is no store-wide lock, so generation publication is optimistic. Refresh
 chooses one more than the highest published generation of the exact profile
@@ -69,10 +70,14 @@ publication writes. `storage index refresh-discover` and `reconcile
 refresh-report` do not prune; run `storage index prune --acknowledge-index-prune`
 for those workflows. Prune removes a superseded snapshot's data record first
 and then its descriptor; rerunning it after an interruption finishes the job.
-It never removes the latest generation (or either side of a tie at it),
-protected records, or other profiles' records. Latest selection lists at most
-256 descriptors across all profiles; an index already over that budget reports
-`record_listing_incomplete` and asks for prune. Refresh and prune use a larger
+After a complete listing it also removes orphan data that no descriptor
+references and whose snapshot is of the same profile revision and an older
+generation than the retained ones. It never removes the latest generation (or
+either side of a tie at it), protected records, or other profiles' records.
+Latest selection lists at most 256 descriptors across all profiles; an index
+already over that budget reports `record_listing_incomplete` and asks for
+prune with `--retain-generations` at most 256 divided by the number of
+profiles. Refresh and prune use a larger
 maintenance listing (10,000 records), and prune also acts on a verified partial
 listing (outcome `partial`, exit 4), so repeat it until the outcome is
 `complete` for each profile. A pruned generation can no longer be read through

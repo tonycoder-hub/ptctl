@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -208,6 +210,35 @@ func TestMetafileStoreInvalidImportAndCorruptConsumerUseIntegrityExit(t *testing
 	code = Run([]string{"torrent", "inspect", "--metafile-store", storeRoot, "--metafile-variant", imported.Data.Artifact.VariantID, "--output", "json"}, strings.NewReader(""), &out, &errOut)
 	if code != 3 || out.Len() != 0 || !strings.Contains(errOut.String(), "stored metafile failed") || strings.Contains(errOut.String(), storeRoot) {
 		t.Fatalf("corrupt consumer code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestStoredMetafileThatNoLongerParsesNamesTheRemedy(t *testing.T) {
+	storeRoot := filepath.Join(physicalCLITempDir(t), "store")
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"metafile", "store", "init", "--store", storeRoot}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("init code=%d stderr=%q", code, errOut.String())
+	}
+	// A digest-valid object the strict canonical parser rejects, as one an
+	// older ptctl stored would be.
+	raw := []byte("d4:infod6:lengthi05eee")
+	digest := sha256.Sum256(raw)
+	variant := "sha256:" + hex.EncodeToString(digest[:])
+	if err := os.WriteFile(filepath.Join(storeRoot, "objects", hex.EncodeToString(digest[:])+".torrent"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"metafile", "store", "inspect", "--store", storeRoot, variant},
+		{"torrent", "inspect", "--metafile-store", storeRoot, "--metafile-variant", variant},
+	} {
+		out.Reset()
+		errOut.Reset()
+		code := Run(args, strings.NewReader(""), &out, &errOut)
+		stderr := errOut.String()
+		if code != 3 || !strings.Contains(stderr, variant) || !strings.Contains(stderr, "non-canonical integer") ||
+			!strings.Contains(stderr, "ptctl metafile store import") || strings.Contains(stderr, storeRoot) {
+			t.Fatalf("%s code=%d stderr=%q", strings.Join(args[:2], " "), code, stderr)
+		}
 	}
 }
 

@@ -53,7 +53,10 @@ job-ledger responses that prove current use of the plan job are checked for
 every other job, without extra requests: its content root (or its save path
 when it claims no content root) is translated only through the exact reviewed
 `--host-root`/`--client-root` mapping, confined below the host root, and
-compared with each selected source name using metadata-only calls. Planning is
+compared with each selected source name using metadata-only calls. For a
+Windows client, a path component with no exact host name is matched
+case-insensitively against its host directory, as a share would resolve it; more
+than one candidate is reported as incomplete. Planning is
 blocked with `source.other_client_job_overlap` when another job's root equals,
 contains, or lies inside a source name before or after host symlink resolution,
 is the same file object as a source (for example a hard-linked cross-seed copy),
@@ -65,7 +68,8 @@ an activation mapping whose client root covers every job. A truncated,
 contradictory, or failed ledger, or a host observation that fails for any reason
 other than absence, reports `client.other_use_enumeration_incomplete` and never
 yields an eligible plan. The check does not descend into another job's
-directory tree, so a link or mount nested inside that tree is not detected, and
+directory tree, so a link or mount nested inside that tree is not detected; it
+does not model share name mangling or Unicode normalization; and
 it does not consult other ptctl records: materialized finals are independent
 byte copies, and adopted finals are covered as downloader jobs.
 

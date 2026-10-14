@@ -164,7 +164,14 @@ func (session *Session) ReserveAttempt(ctx context.Context, intent *VerifiedInte
 	}
 	// Prune removes the intent before the attempt marker. A stale holder of a
 	// VerifiedIntent must still observe the exact intent before publishing, so
-	// a pruned chain is neither re-reserved nor resurrected as an orphan marker.
+	// a pruned chain is normally neither re-reserved nor resurrected. The
+	// metastore has no cross-record compare-and-swap (no-replace publication
+	// is per name), so a prune between this check and the publication below
+	// is excluded by verification instead: Prune only takes terminal chains,
+	// so the marker is either still present (AlreadyPresent) or republished
+	// after the intent was removed, which fails the outcome scan or the set
+	// verification before anything is acquired. Rerunning Prune removes such
+	// a marker, and Forget refuses while it exists.
 	intentPresent, err := session.recordPresent(ctx, intent.ref)
 	if err != nil {
 		return AttemptRecord{}, nil, receipt, err

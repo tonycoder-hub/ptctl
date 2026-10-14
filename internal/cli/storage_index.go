@@ -425,9 +425,7 @@ func (a *app) storageIndexRefresh(args []string) error {
 	if refreshErr == nil && refresh.Status == "stored" && *retain > 0 {
 		// Refresh itself never removes records. Retention runs only after the
 		// new generation is durably stored and protects it explicitly.
-		retention, err := repository.PruneSnapshots(ctx, selection.Profile, storageindex.PruneOptions{
-			RetainGenerations: *retain, Protect: []metastore.RecordID{refresh.DescriptorRecord.ID},
-		})
+		retention, err := repository.PruneSnapshots(ctx, selection.Profile, refresh.RetentionOptions(*retain))
 		report.Retention = &retention
 		switch {
 		case err != nil:
@@ -605,11 +603,7 @@ func parseStorageFlags(a *app, fs *flag.FlagSet, args []string, usageLine, summa
 			_, writeErr := fmt.Fprint(a.stdout, output.String())
 			return true, writeErr
 		}
-		detail := strings.TrimSpace(output.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		return false, usageError("%s: %s", fs.Name(), detail)
+		return false, flagParseError(fs.Name(), err)
 	}
 	return false, nil
 }

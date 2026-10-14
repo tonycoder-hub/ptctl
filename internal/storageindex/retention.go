@@ -28,11 +28,33 @@ type PruneOptions struct {
 	// Protect names descriptor records which must survive this run, such as
 	// one a caller has just published and is still reading.
 	Protect []metastore.RecordID
+	// refresh is set only by RefreshResult.RetentionOptions.
+	refresh *refreshListing
+}
+
+// refreshListing is the complete descriptor listing a stored Refresh verified
+// after its descriptor commit.
+type refreshListing struct {
+	repository *Repository
+	profileID  string
+	listing    descriptorListing
+}
+
+// RetentionOptions returns the PruneOptions for retention right after this
+// stored refresh. The new descriptor is protected, and PruneSnapshots on the
+// same repository and profile reuses the complete descriptor listing Refresh
+// verified after its commit instead of listing the store again. Descriptors
+// published since are newer generations, which only make retention keep
+// more, or stalled ones that PruneSnapshots would treat as superseded anyway.
+func (result RefreshResult) RetentionOptions(retainGenerations int) PruneOptions {
+	return PruneOptions{RetainGenerations: retainGenerations, Protect: []metastore.RecordID{result.DescriptorRecord.ID}, refresh: result.retention}
 }
 
 // PrunedSnapshot is one superseded generation handled by PruneSnapshots.
 // DataRemoval is removed, already_absent, or retained_referenced;
-// DescriptorRemoval is removed or already_absent.
+// DescriptorRemoval is removed or already_absent. An orphan data record,
+// which no descriptor references, has an empty DescriptorRecordID and
+// DescriptorRemoval already_absent.
 type PrunedSnapshot struct {
 	Generation         uint64             `json:"generation"`
 	SnapshotID         string             `json:"snapshot_id"`
@@ -76,9 +98,17 @@ type PruneResult struct {
 // For each superseded generation the data record is removed before its
 // descriptor. A crash between the two leaves an older, never-selected
 // descriptor whose data is absent: latest selection ignores it, an explicit
-// read of it fails closed, and rerunning prune removes it. Descriptor-first
-// ordering would instead leak an unreferenced data record that nothing lists.
-// Removal is exact (digest and size bound); Refresh never prunes by itself.
+// read of it fails closed, and rerunning prune removes it. Removal is exact
+// (digest and size bound); Refresh never prunes by itself.
+//
+// After a complete descriptor listing, prune also removes orphan data that a
+// failed, conflicting, or interrupted refresh published without a
+// descriptor: a data record no listed descriptor references whose verified
+// header names this profile revision and a superseded generation. A refresh
+// still holding such a record fails its pre-commit check, because a newer
+// generation is already published and the latest one is never pruned; one
+// stalled past that check can only commit a superseded descriptor without
+// data, the fail-closed state described above.
 func (repository *Repository) PruneSnapshots(ctx context.Context, profile Profile, options PruneOptions) (PruneResult, error) {
 	result := PruneResult{
 		Effect: snapshotPruneEffect, Status: "incomplete", ProfileID: profile.ID, ProfileRevision: profile.Revision,
@@ -104,7 +134,13 @@ func (repository *Repository) PruneSnapshots(ctx context.Context, profile Profil
 
 	maxRecords := repository.maintenanceMaxRecords()
 	limits := repository.recordLimits(maxRecords)
-	listing, err := repository.listDescriptors(ctx, profile.ID, maxRecords, true, nil)
+	var listing descriptorListing
+	var err error
+	if reuse := options.refresh; reuse != nil && reuse.repository == repository && reuse.profileID == profile.ID {
+		listing = reuse.listing
+	} else {
+		listing, err = repository.listDescriptors(ctx, profile.ID, maxRecords, true, nil)
+	}
 	result.RecordsConsidered = len(listing.descriptors)
 	result.ListingComplete = listing.complete
 	if err != nil {
@@ -114,7 +150,7 @@ func (repository *Repository) PruneSnapshots(ctx context.Context, profile Profil
 	if !listing.complete {
 		result.StopReasons = appendUniqueString(result.StopReasons, "record_listing_incomplete")
 		if len(listing.descriptors) == 0 {
-			return result, fmt.Errorf("%w: no descriptor records could be listed within the private store entry budget", ErrSnapshotSelectionIncomplete)
+			return result, fmt.Errorf("no descriptor records could be listed: %w", repository.incompleteDescriptorListingError(listing, maxRecords))
 		}
 	}
 
@@ -133,20 +169,19 @@ func (repository *Repository) PruneSnapshots(ctx context.Context, profile Profil
 	}
 	result.DescriptorsMatched = len(matches)
 	sort.Slice(generations, func(i, j int) bool { return generations[i] > generations[j] })
-	retained := generations
-	if len(retained) > options.RetainGenerations {
-		retained = retained[:options.RetainGenerations]
+	result.RetainedGenerations = append(result.RetainedGenerations, generations[:min(len(generations), options.RetainGenerations)]...)
+	// Generations below oldestRetained are superseded; zero supersedes none.
+	oldestRetained := uint64(0)
+	if len(generations) >= options.RetainGenerations {
+		oldestRetained = generations[options.RetainGenerations-1]
 	}
-	result.RetainedGenerations = append(result.RetainedGenerations, retained...)
 
 	superseded := make([]loadedDescriptor, 0)
-	if len(generations) > options.RetainGenerations {
-		oldestRetained := generations[options.RetainGenerations-1]
-		for _, candidate := range matches {
-			if _, keep := protected[candidate.ref.ID]; keep || candidate.descriptor.Generation >= oldestRetained {
-				continue
-			}
+	removing := make(map[metastore.RecordID]struct{})
+	for _, candidate := range matches {
+		if _, keep := protected[candidate.ref.ID]; !keep && candidate.descriptor.Generation < oldestRetained {
 			superseded = append(superseded, candidate)
+			removing[candidate.ref.ID] = struct{}{}
 		}
 	}
 	sort.Slice(superseded, func(i, j int) bool {
@@ -155,26 +190,23 @@ func (repository *Repository) PruneSnapshots(ctx context.Context, profile Profil
 		}
 		return superseded[i].ref.ID < superseded[j].ref.ID
 	})
-	removing := make(map[metastore.RecordID]struct{}, len(superseded))
-	for _, candidate := range superseded {
-		removing[candidate.ref.ID] = struct{}{}
-	}
-	referenced := make(map[string]struct{})
+	// referenced holds the data record of every listed descriptor, mapped to
+	// whether a descriptor this pass keeps still references it.
+	referenced := make(map[string]bool, len(listing.descriptors))
 	for _, candidate := range listing.descriptors {
-		if _, ok := removing[candidate.ref.ID]; !ok {
-			referenced[candidate.descriptor.DataRecordID] = struct{}{}
-		}
+		_, removed := removing[candidate.ref.ID]
+		referenced[candidate.descriptor.DataRecordID] = referenced[candidate.descriptor.DataRecordID] || !removed
 	}
 
+	collectOrphans := listing.complete && oldestRetained > 0
 	dataSizes := make(map[metastore.RecordID]int64)
-	dataListingComplete := false
-	if len(superseded) > 0 {
-		dataListing, err := repository.store.ListRecords(ctx, metastore.RecordKindStorageIndexDataV1, limits)
+	dataListing := metastore.RecordListResult{}
+	if len(superseded) > 0 || collectOrphans {
+		dataListing, err = repository.store.ListRecords(ctx, metastore.RecordKindStorageIndexDataV1, limits)
 		if err != nil {
 			result.StopReasons = appendUniqueString(result.StopReasons, pruneStopReason("data_listing", err))
 			return result, err
 		}
-		dataListingComplete = dataListing.Complete
 		for _, ref := range dataListing.Records {
 			dataSizes[ref.ID] = ref.SizeBytes
 		}
@@ -194,10 +226,10 @@ func (repository *Repository) PruneSnapshots(ctx context.Context, profile Profil
 			Generation: candidate.descriptor.Generation, SnapshotID: candidate.descriptor.ID,
 			DescriptorRecordID: candidate.ref.ID, DataRecordID: dataID,
 		}
-		if _, shared := referenced[candidate.descriptor.DataRecordID]; shared {
+		if referenced[candidate.descriptor.DataRecordID] {
 			entry.DataRemoval = "retained_referenced"
 		} else {
-			outcome, writes, err := repository.removeSnapshotData(ctx, dataID, dataSizes, dataListingComplete, limits)
+			outcome, writes, err := repository.removeSnapshotData(ctx, dataID, dataSizes, dataListing.Complete, limits)
 			result.WritesPerformed += writes
 			if err != nil {
 				result.StopReasons = appendUniqueString(result.StopReasons, pruneStopReason("data_removal", err))
@@ -213,6 +245,23 @@ func (repository *Repository) PruneSnapshots(ctx context.Context, profile Profil
 		}
 		entry.DescriptorRemoval = removalOutcome(receipt)
 		result.Pruned = append(result.Pruned, entry)
+	}
+
+	if collectOrphans {
+		for _, ref := range dataListing.Records {
+			if _, listed := referenced[ref.ID.String()]; listed {
+				continue
+			}
+			entry, writes, err := repository.removeOrphanData(ctx, profile, ref, oldestRetained, limits)
+			result.WritesPerformed += writes
+			if err != nil {
+				result.StopReasons = appendUniqueString(result.StopReasons, pruneStopReason("orphan_data_removal", err))
+				return result, err
+			}
+			if entry != nil {
+				result.Pruned = append(result.Pruned, *entry)
+			}
+		}
 	}
 
 	if listing.complete {
@@ -250,6 +299,32 @@ func (repository *Repository) removeSnapshotData(ctx context.Context, id metasto
 		return "", receipt.WritesPerformed, err
 	}
 	return removalOutcome(receipt), receipt.WritesPerformed, nil
+}
+
+// removeOrphanData removes one unreferenced data record when it decodes as a
+// valid snapshot of this exact profile revision at a generation below
+// oldestRetained. Any record it cannot attribute that way is left alone.
+func (repository *Repository) removeOrphanData(ctx context.Context, profile Profile, ref metastore.RecordRef, oldestRetained uint64, limits metastore.RecordLimits) (*PrunedSnapshot, int, error) {
+	var header SnapshotHeader
+	_, _, err := repository.store.LoadRecord(ctx, metastore.RecordKindStorageIndexDataV1, ref.ID, limits, func(reader io.Reader) error {
+		var err error
+		header, _, err = DecodeSnapshot(ctx, reader, repository.limits, func(Entry) error { return nil })
+		return err
+	})
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, 0, err
+	}
+	if err != nil || header.ProfileID != profile.ID || header.ProfileRevision != profile.Revision || header.Generation >= oldestRetained {
+		return nil, 0, nil
+	}
+	receipt, err := repository.store.RemoveRecordExact(ctx, ref, limits)
+	if err != nil {
+		return nil, receipt.WritesPerformed, err
+	}
+	return &PrunedSnapshot{
+		Generation: header.Generation, SnapshotID: header.SnapshotID, DataRecordID: ref.ID,
+		DataRemoval: removalOutcome(receipt), DescriptorRemoval: "already_absent",
+	}, receipt.WritesPerformed, nil
 }
 
 func removalOutcome(receipt metastore.RecordRemovalReceipt) string {

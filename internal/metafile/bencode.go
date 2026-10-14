@@ -141,8 +141,7 @@ func (d *decoder) parse(depth int) (*Node, error) {
 	case ch == 'd':
 		d.pos++
 		node := &Node{Kind: KindDictionary, Dict: make(map[string]*Node), Start: start}
-		var previous []byte
-		hasPrevious := false
+		var previous *Node
 		for {
 			if d.pos >= len(d.data) {
 				return nil, fmt.Errorf("unterminated dictionary at byte %d", start)
@@ -159,13 +158,10 @@ func (d *decoder) parse(depth int) (*Node, error) {
 			if key.Kind != KindBytes {
 				return nil, fmt.Errorf("dictionary key at byte %d is not a byte string", key.Start)
 			}
-			// The empty key is a valid first key, so track presence separately
-			// from the (possibly empty) previous key bytes.
-			if hasPrevious && bytes.Compare(previous, key.Bytes) >= 0 {
+			if previous != nil && bytes.Compare(previous.Bytes, key.Bytes) >= 0 {
 				return nil, fmt.Errorf("dictionary keys are duplicated or not strictly sorted at byte %d", key.Start)
 			}
-			previous = append(previous[:0], key.Bytes...)
-			hasPrevious = true
+			previous = key
 			value, err := d.parse(depth + 1)
 			if err != nil {
 				return nil, err
