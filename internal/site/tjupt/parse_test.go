@@ -11,6 +11,27 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/site"
 )
 
+// The live wording is shaped like TJUPT's mybonusapps.php: the balance is in
+// the intro sentence, and the luck game's rule text mentions an unrelated
+// "当前魔力值≥1000".
+func TestParseBonusBalanceReadsLiveWordingAndIgnoresRuleText(t *testing.T) {
+	const live = `<title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title>
+<span class='color_bonus'> 魔力值 </span>[<a href="mybonus.php">使用</a>|<a href="mybonusapps.php">茉莉园</a>]: <a href="bonus.php?show=log">1,439,363.7</a>
+<table><tr><td class="text" colspan="4">用你的魔力值（当前1,439,363.7）来玩儿吧！</td></tr>
+<tr><td><h1>碰运气</h1>如果当前魔力值≥1000，你可以用它来碰碰运气</td></tr></table>`
+	tests := []struct{ name, body, want string }{
+		{"live wording", live, "1439363.7"},
+		{"rule text only", `<td><h1>碰运气</h1>如果当前魔力值≥1000，你可以用它来碰碰运气</td>`, ""},
+		{"conflicting statements", `<td>用你的魔力值（当前12）来玩儿吧！</td><td>当前魔力值：13</td>`, ""},
+		{"agreeing statements", `<td>用你的魔力值（当前1,000）来玩儿吧！</td><td>当前魔力值：1000</td>`, "1000"},
+	}
+	for _, test := range tests {
+		if got := parseBonusBalance([]byte(test.body)); got != test.want {
+			t.Fatalf("%s: balance = %q, want %q", test.name, got, test.want)
+		}
+	}
+}
+
 func TestParseAccountAndBonusCatalog(t *testing.T) {
 	body := []byte(`<!doctype html><html><head><title>北洋园PT :: Alice的魔力值 - Powered by NexusPHP</title></head>
 	<body><div>当前魔力值：12,345.67</div><table>
