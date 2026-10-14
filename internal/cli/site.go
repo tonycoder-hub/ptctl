@@ -88,7 +88,7 @@ func (a *app) siteCapabilities(args []string) error {
 	if fs.NArg() == 1 {
 		driver, ok := a.registry.Get(fs.Arg(0))
 		if !ok {
-			return fmt.Errorf("unknown site %q", fs.Arg(0))
+			return usageError("unknown site %q", fs.Arg(0))
 		}
 		items = []domain.SiteDescriptor{driver.Descriptor()}
 	}
@@ -136,7 +136,7 @@ func (a *app) siteRead(command string, args []string) error {
 	}
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
-		return fmt.Errorf("unknown site %q", fs.Arg(0))
+		return usageError("unknown site %q", fs.Arg(0))
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
@@ -149,14 +149,14 @@ func (a *app) siteRead(command string, args []string) error {
 	}[command]
 	descriptor := adapter.Descriptor()
 	if !descriptor.Supports(capability) {
-		return fmt.Errorf("site %q does not declare capability %q", descriptor.ID, capability)
+		return usageError("site %q does not declare capability %q", descriptor.ID, capability)
 	}
 	method, readSecret := domain.AuthMethodCookieHeader, readCredential
 	if *apiKeyStdin {
 		method, readSecret = domain.AuthMethodAPIKeyHeader, readAPIKeyCredential
 	}
 	if !descriptor.SupportsAuth(method) {
-		return fmt.Errorf("site %q does not support %s authentication", descriptor.ID, method)
+		return usageError("site %q does not support %s authentication", descriptor.ID, method)
 	}
 	var read func(context.Context, site.Credential) (any, error)
 	var warnings []string

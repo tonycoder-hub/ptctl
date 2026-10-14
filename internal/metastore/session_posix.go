@@ -171,7 +171,9 @@ func platformSessionOpen(session *rootSession, relative string, wantDirectory bo
 	if directory == nil {
 		return nil, fmt.Errorf("bound store directory is unavailable")
 	}
-	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	// O_NONBLOCK keeps a FIFO or device planted at this name from blocking the
+	// open itself; posixRequireOpenType rejects it before any read.
+	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
 	if wantDirectory {
 		flags |= unix.O_DIRECTORY
 	}
@@ -181,6 +183,10 @@ func platformSessionOpen(session *rootSession, relative string, wantDirectory bo
 			return nil, errArtifactNotFound
 		}
 		return nil, fmt.Errorf("open bound store object failed")
+	}
+	if err := posixRequireOpenType(fd, wantDirectory); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), "private-metastore-object")
 	if file == nil {

@@ -44,6 +44,15 @@ func platformInspectObject(*Session, *boundDirectory, string) (*os.File, rawIden
 func platformInspectRootObject(*Session, string) (*os.File, rawIdentity, ObjectKind, error) {
 	return nil, rawIdentity{}, "", ErrUnsupported
 }
+func platformOpenPublishedDirectory(*Session, *boundDirectory, string) (*boundDirectory, error) {
+	return nil, ErrUnsupported
+}
+func platformOpenPublishedRegularReadOnly(*Session, *boundDirectory, string) (*os.File, rawIdentity, error) {
+	return nil, rawIdentity{}, ErrUnsupported
+}
+func platformInspectPublishedObject(*Session, *boundDirectory, string) (*os.File, rawIdentity, ObjectKind, error) {
+	return nil, rawIdentity{}, "", ErrUnsupported
+}
 func platformOpenRootRegular(*Session, string, bool) (*os.File, rawIdentity, error) {
 	return nil, rawIdentity{}, ErrUnsupported
 }

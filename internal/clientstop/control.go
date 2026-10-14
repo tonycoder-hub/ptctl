@@ -175,7 +175,7 @@ func Resume(ctx context.Context, options ResumeOptions) (Report, error) {
 		report.classify(descriptorErr)
 		return report, descriptorErr
 	}
-	prepared, err := BuildPlan(current, descriptor)
+	prepared, err := buildPlan(current, descriptor, plan.Schema)
 	if err != nil || prepared.planID != handle.state.Intent.PlanID {
 		if err == nil {
 			err = fmt.Errorf("%w: live current-use state differs from the client stop journal", ErrPolicy)

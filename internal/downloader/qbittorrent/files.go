@@ -33,8 +33,7 @@ const (
 	jobFileHasSize
 	jobFileHasProgress
 	jobFileHasPriority
-	jobFileHasIsSeed
-	jobFileRequiredFields = jobFileHasIndex | jobFileHasName | jobFileHasSize | jobFileHasProgress | jobFileHasPriority | jobFileHasIsSeed
+	jobFileRequiredFields = jobFileHasIndex | jobFileHasName | jobFileHasSize | jobFileHasProgress | jobFileHasPriority
 )
 
 type rawJobFile struct {
@@ -45,7 +44,6 @@ type rawJobFile struct {
 	Size     int64
 	Progress float64
 	Priority int
-	IsSeed   bool
 }
 
 func (item *rawJobFile) UnmarshalJSON(data []byte) error {
@@ -117,10 +115,12 @@ func (item *rawJobFile) UnmarshalJSON(data []byte) error {
 			}
 			item.present |= jobFileHasPriority
 		case "is_seed":
-			if err := decodeJSONBool(raw, &item.IsSeed); err != nil {
+			// Upstream filesAction attaches this torrent-level flag only to
+			// the first row, so it is optional and only type-checked.
+			var isSeed bool
+			if err := decodeJSONBool(raw, &isSeed); err != nil {
 				return fmt.Errorf("decode qBittorrent file object field")
 			}
-			item.present |= jobFileHasIsSeed
 		}
 	}
 	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
@@ -306,7 +306,8 @@ func normalizeJobFile(item rawJobFile) (downloader.JobFile, string, int64, error
 		SizeBytes:          item.Size,
 		Progress:           item.Progress,
 		Selection:          selection,
-		Complete:           item.IsSeed,
+		// qBittorrent reports exactly 1 once every byte of the file is present.
+		Complete: item.Progress == 1,
 	}, strings.Join(components, "\x00"), pathBytes, nil
 }
 

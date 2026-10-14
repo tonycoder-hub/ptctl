@@ -173,8 +173,10 @@ is eligible. `prepared` and `attempt_reserved_submission_unknown` are blocked
 with zero deletion because their records remain the authority that prevents an
 unsafe repeat POST. Before removing anything, prune seals and re-verifies one
 deterministic retention record containing the exact canonical terminal chain
-and store identity. It then removes outcome, attempt, and intent by their
-domain-separated record digests, with a deterministic owner-private residue
+and store identity. It then removes intent, attempt, and outcome, in that
+order, by their domain-separated record digests (the intent goes first so an
+interrupted prune never leaves an intent without its at-most-once attempt
+marker), with a deterministic owner-private residue
 and directory durability checks making each crash boundary recoverable by
 repeating the same selectors. A completed or recovered prune returns the
 non-executable tombstone ID; it never recreates submission authority.

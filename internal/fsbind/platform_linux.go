@@ -26,6 +26,11 @@ var linuxRenameat2 = unix.Renameat2
 // completed. The real ancestor-chain validation always runs afterward.
 var linuxAbsoluteOpenHook func(componentIndex int)
 
+// linuxRemoveHook is a deterministic package-test seam for replacing a name
+// after its identity was verified ("verified") or after the final pre-unlink
+// name check ("unlink"). The real checks always run afterward.
+var linuxRemoveHook func(stage string)
+
 func platformBindExisting(root string) (*Session, RootInfo, error) {
 	if root == "" || !filepath.IsAbs(root) {
 		return nil, RootInfo{}, ErrInvalidPath
@@ -172,6 +177,14 @@ func platformCreatePrivateDirectory(session *Session, parent *boundDirectory, na
 }
 
 func platformOpenPrivateDirectory(session *Session, parent *boundDirectory, name string) (*boundDirectory, error) {
+	return openLinuxValidatedDirectory(session, parent, name, validateLinuxPrivate)
+}
+
+func platformOpenPublishedDirectory(session *Session, parent *boundDirectory, name string) (*boundDirectory, error) {
+	return openLinuxValidatedDirectory(session, parent, name, validateLinuxPublished)
+}
+
+func openLinuxValidatedDirectory(session *Session, parent *boundDirectory, name string, validate linuxObjectValidator) (*boundDirectory, error) {
 	if err := verifyLinuxDirectory(session, parent); err != nil {
 		return nil, err
 	}
@@ -179,7 +192,7 @@ func platformOpenPrivateDirectory(session *Session, parent *boundDirectory, name
 	if err != nil {
 		return nil, err
 	}
-	raw, err := validateLinuxPrivate(file, true, session.root.raw)
+	raw, err := validate(file, true, session.root.raw)
 	if err != nil {
 		_ = file.Close()
 		return nil, err
@@ -196,10 +209,18 @@ func platformOpenPrivateRegular(session *Session, parent *boundDirectory, name s
 }
 
 func platformOpenPrivateRegularReadOnly(session *Session, parent *boundDirectory, name string) (*os.File, rawIdentity, error) {
+	return openLinuxRegularReadOnly(session, parent, name, validateLinuxPrivate)
+}
+
+func platformOpenPublishedRegularReadOnly(session *Session, parent *boundDirectory, name string) (*os.File, rawIdentity, error) {
+	return openLinuxRegularReadOnly(session, parent, name, validateLinuxPublished)
+}
+
+func openLinuxRegularReadOnly(session *Session, parent *boundDirectory, name string, validate linuxObjectValidator) (*os.File, rawIdentity, error) {
 	if err := verifyLinuxDirectory(session, parent); err != nil {
 		return nil, rawIdentity{}, err
 	}
-	fd, err := unix.Openat(int(parent.file.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := openLinuxExistingAt(int(parent.file.Fd()), name, unix.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) {
 			return nil, rawIdentity{}, ErrNotFound
@@ -211,7 +232,7 @@ func platformOpenPrivateRegularReadOnly(session *Session, parent *boundDirectory
 		_ = unix.Close(fd)
 		return nil, rawIdentity{}, ErrUnsafeObject
 	}
-	raw, err := validateLinuxPrivate(file, false, session.root.raw)
+	raw, err := validate(file, false, session.root.raw)
 	if err != nil {
 		_ = file.Close()
 		return nil, rawIdentity{}, err
@@ -231,18 +252,22 @@ func platformOpenAnySource(session *Session, parent *boundDirectory, name string
 }
 
 func platformInspectObject(session *Session, parent *boundDirectory, name string) (*os.File, rawIdentity, ObjectKind, error) {
-	return inspectLinuxObject(session, parent, name, true)
+	return inspectLinuxObject(session, parent, name, validateLinuxPrivate)
+}
+
+func platformInspectPublishedObject(session *Session, parent *boundDirectory, name string) (*os.File, rawIdentity, ObjectKind, error) {
+	return inspectLinuxObject(session, parent, name, validateLinuxPublished)
 }
 
 func platformInspectRootObject(session *Session, name string) (*os.File, rawIdentity, ObjectKind, error) {
-	return inspectLinuxObject(session, session.root, name, false)
+	return inspectLinuxObject(session, session.root, name, nil)
 }
 
 func platformOpenRootRegular(session *Session, name string, _ bool) (*os.File, rawIdentity, error) {
 	if err := verifyLinuxDirectory(session, session.root); err != nil {
 		return nil, rawIdentity{}, err
 	}
-	fd, err := unix.Openat(int(session.root.file.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := openLinuxExistingAt(int(session.root.file.Fd()), name, unix.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) {
 			return nil, rawIdentity{}, ErrNotFound
@@ -265,11 +290,11 @@ func platformOpenRootRegular(session *Session, name string, _ bool) (*os.File, r
 	return file, raw, nil
 }
 
-func inspectLinuxObject(session *Session, parent *boundDirectory, name string, requirePrivate bool) (*os.File, rawIdentity, ObjectKind, error) {
+func inspectLinuxObject(session *Session, parent *boundDirectory, name string, validate linuxObjectValidator) (*os.File, rawIdentity, ObjectKind, error) {
 	if err := verifyLinuxDirectory(session, parent); err != nil {
 		return nil, rawIdentity{}, "", err
 	}
-	fd, err := unix.Openat(int(parent.file.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := openLinuxExistingAt(int(parent.file.Fd()), name, unix.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) {
 			return nil, rawIdentity{}, "", ErrNotFound
@@ -291,8 +316,8 @@ func inspectLinuxObject(session *Session, parent *boundDirectory, name string, r
 		kind = ObjectKindDirectory
 	}
 	var raw rawIdentity
-	if requirePrivate {
-		raw, err = validateLinuxPrivate(file, kind == ObjectKindDirectory, session.root.raw)
+	if validate != nil {
+		raw, err = validate(file, kind == ObjectKindDirectory, session.root.raw)
 	} else {
 		raw, err = linuxRawIdentity(file, kind == ObjectKindDirectory)
 		if err == nil && (raw.volume != session.root.raw.volume || raw.mount != session.root.raw.mount) {
@@ -516,7 +541,7 @@ func platformPublishNoReplace(session *Session, sourceParent *boundDirectory, so
 	if verifyLinuxDirectory(session, sourceParent) != nil || verifyLinuxDirectory(session, destinationParent) != nil || sourceParent.raw.volume != destinationParent.raw.volume || sourceParent.raw.mount != destinationParent.raw.mount {
 		return false, false, rawIdentity{}, ErrCrossFilesystem
 	}
-	existing, _, _, destinationErr := inspectLinuxObject(session, destinationParent, destinationName, false)
+	existing, _, _, destinationErr := inspectLinuxObject(session, destinationParent, destinationName, nil)
 	if existing != nil {
 		_ = existing.Close()
 	}
@@ -592,34 +617,71 @@ func platformRemoveObject(session *Session, parent *boundDirectory, name string,
 			return false, false, rawIdentity{}, ErrUnsafeObject
 		}
 	}
-	if closeErr := source.Close(); closeErr != nil {
-		return false, false, rawIdentity{}, fmt.Errorf("close removal source failed")
+	unlinked, removedRaw, removeErr := unlinkLinuxVerifiedObject(int(parent.file.Fd()), name, source, wantDirectory, expected)
+	closeErr := source.Close()
+	if !unlinked && errors.Is(removeErr, ErrUnsafeObject) {
+		return false, false, rawIdentity{}, ErrUnsafeObject
 	}
-	flags := 0
-	if wantDirectory {
-		flags = unix.AT_REMOVEDIR
-	}
-	removeErr := unix.Unlinkat(int(parent.file.Fd()), name, flags)
 	remaining, remainingRaw, remainingErr := platformOpenAnySource(session, parent, name, wantDirectory)
 	if remaining != nil {
 		_ = remaining.Close()
 	}
-	if removeErr == nil {
-		if errors.Is(remainingErr, ErrNotFound) {
+	if unlinked {
+		if removeErr == nil && closeErr == nil && errors.Is(remainingErr, ErrNotFound) {
 			if unix.Fsync(int(parent.file.Fd())) != nil {
-				return true, false, expected, ErrDurabilityUnconfirmed
+				return true, false, removedRaw, ErrDurabilityUnconfirmed
 			}
-			return true, true, expected, nil
+			return true, true, removedRaw, nil
 		}
-		return true, false, expected, ErrRemovalAmbiguous
+		return true, false, removedRaw, ErrRemovalAmbiguous
 	}
 	if errors.Is(remainingErr, ErrNotFound) {
-		return true, false, expected, ErrRemovalAmbiguous
+		return true, false, rawIdentity{}, ErrRemovalAmbiguous
 	}
 	if remainingErr == nil && remainingRaw == expected {
 		return false, false, expected, ErrUnsafeObject
 	}
 	return false, false, rawIdentity{}, ErrRemovalAmbiguous
+}
+
+// unlinkLinuxVerifiedObject unlinks name from parent while source, the object
+// whose identity the caller just verified, stays open. Immediately before
+// unlinkat the name is re-read without following links and must still be the
+// held dev/ino, so the verify-to-unlink window is a single system call and a
+// mismatch returns ErrUnsafeObject before anything is removed. After unlinkat
+// the held inode must have lost exactly that link (an unlinked directory has
+// none left); only then is expected reported as the removed identity. POSIX
+// has no unlink-by-identity: if the name changes inside the remaining window
+// the removed object is unknown, so a zero identity and ErrRemovalAmbiguous
+// are returned instead. unlinked reports whether unlinkat succeeded.
+func unlinkLinuxVerifiedObject(parent int, name string, source *os.File, wantDirectory bool, expected rawIdentity) (bool, rawIdentity, error) {
+	if linuxRemoveHook != nil {
+		linuxRemoveHook("verified")
+	}
+	var held, named unix.Stat_t
+	if unix.Fstat(int(source.Fd()), &held) != nil || unix.Fstatat(parent, name, &named, unix.AT_SYMLINK_NOFOLLOW) != nil ||
+		named.Dev != held.Dev || named.Ino != held.Ino || named.Mode&unix.S_IFMT != held.Mode&unix.S_IFMT ||
+		uint64(held.Dev) != expected.volume || held.Ino != expected.fileLow {
+		return false, rawIdentity{}, ErrUnsafeObject
+	}
+	if linuxRemoveHook != nil {
+		linuxRemoveHook("unlink")
+	}
+	flags := 0
+	if wantDirectory {
+		flags = unix.AT_REMOVEDIR
+	}
+	if err := unix.Unlinkat(parent, name, flags); err != nil {
+		return false, rawIdentity{}, err
+	}
+	var after unix.Stat_t
+	if unix.Fstat(int(source.Fd()), &after) != nil {
+		return true, rawIdentity{}, ErrRemovalAmbiguous
+	}
+	if (wantDirectory && after.Nlink == 0) || (!wantDirectory && held.Nlink > 0 && after.Nlink == held.Nlink-1) {
+		return true, expected, nil
+	}
+	return true, rawIdentity{}, ErrRemovalAmbiguous
 }
 
 func platformRemoveRootRegular(session *Session, name string, expected rawIdentity, expectedSize int64) (bool, bool, rawIdentity, error) {
@@ -638,25 +700,26 @@ func platformRemoveRootRegular(session *Session, name string, expected rawIdenti
 		_ = source.Close()
 		return false, false, rawIdentity{}, ErrUnsafeObject
 	}
-	if closeErr := source.Close(); closeErr != nil {
-		return false, false, rawIdentity{}, fmt.Errorf("close root removal source failed")
+	unlinked, removedRaw, removeErr := unlinkLinuxVerifiedObject(int(session.root.file.Fd()), name, source, false, expected)
+	closeErr := source.Close()
+	if !unlinked && errors.Is(removeErr, ErrUnsafeObject) {
+		return false, false, rawIdentity{}, ErrUnsafeObject
 	}
-	removeErr := unix.Unlinkat(int(session.root.file.Fd()), name, 0)
 	remaining, remainingRaw, remainingErr := platformOpenRootRegular(session, name, false)
 	if remaining != nil {
 		_ = remaining.Close()
 	}
-	if removeErr == nil {
-		if errors.Is(remainingErr, ErrNotFound) {
+	if unlinked {
+		if removeErr == nil && closeErr == nil && errors.Is(remainingErr, ErrNotFound) {
 			if unix.Fsync(int(session.root.file.Fd())) != nil {
-				return true, false, expected, ErrDurabilityUnconfirmed
+				return true, false, removedRaw, ErrDurabilityUnconfirmed
 			}
-			return true, true, expected, nil
+			return true, true, removedRaw, nil
 		}
-		return true, false, expected, ErrRemovalAmbiguous
+		return true, false, removedRaw, ErrRemovalAmbiguous
 	}
 	if errors.Is(remainingErr, ErrNotFound) {
-		return true, false, expected, ErrRemovalAmbiguous
+		return true, false, rawIdentity{}, ErrRemovalAmbiguous
 	}
 	if remainingErr == nil && remainingRaw == expected {
 		return false, false, expected, ErrUnsafeObject
@@ -712,11 +775,13 @@ func openLinuxPrivateRegular(session *Session, parent *boundDirectory, name stri
 	if err := verifyLinuxDirectory(session, parent); err != nil {
 		return nil, rawIdentity{}, err
 	}
-	flags := unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	var fd int
+	var err error
 	if create {
-		flags |= unix.O_CREAT | unix.O_EXCL
+		fd, err = unix.Openat(int(parent.file.Fd()), name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_CREAT|unix.O_EXCL, 0o600)
+	} else {
+		fd, err = openLinuxExistingAt(int(parent.file.Fd()), name, unix.O_RDWR)
 	}
-	fd, err := unix.Openat(int(parent.file.Fd()), name, flags, 0o600)
 	if err != nil {
 		if errors.Is(err, syscall.EEXIST) {
 			return nil, rawIdentity{}, ErrAlreadyExists
@@ -831,6 +896,31 @@ func openLinuxAbsoluteDirectory(path string) (*os.File, error) {
 	return current, nil
 }
 
+// openLinuxExistingAt opens one existing name without following links. The
+// open itself uses O_NONBLOCK so a FIFO or device planted at a reviewed name
+// cannot block the process; anything other than a regular file or directory is
+// closed before any read, and the flag is cleared on accepted descriptors.
+func openLinuxExistingAt(parent int, name string, access int) (int, error) {
+	fd, err := unix.Openat(parent, name, access|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return -1, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return -1, ErrUnsafeObject
+	}
+	if kind := stat.Mode & unix.S_IFMT; kind != unix.S_IFREG && kind != unix.S_IFDIR {
+		_ = unix.Close(fd)
+		return -1, ErrUnsafeObject
+	}
+	if err := unix.SetNonblock(fd, false); err != nil {
+		_ = unix.Close(fd)
+		return -1, ErrUnsafeObject
+	}
+	return fd, nil
+}
+
 func openLinuxDirectoryAt(parent *os.File, name string) (*os.File, error) {
 	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -861,7 +951,24 @@ func verifyLinuxDirectory(session *Session, directory *boundDirectory) error {
 	return nil
 }
 
+type linuxObjectValidator func(file *os.File, wantDirectory bool, root rawIdentity) (rawIdentity, error)
+
 func validateLinuxPrivate(file *os.File, wantDirectory bool, root rawIdentity) (rawIdentity, error) {
+	return validateLinuxOwned(file, wantDirectory, root, false)
+}
+
+// validateLinuxPublished checks an object that has already left the private
+// operation subtree through no-replace publication. After publication a user
+// may grant a downloader read access or add a cross-seeding hard link, so
+// group/other read/execute bits and extra links are tolerated here. Ownership,
+// object kind, same-filesystem binding, special mode bits, and group/other
+// write access still fail closed; callers separately bind the exact journaled
+// identity, namespace, size, and content.
+func validateLinuxPublished(file *os.File, wantDirectory bool, root rawIdentity) (rawIdentity, error) {
+	return validateLinuxOwned(file, wantDirectory, root, true)
+}
+
+func validateLinuxOwned(file *os.File, wantDirectory bool, root rawIdentity, published bool) (rawIdentity, error) {
 	info, err := file.Stat()
 	if err != nil || info.IsDir() != wantDirectory || (!wantDirectory && !info.Mode().IsRegular()) {
 		return rawIdentity{}, ErrUnsafeObject
@@ -871,8 +978,14 @@ func validateLinuxPrivate(file *os.File, wantDirectory bool, root rawIdentity) (
 	if wantDirectory {
 		wanted = 0o700
 	}
-	if !ok || stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm() != wanted || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 ||
-		(!wantDirectory && stat.Nlink != 1) {
+	if !ok || stat.Uid != uint32(os.Geteuid()) || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return rawIdentity{}, ErrUnsafeObject
+	}
+	if published {
+		if info.Mode().Perm()&0o022 != 0 {
+			return rawIdentity{}, ErrUnsafeObject
+		}
+	} else if info.Mode().Perm() != wanted || (!wantDirectory && stat.Nlink != 1) {
 		return rawIdentity{}, ErrUnsafeObject
 	}
 	raw, err := linuxRawIdentity(file, wantDirectory)

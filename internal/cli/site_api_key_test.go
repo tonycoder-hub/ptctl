@@ -110,6 +110,35 @@ func TestSiteReadRejectsAnUnsupportedCredentialKindBeforeReadingIt(t *testing.T)
 	}
 }
 
+func TestSiteCommandsReportUnknownSitesAndUndeclaredCapabilitiesAsUsage(t *testing.T) {
+	store := t.TempDir()
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"site", "capabilities", "no-such-site"}, want: `unknown site "no-such-site"`},
+		{args: []string{"site", "status", "--cookie-stdin", "no-such-site"}, want: `unknown site "no-such-site"`},
+		{args: []string{"site", "search", "--cookie-stdin", "no-such-site", "query"}, want: `unknown site "no-such-site"`},
+		{args: []string{"site", "detail", "--cookie-stdin", "no-such-site", "1"}, want: `unknown site "no-such-site"`},
+		{args: []string{"site", "bonus", "review", "--cookie-stdin", "no-such-site", "option"}, want: `unknown site "no-such-site"`},
+		{args: []string{"site", "metafile", "fetch", "--cookie-stdin", "--acknowledge-site-effect", "--metafile-store", store, "no-such-site", "1"}, want: `unknown site "no-such-site"`},
+		{args: []string{"site", "account", "--api-key-stdin", "api-key-test"}, want: `site "api-key-test" does not declare capability "account.read"`},
+		{args: []string{"site", "status", "--cookie-stdin", "api-key-test"}, want: `site "api-key-test" does not support cookie_header authentication`},
+		{args: []string{"site", "detail", "--cookie-stdin", "api-key-test", "1"}, want: `site "api-key-test" does not declare capability "torrent.detail"`},
+		{args: []string{"site", "metafile", "fetch", "--cookie-stdin", "--acknowledge-site-effect", "--metafile-store", store, "api-key-test", "1"}, want: `site "api-key-test" does not declare capability "torrent.metafile.read_effectful"`},
+	}
+	for _, test := range tests {
+		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
+			secret := &trackingReader{}
+			var out, errOut bytes.Buffer
+			application := &app{stdin: secret, stdout: &out, stderr: &errOut, registry: site.NewRegistry(&apiKeySiteAdapter{})}
+			if code := runWithApp(test.args, application); code != 2 || out.Len() != 0 || secret.read || !strings.Contains(errOut.String(), test.want) || !strings.Contains(errOut.String(), "run 'ptctl help' for usage") {
+				t.Fatalf("code=%d stdout=%q stderr=%q secretRead=%t", code, out.String(), errOut.String(), secret.read)
+			}
+		})
+	}
+}
+
 func TestSiteReadRejectsAnEmptyAPIKey(t *testing.T) {
 	adapter := &apiKeySiteAdapter{}
 	application := &app{stdin: strings.NewReader(" \n"), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, registry: site.NewRegistry(adapter)}

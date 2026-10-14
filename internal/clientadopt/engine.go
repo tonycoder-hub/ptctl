@@ -670,8 +670,26 @@ func executeAdd(ctx context.Context, options RunOptions, handle *journalHandle, 
 		report.finalize()
 		return report, errors.Join(ErrRequestUnknown, mutationErr)
 	}
+	if mutationErr != nil && !lostAddResponse(mutation.StopReason) && !errors.Is(mutationErr, ErrIntegrity) {
+		// qBittorrent answered without accepting the add (for example its
+		// duplicate "Fails." body or a 409), so this request did not create
+		// the exact job observed afterward.
+		report.Outcome = OutcomeBlocked
+		report.Operation.PhaseAfter = "request_rejected_existing_job"
+		report.Operation.Resumable = false
+		report.Client.Status = "add_rejected_existing_exact_job"
+		report.addBlocker("client.add_rejected_existing_job", "the downloader answered without accepting the add; the exact job observed afterward is not attributable to this operation and must be removed before any resume")
+		report.finalize()
+		return report, errors.Join(ErrPolicy, mutationErr)
+	}
 	if mutationErr != nil {
-		report.addIssue("client.add_response_unconfirmed", "the add response failed, but a unique exact stopped job was observed afterward")
+		report.Outcome = OutcomeRequestUnknown
+		report.Operation.PhaseAfter = "request_result_unknown"
+		report.Operation.Resumable = true
+		report.Client.Status = "add_response_lost_exact_job_observed"
+		report.addIssue("client.add_response_unconfirmed", "the add response was lost, so the exact stopped job observed afterward is not attributed in this invocation")
+		report.finalize()
+		return report, errors.Join(ErrRequestUnknown, mutationErr)
 	}
 	return finalizeObserved(ctx, options, handle, after, after.started, nil,
 		"same_invocation_post_add_exact_reverification",
@@ -1017,6 +1035,18 @@ func refreshPreparedFinal(ctx context.Context, prepared *PreparedPlan, report *R
 		report.Final.Observation = observation
 	}
 	return nil
+}
+
+// lostAddResponse reports whether a failed add receipt leaves the request
+// outcome unknown (no complete answer was read) rather than answered without
+// acceptance. Unrecognized stop reasons are treated as answered rejections.
+func lostAddResponse(stopReason string) bool {
+	switch stopReason {
+	case "transport_failed", "response_read_failed", "context_cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func validSuccessfulMutation(receipt downloader.MutationReceipt, expectedBytes int64) bool {

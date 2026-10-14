@@ -266,6 +266,8 @@ func classifyBonusReviewResponse(response httpguard.StrictResponse) (string, err
 		return "not_found", fmt.Errorf("TJUPT bonus page was not found")
 	case response.StatusCode == http.StatusTooManyRequests:
 		return "rate_limited", fmt.Errorf("TJUPT rate limited the bonus review request")
+	case response.StatusCode >= 300 && response.StatusCode <= 399 && response.RedirectID == loginRedirectID:
+		return "authentication_required", fmt.Errorf("TJUPT redirected to its login page; the session is not authenticated")
 	case response.StatusCode >= 300 && response.StatusCode <= 399:
 		return "redirect_rejected", fmt.Errorf("TJUPT bonus review redirect was rejected")
 	case response.StatusCode != http.StatusOK:

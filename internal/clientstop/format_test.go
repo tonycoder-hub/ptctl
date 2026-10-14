@@ -139,20 +139,9 @@ func TestClientStopJournalRejectsProtocolMismatchedRequestID(t *testing.T) {
 	}
 }
 
-func TestClientStopJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
-	root, plan := testStopPlan(t)
-	planID, _ := PlanID(plan)
-	handle, _, err := createJournal(context.Background(), root, plan, planID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	attempt := testStopAttempt(OperationIDForPlan(planID), planID, plan, now, 1, "")
-	raw, attemptID, err := encodeAttempt(attempt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending, _ := fsbind.PathFromComponents([]string{scratchDirectory, pendingName(attemptFileName(1))})
+func stageClientStopPendingMarker(t *testing.T, handle *journalHandle, destination string, raw []byte) {
+	t.Helper()
+	pending, _ := fsbind.PathFromComponents([]string{scratchDirectory, pendingName(destination)})
 	file, err := handle.subtree.CreateRegular(context.Background(), pending)
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +158,26 @@ func TestClientStopJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
 	if err := handle.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestClientStopJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
+	root, plan := testStopPlan(t)
+	planID, _ := PlanID(plan)
+	handle, _, err := createJournal(context.Background(), root, plan, planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
 	operation := OperationIDForPlan(planID)
+	attempt := testStopAttempt(operation, planID, plan, now, 1, "")
+	raw, attemptID, err := encodeAttempt(attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An attempt is published before the stop request is sent, so an
+	// unpublished staged attempt proves no request was sent: recovery
+	// discards it instead of inventing an attempt.
+	stageClientStopPendingMarker(t, handle, attemptFileName(1), raw)
 	if _, _, err := openJournal(context.Background(), root, operation, false, nil); !errors.Is(err, ErrMarkerRecoveryRequired) {
 		t.Fatalf("read-only open recovered or misclassified pending marker: %v", err)
 	}
@@ -177,9 +185,31 @@ func TestClientStopJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer recovered.Close()
-	if len(recovered.state.Attempts) != 1 || recovered.state.AttemptIDs[0] != attemptID || !receipt.Marker.Publication.Published || recovered.state.Pending != "" {
-		t.Fatalf("state=%#v receipt=%#v", recovered.state, receipt)
+	attemptPath, _ := fsbind.PathFromComponents([]string{attemptFileName(1)})
+	if _, inspectErr := recovered.subtree.Inspect(context.Background(), attemptPath); len(recovered.state.Attempts) != 0 ||
+		recovered.state.Pending != "" || receipt.Marker.Publication.Published || !receipt.Marker.TemporaryRemoved ||
+		receipt.Marker.TemporaryRemovalUncertain || !errors.Is(inspectErr, fsbind.ErrNotFound) {
+		t.Fatalf("state=%#v receipt=%#v inspect=%v", recovered.state, receipt, inspectErr)
+	}
+
+	// A staged response records an observed fact after a published attempt,
+	// so recovery still publishes it.
+	if _, published, appendErr := recovered.appendAttempt(context.Background(), attempt); appendErr != nil || published != attemptID {
+		t.Fatalf("append attempt id=%s err=%v", published, appendErr)
+	}
+	responseRaw, responseID, err := encodeResponse(testStopResponse(operation, planID, attemptID, now.Add(time.Second), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageClientStopPendingMarker(t, recovered, responseFileName(1), responseRaw)
+	republished, receipt, err := openJournal(context.Background(), root, operation, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer republished.Close()
+	if len(republished.state.Attempts) != 1 || republished.state.AttemptIDs[0] != attemptID || republished.state.ResponseIDs[1] != responseID ||
+		!receipt.Marker.Publication.Published || republished.state.Pending != "" {
+		t.Fatalf("state=%#v receipt=%#v", republished.state, receipt)
 	}
 }
 
@@ -459,6 +489,32 @@ func TestClientStopJournalEnforcesAttemptResponseCompletionOrder(t *testing.T) {
 	completion := testStopCompletion(operation, planID, plan, attemptID, responseID, now, true)
 	if err := validateCompletionForState(state, completion); !errors.Is(err, ErrIntegrity) {
 		t.Fatalf("completion preceding response accepted: %v", err)
+	}
+}
+
+func TestClientStopPlanSchemasBindReviewedJobState(t *testing.T) {
+	_, legacy := testStopPlan(t)
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy v1 plan with exact substate rejected: %v", err)
+	}
+	current := legacy
+	current.Schema, current.ReviewedJobState = PlanSchemaV2, ReviewedJobPhaseStarted
+	if err := current.Validate(); err != nil {
+		t.Fatalf("v2 plan with normalized started phase rejected: %v", err)
+	}
+	legacyID, legacyErr := PlanID(legacy)
+	currentID, currentErr := PlanID(current)
+	if legacyErr != nil || currentErr != nil || legacyID == currentID {
+		t.Fatalf("v1 and v2 plans must have distinct IDs: %q %v %q %v", legacyID, legacyErr, currentID, currentErr)
+	}
+	for _, invalid := range []Plan{
+		func() Plan { plan := current; plan.ReviewedJobState = "uploading"; return plan }(),
+		func() Plan { plan := legacy; plan.ReviewedJobState = ReviewedJobPhaseStarted; return plan }(),
+		func() Plan { plan := current; plan.Schema = "ptctl.client-stop-plan/v3"; return plan }(),
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("plan with schema %q and reviewed state %q accepted", invalid.Schema, invalid.ReviewedJobState)
+		}
 	}
 }
 

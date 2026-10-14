@@ -156,8 +156,10 @@ func requiredInt64(fields map[string]json.RawMessage, key string) (int64, error)
 	if !exists {
 		return 0, fmt.Errorf("missing integer field")
 	}
+	// encoding/json leaves the target untouched for null, which would
+	// silently read as zero (e.g. status 0 or error 0).
 	var value int64
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if isJSONNull(raw) || json.Unmarshal(raw, &value) != nil {
 		return 0, fmt.Errorf("invalid integer field")
 	}
 	return value, nil
@@ -169,10 +171,14 @@ func requiredFloat64(fields map[string]json.RawMessage, key string) (float64, er
 		return 0, fmt.Errorf("missing number field")
 	}
 	var value float64
-	if err := json.Unmarshal(raw, &value); err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+	if isJSONNull(raw) || json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 		return 0, fmt.Errorf("invalid number field")
 	}
 	return value, nil
+}
+
+func isJSONNull(raw []byte) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }
 
 func requiredBool(fields map[string]json.RawMessage, key string) (bool, error) {
@@ -180,19 +186,14 @@ func requiredBool(fields map[string]json.RawMessage, key string) (bool, error) {
 	if !exists {
 		return false, fmt.Errorf("missing boolean field")
 	}
-	var value bool
-	if err := json.Unmarshal(raw, &value); err != nil {
+	switch string(bytes.TrimSpace(raw)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
 		return false, fmt.Errorf("invalid boolean field")
 	}
-	return value, nil
-}
-
-func requiredLegacyWanted(fields map[string]json.RawMessage, key string) (bool, error) {
-	value, err := requiredInt64(fields, key)
-	if err != nil || value != 0 && value != 1 {
-		return false, fmt.Errorf("invalid legacy wanted field")
-	}
-	return value == 1, nil
 }
 
 func decodeJSONString(raw []byte) (string, error) {

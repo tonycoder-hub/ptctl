@@ -191,9 +191,22 @@ func TestInvalidUsernameStopsBeforeRequest(t *testing.T) {
 }
 
 func TestStrictResponseAndWantedTypes(t *testing.T) {
-	legacy := json.RawMessage(`{"torrents":[{"hashString":"` + testHash + `","name":"bundle","downloadDir":"/downloads","files":[{"bytesCompleted":1,"length":1,"name":"bundle/a"}],"fileStats":[{"bytesCompleted":1,"wanted":true,"priority":0}]}]}`)
-	if _, _, _, _, err := decodeFileResult(context.Background(), legacy, protocolLegacy, testHash, downloader.DefaultJobFileLedgerLimits()); err == nil {
-		t.Fatal("legacy boolean wanted was accepted")
+	// Transmission 4.0.x rpcimpl.cc addFileStats and 4.1.x make_file_stats_vec
+	// both emit fileStats/file_stats "wanted" as a JSON boolean.
+	legacyFileResult := func(wanted string) json.RawMessage {
+		return json.RawMessage(`{"torrents":[{"hashString":"` + testHash + `","name":"bundle","downloadDir":"/downloads","files":[{"bytesCompleted":1,"length":1,"name":"bundle/a"},{"bytesCompleted":0,"length":1,"name":"bundle/b"}],"fileStats":[{"bytesCompleted":1,"wanted":true,"priority":0},{"bytesCompleted":0,"wanted":` + wanted + `,"priority":0}]}]}`)
+	}
+	files, _, _, _, err := decodeFileResult(context.Background(), legacyFileResult("false"), protocolLegacy, testHash, downloader.DefaultJobFileLedgerLimits())
+	if err != nil {
+		t.Fatalf("legacy boolean wanted was rejected: %v", err)
+	}
+	if len(files) != 2 || files[0].Selection != downloader.JobFileSelectionSelected || files[1].Selection != downloader.JobFileSelectionSkipped || !files[0].Complete || files[1].Complete {
+		t.Fatalf("legacy boolean wanted was misread: %#v", files)
+	}
+	for _, invalid := range []string{"1", "0", "null", `"true"`} {
+		if _, _, _, _, err := decodeFileResult(context.Background(), legacyFileResult(invalid), protocolLegacy, testHash, downloader.DefaultJobFileLedgerLimits()); err == nil {
+			t.Fatalf("legacy non-boolean wanted %s was accepted", invalid)
+		}
 	}
 	modern := json.RawMessage(`{"torrents":[{"hash_string":"` + testHash + `","name":"bundle","download_dir":"/downloads","files":[{"bytes_completed":1,"length":1,"name":"bundle/a"}],"file_stats":[{"bytes_completed":1,"wanted":1,"priority":0}]}]}`)
 	if _, _, _, _, err := decodeFileResult(context.Background(), modern, protocolJSONRPC, testHash, downloader.DefaultJobFileLedgerLimits()); err == nil {
@@ -208,13 +221,66 @@ func TestStrictResponseAndWantedTypes(t *testing.T) {
 		t.Fatal("unpaired JSON surrogate was accepted")
 	}
 	consumed := 0
-	_, err := decodeRawArray([]byte(`[{},"CANARY-N-PLUS-ONE-SECRET\ud800"]`), 1, func(_ int, _ json.RawMessage) error {
+	_, err = decodeRawArray([]byte(`[{},"CANARY-N-PLUS-ONE-SECRET\ud800"]`), 1, func(_ int, _ json.RawMessage) error {
 		consumed++
 		return nil
 	})
 	if err == nil || consumed != 1 || strings.Contains(err.Error(), "CANARY") {
 		t.Fatalf("N+1 was decoded or leaked: consumed=%d err=%v", consumed, err)
 	}
+}
+
+func TestLedgerMapsOnlyLocalErrorToErrorState(t *testing.T) {
+	// Transmission 4.0.6 rpcimpl.cc and 4.1.x make_torrent_field both emit
+	// the tr_stat_errtype integer under "error" whenever it is requested:
+	// 0 ok, 1 tracker warning, 2 tracker error, 3 local error.
+	for _, modern := range []bool{false, true} {
+		job := func(status, errorCode any) json.RawMessage {
+			value := ledgerFixture(modern)
+			value["status"] = status
+			if errorCode == nil {
+				delete(value, "error")
+			} else {
+				value["error"] = errorCode
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return encoded
+		}
+		for _, test := range []struct {
+			status    int
+			errorCode int
+			want      string
+		}{
+			{status: 6, errorCode: 0, want: "uploading"},
+			{status: 6, errorCode: 1, want: "uploading"},
+			{status: 0, errorCode: 2, want: "stoppedUP"},
+			{status: 0, errorCode: 3, want: "error"},
+			{status: 6, errorCode: 3, want: "error"},
+		} {
+			decoded, err := decodeLedgerJob(job(test.status, test.errorCode), protocolForTest(modern))
+			if err != nil {
+				t.Fatalf("modern=%v status=%d error=%d: %v", modern, test.status, test.errorCode, err)
+			}
+			if decoded.State != test.want {
+				t.Fatalf("modern=%v status=%d error=%d state = %q, want %q", modern, test.status, test.errorCode, decoded.State, test.want)
+			}
+		}
+		for _, invalid := range []any{nil, -1, 4, 1.5, "3", true, json.RawMessage(`null`)} {
+			if _, err := decodeLedgerJob(job(0, invalid), protocolForTest(modern)); err == nil {
+				t.Fatalf("modern=%v invalid error field %#v was accepted", modern, invalid)
+			}
+		}
+	}
+}
+
+func protocolForTest(modern bool) protocol {
+	if modern {
+		return protocolJSONRPC
+	}
+	return protocolLegacy
 }
 
 func TestEndpointValidation(t *testing.T) {
@@ -329,9 +395,9 @@ func newRPCFixture(t *testing.T, modern bool, rpcVersion string) *httptest.Serve
 
 func ledgerFixture(modern bool) map[string]any {
 	if modern {
-		return map[string]any{"hash_string": testHash, "name": "bundle", "total_size": 6, "percent_complete": 1, "status": 6, "download_dir": "/downloads", "downloaded_ever": 6, "uploaded_ever": 7}
+		return map[string]any{"hash_string": testHash, "name": "bundle", "total_size": 6, "percent_complete": 1, "status": 6, "error": 0, "download_dir": "/downloads", "downloaded_ever": 6, "uploaded_ever": 7}
 	}
-	return map[string]any{"hashString": testHash, "name": "bundle", "totalSize": 6, "percentComplete": 1, "status": 6, "downloadDir": "/downloads", "downloadedEver": 6, "uploadedEver": 7}
+	return map[string]any{"hashString": testHash, "name": "bundle", "totalSize": 6, "percentComplete": 1, "status": 6, "error": 0, "downloadDir": "/downloads", "downloadedEver": 6, "uploadedEver": 7}
 }
 
 func fileFixture(modern bool) map[string]any {
@@ -355,8 +421,8 @@ func fileFixture(modern bool) map[string]any {
 			map[string]any{"bytesCompleted": 3, "length": 3, "name": "bundle/b.bin"},
 		},
 		"fileStats": []any{
-			map[string]any{"bytesCompleted": 3, "wanted": 1, "priority": 0},
-			map[string]any{"bytesCompleted": 3, "wanted": 1, "priority": 0},
+			map[string]any{"bytesCompleted": 3, "wanted": true, "priority": 0},
+			map[string]any{"bytesCompleted": 3, "wanted": true, "priority": 0},
 		},
 	}
 }

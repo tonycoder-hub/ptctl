@@ -473,6 +473,56 @@ func TestTransmissionDuplicateResponseNeverCreatesAdoptionCompletion(t *testing.
 	}
 }
 
+func TestQBittorrentAddWithoutAcceptedResponseIsNotAttributedInTheSameInvocation(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name, stopReason, phase, clientStatus string
+		outcome                               Outcome
+		resumable                             bool
+		sentinel                              error
+	}{
+		{name: "answered_without_acceptance", stopReason: "response_invalid", phase: "request_rejected_existing_job",
+			clientStatus: "add_rejected_existing_exact_job", outcome: OutcomeBlocked, sentinel: ErrPolicy},
+		{name: "http_rejected", stopReason: "http_rejected", phase: "request_rejected_existing_job",
+			clientStatus: "add_rejected_existing_exact_job", outcome: OutcomeBlocked, sentinel: ErrPolicy},
+		{name: "unrecognized_reason", stopReason: "client_mutation_failed", phase: "request_rejected_existing_job",
+			clientStatus: "add_rejected_existing_exact_job", outcome: OutcomeBlocked, sentinel: ErrPolicy},
+		{name: "lost_response", stopReason: "transport_failed", phase: "request_result_unknown",
+			clientStatus: "add_response_lost_exact_job_observed", outcome: OutcomeRequestUnknown, resumable: true, sentinel: ErrRequestUnknown},
+		{name: "lost_response_body", stopReason: "response_read_failed", phase: "request_result_unknown",
+			clientStatus: "add_response_lost_exact_job_observed", outcome: OutcomeRequestUnknown, resumable: true, sentinel: ErrRequestUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := makeMaterializedFixture(t, ctx)
+			prepared := prepareFixturePlan(t, fixture)
+			savePath, _ := prepared.savePath()
+			contentPath, _ := prepared.contentPath()
+			before := ledgerSnapshot(fixture.meta, nil, time.Now().UTC())
+			// The exact job appears, but qBittorrent did not accept this add
+			// (for example a concurrent add made it a duplicate).
+			after := ledgerSnapshot(fixture.meta, &downloader.Torrent{
+				Hash: "opaque-external", InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
+				IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{},
+				SizeBytes: fixture.meta.TotalLength, State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+			}, before.ObservedAtEnd.Add(time.Millisecond))
+			session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{before, after},
+				addErr: fmt.Errorf("qBittorrent add response was not accepted"), addStopReason: test.stopReason}
+			report, err := Run(ctx, RunOptions{
+				Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Metafile: fixture.payload(t), Session: session, AcknowledgeAdd: true,
+			})
+			if !errors.Is(err, test.sentinel) || report.Outcome != test.outcome || report.Journal.CompletionDurable ||
+				report.Operation.PhaseAfter != test.phase || report.Client.Status != test.clientStatus ||
+				report.Operation.Resumable != test.resumable || session.adds != 1 {
+				t.Fatalf("report=%#v err=%v", report, err)
+			}
+			status, err := Status(ctx, StatusOptions{TargetRoot: fixture.targetRoot, OperationID: prepared.OperationID()})
+			if err != nil || status.Journal.AttemptsRecorded != 1 || status.Outcome == OutcomeHistoricalAdopted {
+				t.Fatalf("status=%#v err=%v", status, err)
+			}
+		})
+	}
+}
+
 func containsWarning(warnings []string, fragment string) bool {
 	for _, warning := range warnings {
 		if strings.Contains(warning, fragment) {
@@ -629,6 +679,61 @@ func TestResumeNeverRepairsAnInitializationNamespaceWithUnexpectedObjects(t *tes
 	if !errors.Is(err, ErrIntegrity) || report.Outcome != OutcomeIntegrityFailed || report.WritesPerformed != 0 ||
 		mutation.requests != 1 || mutation.adds != 0 {
 		t.Fatalf("report=%#v requests=%d adds=%d err=%v", report, mutation.requests, mutation.adds, err)
+	}
+}
+
+func TestResumeDiscardsUnpublishedAddAttemptInsteadOfAttributingAnExternalJob(t *testing.T) {
+	ctx := context.Background()
+	fixture := makeMaterializedFixture(t, ctx)
+	prepared := prepareFixturePlan(t, fixture)
+	handle, _, err := createJournal(ctx, fixture.targetRoot, prepared.plan, prepared.planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	raw, _, err := encodeAttempt(Attempt{
+		Schema: AttemptSchemaV1, OperationID: prepared.OperationID(), Sequence: 1, PlanID: prepared.planID,
+		ObservedAtStart: now, ObservedAtEnd: now.Add(time.Millisecond), BeforeStatus: string(downloader.LedgerIdentityAbsent),
+		MetafileVariantID: prepared.plan.MetafileVariantID, MetafileBytes: prepared.plan.MetafileBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The add attempt is published before the POST, so a staged but
+	// unpublished attempt proves the add was never sent.
+	pendingPath, _ := fsbind.PathFromComponents([]string{scratchDirectory, pendingName(attemptFileName(1))})
+	file, err := handle.subtree.CreateRegular(ctx, pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeAll(ctx, file, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	savePath, _ := prepared.savePath()
+	contentPath, _ := prepared.contentPath()
+	external := ledgerSnapshot(fixture.meta, &downloader.Torrent{
+		Hash: "opaque-external", InfoHashV1: fixture.meta.InfoHashV1, IdentityStatus: downloader.IdentityStatusValid,
+		IdentityEvidence: []string{"magnet_xt_btih_hex"}, IdentityIssues: []string{},
+		SizeBytes: fixture.meta.TotalLength, State: "stoppedDL", SavePath: savePath, ContentPath: contentPath,
+	}, now.Add(time.Second))
+	session := &fakeMutationSession{requests: 1, ledgers: []downloader.LedgerSnapshot{external}}
+	resumed, err := Resume(ctx, prepared.OperationID(), RunOptions{Prepared: prepared, ExpectedPlanID: prepared.PlanID(), Session: session})
+	if !errors.Is(err, ErrPolicy) || resumed.Outcome == OutcomeAdoptedPendingRecheck || resumed.Journal.CompletionDurable ||
+		resumed.Journal.AttemptsRecorded != 0 || session.adds != 0 {
+		t.Fatalf("resume=%#v adds=%d err=%v", resumed, session.adds, err)
+	}
+	status, err := Status(ctx, StatusOptions{TargetRoot: fixture.targetRoot, OperationID: prepared.OperationID()})
+	if err != nil || status.Journal.PendingRecoveryMarker || status.Journal.AttemptsRecorded != 0 {
+		t.Fatalf("status=%#v err=%v", status, err)
 	}
 }
 

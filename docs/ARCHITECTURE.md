@@ -170,7 +170,9 @@ canonical terminal stop journal or complete retention tombstone creates opaque
 `clientstop.VerifiedCompletion` authority. The selected stop must reproduce the
 metafile, final, activation terminal marker, driver/configuration, mapping,
 typed job, file-layout, and complete-snapshot lineage. Only an accepted response
-followed by exact stopped observation is attributed; a stopped observation
+followed by exact stopped observation is attributed (the same `run` invocation
+may wait through a bounded read-only settle for an asynchronously applied
+stop); a stopped observation
 after an unknown response remains historical causality-unproven evidence and
 prevents overall consistency without reading the password.
 
@@ -318,7 +320,10 @@ additionally requires two stable, complete indexed file observations: every row
 must match its manifest index and size, remain selected and complete, and have
 an effective path equal to the independently projected verified source
 binding. The qBittorrent path contract is fixed as `save_path` plus the returned
-relative file path; `content_path` must be a consistent ancestor. Transmission
+relative file path; `content_path` must be a consistent ancestor. A qBittorrent
+file row is complete only when its own `progress` is exactly 1; the
+torrent-level `is_seed` flag, which upstream attaches to the first row only,
+is optional and never read as per-file completion. Transmission
 uses `download_dir` plus the current `name` as its content root and
 `download_dir` plus each ordered `files[].name` as the effective file path;
 the paired `file_stats` row supplies selection and completion. The
@@ -443,11 +448,19 @@ exact intent record and operation ID only after `status` proves a complete
 terminal intent/attempt/outcome chain. It canonicalizes that entire chain into
 a deterministic, content-addressed `site.bonus.exchange.retention.v1` record,
 publishes and jointly re-verifies it under the same bound store session, then
-removes outcome, attempt, and intent by exact record identity. Each removal
-uses a deterministic private residue and brackets namespace deletion with
-content verification and directory durability. A crash is recovered only by
-repeating the same explicit selectors. Prepared state and an attempt marker
-without a durable outcome are never eligible.
+removes intent, attempt, and outcome, in that order, by exact record identity.
+Removing the intent before the attempt marker means no crash point or
+concurrent observer can see an intent without its at-most-once marker, so a
+stale submit process that still holds a verified intent cannot reserve again;
+`ReserveAttempt` also re-observes the exact intent before publishing a marker.
+Without a cross-record compare-and-swap, a prune between that check and the
+publication can only republish a pruned chain's marker after its intent is
+gone, which fails verification before any reservation; rerunning prune removes
+it.
+Each removal uses a deterministic private residue and brackets namespace
+deletion with content verification and directory durability. A crash is
+recovered only by repeating the same explicit selectors. Prepared state and an
+attempt marker without a durable outcome are never eligible.
 
 `forget` accepts only one explicit retained tombstone after proving the three
 executable records absent. It publishes a deterministic
@@ -560,8 +573,11 @@ established fail closed. Before store-layout or artifact mutation, the operation
 holds one reviewed root identity and requires the root, `objects`, `tmp`,
 staging file, and final object to remain on the same reviewed filesystem. POSIX
 creation below that root, inspection, publication, cleanup, and directory
-flushing are handle-relative; Linux additionally binds device and mount ID,
-while macOS binds device and filesystem ID. Windows pins every path
+flushing are handle-relative. POSIX opens existing store names and import
+sources non-blocking and rejects anything other than the expected regular file
+or directory (a planted FIFO, socket, or device) before any read, so such an
+entry fails closed instead of hanging the command. Linux additionally binds
+device and mount ID, while macOS binds device and filesystem ID. Windows pins every path
 prefix plus the three private directories with no-delete guards, checks the
 volume identity, and rechecks the named binding before reporting success. A
 per-user, per-session, normalized-path-derived Windows named mutex serializes
@@ -582,6 +598,21 @@ post-publication durability confirmation fails, the outcome is
 visible object is neither claimed absent nor deleted as rollback. The store is
 not an encrypted vault: compromise of the account, backing filesystem, or
 privileged administrator still exposes private announce material.
+
+A process killed before its deferred staging cleanup leaves a random staging
+name in `tmp/`. The first standalone artifact or sealed-record import through
+each opened store handle (normally once per process) collects such residue
+best effort, without affecting its own result: only the exact
+generated names (`.import-<32 hex>.torrent`, `.init-<32 hex>.marker`,
+`.record-import-<32 hex>.sealed`) qualify, each must still open through the
+bound session as a private regular file on the reviewed filesystem, and it
+must be more than 24 hours old. At most 16 names among the first 256 `tmp/`
+entries are removed per pass. The deterministic record-removal recovery name
+and every other entry stay opaque; `Init`, read-only operations, and bound
+record sessions never collect. Removal only unlinks the `tmp/` name, so residue
+left between publication and staging cleanup never affects the published
+object. Store paths whose existing prefix contains a symbolic link remain
+rejected by design; pass the resolved physical path instead.
 
 Reports identify the store and artifact opaquely. Store and import-source
 absolute paths are omitted by default and appear only under the explicit
@@ -721,7 +752,13 @@ owner-only staging, no-replace publication, final-directory durability, and
 fresh named-identity checks. Load grants a synchronous reader only and succeeds
 after both the consumer and the store observe EOF, the full domain digest
 matches, and handle/name metadata remains stable. Listing is bounded by entries,
-records, and path bytes; unknown `objects` entries fail closed.
+records, and path bytes; unknown `objects` entries fail closed. The `objects`
+directory is flat and shared by every metafile artifact and record kind, so
+the entry budget (default 25,000, at most 100,000) counts all of them. A budget
+stop is an incomplete result, not an error; callers that require a complete
+inventory convert it with `RecordListResult.IncompleteError`, which wraps
+`ErrRecordListIncomplete` and names the exhausted budget and its hard maximum.
+Sharding `objects` would be a store-layout migration and is not implemented.
 
 A storage profile is immutable configuration: exact roots, platform/path
 encoding, one-filesystem/network policy, and scan budgets determine its
@@ -766,7 +803,44 @@ profile revision and chooses the unique
 largest monotonic generation; a tie is ambiguous, listing N+1 is incomplete,
 and a corrupt/dangling newest descriptor never causes fallback to an older
 generation. An explicit descriptor record ID bypasses listing only, not
-freshness semantics.
+freshness semantics. A sealed descriptor that fails to decode is skipped only
+when its digest-verified bytes are valid JSON without duplicate keys whose
+exact top-level `profile_id` names a different valid profile (reported as
+`foreign_invalid_descriptors`); store corruption, unattributable records, and
+the selected profile's own invalid records still fail closed.
+
+Generation publication is optimistic because the store has no exclusive lock.
+Refresh chooses one more than the highest generation of the exact profile,
+tolerating a tie there so that a newer generation supersedes an ambiguous
+profile, and re-lists the profile's descriptors before the descriptor commit
+(any descriptor at or above its generation is a conflict) and after it (any
+other descriptor at its generation is a conflict). A conflict returns
+`ErrSnapshotGenerationConflict` with stop reason `generation_conflict` and is
+never `stored`; the next refresh publishes a unique newer generation. Refresh
+itself never removes records, so its receipt keeps exactly the two publication
+writes.
+
+Retention is an explicit per-profile removal pass (`PruneSnapshots`, used by
+`storage index refresh` after a stored refresh and by `storage index prune`).
+It keeps the newest N distinct observed generations (default 3, so the default
+64 profiles stay below the 256-descriptor selection budget) and removes each
+older, unprotected descriptor of the exact profile revision: first its
+unreferenced data record, then the descriptor, both by exact digest and size.
+A crash between the two leaves an older descriptor without data, which latest
+selection never chooses, an explicit read rejects, and a rerun removes. After a
+complete descriptor listing, prune also removes orphan data (from a failed or
+conflicting refresh) that no listed descriptor references and that decodes as a
+snapshot of the exact profile revision below the N-th newest generation; a
+refresh still holding such data fails its pre-commit check, because the newest
+generation is never pruned. `RefreshResult.RetentionOptions` lets a
+post-refresh pass reuse the refresh's committed listing. The rule only needs
+a subset of descriptors: a generation below the N-th newest observed one is
+also below the N-th newest overall, so prune and refresh use a larger
+10,000-record maintenance listing, and prune acts on a verified partial listing
+(`partial`), letting installations that already exceed the selection budget
+recover. Concurrent refreshes only add newer generations. Staging residue of an
+interrupted exact removal and the store-wide entry budget remain metastore
+concerns.
 
 Snapshot consumption is candidate-only. It first verifies the entire sealed
 descriptor and NDJSON record, while retaining only torrent-required sizes under
@@ -898,7 +972,9 @@ bounded DFS opens one directory at a time, sorts entries deterministically,
 retains only wanted sizes, does not follow symlinks or Windows reparse points,
 and does not cross a filesystem boundary. Roots, depth, directories, entries,
 per-directory entries, retained candidates, retained raw path bytes, and issue
-count all have mandatory process hard caps.
+count all have mandatory process hard caps. On POSIX, inventory, verification,
+and source reads open a checked name non-blocking without following a final
+link and reject a non-regular object, so a FIFO swapped in cannot hang them.
 
 The public report uses a root ID plus relative components and raw base64.
 Absolute host paths are process-local details and are hidden unless explicitly
@@ -930,7 +1006,11 @@ builder cannot be given a user-constructed `Verified=true` JSON object.
 Manifest paths are indexed by file number and retain raw components. They are
 checked for traversal, separators, controls, NUL, Windows ADS/device names,
 trailing dot/space behavior, case collisions, and a conservative Unicode
-normalization policy before target planning.
+normalization policy before target planning. A Windows device name matches
+on the text before the first dot with trailing spaces removed (`CON .txt` is
+`CON`) and covers `CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `CONIN$`, `CONOUT$`,
+and `COM`/`LPT` followed by `0`-`9`, `¹`, `²`, or `³`. Only BEP 47 padding
+entries may share a path, and only with other padding entries.
 
 Each discovered file keeps its original root, raw relative components,
 scan-time file information, platform identity, size, and mtime. Every proof
@@ -1063,14 +1143,26 @@ supplied source selectors and reverify staged or final bytes; a durable journal
 is recovery evidence, never source-content authority.
 Committed recovery rechecks the final namespace and content and returns
 `already_committed`. No command enumerates and silently selects an operation.
+Published-final views on POSIX accept later group/other read/execute bits and
+extra same-filesystem hard links, but still require the current owner and
+exact identities and reject group/other write access; in-flight stage and
+scratch objects remain owner-private and single-linked.
 
 `status ID` replays one journal without claiming current content proof.
 `status` without an ID performs a bounded target-root name listing; each result
 is `not_inspected`, the JSON kind is
 `content.materialization.operation_list`, and incomplete listing returns a
-report before exit `4`. `abandon` writes one terminal event only before
+report before exit `4`. Unrelated root entries whose names no bound path can
+represent (for example invalid UTF-8) are counted in
+`root_used.unrepresentable` with a warning instead of failing the listing;
+exact namespace and emptiness inventories still fail closed on them.
+`abandon` writes one terminal event only before
 publication intent. It retains stage and scratch objects and is neither
-cleanup, deletion, nor rollback.
+cleanup, deletion, nor rollback. A failed copy removes only its own
+unpublished scratch object by exact name and creation identity, and the final
+commit first removes retained canonical scratch from earlier failed or
+interrupted attempts by inventoried identity and size; the
+`scratch_files_removed` write counter reports each confirmed removal.
 
 `prune` is the separate retention transition defined in
 [MATERIALIZE_RETENTION.md](MATERIALIZE_RETENTION.md). It accepts only an
@@ -1150,7 +1242,9 @@ For the default stopped-add action, `downloader.MutationSession` extends the
 bounded ledger session with one `AddStopped` port. The exact raw payload is an opaque, one-shot
 `MetafilePayload` loaded only from the bound private metastore object. The
 qBittorrent implementation reuses one authenticated session and streams one
-bounded multipart POST. The Transmission implementation uses its fixed
+bounded multipart POST that pins `autoTMM=false` and the original content
+layout (`contentLayout=Original`, or `root_folder=true` before 4.3.2) so
+placement never depends on client defaults. The Transmission implementation uses its fixed
 two-request CSRF/version handshake and streams one bounded base64 payload in
 the version-appropriate `torrent_add` or `torrent-add` envelope with paused
 state requested. Both implementations disable HTTP/2, connection reuse,
@@ -1164,11 +1258,19 @@ unavailable, invalid, partial, conflicting, or duplicate typed identity fails cl
 Hybrid identity requires both hash families on the same qBittorrent job and is
 therefore ineligible for Transmission adoption. Names, sizes, progress, and
 paths never select a job. After the POST, success requires one unique exact
-job, expected size, stopped state, and exact lexical save/content paths. For
+job, expected size, stopped state, and exact lexical save/content paths, plus
+an accepted add response in the same invocation: a qBittorrent answer that does
+not accept the add blocks attribution, and a lost response stays unknown until
+resume applies the documented recovery rule. For
 Transmission it also requires the same invocation's explicit accepted-add
 response whose returned v1 hash matches the reviewed identity: a duplicate
 response is rejected, and an unknown response cannot be attributed later
-merely because an exact job appears. This is still a client
+merely because an exact job appears. qBittorrent 4.x through 5.1.x accept an
+add with HTTP 200 `Ok.`; qBittorrent 5.2.x (WebAPI 2.14) instead returns a
+JSON summary, which is accepted only when it reports exactly one success, no
+failure or pending add, and one `added_torrent_ids` TorrentID equal to the
+reviewed identity (v1, or the truncated v2 hash for v2/hybrid jobs); its 202
+pending and 409 all-failed statuses are rejected. This is still a client
 claim: the completion marker says `adopted_pending_client_recheck`, while the
 raw metafile variant remains unobservable to either downloader.
 
@@ -1368,8 +1470,13 @@ completion
 path first seals an observed `checkingUP|checkingDL|checkingResumeData` state,
 then on a later invocation observes a complete stopped job. A second accepted
 path begins from an incomplete stopped job and observes complete stopped state
-immediately after the same invocation's request. If a complete job checks too quickly to
-expose either edge, the request remains unknown. Resume observes first and
+immediately after the same invocation's request; because qBittorrent refreshes
+torrent state periodically, a non-conclusive after-observation is followed by
+at most four bounded read-only probes in the same session before the attempt is
+judged. If a complete job checks too quickly to
+expose either edge, the request remains unknown; after the recheck attempt
+budget is spent, status reports `attempt_budget_exhausted` (blocked,
+non-resumable) and no further recheck is sent. Resume observes first and
 never repeats an unknown recheck or start unless its separate base and repeat
 acknowledgements are both present. A reviewed start is a later resume after
 the recheck-completion marker is durable, so one invocation sends at most one
@@ -1480,7 +1587,8 @@ activation, mapping, and client selectors as keep-data removal. It opens one
 narrow `downloader.ExistingJobStopSession`, binds a code-owned versioned stop
 descriptor, and accepts only a complete exact job that is currently in a
 started seeding state. The plan records typed identity, current-use/job/layout
-IDs, complete file snapshot, reviewed started state, activation/materialize
+IDs, complete file snapshot, reviewed started phase (v2 plans record the
+normalized `started` phase; legacy v1 plans record the exact substate), activation/materialize
 lineage, root/object identities, and file-ledger limits. The process-local job
 key is intentionally absent from the plan and every report.
 

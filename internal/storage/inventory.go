@@ -464,7 +464,7 @@ func readObservedDirectoryBounded(ctx context.Context, root SearchRootObservatio
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	directory, err := os.Open(current)
+	directory, err := openDirectory(current)
 	if err != nil {
 		return nil, err
 	}
@@ -770,7 +770,7 @@ func (observation FileObservation) OpenObservedRegularContext(ctx context.Contex
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	file, err := os.Open(path)
+	file, err := OpenRegular(path)
 	if err != nil {
 		return nil, fmt.Errorf("open observed file: %w", err)
 	}

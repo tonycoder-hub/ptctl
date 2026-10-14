@@ -87,7 +87,7 @@ func (d *decoder) parse(depth int) (*Node, error) {
 		}
 		end := d.pos + endRel
 		raw := d.data[d.pos:end]
-		if len(raw) == 0 || (len(raw) > 1 && raw[0] == '0') || bytes.Equal(raw, []byte("-0")) || (len(raw) > 2 && raw[0] == '-' && raw[1] == '0') {
+		if !canonicalInteger(raw) {
 			return nil, fmt.Errorf("non-canonical integer at byte %d", start)
 		}
 		value, err := strconv.ParseInt(string(raw), 10, 64)
@@ -141,7 +141,7 @@ func (d *decoder) parse(depth int) (*Node, error) {
 	case ch == 'd':
 		d.pos++
 		node := &Node{Kind: KindDictionary, Dict: make(map[string]*Node), Start: start}
-		var previous []byte
+		var previous *Node
 		for {
 			if d.pos >= len(d.data) {
 				return nil, fmt.Errorf("unterminated dictionary at byte %d", start)
@@ -158,10 +158,10 @@ func (d *decoder) parse(depth int) (*Node, error) {
 			if key.Kind != KindBytes {
 				return nil, fmt.Errorf("dictionary key at byte %d is not a byte string", key.Start)
 			}
-			if previous != nil && bytes.Compare(previous, key.Bytes) >= 0 {
+			if previous != nil && bytes.Compare(previous.Bytes, key.Bytes) >= 0 {
 				return nil, fmt.Errorf("dictionary keys are duplicated or not strictly sorted at byte %d", key.Start)
 			}
-			previous = append(previous[:0], key.Bytes...)
+			previous = key
 			value, err := d.parse(depth + 1)
 			if err != nil {
 				return nil, err
@@ -171,4 +171,27 @@ func (d *decoder) parse(depth int) (*Node, error) {
 	default:
 		return nil, fmt.Errorf("invalid bencode token 0x%02x at byte %d", ch, d.pos)
 	}
+}
+
+// canonicalInteger reports whether raw is a BEP 3 canonical integer: "0", or
+// an optional '-' followed by a nonzero digit and more ASCII digits. A '+'
+// sign, "-0", and leading zeros all have a canonical alternative and are
+// rejected so that one value has exactly one accepted encoding.
+func canonicalInteger(raw []byte) bool {
+	digits := raw
+	if len(digits) > 0 && digits[0] == '-' {
+		digits = digits[1:]
+		if len(digits) > 0 && digits[0] == '0' {
+			return false
+		}
+	}
+	if len(digits) == 0 || (len(digits) > 1 && digits[0] == '0') {
+		return false
+	}
+	for _, ch := range digits {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }

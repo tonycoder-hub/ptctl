@@ -36,6 +36,7 @@ type retireFixture struct {
 	sourceRoot       string
 	sourcePath       string
 	targetRoot       string
+	hostRoot         string
 	activationPlanID string
 }
 
@@ -300,6 +301,13 @@ func makeRetireFixture(t *testing.T) retireFixture {
 }
 
 func makeRetireFixtureMode(t *testing.T, retainActivation bool) retireFixture {
+	return makeRetireFixtureLayout(t, retainActivation, false)
+}
+
+// makeRetireFixtureLayout optionally maps one shared host root containing
+// both the source root and target root to client root /downloads, so other
+// downloader jobs can name the source in the reviewed client namespace.
+func makeRetireFixtureLayout(t *testing.T, retainActivation, sharedHostRoot bool) retireFixture {
 	t.Helper()
 	ctx := context.Background()
 	content := []byte("retirement source fixture")
@@ -308,15 +316,29 @@ func makeRetireFixtureMode(t *testing.T, retainActivation bool) retireFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sourceRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	var sourceRoot, targetRoot, hostRoot string
+	if sharedHostRoot {
+		base, baseErr := filepath.EvalSymlinks(t.TempDir())
+		if baseErr != nil {
+			t.Fatal(baseErr)
+		}
+		sourceRoot, targetRoot, hostRoot = filepath.Join(base, "source"), filepath.Join(base, "target"), base
+		for _, directory := range []string{sourceRoot, targetRoot} {
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	} else {
+		sourceRoot, err = filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		targetRoot = t.TempDir()
 	}
 	sourcePath := filepath.Join(sourceRoot, "PRIVATE-SOURCE-PATH-CANARY.bin")
 	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	targetRoot := t.TempDir()
 	if session, _, err := fsbind.BindExisting(targetRoot); errors.Is(err, fsbind.ErrUnsupported) {
 		t.Skipf("materialize filesystem binding is unsupported: %v", err)
 	} else if err != nil {
@@ -344,9 +366,11 @@ func makeRetireFixtureMode(t *testing.T, retainActivation bool) retireFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostRoot, err := filepath.EvalSymlinks(targetRoot)
-	if err != nil {
-		t.Fatal(err)
+	if !sharedHostRoot {
+		hostRoot, err = filepath.EvalSymlinks(targetRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	clientConfig := "sha256:" + strings.Repeat("c", 64)
 	projection, err := final.ProjectClientPaths(hostRoot, "/downloads", false)
@@ -449,7 +473,7 @@ func makeRetireFixtureMode(t *testing.T, retainActivation bool) retireFixture {
 	}
 	return retireFixture{meta: meta, discovery: freshDiscovery, final: final, activation: completion,
 		currentUse: currentUse, currentJob: completeJob,
-		sourceRoot: sourceRoot, sourcePath: sourcePath, targetRoot: targetRoot, activationPlanID: preview.Plan.ID}
+		sourceRoot: sourceRoot, sourcePath: sourcePath, targetRoot: targetRoot, hostRoot: hostRoot, activationPlanID: preview.Plan.ID}
 }
 
 func retireBuildOptions(fixture retireFixture, meta *metafile.MetaInfo, discovery *seed.DiscoveryResult, showPaths bool) BuildOptions {
@@ -485,4 +509,49 @@ func hasFinding(findings []Finding, code string) bool {
 		}
 	}
 	return false
+}
+
+func TestPathWithinFailsClosedOnResolutionErrors(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(base, "final", "file.bin")
+	if err := os.MkdirAll(filepath.Dir(inside), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside.bin")
+	if err := os.WriteFile(outside, []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finalRoot := filepath.Join(base, "final")
+	if within, err := pathWithin(finalRoot, inside); err != nil || !within {
+		t.Fatalf("inside path: within=%v err=%v", within, err)
+	}
+	if within, err := pathWithin(finalRoot, outside); err != nil || within {
+		t.Fatalf("outside path: within=%v err=%v", within, err)
+	}
+	if err := os.Symlink(finalRoot, filepath.Join(base, "alias")); err == nil {
+		if within, err := pathWithin(finalRoot, filepath.Join(base, "alias", "file.bin")); err != nil || !within {
+			t.Fatalf("aliased path: within=%v err=%v", within, err)
+		}
+	}
+	for name, test := range map[string][2]string{
+		"missing path":         {finalRoot, filepath.Join(base, "missing.bin")},
+		"missing base":         {filepath.Join(base, "missing-final"), inside},
+		"dangling link":        {finalRoot, filepath.Join(base, "dangling")},
+		"non-directory parent": {finalRoot, filepath.Join(outside, "child")},
+	} {
+		if name == "dangling link" {
+			if err := os.Symlink(filepath.Join(base, "nowhere"), test[1]); err != nil {
+				continue
+			}
+		}
+		if within, err := pathWithin(test[0], test[1]); err == nil {
+			t.Fatalf("%s: unresolvable path was classified as within=%v instead of failing closed", name, within)
+		}
+	}
 }

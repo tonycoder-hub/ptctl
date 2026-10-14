@@ -105,7 +105,7 @@ func (a *app) seedRetireParentCleanupPlan(args []string) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		return usageError("seed retire parent-cleanup plan: %s", sourceRetireFlagError(flagOutput.String(), err))
+		return flagParseError("seed retire parent-cleanup plan", err)
 	}
 	if fs.NArg() != 0 {
 		return usageError("seed retire parent-cleanup plan accepts flags only")
@@ -179,7 +179,7 @@ func (a *app) seedRetireParentCleanupRun(args []string) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		return usageError("seed retire parent-cleanup run: %s", sourceRetireFlagError(flagOutput.String(), err))
+		return flagParseError("seed retire parent-cleanup run", err)
 	}
 	if fs.NArg() != 0 {
 		return usageError("seed retire parent-cleanup run accepts flags only")
@@ -256,7 +256,7 @@ func (a *app) seedRetireParentCleanupResume(args []string) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		return usageError("seed retire parent-cleanup resume: %s", sourceRetireFlagError(flagOutput.String(), err))
+		return flagParseError("seed retire parent-cleanup resume", err)
 	}
 	if fs.NArg() != 1 || *target == "" || *expected == "" || len(roots) == 0 || !*acknowledge {
 		return usageError("seed retire parent-cleanup resume requires target, cleanup plan ID, search roots, acknowledgement, and one OPERATION_ID")

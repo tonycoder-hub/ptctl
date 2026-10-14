@@ -60,6 +60,10 @@ type clientActivateServer struct {
 	stopHook   func()
 	removeMode string
 	removeHook func()
+
+	// stopAfterReads models an asynchronous stop: after an accepted stop the
+	// job stays started until this many further ledger reads have been served.
+	stopAfterReads int
 }
 
 func TestClientActivatePlanRunResumeStatusAndPrivacy(t *testing.T) {
@@ -606,6 +610,14 @@ func (server *clientActivateServer) serveHTTP(writer http.ResponseWriter, reques
 		_, _ = writer.Write([]byte("v5.0.4"))
 	case "/api/v2/torrents/info":
 		server.ledger.Add(1)
+		server.mu.Lock()
+		if server.stopAfterReads > 0 {
+			server.stopAfterReads--
+			if server.stopAfterReads == 0 {
+				server.state, server.progress = "stoppedUP", 1
+			}
+		}
+		server.mu.Unlock()
 		state, progress := server.currentState()
 		writer.Header().Set("Content-Type", "application/json")
 		server.mu.Lock()
@@ -669,7 +681,11 @@ func (server *clientActivateServer) serveHTTP(writer http.ResponseWriter, reques
 		mode := server.stopMode
 		hook := server.stopHook
 		server.mu.Unlock()
-		if mode != "unknown_keep_started" && mode != "accepted_keep_started" {
+		if mode == "accepted_stop_after_reads" {
+			server.mu.Lock()
+			server.stopAfterReads = 3
+			server.mu.Unlock()
+		} else if mode != "unknown_keep_started" && mode != "accepted_keep_started" {
 			server.setState("stoppedUP", 1)
 		}
 		if hook != nil {

@@ -56,7 +56,8 @@ func TestClientStopPlanRunStatusAndFreshCompletionProof(t *testing.T) {
 
 	planned := runClientStopJSON(t, append([]string{"client", "stop", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
 	if planned.Data.Outcome != clientstop.OutcomeReady || planned.Data.Effect != "none" || planned.Data.Plan.ID == "" ||
-		planned.Data.Plan.Data.ReviewedJobState != "uploading" || planned.Data.Plan.Data.Stop.Protocol != "qbittorrent_webapi_v5" ||
+		planned.Data.Plan.Data.Schema != clientstop.PlanSchemaV2 ||
+		planned.Data.Plan.Data.ReviewedJobState != clientstop.ReviewedJobPhaseStarted || planned.Data.Plan.Data.Stop.Protocol != "qbittorrent_webapi_v5" ||
 		planned.Data.Writes.WritesPerformed != 0 || planned.Data.Client.RequestsMade != 3 ||
 		fixture.server.totalRequests()-requestsBeforePlan != 3 {
 		t.Fatalf("unexpected stop plan: %#v", planned.Data)
@@ -102,6 +103,30 @@ func TestClientStopPlanRunStatusAndFreshCompletionProof(t *testing.T) {
 		t.Fatalf("unexpected fresh completion proof: %#v", fresh.Data)
 	}
 	assertClientStopPrivate(t, mustJSON(t, fresh), fixture)
+}
+
+func TestClientStopPlanIDToleratesStartedSubstateJitter(t *testing.T) {
+	fixture := prepareClientStopCLIFixture(t)
+	base := clientStopBaseArgs(fixture)
+	planned := runClientStopJSON(t, append([]string{"client", "stop", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if planned.Data.Outcome != clientstop.OutcomeReady {
+		t.Fatalf("unexpected stop plan: %#v", planned.Data)
+	}
+	// qBittorrent moves a seeding job between started substates on its own;
+	// the reviewed plan must survive uploading -> stalledUP between plan and run.
+	fixture.server.setState("stalledUP", 1)
+	replanned := runClientStopJSON(t, append([]string{"client", "stop", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if replanned.Data.Plan.ID != planned.Data.Plan.ID {
+		t.Fatalf("started substate jitter changed the stop plan ID: %s != %s", replanned.Data.Plan.ID, planned.Data.Plan.ID)
+	}
+	runArgs := append([]string{"client", "stop", "run"}, base...)
+	runArgs = append(runArgs, "--expect-stop-plan-id", planned.Data.Plan.ID, "--acknowledge-client-stop")
+	stopped := runClientStopJSON(t, runArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if stopped.Data.Outcome != clientstop.OutcomeStopped || !stopped.Data.Plan.Matches ||
+		stopped.Data.Before.JobState != "stalledUP" || stopped.Data.Stopped.Observation.JobState != "stoppedUP" ||
+		fixture.server.stop.Load() != 1 {
+		t.Fatalf("unexpected stop run after started substate jitter: %#v", stopped.Data)
+	}
 }
 
 func TestReconcileReportBindsTerminalClientStopToCurrentStoppedJobWithoutExtraRequests(t *testing.T) {
@@ -447,6 +472,28 @@ func TestClientStopAcceptedResponseWithoutStoppedStateRemainsBlocked(t *testing.
 	if resumed.Data.Outcome != clientstop.OutcomeStoppedUnattributed || resumed.Data.Assurance.CompletionBasis != "exact_stopped_after_unknown_attempt_causality_unproven" ||
 		resumed.Data.Mutation.Receipt.Complete != true || fixture.server.stop.Load() != 1 {
 		t.Fatalf("cross-session stopped proof claimed response causality: %#v", resumed.Data)
+	}
+}
+
+func TestClientStopAcceptedResponseWithLaggingStoppedStateStaysAttributed(t *testing.T) {
+	fixture := prepareClientStopCLIFixture(t)
+	base := clientStopBaseArgs(fixture)
+	planned := runClientStopJSON(t, append([]string{"client", "stop", "plan"}, base...), strings.NewReader(clientAdoptPassword+"\n"), 0)
+	fixture.server.setStopMode("accepted_stop_after_reads")
+	ledgerBefore := fixture.server.ledger.Load()
+	runArgs := append([]string{"client", "stop", "run"}, base...)
+	runArgs = append(runArgs, "--expect-stop-plan-id", planned.Data.Plan.ID, "--acknowledge-client-stop")
+	report := runClientStopJSON(t, runArgs, strings.NewReader(clientAdoptPassword+"\n"), 0)
+	if report.Data.Outcome != clientstop.OutcomeStopped || report.Data.Operation.Resumable ||
+		report.Data.Assurance.CompletionBasis != "accepted_response_then_exact_stopped" ||
+		report.Data.Mutation.Status != "accepted" || report.Data.Stopped.Observation.JobState != "stoppedUP" ||
+		fixture.server.stop.Load() != 1 {
+		t.Fatalf("asynchronously applied accepted stop lost attribution: %#v", report.Data)
+	}
+	// Two pre-stop reads, the lagging first observation, two settle probes (the
+	// second sees stoppedUP), and the full stopped proof; the stop is not repeated.
+	if reads := fixture.server.ledger.Load() - ledgerBefore; reads != 6 {
+		t.Fatalf("accepted stop settle made %d ledger reads, want 6", reads)
 	}
 }
 

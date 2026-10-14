@@ -73,6 +73,75 @@ func TestStatusAuthenticatesAndReadsVersion(t *testing.T) {
 	}
 }
 
+func TestLoginAcceptsOnlyUpstreamSuccessShapes(t *testing.T) {
+	credential, err := downloader.NewCredential("alice", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		status     int
+		body       string
+		cookieName string
+		wantOK     bool
+	}{
+		// qBittorrent 4.x-5.1.x: 200 "Ok." with the SID cookie.
+		{name: "legacy-ok", status: http.StatusOK, body: "Ok.", cookieName: "SID", wantOK: true},
+		// qBittorrent 5.2.x: loginAction sets no result, so WebApplication
+		// answers 204 with an empty body and a QBT_SID_<port> cookie.
+		{name: "5.2-no-content", status: http.StatusNoContent, cookieName: "QBT_SID_8080", wantOK: true},
+		{name: "legacy-bad-credentials", status: http.StatusOK, body: "Fails."},
+		{name: "5.2-bad-credentials", status: http.StatusUnauthorized, body: "Unauthorized"},
+		{name: "banned", status: http.StatusForbidden, body: "Your IP address has been banned after too many failed authentication attempts."},
+		{name: "empty-200", status: http.StatusOK},
+		{name: "other-success-status", status: http.StatusAccepted, body: "Ok."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var versionRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v2/auth/login":
+					if test.cookieName != "" {
+						http.SetCookie(w, &http.Cookie{Name: test.cookieName, Value: "synthetic", Path: "/", HttpOnly: true})
+					}
+					w.WriteHeader(test.status)
+					_, _ = w.Write([]byte(test.body))
+				case "/api/v2/app/version":
+					versionRequests.Add(1)
+					if _, err := r.Cookie(test.cookieName); test.cookieName == "" || err != nil {
+						http.Error(w, "Forbidden", http.StatusForbidden)
+						return
+					}
+					_, _ = w.Write([]byte("v5.2.4"))
+				case "/api/v2/app/webapiVersion":
+					_, _ = w.Write([]byte("2.14.1"))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			adapter, err := New(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := adapter.Status(context.Background(), credential)
+			if test.wantOK {
+				if err != nil || status.Version != "v5.2.4" || versionRequests.Load() != 1 {
+					t.Fatalf("status=%#v versionRequests=%d err=%v", status, versionRequests.Load(), err)
+				}
+				return
+			}
+			if err == nil || versionRequests.Load() != 0 {
+				t.Fatalf("rejected login was accepted: status=%#v versionRequests=%d err=%v", status, versionRequests.Load(), err)
+			}
+		})
+	}
+	// net/http cannot serve a 204 body, so cover that shape directly.
+	if loginAccepted(http.StatusNoContent, []byte("Ok.")) || loginAccepted(http.StatusOK, []byte(strings.Repeat(" ", 1022)+"Ok.")) {
+		t.Fatal("non-canonical login success shape was accepted")
+	}
+}
+
 func TestLoginBodyIsNotReplayedAcrossOriginRedirect(t *testing.T) {
 	var targetRequests atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

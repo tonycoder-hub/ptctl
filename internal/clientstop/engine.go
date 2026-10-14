@@ -75,14 +75,13 @@ func Run(ctx context.Context, options RunOptions) (Report, error) {
 	defer handle.Close()
 	report.Operation.Status, report.Operation.Phase, report.Operation.Resumable = "active", "journaled", true
 
-	current, currentObservation, err := options.Prepared.current.Reobserve(ctx, options.Session)
+	current, currentObservation, err := options.Prepared.current.ReobserveStarted(ctx, options.Session)
 	if err != nil {
 		report.classify(err)
 		return report, err
 	}
 	if !current.JobStarted() || currentObservation.UseID != plan.UseID || currentObservation.JobID != plan.JobID ||
-		currentObservation.FileLayoutID != plan.FileLayoutID || currentObservation.CompleteFileSnapshotID != plan.CompleteFileSnapshotID ||
-		currentObservation.JobState != plan.ReviewedJobState {
+		currentObservation.FileLayoutID != plan.FileLayoutID || currentObservation.CompleteFileSnapshotID != plan.CompleteFileSnapshotID {
 		err = fmt.Errorf("%w: current downloader use differs from the reviewed client stop plan", ErrPolicy)
 		report.classify(err)
 		return report, err
@@ -163,6 +162,10 @@ func executeAttempt(ctx context.Context, handle *journalHandle, current *clienta
 		return *report, unknown
 	}
 	stopped, stoppedObservation, stoppedErr := clientactivate.VerifyCurrentJobStopped(ctx, current, session)
+	if stoppedErr != nil && mutationReceipt.Complete && mutationErr == nil && errors.Is(stoppedErr, clientactivate.ErrPolicy) &&
+		stoppedObservation.JobID != "" && clientactivate.AwaitCurrentJobStopped(ctx, current, session) {
+		stopped, stoppedObservation, stoppedErr = clientactivate.VerifyCurrentJobStopped(ctx, current, session)
+	}
 	if stoppedErr != nil {
 		report.Stopped.Status = "not_proven"
 		if errors.Is(stoppedErr, clientactivate.ErrIntegrity) || errors.Is(stoppedErr, materialize.ErrIntegrity) {
@@ -235,8 +238,11 @@ func completeStopped(ctx context.Context, handle *journalHandle, plan Plan, plan
 
 func validateRunOptions(options RunOptions) error {
 	if options.TargetRoot == "" || options.Prepared == nil || options.Session == nil || !options.AcknowledgeStop ||
-		!canonicalPlanID(options.ExpectedPlanID) || options.ExpectedPlanID != options.Prepared.planID {
+		!canonicalPlanID(options.ExpectedPlanID) {
 		return fmt.Errorf("%w: client stop run options are invalid or unacknowledged", ErrPolicy)
+	}
+	if options.ExpectedPlanID != options.Prepared.planID {
+		return fmt.Errorf("%w: expected client stop plan ID differs from the live reviewed plan; review a fresh plan (plans reviewed before %s cannot be run)", ErrPolicy, PlanSchemaV2)
 	}
 	if err := options.Prepared.validate(); err != nil {
 		return err

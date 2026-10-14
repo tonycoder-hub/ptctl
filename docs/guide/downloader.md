@@ -112,7 +112,9 @@ of the committed (or retained) materialized final, and a complete typed-infohash
 queue observation proving that the target job is absent. It then publishes a
 private target-root-local request intent before exactly one add POST. The POST
 submits the exact stored bytes with the reviewed save path and requests a
-stopped/paused job. It never changes an existing job, moves data, starts a
+stopped/paused job; for qBittorrent it also disables automatic torrent
+management and requests the original content layout, so client defaults cannot
+relocate or re-root the data. It never changes an existing job, moves data, starts a
 recheck, resumes transfer, deletes content, or retires the source.
 
 The normal qBittorrent run uses one login, one complete ledger read before the

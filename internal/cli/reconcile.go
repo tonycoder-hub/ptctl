@@ -145,11 +145,7 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		detail := strings.TrimSpace(flagOutput.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		return usageError("%s: %s", commandName, detail)
+		return flagParseError(commandName, err)
 	}
 	if fs.NArg() != 0 {
 		return usageError("%s accepts flags only; unexpected argument %q", commandName, fs.Arg(0))
@@ -900,9 +896,14 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 			}
 		}
 	}
+	// One predicate decides both whether credentials are read and whether the
+	// downloader session is opened, so a failed prerequisite gate can never send
+	// an unread (empty) credential to the client.
+	prerequisiteGatesPassed := !refreshManifestBudgetBlocked && storageIndexGateErr == nil && !siteBindingGateFailed &&
+		!adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed && !parentCleanupGateFailed
 	var siteCredential site.Credential
 	var clientCredential downloader.Credential
-	if !refreshManifestBudgetBlocked && storageIndexGateErr == nil && !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed && !parentCleanupGateFailed {
+	if prerequisiteGatesPassed {
 		switch {
 		case siteDetailRequested && clientRequested:
 			siteCredential, clientCredential, err = readReconciliationCredentialBundle(a.stdin, *username)
@@ -935,13 +936,13 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 		FileLayoutMode: *clientFileLayout,
 		FileLimits:     clientFileLimits,
 	}
-	if clientRequested && (refreshManifestBudgetBlocked || storageIndexGateErr != nil || siteBindingGateFailed || adoptionGateFailed || activationGateFailed || stopGateFailed || removalGateFailed || retirementGateFailed || parentCleanupGateFailed) {
+	if clientRequested && !prerequisiteGatesPassed {
 		bracket.StopReason = "client_snapshot_incomplete"
 	}
 	var session downloader.LedgerSession
 	var fileJobKey string
 	fileBeforeComplete := false
-	if clientRequested && !refreshManifestBudgetBlocked && storageIndexGateErr == nil && !siteBindingGateFailed && !adoptionGateFailed && !activationGateFailed && !stopGateFailed && !removalGateFailed && !retirementGateFailed {
+	if clientRequested && prerequisiteGatesPassed {
 		session, err = clientAdapter.OpenReadSession(ctx, clientCredential)
 		if err != nil {
 			session = nil

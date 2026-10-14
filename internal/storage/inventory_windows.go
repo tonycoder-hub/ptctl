@@ -49,3 +49,9 @@ func isNetworkPath(path string) bool {
 	volume := filepath.VolumeName(path)
 	return strings.HasPrefix(volume, `\\`)
 }
+
+// OpenRegular is os.Open on Windows, where an ordinary path cannot name a
+// FIFO; callers still check that the opened object is a regular file.
+func OpenRegular(path string) (*os.File, error) { return os.Open(path) }
+
+func openDirectory(path string) (*os.File, error) { return os.Open(path) }

@@ -784,8 +784,7 @@ func continueRun(ctx context.Context, meta *metafile.MetaInfo, source *metafile.
 			return verifyErr
 		}
 		report.Target.FinalContentVerified = true
-		journal.scratchObserved = false
-		if err := journal.observeScratch(ctx); err != nil {
+		if err := journal.removeRetainedScratch(ctx, report); err != nil {
 			return err
 		}
 		if journal.scratchEntries != 0 || journal.scratchBytes != 0 {
@@ -1007,9 +1006,8 @@ func stageManifestFile(ctx context.Context, layoutFile LayoutFile, source *metaf
 	if err != nil {
 		return copyReceipt{}, err
 	}
-	scratch, err := fsbind.PathFromComponents([]string{
-		scratchDirectoryName, fmt.Sprintf("copy-%09d-%s.pending", layoutFile.ManifestIndex, nonce),
-	})
+	scratchName := fmt.Sprintf("copy-%09d-%s.pending", layoutFile.ManifestIndex, nonce)
+	scratch, err := fsbind.PathFromComponents([]string{scratchDirectoryName, scratchName})
 	if err != nil {
 		return copyReceipt{}, err
 	}
@@ -1024,6 +1022,23 @@ func stageManifestFile(ctx context.Context, layoutFile LayoutFile, source *metaf
 	report.Writes.ScratchFilesCreated++
 	hasher := sha256.New()
 	var copied int64
+	created := target.Identity()
+	// discard closes and removes this call's unpublished scratch object, bound
+	// to its exact name and creation identity, also after cancellation. A
+	// retained object stays in the scratch inventory and is recovered before
+	// commit. Identity drift is never hidden.
+	discard := func(failure error) (copyReceipt, error) {
+		_ = target.Close()
+		if created.IsZero() {
+			return copyReceipt{Bytes: copied}, failure
+		}
+		if cleanupErr := journal.discardScratch(context.WithoutCancel(ctx), scratchName, created, -1, report); cleanupErr == nil {
+			journal.releaseScratch(layoutFile.Length)
+		} else if errors.Is(cleanupErr, ErrCorruptJournal) {
+			failure = errors.Join(failure, cleanupErr)
+		}
+		return copyReceipt{Bytes: copied}, failure
+	}
 	if layoutFile.Length > 0 {
 		_, consumeErr := source.ConsumeVerifiedFile(ctx, layoutFile.ManifestIndex, func(reader io.Reader) error {
 			written, copyErr := io.CopyBuffer(io.MultiWriter(target, hasher), reader, buffer)
@@ -1035,25 +1050,22 @@ func stageManifestFile(ctx context.Context, layoutFile LayoutFile, source *metaf
 		report.Writes.BytesWritten += copied
 		report.Writes.ScratchBytesWritten += copied
 		if consumeErr != nil {
-			_ = target.Close()
-			return copyReceipt{Bytes: copied}, consumeErr
+			return discard(consumeErr)
 		}
 	}
 	if copied != layoutFile.Length {
-		_ = target.Close()
-		return copyReceipt{Bytes: copied}, fmt.Errorf("%w: copied byte count disagrees with manifest", ErrIntegrity)
+		return discard(fmt.Errorf("%w: copied byte count disagrees with manifest", ErrIntegrity))
 	}
 	if err := target.Sync(); err != nil {
-		_ = target.Close()
-		return copyReceipt{Bytes: copied}, err
+		return discard(err)
 	}
 	info, err := target.Info()
 	closeErr := target.Close()
 	if err != nil {
-		return copyReceipt{Bytes: copied}, err
+		return discard(err)
 	}
 	if closeErr != nil {
-		return copyReceipt{Bytes: copied}, closeErr
+		return discard(closeErr)
 	}
 	if info.SizeBytes != layoutFile.Length || info.Identity.IsZero() {
 		return copyReceipt{Bytes: copied}, fmt.Errorf("%w: staged scratch file changed before publication", ErrIntegrity)
