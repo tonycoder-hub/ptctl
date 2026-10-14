@@ -110,7 +110,7 @@ func TestReconcileTransmissionReadOnlyLedger(t *testing.T) {
 		case "torrent_get":
 			result = map[string]any{"torrents": []any{map[string]any{
 				"hash_string": meta.InfoHashV1, "name": "PTCTL-CLIENT-PATH-CANARY.bin", "total_size": int64(len("content")),
-				"percent_complete": 1.0, "status": 6, "download_dir": "/downloads", "downloaded_ever": int64(len("content")), "uploaded_ever": int64(10),
+				"percent_complete": 1.0, "status": 6, "error": 0, "download_dir": "/downloads", "downloaded_ever": int64(len("content")), "uploaded_ever": int64(10),
 			}}}
 		default:
 			t.Errorf("unexpected method %q", request.Method)

@@ -630,6 +630,20 @@ func TestStoreOperationsReleaseWindowsDeletionHandles(t *testing.T) {
 	}
 }
 
+func TestLoadNamesStoredArtifactThatNoLongerParses(t *testing.T) {
+	store := newTestStore(t)
+	// A digest-valid object the strict parser rejects, such as one stored
+	// before parsing became canonical.
+	raw := []byte("d4:infod6:lengthi05eee")
+	id := artifactIDFor(raw)
+	createPrivateTestFile(t, filepath.Join(store.root, objectRelativePath(id)), raw)
+	_, _, err := store.Load(context.Background(), id, DefaultLimits())
+	if !errors.Is(err, ErrCorruptArtifact) || !errors.Is(err, ErrArtifactUnparseable) ||
+		!strings.Contains(err.Error(), id.String()) || !strings.Contains(err.Error(), "non-canonical integer at byte") {
+		t.Fatalf("unparseable stored artifact error=%v", err)
+	}
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, receipt, err := Init(filepath.Join(physicalTempDir(t), "store"))

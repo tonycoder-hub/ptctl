@@ -32,6 +32,9 @@ func (a *Adapter) Account(ctx context.Context, credential site.Credential) (doma
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return domain.AccountSnapshot{}, fmt.Errorf("TJUPT account read timed out: %w", context.DeadlineExceeded)
 		}
+		if errors.Is(err, errLoginRedirect) {
+			return domain.AccountSnapshot{}, fmt.Errorf("TJUPT session is not authenticated")
+		}
 		return domain.AccountSnapshot{}, fmt.Errorf("TJUPT account read failed")
 	}
 	if !matchesAccountURL(a.baseURL, finalURL) {
@@ -47,7 +50,7 @@ func (a *Adapter) Account(ctx context.Context, credential site.Credential) (doma
 			return domain.AccountSnapshot{}, fmt.Errorf("TJUPT account page fields were invalid")
 		}
 		return domain.AccountSnapshot{
-			SiteID:     "tjupt",
+			SiteID:     SiteID,
 			Username:   username,
 			Bonus:      bonus,
 			ObservedAt: time.Now().UTC(),

@@ -13,6 +13,11 @@ import (
 
 const maxSmallRecordBytes = int64(256 << 10)
 
+// errSnapshotByteBudget reports that the encoded NDJSON snapshot would exceed
+// Limits.MaxSnapshotBytes. Profile scan limits bound files and raw path bytes,
+// not this encoded size, so a valid profile can still reach it.
+var errSnapshotByteBudget = errors.New("storage index byte budget exceeded")
+
 func EncodeProfile(profile Profile) ([]byte, error) {
 	if err := profile.Validate(); err != nil {
 		return nil, err
@@ -145,7 +150,7 @@ func (encoder *SnapshotEncoder) write(value any) error {
 	}
 	raw = append(raw, '\n')
 	if int64(len(raw)) > encoder.limits.MaxSnapshotBytes-encoder.bytes {
-		return fmt.Errorf("storage index byte budget exceeded")
+		return errSnapshotByteBudget
 	}
 	written, err := encoder.writer.Write(raw)
 	encoder.bytes += int64(written)

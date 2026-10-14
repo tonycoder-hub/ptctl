@@ -940,7 +940,7 @@ func (server *transmissionAdoptServer) serveHTTP(writer http.ResponseWriter, req
 			server.mu.Unlock()
 			jobs = append(jobs, map[string]any{
 				"hash_string": server.meta.InfoHashV1, "name": materializeFinalName,
-				"total_size": server.meta.TotalLength, "percent_complete": progress, "status": status,
+				"total_size": server.meta.TotalLength, "percent_complete": progress, "status": status, "error": 0,
 				"download_dir": clientAdoptRoot, "downloaded_ever": int64(0), "uploaded_ever": int64(0),
 			})
 		}

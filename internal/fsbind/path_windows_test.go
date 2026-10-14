@@ -31,3 +31,16 @@ func TestWindowsComponentLimitCountsUTF16CodeUnits(t *testing.T) {
 		})
 	}
 }
+
+func TestWindowsComponentRejectsEveryReservedDeviceSpelling(t *testing.T) {
+	for _, component := range []string{"CONIN$", "conout$.txt", "COM0", "lpt0.bin", "COM¹.txt", "CON .txt", "nul.tar.gz", "Aux.log"} {
+		if _, err := PathFromComponents([]string{component}); !errors.Is(err, ErrInvalidPath) {
+			t.Fatalf("reserved device component %q error = %v", component, err)
+		}
+	}
+	for _, component := range []string{"CONSOLE.txt", "COM10", "my.CON", "release"} {
+		if _, err := PathFromComponents([]string{component}); err != nil {
+			t.Fatalf("ordinary component %q rejected: %v", component, err)
+		}
+	}
+}

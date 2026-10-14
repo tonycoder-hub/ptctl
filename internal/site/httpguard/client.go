@@ -1,8 +1,10 @@
 package httpguard
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -49,19 +51,78 @@ type FormField struct {
 // semantic identifier. The raw Location value never crosses StrictResponse.
 type RedirectClassifier func(*url.URL) (string, bool)
 
+// ErrBlockedAddress reports that a site host resolved only to addresses the
+// public-IP dial policy refuses. Request errors keep their generic text and
+// expose this cause only through errors.Is.
+var ErrBlockedAddress = errors.New("site host resolved only to blocked address ranges")
+
+// RedirectError reports a rejected, unfollowed redirect whose single
+// same-origin Location an explicit classifier recognized. Only the allowlisted
+// classifier ID is retained; the raw Location never crosses this boundary.
+type RedirectError struct {
+	ID string
+}
+
+func (err *RedirectError) Error() string { return "site redirect was rejected" }
+
 type Client struct {
-	base        *url.URL
-	cookie      string
-	strictHTTP  *http.Client
-	minInterval time.Duration
-	maxBody     int64
-	mu          sync.Mutex
-	lastRequest time.Time
-	requestMu   sync.Mutex
-	requests    int
+	base             *url.URL
+	credentialHeader string
+	credentialValue  string
+	strictHTTP       *http.Client
+	minInterval      time.Duration
+	maxBody          int64
+	mu               sync.Mutex
+	lastRequest      time.Time
+	requestMu        sync.Mutex
+	requests         int
 }
 
 func New(baseURL, cookie string, minInterval time.Duration) (*Client, error) {
+	return newClient(baseURL, "Cookie", cookie, minInterval)
+}
+
+// NewWithHeaderCredential binds one non-cookie credential header, such as an
+// API key, to every request. The header must be a plain token that the client
+// does not otherwise control, and the value must be printable ASCII.
+func NewWithHeaderCredential(baseURL, header, value string, minInterval time.Duration) (*Client, error) {
+	name, ok := credentialHeaderName(header)
+	if !ok {
+		return nil, fmt.Errorf("site credential header name is invalid")
+	}
+	if value == "" || len(value) > 8<<10 || value != strings.TrimSpace(value) || !asciiHeaderValue(value) {
+		return nil, fmt.Errorf("site credential header value is invalid")
+	}
+	return newClient(baseURL, name, value, minInterval)
+}
+
+// reservedHeaders are set by the client itself or frame the message, so a
+// credential header must never replace them.
+var reservedHeaders = map[string]bool{
+	"Accept": true, "Accept-Encoding": true, "Connection": true, "Content-Length": true,
+	"Content-Type": true, "Cookie": true, "Host": true, "Keep-Alive": true,
+	"Proxy-Authorization": true, "Proxy-Connection": true, "Te": true, "Trailer": true,
+	"Transfer-Encoding": true, "Upgrade": true, "User-Agent": true,
+}
+
+func credentialHeaderName(raw string) (string, bool) {
+	if raw == "" || len(raw) > 64 {
+		return "", false
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+			return "", false
+		}
+	}
+	name := http.CanonicalHeaderKey(raw)
+	if reservedHeaders[name] {
+		return "", false
+	}
+	return name, true
+}
+
+func newClient(baseURL, credentialHeader, credentialValue string, minInterval time.Duration) (*Client, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse site URL failed")
@@ -73,7 +134,7 @@ func New(baseURL, cookie string, minInterval time.Duration) (*Client, error) {
 
 	strictTransport := newStrictTransport()
 
-	c := &Client{base: base, cookie: cookie, minInterval: minInterval, maxBody: defaultMaxBody}
+	c := &Client{base: base, credentialHeader: credentialHeader, credentialValue: credentialValue, minInterval: minInterval, maxBody: defaultMaxBody}
 	c.strictHTTP = &http.Client{
 		Transport: strictTransport,
 		Timeout:   30 * time.Second,
@@ -124,17 +185,25 @@ func newStrictTransport() *http.Transport {
 		if lastErr != nil {
 			return nil, fmt.Errorf("connect to site host: %w", lastErr)
 		}
-		return nil, fmt.Errorf("site host resolved only to blocked address ranges")
+		return nil, ErrBlockedAddress
 	}
 	return transport
 }
 
 func (c *Client) Get(ctx context.Context, relativePath string, query url.Values) ([]byte, *url.URL, error) {
+	return c.GetClassified(ctx, relativePath, query, nil)
+}
+
+// GetClassified is Get with an explicit same-origin redirect classifier. It
+// still never follows a redirect: a 3xx answer whose single Location the
+// classifier accepts fails with *RedirectError, and every other redirect keeps
+// the generic rejection.
+func (c *Client) GetClassified(ctx context.Context, relativePath string, query url.Values, classify RedirectClassifier) ([]byte, *url.URL, error) {
 	target, err := c.target(relativePath, query)
 	if err != nil {
 		return nil, nil, err
 	}
-	response, err := c.GetOnce(ctx, relativePath, query, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", c.maxBody, hardMaxResponseHeaders)
+	response, err := c.GetOnceClassified(ctx, relativePath, query, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", c.maxBody, hardMaxResponseHeaders, classify)
 	if err != nil {
 		return nil, nil, fmt.Errorf("site read failed: %w", err)
 	}
@@ -142,6 +211,9 @@ func (c *Client) Get(ctx context.Context, relativePath string, query url.Values)
 		return nil, target, fmt.Errorf("site rate limited the request (HTTP 429); retry manually after the server-specified interval")
 	}
 	if response.StatusCode >= 300 && response.StatusCode <= 399 {
+		if response.RedirectID != "" {
+			return nil, target, &RedirectError{ID: response.RedirectID}
+		}
 		return nil, target, fmt.Errorf("site redirect was rejected")
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
@@ -154,6 +226,13 @@ func (c *Client) Get(ctx context.Context, relativePath string, query url.Values)
 // response headers and body. The caller should use a freshly-created Client;
 // Fetch sessions enforce that this method is invoked at most once.
 func (c *Client) GetOnce(ctx context.Context, relativePath string, query url.Values, accept string, maxBody, maxHeaderBytes int64) (StrictResponse, error) {
+	return c.GetOnceClassified(ctx, relativePath, query, accept, maxBody, maxHeaderBytes, nil)
+}
+
+// GetOnceClassified is GetOnce with an explicit redirect classifier. The
+// redirect is never followed; an accepted same-origin Location is reported
+// only as StrictResponse.RedirectID.
+func (c *Client) GetOnceClassified(ctx context.Context, relativePath string, query url.Values, accept string, maxBody, maxHeaderBytes int64, classify RedirectClassifier) (StrictResponse, error) {
 	var result StrictResponse
 	if maxBody <= 0 || maxBody > 32<<20 || maxHeaderBytes <= 0 || maxHeaderBytes > hardMaxResponseHeaders {
 		return result, fmt.Errorf("site response budget is invalid")
@@ -177,74 +256,12 @@ func (c *Client) GetOnce(ctx context.Context, relativePath string, query url.Val
 	}
 	req.Header.Set("Accept", accept)
 	req.Header.Set("Accept-Encoding", "identity")
-	req.Header.Set("User-Agent", "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; conservative-read-only-client)")
-	if c.cookie != "" {
-		req.Header.Set("Cookie", c.cookie)
-	}
+	req.Header.Set("User-Agent", readOnlyUserAgent)
+	c.applyCredential(req)
 	// The dedicated fresh H1-only transport neither pools the connection nor
 	// follows redirects, so this effect cannot be replayed by the transport.
 	req.Close = true
-	if c.strictHTTP == nil {
-		return result, fmt.Errorf("strict site transport is unavailable")
-	}
-
-	result.ObservedAtStart = time.Now().UTC()
-	c.recordRequest()
-	resp, err := c.strictHTTP.Do(req)
-	if err != nil {
-		result.ObservedAtEnd = time.Now().UTC()
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return result, fmt.Errorf("site request canceled: %w", ctxErr)
-		}
-		return result, fmt.Errorf("site request failed")
-	}
-	defer resp.Body.Close()
-	result.StatusCode = resp.StatusCode
-	if responseHeaderSize(resp.Header) > maxHeaderBytes {
-		result.ObservedAtEnd = time.Now().UTC()
-		return result, fmt.Errorf("site response headers exceeded the configured budget")
-	}
-	if len(resp.Header.Values("Content-Range")) != 0 {
-		result.ObservedAtEnd = time.Now().UTC()
-		return result, fmt.Errorf("partial site response was rejected")
-	}
-	encodings := resp.Header.Values("Content-Encoding")
-	if len(encodings) > 1 || (len(encodings) == 1 && !strings.EqualFold(strings.TrimSpace(encodings[0]), "identity")) || resp.Uncompressed {
-		result.ObservedAtEnd = time.Now().UTC()
-		return result, fmt.Errorf("encoded site response was rejected")
-	}
-	if len(resp.TransferEncoding) > 1 || (len(resp.TransferEncoding) == 1 && !strings.EqualFold(resp.TransferEncoding[0], "chunked")) {
-		result.ObservedAtEnd = time.Now().UTC()
-		return result, fmt.Errorf("encoded site transfer was rejected")
-	}
-	if len(resp.Trailer) != 0 {
-		result.ObservedAtEnd = time.Now().UTC()
-		return result, fmt.Errorf("site response trailers were rejected")
-	}
-	result.MediaType, err = strictResponseMediaType(resp.Header.Values("Content-Type"))
-	if err != nil {
-		result.ObservedAtEnd = time.Now().UTC()
-		return result, err
-	}
-	if resp.ContentLength > maxBody {
-		result.ObservedAtEnd = time.Now().UTC()
-		return result, fmt.Errorf("site response exceeded the configured budget")
-	}
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-	result.ResponseBytesRead = int64(len(body))
-	result.ObservedAtEnd = time.Now().UTC()
-	if readErr != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return result, fmt.Errorf("site response read canceled: %w", ctxErr)
-		}
-		return result, fmt.Errorf("site response read failed")
-	}
-	if int64(len(body)) > maxBody {
-		return result, fmt.Errorf("site response exceeded the configured budget")
-	}
-	result.ResponseBytesKnown = true
-	result.Body = body
-	return result, nil
+	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, classify)
 }
 
 // PostFormOnce performs one non-following, non-retrying form POST. The request
@@ -288,10 +305,68 @@ func (c *Client) PostFormOnce(ctx context.Context, relativePath string, query ur
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; explicit-effect-client)")
-	if c.cookie != "" {
-		req.Header.Set("Cookie", c.cookie)
-	}
+	c.applyCredential(req)
 	req.Close = true
+	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, classify)
+}
+
+// PostReadOnce performs one non-following, non-retrying POST for APIs that
+// expose reads only through POST. The caller supplies the encoded body; it is
+// sent once, never replayed, and never included in a result or diagnostic.
+func (c *Client) PostReadOnce(ctx context.Context, relativePath, contentType string, body []byte, accept string, maxRequestBytes, maxBody, maxHeaderBytes int64) (StrictResponse, error) {
+	var result StrictResponse
+	if maxBody <= 0 || maxBody > 32<<20 || maxHeaderBytes <= 0 || maxHeaderBytes > hardMaxResponseHeaders {
+		return result, fmt.Errorf("site response budget is invalid")
+	}
+	if maxRequestBytes <= 0 || maxRequestBytes > 1<<20 || int64(len(body)) > maxRequestBytes {
+		return result, fmt.Errorf("site request body budget is invalid")
+	}
+	if accept == "" || !asciiHeaderValue(accept) {
+		return result, fmt.Errorf("site accept header is invalid")
+	}
+	if contentType == "" || !asciiHeaderValue(contentType) {
+		return result, fmt.Errorf("site request content type is invalid")
+	}
+	if _, _, err := mime.ParseMediaType(contentType); err != nil {
+		return result, fmt.Errorf("site request content type is invalid")
+	}
+	target, err := c.target(relativePath, nil)
+	if err != nil {
+		return result, err
+	}
+	if err := c.wait(ctx); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	result.RequestBytes = int64(len(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), io.NopCloser(bytes.NewReader(body)))
+	if err != nil {
+		return result, fmt.Errorf("build site request failed")
+	}
+	req.ContentLength = int64(len(body))
+	req.GetBody = nil
+	req.Header.Set("Accept", accept)
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("User-Agent", readOnlyUserAgent)
+	c.applyCredential(req)
+	req.Close = true
+	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, nil)
+}
+
+const readOnlyUserAgent = "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; conservative-read-only-client)"
+
+func (c *Client) applyCredential(req *http.Request) {
+	if c.credentialValue != "" {
+		req.Header.Set(c.credentialHeader, c.credentialValue)
+	}
+}
+
+// roundTrip sends req exactly once and applies the shared response checks in
+// a fixed order. Only callers that accept redirects pass a classifier.
+func (c *Client) roundTrip(ctx context.Context, req *http.Request, result StrictResponse, maxBody, maxHeaderBytes int64, classify RedirectClassifier) (StrictResponse, error) {
 	if c.strictHTTP == nil {
 		return result, fmt.Errorf("strict site transport is unavailable")
 	}
@@ -304,7 +379,7 @@ func (c *Client) PostFormOnce(ctx context.Context, relativePath string, query ur
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return result, fmt.Errorf("site request canceled: %w", ctxErr)
 		}
-		return result, fmt.Errorf("site request failed")
+		return result, requestFailure(err)
 	}
 	defer resp.Body.Close()
 	result.StatusCode = resp.StatusCode
@@ -364,6 +439,20 @@ func (c *Client) PostFormOnce(ctx context.Context, relativePath string, query ur
 	result.Body = responseBody
 	return result, nil
 }
+
+// requestFailure keeps the generic text of a failed round trip and exposes a
+// blocked-address dial only through errors.Is.
+func requestFailure(err error) error {
+	if errors.Is(err, ErrBlockedAddress) {
+		return blockedRequestError{}
+	}
+	return fmt.Errorf("site request failed")
+}
+
+type blockedRequestError struct{}
+
+func (blockedRequestError) Error() string { return "site request failed" }
+func (blockedRequestError) Unwrap() error { return ErrBlockedAddress }
 
 func encodeFormFields(fields []FormField, maximumFields int, maximumBytes int64) (string, error) {
 	if len(fields) == 0 || len(fields) > maximumFields {
@@ -530,6 +619,12 @@ func publicIP(ip net.IP) bool {
 			return false
 		}
 	}
+	if wellKnownNAT64.Contains(ip) {
+		// RFC 6052: a NAT64 gateway forwards to the embedded IPv4 address,
+		// so that address must itself be public.
+		embedded := ip.To16()
+		return publicIP(net.IPv4(embedded[12], embedded[13], embedded[14], embedded[15]))
+	}
 	return true
 }
 
@@ -556,8 +651,20 @@ var blockedNetworks = mustNetworks(
 	"198.51.100.0/24",
 	"203.0.113.0/24",
 	"240.0.0.0/4",
+	"192.88.99.0/24", // deprecated 6to4 relay anycast
+	"::/96",          // deprecated IPv4-compatible IPv6
+	"64:ff9b:1::/48", // local-use NAT64
+	"100::/64",       // discard-only
+	"100:0:0:1::/64", // dummy prefix
+	"2001::/23",      // IETF protocol assignments, including Teredo 2001::/32
 	"2001:db8::/32",
+	"2002::/16", // 6to4, which embeds an arbitrary IPv4 address
+	"3fff::/20",
+	"5f00::/16", // SRv6 SIDs
+	"fec0::/10", // deprecated site-local
 )
+
+var wellKnownNAT64 = mustNetworks("64:ff9b::/96")[0]
 
 func mustNetworks(cidrs ...string) []*net.IPNet {
 	result := make([]*net.IPNet, 0, len(cidrs))

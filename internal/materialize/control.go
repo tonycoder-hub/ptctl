@@ -243,12 +243,16 @@ func ListOperations(ctx context.Context, targetRoot string, limits OperationList
 		return result, fmt.Errorf("%w: bind target root: %v", ErrPolicy, err)
 	}
 	defer session.Close()
-	listing, err := session.ListRoot(ctx, fsbind.ListLimits{
+	listing, err := session.ListRootForDiscovery(ctx, fsbind.ListLimits{
 		MaxEntries: limits.MaxRootEntries, MaxNameBytes: limits.MaxNameBytes,
 	})
 	result.RootUsed = listing.Used
 	if err != nil {
 		return result, err
+	}
+	if listing.Used.Unrepresentable > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"%d target root entries with names that cannot be bound were skipped; ptctl never creates such names", listing.Used.Unrepresentable))
 	}
 	if !listing.Complete {
 		result.StopReason = listing.StopReason

@@ -50,7 +50,7 @@ func (a *app) seedRetireRun(args []string) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		return usageError("seed retire run: %s", sourceRetireFlagError(flagOutput.String(), err))
+		return flagParseError("seed retire run", err)
 	}
 	if fs.NArg() != 0 {
 		return usageError("seed retire run accepts flags only")
@@ -127,7 +127,7 @@ func (a *app) seedRetireResume(args []string) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		return usageError("seed retire resume: %s", sourceRetireFlagError(flagOutput.String(), err))
+		return flagParseError("seed retire resume", err)
 	}
 	if fs.NArg() != 1 {
 		return usageError("seed retire resume requires exactly one OPERATION_ID")
@@ -593,13 +593,6 @@ func sourceRetireExecutionFinding(findings []sourceretire.Finding, code string) 
 		}
 	}
 	return false
-}
-
-func sourceRetireFlagError(output string, err error) string {
-	if detail := strings.TrimSpace(output); detail != "" {
-		return detail
-	}
-	return err.Error()
 }
 
 func validSourceRetireExecutionPlanID(value string) bool {

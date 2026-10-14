@@ -3,8 +3,9 @@
 ## Reporting a vulnerability
 
 Please use GitHub's private vulnerability reporting for this repository. Do not
-open a public issue containing a tracker cookie, passkey, private `.torrent`,
-RSS URL, downloader credential, private path, or unredacted diagnostic output.
+open a public issue containing a tracker cookie, site API key, passkey, private
+`.torrent`, RSS URL, downloader credential, private path, or unredacted
+diagnostic output.
 
 If private reporting is unavailable, open a minimal public issue asking the
 maintainer to enable a private channel. Do not include exploit details or

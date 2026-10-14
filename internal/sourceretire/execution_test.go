@@ -5,17 +5,63 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 	"github.com/tonycoder-hub/ptctl/internal/fsbind"
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
 )
+
+func TestCompareReadersSeparatesReadFailuresFromIntegrityMismatches(t *testing.T) {
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("ptctl-source-bytes"), 20000)
+	readFailure := errors.New("simulated EIO")
+	failingAfter := func(prefix int) io.Reader {
+		return io.MultiReader(bytes.NewReader(payload[:prefix]), iotest.ErrReader(readFailure))
+	}
+	for name, test := range map[string]struct {
+		left, right io.Reader
+	}{
+		"source fails mid-buffer":  {failingAfter(1000), bytes.NewReader(payload)},
+		"final fails mid-buffer":   {bytes.NewReader(payload), failingAfter(1000)},
+		"source fails immediately": {iotest.ErrReader(readFailure), bytes.NewReader(payload)},
+		"final fails later":        {bytes.NewReader(payload), failingAfter(200 << 10)},
+	} {
+		err := compareReadersContext(ctx, test.left, test.right, int64(len(payload)))
+		if !errors.Is(err, readFailure) || errors.Is(err, ErrExecutionIntegrity) {
+			t.Fatalf("%s: read failure was classified as %v", name, err)
+		}
+	}
+	changed := bytes.Clone(payload)
+	changed[len(changed)-1] ^= 0xff
+	for name, test := range map[string]struct {
+		left, right io.Reader
+		expected    int64
+	}{
+		"bytes differ":     {bytes.NewReader(payload), bytes.NewReader(changed), int64(len(payload))},
+		"final shorter":    {bytes.NewReader(payload), bytes.NewReader(payload[:len(payload)-1]), int64(len(payload))},
+		"unexpected size":  {bytes.NewReader(payload), bytes.NewReader(payload), int64(len(payload)) + 1},
+		"source truncated": {bytes.NewReader(payload[:10]), bytes.NewReader(payload), int64(len(payload))},
+	} {
+		if err := compareReadersContext(ctx, test.left, test.right, test.expected); !errors.Is(err, ErrExecutionIntegrity) {
+			t.Fatalf("%s: mismatch was classified as %v", name, err)
+		}
+	}
+	if err := compareReadersContext(ctx, bytes.NewReader(payload), bytes.NewReader(payload), int64(len(payload))); err != nil {
+		t.Fatalf("identical readers: %v", err)
+	}
+	if report, err := mapExecutionError(&ExecutionReport{}, compareReadersContext(ctx, failingAfter(10), bytes.NewReader(payload), int64(len(payload))), "compare"); err == nil ||
+		report.Outcome == ExecutionOutcomeIntegrity {
+		t.Fatalf("read failure mapped to %#v, %v", report.Outcome, err)
+	}
+}
 
 func executionSession(fixture retireFixture, count int) *retireActivationSession {
 	now := time.Now().UTC()
@@ -54,14 +100,14 @@ func TestRunRetiresOneExactSourceAndStatusIsHistorical(t *testing.T) {
 	if err := intent.Validate(); err != nil {
 		t.Fatalf("pre-write intent validation: %#v: %v", intent, err)
 	}
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	runOptions := RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery, Final: fixture.final,
 		Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session, ShowAbsolutePaths: true},
 		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()}
 	report, err := Run(context.Background(), runOptions)
 	if err != nil || report.Outcome != ExecutionOutcomeRetired || !report.DeletionPerformed || report.Writes.NamesRemoved != 1 ||
 		report.Writes.BytesRemoved != fixture.meta.TotalLength || report.Operation.Phase != "complete" || report.Operation.Resumable ||
-		len(report.Files) != 1 || report.Files[0].Status != "retired" || session.RequestsMade() != 4 {
+		len(report.Files) != 1 || report.Files[0].Status != "retired" || session.RequestsMade() != 5 {
 		t.Fatalf("run=%#v requests=%d err=%v", report, session.RequestsMade(), err)
 	}
 	if _, err := os.Lstat(fixture.sourcePath); !os.IsNotExist(err) {
@@ -106,6 +152,110 @@ func TestRunRetiresOneExactSourceAndStatusIsHistorical(t *testing.T) {
 	}
 }
 
+func TestResumeOfCompletedRetirementDoesNotRequireRemovedSourceParent(t *testing.T) {
+	fixture := makeRetireFixture(t)
+	preview, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
+	if err != nil || preview.Outcome != OutcomeEligible {
+		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	searchRoot := filepath.Dir(fixture.sourceRoot)
+	report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery, Final: fixture.final,
+		Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: executionSession(fixture, 4)},
+		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{searchRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
+	if err != nil || report.Outcome != ExecutionOutcomeRetired {
+		t.Fatalf("run=%#v err=%v", report, err)
+	}
+	operation, err := ParseOperationID(report.Operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := func() (ExecutionReport, error) {
+		return Resume(context.Background(), ResumeOptions{Meta: fixture.meta, Final: fixture.final, Activation: fixture.activation,
+			ClientUse: fixture.currentUse, TargetRoot: fixture.targetRoot, OperationID: operation, ExpectedPlanID: preview.Plan.ID,
+			SearchRoots: []string{searchRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
+	}
+	// Parent cleanup (or the operator) may remove the now-empty source parent.
+	if err := os.Remove(fixture.sourceRoot); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := resume()
+	if err != nil || resumed.Outcome != ExecutionOutcomeAlreadyRetired || resumed.Operation.Resumable || resumed.WritesPerformed != 0 {
+		t.Fatalf("completed resume after parent removal=%#v err=%v", resumed, err)
+	}
+	if err := os.Mkdir(fixture.sourceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.sourcePath, []byte("retirement source fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err = resume()
+	if !errors.Is(err, ErrExecutionIntegrity) || resumed.Outcome != ExecutionOutcomeIntegrity || resumed.WritesPerformed != 0 {
+		t.Fatalf("completed resume after the source path was recreated=%#v err=%v", resumed, err)
+	}
+	if raw, err := os.ReadFile(fixture.sourcePath); err != nil || string(raw) != "retirement source fixture" {
+		t.Fatalf("recreated source changed: %q %v", raw, err)
+	}
+}
+
+func TestRunClientSessionFailuresAroundDeletionStayResumable(t *testing.T) {
+	fixture := makeRetireFixture(t)
+	preview, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
+	if err != nil || preview.Outcome != OutcomeEligible {
+		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	run := func(session downloader.LedgerSession) (ExecutionReport, error) {
+		return Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery, Final: fixture.final,
+			Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
+			ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
+	}
+	resume := func(operation OperationID, session downloader.LedgerSession) (ExecutionReport, error) {
+		return Resume(context.Background(), ResumeOptions{Meta: fixture.meta, Final: fixture.final, Activation: fixture.activation,
+			ClientUse: fixture.currentUse, ClientSession: session, TargetRoot: fixture.targetRoot, OperationID: operation,
+			ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
+	}
+	// The session fails (for example an expired qBittorrent cookie) at the
+	// fresh ledger read immediately before the first unlink: nothing is removed.
+	report, err := run(executionSession(fixture, 2))
+	if err == nil || errors.Is(err, ErrExecutionIntegrity) || report.Outcome != ExecutionOutcomePartial || report.DeletionPerformed ||
+		report.Writes.NamesRemoved != 0 || !report.Operation.Resumable {
+		t.Fatalf("pre-removal session failure=%#v err=%v", report, err)
+	}
+	if _, err := os.Stat(fixture.sourcePath); err != nil {
+		t.Fatalf("source was removed without a live pre-removal ledger read: %v", err)
+	}
+	operation, err := ParseOperationID(report.Operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fresh session resumes, removes the name, and then fails after the
+	// unlink: the deletion is journaled and the operation stays resumable.
+	expiring := executionSession(fixture, 2)
+	report, err = resume(operation, expiring)
+	if err == nil || errors.Is(err, ErrExecutionIntegrity) || report.Outcome != ExecutionOutcomePartial || !report.DeletionPerformed ||
+		report.Writes.NamesRemoved != 1 || !report.Operation.Resumable || report.Operation.Phase == "complete" || expiring.RequestsMade() != 4 {
+		t.Fatalf("post-removal session failure=%#v requests=%d err=%v", report, expiring.RequestsMade(), err)
+	}
+	if _, err := os.Lstat(fixture.sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("source name remains after a journaled removal: %v", err)
+	}
+	status, err := Status(context.Background(), StatusOptions{TargetRoot: fixture.targetRoot, OperationID: operation, Limits: DefaultExecutionLimits()})
+	if err != nil || !status.Operation.Resumable || status.Outcome == ExecutionOutcomeIntegrity {
+		t.Fatalf("status after post-removal failure=%#v err=%v", status, err)
+	}
+	// Another fresh session completes the operation with one before and one
+	// after read and no further removal.
+	fresh := executionSession(fixture, 2)
+	report, err = resume(operation, fresh)
+	if err != nil || report.Outcome != ExecutionOutcomeRetired || report.Writes.NamesRemoved != 0 || report.Operation.Phase != "complete" ||
+		report.Operation.Resumable || fresh.RequestsMade() != 3 {
+		t.Fatalf("completing resume=%#v requests=%d err=%v", report, fresh.RequestsMade(), err)
+	}
+	report, err = resume(operation, nil)
+	if err != nil || report.Outcome != ExecutionOutcomeAlreadyRetired {
+		t.Fatalf("idempotent resume=%#v err=%v", report, err)
+	}
+}
+
 func TestNormalizeExecutionRootsRejectsUnacknowledgedWindowsNetworkPathBeforeAccess(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows UNC policy")
@@ -134,7 +284,7 @@ func TestRunPlanMismatchAndMissingAcknowledgementAreZeroWrite(t *testing.T) {
 			if test.plan != "" {
 				expected = test.plan
 			}
-			session := executionSession(fixture, 3)
+			session := executionSession(fixture, 4)
 			report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 				Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 				ExpectedPlanID: expected, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: test.ack, Limits: DefaultExecutionLimits()})
@@ -173,7 +323,7 @@ func TestRunProtocolBudgetsFailBeforeJournalWrite(t *testing.T) {
 			}
 			limits := DefaultExecutionLimits()
 			test.mutate(&limits)
-			session := executionSession(fixture, 3)
+			session := executionSession(fixture, 4)
 			report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 				Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 				ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: limits})
@@ -295,7 +445,7 @@ func TestRunRetiresOnlySelectedHardlinkName(t *testing.T) {
 	if err := os.Link(fixture.sourcePath, alias); err != nil {
 		t.Skipf("hardlinks are unavailable: %v", err)
 	}
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
@@ -323,7 +473,7 @@ func TestRunRejectsReplacedSourceBeforeJournalWrite(t *testing.T) {
 	if err := os.Rename(replacement, fixture.sourcePath); err != nil {
 		t.Fatal(err)
 	}
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
@@ -350,7 +500,7 @@ func TestRunRejectsTargetRootReplacementBeforeSourceRemoval(t *testing.T) {
 		return hookErr
 	}
 	t.Cleanup(func() { beforeSourceRemovalHook = nil })
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	report, runErr := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
@@ -365,13 +515,44 @@ func TestRunRejectsTargetRootReplacementBeforeSourceRemoval(t *testing.T) {
 	}
 }
 
+// The post-deletion client reobservation carries the only exact final
+// reverification before completion; a final changed across the unlink must
+// never be journaled as retired.
+func TestRunDoesNotCompleteWhenTheFinalChangesAcrossDeletion(t *testing.T) {
+	fixture := makeRetireFixture(t)
+	preview, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
+	if err != nil || preview.Outcome != OutcomeEligible {
+		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	finalPath, _, ok := fixture.final.ProcessFilePath(0)
+	if !ok {
+		t.Fatal("final path unavailable")
+	}
+	var hookErr error
+	beforeSourceRemovalHook = func(int) error {
+		hookErr = os.WriteFile(finalPath, bytes.Repeat([]byte{'x'}, int(fixture.meta.TotalLength)), 0o600)
+		return hookErr
+	}
+	t.Cleanup(func() { beforeSourceRemovalHook = nil })
+	report, runErr := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
+		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: executionSession(fixture, 4)},
+		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
+	if hookErr != nil {
+		t.Skipf("final rewrite is unavailable on this platform: %v", hookErr)
+	}
+	if !errors.Is(runErr, ErrExecutionIntegrity) || report.Outcome != ExecutionOutcomeIntegrity || report.Writes.NamesRemoved != 1 ||
+		report.Operation.Phase == "complete" {
+		t.Fatalf("run after final change=%#v err=%v", report, runErr)
+	}
+}
+
 func TestStatusRejectsCorruptIntentWithoutPathDisclosure(t *testing.T) {
 	fixture := makeRetireFixture(t)
 	preview, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	report, err := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
 		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: session},
 		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})

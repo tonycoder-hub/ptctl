@@ -51,11 +51,14 @@ func (s *readSession) ReadLedger(ctx context.Context) (downloader.LedgerSnapshot
 	}, nil
 }
 
+// ledgerFields requests the numeric tr_stat error code, which both protocols
+// name "error". The free-text errorString/error_string is not requested:
+// nothing consumes it and ptctl never surfaces raw server diagnostics.
 func ledgerFields(value protocol) []string {
 	if value == protocolJSONRPC {
-		return []string{"hash_string", "name", "total_size", "percent_complete", "status", "download_dir", "downloaded_ever", "uploaded_ever"}
+		return []string{"hash_string", "name", "total_size", "percent_complete", "status", "error", "download_dir", "downloaded_ever", "uploaded_ever"}
 	}
-	return []string{"hashString", "name", "totalSize", "percentComplete", "status", "downloadDir", "downloadedEver", "uploadedEver"}
+	return []string{"hashString", "name", "totalSize", "percentComplete", "status", "error", "downloadDir", "downloadedEver", "uploadedEver"}
 }
 
 func fileFields(value protocol) []string {
@@ -150,6 +153,17 @@ func decodeLedgerJob(raw json.RawMessage, valueProtocol protocol) (downloader.To
 	if err != nil || status < 0 || status > 6 {
 		return downloader.Torrent{}, fmt.Errorf("invalid torrent state")
 	}
+	errorCode, err := requiredInt64(fields, "error")
+	if err != nil || errorCode < 0 || errorCode > transmissionLocalError {
+		return downloader.Torrent{}, fmt.Errorf("invalid torrent error state")
+	}
+	state := normalizeState(status, progress)
+	if errorCode == transmissionLocalError {
+		// A local error (missing data, disk full, permissions) stops the job
+		// but keeps status 0 and its old progress, which would otherwise read
+		// as complete stoppedUP. Tracker codes 1 and 2 leave the state as is.
+		state = "error"
+	}
 	downloaded, err := requiredInt64(fields, downloadedKey)
 	if err != nil || downloaded < 0 {
 		return downloader.Torrent{}, fmt.Errorf("invalid downloaded byte counter")
@@ -167,7 +181,7 @@ func decodeLedgerJob(raw json.RawMessage, valueProtocol protocol) (downloader.To
 		Name:             name,
 		SizeBytes:        size,
 		Progress:         progress,
-		State:            normalizeState(status, progress),
+		State:            state,
 		SavePath:         directory,
 		ContentPath:      contentPath,
 		Downloaded:       downloaded,
@@ -394,12 +408,10 @@ func decodeFileState(raw json.RawMessage, valueProtocol protocol) (fileState, er
 	if err != nil || completed < 0 {
 		return fileState{}, fmt.Errorf("Transmission file state has invalid completed bytes")
 	}
-	var wanted bool
-	if valueProtocol == protocolJSONRPC {
-		wanted, err = requiredBool(fields, "wanted")
-	} else {
-		wanted, err = requiredLegacyWanted(fields, "wanted")
-	}
+	// Every supported Transmission release emits fileStats/file_stats
+	// "wanted" as a JSON boolean in both RPC styles; only the separate
+	// top-level "wanted" torrent field (never requested here) uses 0/1.
+	wanted, err := requiredBool(fields, "wanted")
 	if err != nil {
 		return fileState{}, err
 	}
@@ -420,6 +432,11 @@ func normalizeV1Hash(value string) (string, error) {
 	}
 	return hex.EncodeToString(digest), nil
 }
+
+// transmissionLocalError is tr_stat_errtype TR_STAT_LOCAL_ERROR, the largest
+// code Transmission 4.0 and 4.1 define (0 ok, 1 tracker warning, 2 tracker
+// error, 3 local error).
+const transmissionLocalError = 3
 
 func normalizeState(value int64, progress float64) string {
 	switch value {

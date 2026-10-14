@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -208,6 +210,60 @@ func TestMetafileStoreInvalidImportAndCorruptConsumerUseIntegrityExit(t *testing
 	code = Run([]string{"torrent", "inspect", "--metafile-store", storeRoot, "--metafile-variant", imported.Data.Artifact.VariantID, "--output", "json"}, strings.NewReader(""), &out, &errOut)
 	if code != 3 || out.Len() != 0 || !strings.Contains(errOut.String(), "stored metafile failed") || strings.Contains(errOut.String(), storeRoot) {
 		t.Fatalf("corrupt consumer code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestStoredMetafileThatNoLongerParsesNamesTheRemedy(t *testing.T) {
+	storeRoot := filepath.Join(physicalCLITempDir(t), "store")
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"metafile", "store", "init", "--store", storeRoot}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("init code=%d stderr=%q", code, errOut.String())
+	}
+	// A digest-valid object the strict canonical parser rejects, as one an
+	// older ptctl stored would be. It reuses a store-created object file so it
+	// keeps the private mode and Windows DACL the store requires of objects.
+	raw := []byte("d4:infod6:lengthi05eee")
+	digest := sha256.Sum256(raw)
+	variant := "sha256:" + hex.EncodeToString(digest[:])
+	validPath := filepath.Join(physicalCLITempDir(t), "valid.torrent")
+	if err := os.WriteFile(validPath, testV1Metafile("valid.bin", []byte("valid")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"metafile", "store", "import", "--store", storeRoot, "--output", "json", validPath}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("import code=%d stderr=%q", code, errOut.String())
+	}
+	var imported struct {
+		Data struct {
+			Artifact struct {
+				VariantID string `json:"metafile_variant_id"`
+			} `json:"artifact"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &imported); err != nil {
+		t.Fatal(err)
+	}
+	objects := filepath.Join(storeRoot, "objects")
+	planted := filepath.Join(objects, hex.EncodeToString(digest[:])+".torrent")
+	if err := os.Rename(filepath.Join(objects, strings.TrimPrefix(imported.Data.Artifact.VariantID, "sha256:")+".torrent"), planted); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planted, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"metafile", "store", "inspect", "--store", storeRoot, variant},
+		{"torrent", "inspect", "--metafile-store", storeRoot, "--metafile-variant", variant},
+	} {
+		out.Reset()
+		errOut.Reset()
+		code := Run(args, strings.NewReader(""), &out, &errOut)
+		stderr := errOut.String()
+		if code != 3 || !strings.Contains(stderr, variant) || !strings.Contains(stderr, "non-canonical integer") ||
+			!strings.Contains(stderr, "ptctl metafile store import") || strings.Contains(stderr, storeRoot) {
+			t.Fatalf("%s code=%d stderr=%q", strings.Join(args[:2], " "), code, stderr)
+		}
 	}
 }
 

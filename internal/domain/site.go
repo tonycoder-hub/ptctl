@@ -10,6 +10,9 @@ type AuthMethod string
 
 const (
 	AuthMethodCookieHeader AuthMethod = "cookie_header"
+	// AuthMethodAPIKeyHeader is a site-issued API token sent in a dedicated
+	// request header, such as M-Team's x-api-key.
+	AuthMethodAPIKeyHeader AuthMethod = "api_key_header"
 )
 
 const (

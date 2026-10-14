@@ -16,7 +16,16 @@ import (
 )
 
 const (
-	PlanSchemaV1       = "ptctl.client-stop-plan/v1"
+	// PlanSchemaV1 plans bind the exact raw started substate observed at
+	// review. They remain valid and resumable with that exact-state rule.
+	PlanSchemaV1 = "ptctl.client-stop-plan/v1"
+	// PlanSchemaV2 plans bind only the normalized complete-started phase, so
+	// ordinary seeding jitter (uploading, stalledUP, queuedUP, forcedUP) cannot
+	// change the plan ID or fail the live consistency checks.
+	PlanSchemaV2 = "ptctl.client-stop-plan/v2"
+	// ReviewedJobPhaseStarted is the only reviewed job state of a v2 plan.
+	ReviewedJobPhaseStarted = "started"
+
 	IntentSchemaV1     = "ptctl.client-stop-intent/v1"
 	AttemptSchemaV1    = "ptctl.client-stop-attempt/v1"
 	ResponseSchemaV1   = "ptctl.client-stop-response/v1"
@@ -65,10 +74,10 @@ type Plan struct {
 }
 
 func (plan Plan) Validate() error {
-	if plan.Schema != PlanSchemaV1 || plan.Action != ActionStopExactJob || !canonicalSHA256ID(plan.ClientConfigID) ||
+	if !validReviewedJobState(plan.Schema, plan.ReviewedJobState) || plan.Action != ActionStopExactJob || !canonicalSHA256ID(plan.ClientConfigID) ||
 		plan.Stop.Validate() != nil || plan.Stop.Driver != plan.Driver || !canonicalSHA256ID(plan.UseID) ||
 		!canonicalSHA256ID(plan.JobID) || !canonicalSHA256ID(plan.FileLayoutID) ||
-		!canonicalSHA256ID(plan.CompleteFileSnapshotID) || !startedState(plan.ReviewedJobState) ||
+		!canonicalSHA256ID(plan.CompleteFileSnapshotID) ||
 		!canonicalSHA256ID(plan.PathMappingID) || !canonicalSHA256ID(plan.ActivationOperationID) ||
 		!canonicalPlanID(plan.ActivationPlanID) || !canonicalSHA256ID(plan.ActivationTerminalID) ||
 		!canonicalSHA256ID(plan.MetafileVariantID) || !canonicalSHA256ID(plan.MaterializeOperationID) ||
@@ -315,6 +324,19 @@ func startedState(value string) bool {
 }
 
 func completeStoppedState(value string) bool { return value == "pausedUP" || value == "stoppedUP" }
+
+// validReviewedJobState accepts the exact raw started substate of a legacy v1
+// plan, or the normalized started phase of a v2 plan; any other schema fails.
+func validReviewedJobState(schema, reviewed string) bool {
+	switch schema {
+	case PlanSchemaV1:
+		return startedState(reviewed)
+	case PlanSchemaV2:
+		return reviewed == ReviewedJobPhaseStarted
+	default:
+		return false
+	}
+}
 
 func validStopReason(value string) bool {
 	switch value {

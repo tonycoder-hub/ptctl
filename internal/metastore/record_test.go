@@ -266,6 +266,10 @@ func TestRecordListBudgetsAreNPlusOneAndDeterministic(t *testing.T) {
 		if err != nil || first.Complete || first.StopReason != "entry_limit" || first.Used.EntriesConsidered != 2 || len(first.Records) != 0 {
 			t.Fatalf("entry limit: result=%+v err=%v", first, err)
 		}
+		if incomplete := first.IncompleteError(); !errors.Is(incomplete, ErrRecordListIncomplete) ||
+			!strings.Contains(incomplete.Error(), "more than 1 entries") || !strings.Contains(incomplete.Error(), "at most 100000") {
+			t.Fatalf("entry limit was not actionable: %v", incomplete)
+		}
 		second, err := store.ListRecords(context.Background(), RecordKindStorageIndexDataV1, limits)
 		if err != nil || !reflect.DeepEqual(first, second) {
 			t.Fatalf("entry result was not deterministic: first=%+v second=%+v err=%v", first, second, err)
@@ -280,6 +284,9 @@ func TestRecordListBudgetsAreNPlusOneAndDeterministic(t *testing.T) {
 		if err != nil || first.Complete || first.StopReason != "record_limit" || first.Used.RecordsMatched != 2 || len(first.Records) != 1 {
 			t.Fatalf("record limit: result=%+v err=%v", first, err)
 		}
+		if incomplete := first.IncompleteError(); !errors.Is(incomplete, ErrRecordListIncomplete) || !strings.Contains(incomplete.Error(), "more than 1 storage.index.data.v1 records") {
+			t.Fatalf("record limit was not actionable: %v", incomplete)
+		}
 		second, err := store.ListRecords(context.Background(), RecordKindStorageIndexDataV1, limits)
 		if err != nil || !reflect.DeepEqual(first, second) {
 			t.Fatalf("record result was not deterministic: first=%+v second=%+v err=%v", first, second, err)
@@ -293,6 +300,12 @@ func TestRecordListBudgetsAreNPlusOneAndDeterministic(t *testing.T) {
 		first, err := store.ListRecords(context.Background(), RecordKindStorageIndexDataV1, limits)
 		if err != nil || first.Complete || first.StopReason != "path_limit" || first.Used.EntriesConsidered != 1 || first.Used.PathBytes != 0 || len(first.Records) != 0 {
 			t.Fatalf("path limit: result=%+v err=%v", first, err)
+		}
+		if incomplete := first.IncompleteError(); !errors.Is(incomplete, ErrRecordListIncomplete) || !strings.Contains(incomplete.Error(), "1-byte path budget") {
+			t.Fatalf("path limit was not actionable: %v", incomplete)
+		}
+		if complete, err := store.ListRecords(context.Background(), RecordKindStorageIndexDataV1, DefaultRecordLimits()); err != nil || !complete.Complete || complete.IncompleteError() != nil {
+			t.Fatalf("complete listing reported incomplete: result=%+v err=%v", complete, err)
 		}
 		second, err := store.ListRecords(context.Background(), RecordKindStorageIndexDataV1, limits)
 		if err != nil || !reflect.DeepEqual(first, second) {

@@ -26,21 +26,36 @@ func strictTestClient(t *testing.T, transport http.RoundTripper, cookie string) 
 		t.Fatal(err)
 	}
 	return &Client{
-		base:       base,
-		cookie:     cookie,
-		maxBody:    defaultMaxBody,
-		strictHTTP: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		base:             base,
+		credentialHeader: "Cookie",
+		credentialValue:  cookie,
+		maxBody:          defaultMaxBody,
+		strictHTTP:       &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
 
 func TestPublicIPPolicy(t *testing.T) {
-	blocked := []string{"127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.169.254", "192.0.2.1", "::1", "fc00::1", "2001:db8::1"}
+	blocked := []string{
+		"127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.169.254", "192.0.2.1", "::1", "fc00::1", "2001:db8::1",
+		"0.0.0.0", "172.16.0.1", "192.168.1.1", "192.0.0.9", "192.88.99.1", "198.18.0.1", "198.51.100.1", "203.0.113.1",
+		"224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
+		"::", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254", "::127.0.0.1", "::a00:1",
+		"fe80::1", "fd00::1", "fec0::1", "ff02::1", "ff0e::1",
+		"64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::c0a8:101", "64:ff9b::6440:1", "64:ff9b:1::1",
+		"2002:7f00:1::1", "2002:a00:1::1", "2002:101:101::1",
+		"2001::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:2::1", "2001:20::1",
+		"100::1", "100:0:0:1::1", "3fff::1", "5f00::1",
+	}
 	for _, raw := range blocked {
-		if publicIP(net.ParseIP(raw)) {
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			t.Fatalf("invalid test address %s", raw)
+		}
+		if publicIP(ip) {
 			t.Fatalf("%s should be blocked", raw)
 		}
 	}
-	for _, raw := range []string{"1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"} {
+	for _, raw := range []string{"1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "::ffff:1.1.1.1", "64:ff9b::101:101", "2001:200::1"} {
 		if !publicIP(net.ParseIP(raw)) {
 			t.Fatalf("%s should be public", raw)
 		}
@@ -184,6 +199,55 @@ func TestOrdinaryGetAlsoUsesOneStrictAttempt(t *testing.T) {
 	}), "sid=COOKIE-CANARY")
 	if _, _, err := client.Get(context.Background(), "first", nil); err == nil || calls != 1 || client.RequestsMade() != 1 || strings.Contains(err.Error(), "CANARY") {
 		t.Fatalf("err=%v calls=%d requests=%d", err, calls, client.RequestsMade())
+	}
+}
+
+func TestClassifiedGetReportsOnlyAllowlistedRedirectID(t *testing.T) {
+	login := func(target *url.URL) (string, bool) {
+		if target.Path == "/login.php" {
+			return "test.login", true
+		}
+		return "", false
+	}
+	for _, test := range []struct {
+		location string
+		wantID   string
+	}{
+		{location: "login.php?returnto=CANARY", wantID: "test.login"},
+		{location: "https://example.test/login.php?returnto=CANARY", wantID: "test.login"},
+		{location: "https://other.invalid/login.php?returnto=CANARY"},
+		{location: "http://example.test/login.php?returnto=CANARY"},
+		{location: "https://example.test/second?CANARY"},
+	} {
+		calls := 0
+		client := strictTestClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": {test.location}},
+				Body:       io.NopCloser(strings.NewReader("CANARY-REDIRECT-BODY")),
+			}, nil
+		}), "sid=secret")
+		_, _, err := client.GetClassified(context.Background(), "mybonusapps.php", nil, login)
+		var redirect *RedirectError
+		gotID := ""
+		if errors.As(err, &redirect) {
+			gotID = redirect.ID
+		}
+		if err == nil || gotID != test.wantID || calls != 1 || client.RequestsMade() != 1 || strings.Contains(err.Error(), "CANARY") {
+			t.Fatalf("%s: err=%v id=%q calls=%d", test.location, err, gotID, calls)
+		}
+		response, err := client.GetOnceClassified(context.Background(), "mybonusapps.php", nil, "text/html", 1024, 1024, login)
+		if err != nil || response.StatusCode != http.StatusFound || response.RedirectID != test.wantID || calls != 2 {
+			t.Fatalf("%s: once response=%#v err=%v calls=%d", test.location, response, err, calls)
+		}
+		response, err = client.GetOnce(context.Background(), "mybonusapps.php", nil, "text/html", 1024, 1024)
+		if err != nil || response.RedirectID != "" || calls != 3 {
+			t.Fatalf("%s: unclassified response=%#v err=%v", test.location, response, err)
+		}
+		if _, _, err := client.Get(context.Background(), "mybonusapps.php", nil); err == nil || errors.As(err, &redirect) || calls != 4 {
+			t.Fatalf("%s: unclassified Get err=%v", test.location, err)
+		}
 	}
 }
 

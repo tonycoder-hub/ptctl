@@ -314,7 +314,7 @@ func (a *app) metafileStoreInspect(args []string) error {
 			return writeErr
 		}
 		if errors.Is(err, metastore.ErrCorruptArtifact) {
-			return &integrityErr{message: "stored metafile failed digest or parse validation"}
+			return storedMetafileIntegrityErr("stored metafile", err)
 		}
 		return err
 	}

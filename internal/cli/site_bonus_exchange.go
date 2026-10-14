@@ -740,7 +740,7 @@ func (a *app) bonusExchangeWriter(siteID, selector string) (domain.SiteDescripto
 	if err != nil || config.Validate() != nil {
 		return descriptor, nil, site.BonusExchangeConfig{}, usageError("site bonus exchange configuration is unavailable")
 	}
-	descriptorOrigin, err := canonicalSiteDescriptorOrigin(descriptor.BaseURL)
+	descriptorOrigin, err := site.DescriptorOrigin(descriptor)
 	if err != nil || descriptorOrigin != config.Origin {
 		return descriptor, nil, site.BonusExchangeConfig{}, usageError("site bonus exchange origin is unsafe")
 	}

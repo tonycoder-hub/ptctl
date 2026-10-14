@@ -123,7 +123,7 @@ def fake_downloader(driver, infohash, length, wrong_path=False):
             elif method == "torrent_get":
                 result = {"torrents": [{
                     "hash_string": infohash, "name": "demo.txt", "total_size": length,
-                    "percent_complete": 1.0, "status": 6, "download_dir": client_root,
+                    "percent_complete": 1.0, "status": 6, "error": 0, "download_dir": client_root,
                     "downloaded_ever": length, "uploaded_ever": 0,
                 }]}
             else:

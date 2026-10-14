@@ -117,11 +117,13 @@ func TestTorrentDetailResponseClassificationFailsClosed(t *testing.T) {
 	tests := []struct {
 		name       string
 		status     int
+		redirectID string
 		mediaType  string
 		body       []byte
 		stopReason string
 	}{
 		{name: "unauthorized", status: http.StatusUnauthorized, mediaType: "text/html", body: []byte(valid), stopReason: "authentication_required"},
+		{name: "login redirect", status: http.StatusFound, redirectID: loginRedirectID, mediaType: "text/html", body: []byte(valid), stopReason: "authentication_required"},
 		{name: "not found", status: http.StatusNotFound, mediaType: "text/html", body: []byte(valid), stopReason: "not_found"},
 		{name: "rate limited", status: http.StatusTooManyRequests, mediaType: "text/html", body: []byte(valid), stopReason: "rate_limited"},
 		{name: "redirect", status: http.StatusFound, mediaType: "text/html", body: []byte(valid), stopReason: "redirect_rejected"},
@@ -140,7 +142,7 @@ func TestTorrentDetailResponseClassificationFailsClosed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			start := time.Now().UTC()
 			client := &fakeGuardedClient{response: httpguard.StrictResponse{
-				StatusCode: test.status, MediaType: test.mediaType, Body: test.body,
+				StatusCode: test.status, RedirectID: test.redirectID, MediaType: test.mediaType, Body: test.body,
 				ObservedAtStart: start, ObservedAtEnd: start, ResponseBytesRead: int64(len(test.body)), ResponseBytesKnown: true,
 			}}
 			adapter := New("")

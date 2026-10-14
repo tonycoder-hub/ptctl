@@ -14,6 +14,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
 const forbiddenWindowsAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT |
@@ -91,7 +93,16 @@ func platformBindExisting(root string) (*Session, RootInfo, error) {
 			desired = windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE
 		}
 		guard, guardErr := openWindowsAbsoluteDirectory(path, desired)
-		if guardErr != nil || guard.raw.volume != uint64(serial) {
+		if errors.Is(guardErr, ErrNotFound) {
+			// Like the POSIX binding: a missing root or ancestor is absence,
+			// which callers may treat differently from an unsafe object.
+			return nil, RootInfo{}, ErrNotFound
+		}
+		if guardErr != nil {
+			return nil, RootInfo{}, ErrUnsafeObject
+		}
+		if guard.raw.volume != uint64(serial) {
+			_ = guard.file.Close()
 			return nil, RootInfo{}, ErrUnsafeObject
 		}
 		state.data.guards = append(state.data.guards, guard)
@@ -159,12 +170,7 @@ func platformValidateComponent(component string) error {
 			return ErrInvalidPath
 		}
 	}
-	base := strings.ToUpper(strings.TrimSuffix(component, filepath.Ext(component)))
-	switch base {
-	case "CON", "PRN", "AUX", "NUL", "CLOCK$":
-		return ErrInvalidPath
-	}
-	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {
+	if storage.WindowsReservedDeviceName(component) {
 		return ErrInvalidPath
 	}
 	return nil
@@ -270,6 +276,21 @@ func platformInspectObject(session *Session, parent *boundDirectory, name string
 
 func platformInspectRootObject(session *Session, name string) (*os.File, rawIdentity, ObjectKind, error) {
 	return inspectWindowsObject(session, session.root, name, false)
+}
+
+// Windows published views intentionally keep the owner-only protected DACL and
+// single-link checks; only the POSIX implementation relaxes post-publication
+// read/execute mode bits and hard-link counts.
+func platformOpenPublishedDirectory(session *Session, parent *boundDirectory, name string) (*boundDirectory, error) {
+	return platformOpenPrivateDirectory(session, parent, name)
+}
+
+func platformOpenPublishedRegularReadOnly(session *Session, parent *boundDirectory, name string) (*os.File, rawIdentity, error) {
+	return platformOpenPrivateRegularReadOnly(session, parent, name)
+}
+
+func platformInspectPublishedObject(session *Session, parent *boundDirectory, name string) (*os.File, rawIdentity, ObjectKind, error) {
+	return platformInspectObject(session, parent, name)
 }
 
 func platformOpenRootRegular(session *Session, name string, forDelete bool) (*os.File, rawIdentity, error) {
