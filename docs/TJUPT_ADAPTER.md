@@ -32,10 +32,11 @@ or unknown HTML is indeterminate/an error rather than a successful empty
 result. Search rows are read from the NexusPHP `<table class="torrents">`
 with each row's nested `torrentname` table kept intact, so the later size
 cell is not cut off; sizes use NexusPHP's 1024-based `KB`/`MB`/`GB`/`TB`/`PB`
-labels. A results page whose rows cannot be recognized is an error, not an
-empty result; only a recognized TJUPT empty-search message (such as
-`没有种子。请用准确的关键字重试。`, or `没有结果！` for the query `0`) yields
-zero results.
+labels, and a size of 2^63 bytes (8 EiB) or more is left absent rather than
+reported wrapped or clamped. A results page whose rows cannot be recognized
+is an error, not an empty result; only a recognized TJUPT empty-search message
+(such as `没有种子。请用准确的关键字重试。`, or `没有结果！` for the query `0`)
+yields zero results.
 
 The header row names its columns with icon classes (`time`, `size`,
 `seeders`, `leechers`, `snatched`) and the `类型` label. When each of those

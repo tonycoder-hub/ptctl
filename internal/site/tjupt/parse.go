@@ -301,7 +301,9 @@ func firstSize(cells []string) (int64, bool) {
 			power = 5
 		}
 		bytes := value * math.Pow(base, float64(power))
-		if bytes >= 0 && bytes <= math.MaxInt64 {
+		// float64(math.MaxInt64) rounds up to 2^63, which int64 cannot hold;
+		// converting it is implementation-defined (negative on amd64).
+		if bytes >= 0 && bytes < math.MaxInt64 {
 			return int64(math.Round(bytes)), true
 		}
 	}
