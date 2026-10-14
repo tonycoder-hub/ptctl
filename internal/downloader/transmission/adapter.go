@@ -182,6 +182,18 @@ func (a *Adapter) Torrents(ctx context.Context, credential downloader.Credential
 	return snapshot.Jobs, nil
 }
 
+// rejectedStatus names why Transmission answered 401 or 403 without echoing
+// the response. Transmission answers 403 before it checks the credentials,
+// when rpc-whitelist does not include the caller (behind Docker that is the
+// bridge gateway, not 127.0.0.1) or while its anti-brute-force lock is active,
+// so a 403 says nothing about the password.
+func rejectedStatus(status int) error {
+	if status == http.StatusForbidden {
+		return fmt.Errorf("Transmission refused this client (HTTP 403) before checking the credentials: add its address to rpc-whitelist or disable the whitelist, or restart Transmission to clear an anti-brute-force lock")
+	}
+	return fmt.Errorf("Transmission rejected the credentials")
+}
+
 func (s *readSession) bootstrap(ctx context.Context) error {
 	probe, err := marshalLegacyRequest("session-get", map[string]any{"fields": []string{"version", "rpc-version-semver", "rpc-version"}}, 1)
 	if err != nil {
@@ -192,7 +204,7 @@ func (s *readSession) bootstrap(ctx context.Context) error {
 		return err
 	}
 	if response.status == http.StatusUnauthorized || response.status == http.StatusForbidden {
-		return fmt.Errorf("Transmission rejected the credentials")
+		return rejectedStatus(response.status)
 	}
 	if response.status != http.StatusConflict {
 		return fmt.Errorf("Transmission did not provide the required CSRF version handshake")
@@ -355,7 +367,7 @@ func (s *readSession) call(ctx context.Context, legacyMethod, rpcMethod string, 
 		return nil, int64(len(response.body)), fmt.Errorf("Transmission CSRF session expired; automatic replay is disabled")
 	}
 	if response.status == http.StatusUnauthorized || response.status == http.StatusForbidden {
-		return nil, int64(len(response.body)), fmt.Errorf("Transmission rejected the credentials")
+		return nil, int64(len(response.body)), rejectedStatus(response.status)
 	}
 	if response.status != http.StatusOK {
 		return nil, int64(len(response.body)), fmt.Errorf("Transmission returned HTTP %d", response.status)
