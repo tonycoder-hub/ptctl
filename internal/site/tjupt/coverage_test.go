@@ -175,3 +175,16 @@ func TestCanonicalBonusBalance(t *testing.T) {
 		}
 	}
 }
+
+func TestFirstSizeRejectsValuesInt64CannotHold(t *testing.T) {
+	// 8192 PiB is exactly 2^63. The bound must be checked before converting,
+	// because converting 2^63 to int64 is negative on amd64.
+	for _, text := range []string{"8192 PiB", "8192.00 PB", "8191.9999999999999999 PiB", "99999 PB"} {
+		if size, ok := firstSize([]string{text}); ok || size != 0 {
+			t.Fatalf("firstSize(%q)=%d,%v", text, size, ok)
+		}
+	}
+	if size, ok := firstSize([]string{"8191 PiB"}); !ok || size != 8191<<50 {
+		t.Fatalf("firstSize(8191 PiB)=%d,%v", size, ok)
+	}
+}
