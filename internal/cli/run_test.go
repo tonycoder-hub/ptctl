@@ -41,7 +41,7 @@ func TestFlagParseErrorsPrintOneShortLineInsteadOfTheFullHelp(t *testing.T) {
 			secret := &trackingReader{}
 			var out, errOut bytes.Buffer
 			code := Run(append(append([]string{}, command...), "--no-such-flag"), secret, &out, &errOut)
-			want := "error: " + name + ": flag provided but not defined: -no-such-flag (see 'ptctl " + name + " --help')\nrun 'ptctl help' for usage\n"
+			want := "error: " + name + ": flag provided but not defined: -no-such-flag (see 'ptctl " + name + " --help')\nrun 'pt help' for usage (ptctl is also supported)\n"
 			if code != 2 || out.Len() != 0 || secret.read || errOut.String() != want {
 				t.Fatalf("code=%d stdout=%q stderr=%q secretRead=%t", code, out.String(), errOut.String(), secret.read)
 			}
@@ -204,4 +204,41 @@ func testV2Metafile(root [32]byte) []byte {
 	metafile := []byte("d4:infod9:file treed1:xd0:d6:lengthi1e11:pieces root32:")
 	metafile = append(metafile, root[:]...)
 	return append(metafile, []byte("eee12:meta versioni2e4:name1:x12:piece lengthi16384eee")...)
+}
+
+func TestReadOnlyLeafHelpIsSuccessfulWithoutInput(t *testing.T) {
+	cases := []struct {
+		args []string
+		flag string
+	}{
+		{[]string{"version"}, "-output"},
+		{[]string{"torrent", "inspect", "--metafile-store", "missing-help-store"}, "-metafile-variant"},
+		{[]string{"torrent", "verify", "--content", "missing-help-content"}, "-content"},
+		{[]string{"client", "list", "--url", "invalid-endpoint", "--password-stdin"}, "-driver"},
+		{[]string{"client", "status", "--url", "invalid-endpoint", "--password-stdin"}, "-driver"},
+	}
+	for _, tc := range cases {
+		for _, help := range []string{"-h", "--help"} {
+			t.Run(strings.Join(tc.args, " ")+" "+help, func(t *testing.T) {
+				reader := &trackingReader{}
+				var out, errOut bytes.Buffer
+				args := append(append([]string(nil), tc.args...), help)
+				code := Run(args, reader, &out, &errOut)
+				if code != 0 || errOut.Len() != 0 || reader.read || !strings.HasPrefix(out.String(), "Usage:\n  pt ") || !strings.Contains(out.String(), tc.flag) {
+					t.Fatalf("help code=%d read=%t stdout=%q stderr=%q", code, reader.read, out.String(), errOut.String())
+				}
+			})
+		}
+	}
+}
+
+func TestReadOnlyLeafFlagErrorsStayOffStdout(t *testing.T) {
+	for _, prefix := range [][]string{{"version"}, {"torrent", "inspect"}, {"torrent", "verify"}, {"client", "list"}, {"client", "status"}} {
+		reader := &trackingReader{}
+		var out, errOut bytes.Buffer
+		args := append(append([]string(nil), prefix...), "--unknown-read-only-flag")
+		if code := Run(args, reader, &out, &errOut); code != 2 || out.Len() != 0 || errOut.Len() == 0 || reader.read {
+			t.Fatalf("args=%v code=%d read=%t stdout=%q stderr=%q", args, code, reader.read, out.String(), errOut.String())
+		}
+	}
 }

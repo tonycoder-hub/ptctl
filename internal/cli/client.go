@@ -34,6 +34,9 @@ func newReadOnlyDownloaderDriver(name, endpoint string) (readOnlyDownloaderDrive
 }
 
 func (a *app) client(args []string) error {
+	if groupHelpRequested(args) {
+		return a.helpTopic([]string{"client"})
+	}
 	if len(args) > 0 && args[0] == "adopt" {
 		return a.clientAdopt(args[1:])
 	}
@@ -56,7 +59,10 @@ func (a *app) client(args []string) error {
 	endpoint := fs.String("url", "", "downloader API origin or RPC URL")
 	username := fs.String("username", "", "downloader username")
 	passwordStdin := fs.Bool("password-stdin", false, "read password from stdin")
-	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *endpoint == "" {
+	if done, err := a.parseReadOnlyFlags(fs, args[1:], "client "+command+" --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]"); done || err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *endpoint == "" {
 		return usageError("client %s requires --url and no positional arguments", command)
 	}
 	if err := validateOutput(*output); err != nil {

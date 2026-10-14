@@ -1,8 +1,11 @@
 # Build outputs
+/pt
+/pt.exe
 /ptctl
 /ptctl.exe
 /dist/
 /coverage.out
+__pycache__/
 
 # Editors and OS files
 .idea/
@@ -26,4 +29,3 @@ Thumbs.db
 *.db
 *.db-shm
 *.db-wal
-

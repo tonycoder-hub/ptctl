@@ -1,8 +1,20 @@
-# ptctl
+# pt cli
 
-`ptctl` is a conservative, content-first CLI for private BitTorrent trackers.
+**pt cli** is a conservative, content-first CLI for private BitTorrent trackers.
 It treats a tracker website, a downloader, and a filesystem as separate trust
 domains and reconciles them around verifiable torrent metadata.
+
+The primary command is `pt`; `ptctl` remains a compatible entry point. The
+GitHub repository, Go module, private-store formats, and `ptctl.dev/v1` JSON
+schema keep their existing names. Older `ptctl` examples below remain valid.
+
+**Start here: [只读入门 / read-only quickstart](docs/READ_ONLY_QUICKSTART.md)**
+for Windows packages, exact verification, downloader reconciliation, and a
+small credential-free synthetic sample.
+
+For an extracted macOS/Linux package, run `sh examples/readonly/try.sh` for an
+offline walkthrough. Discover the core commands with `pt torrent --help`,
+`pt help client list`, and `pt help config`.
 
 > Status: `v0.4.0-alpha` development. Ordinary inspection, downloader reads,
 > content proof, discovery, planning, and reconciliation are intentionally
@@ -11,7 +23,7 @@ domains and reconciles them around verifiable torrent metadata.
 > [write boundaries](#write-boundaries) and the full
 > [status statement](docs/guide/README.md#current-status-and-write-boundaries).
 
-中文简介：`ptctl` 不是把 PT 网页机械地搬进终端。它以 `.torrent`、
+中文简介：**pt cli** 以 `.torrent`、
 实际文件、下载器任务和站点记录这四本账为核心，先精确校验，再生成
 清晰、可审计的报告与计划。TJUPT（Cookie）与 M-Team 馒头（API 令牌）是首批
 实验性站点适配器，而不是写死在核心里的站点。
@@ -67,18 +79,29 @@ Run `ptctl help` for the exact flags of every command.
 
 ## Install
 
-Requires Go 1.24 or newer.
+Preview packages for Windows amd64, Linux amd64, and macOS arm64 are built by
+CI after tests and extracted-binary acceptance. Download the
+`pt-cli-bundle-<commit>-<attempt>` artifact from a successful `ci` run on
+[Actions](https://github.com/tonycoder-hub/ptctl/actions) (artifacts expire
+after 14 days), then follow the
+[checksum and extraction steps](docs/READ_ONLY_QUICKSTART.md). Each package
+contains both commands, the short guide, synthetic samples, licenses, build
+identity, and SHA-256 checksums. Packages are not code-signed or notarized.
+
+To build from source you need Go 1.24 or newer. The published tags predate the
+current code, so install from `main`:
 
 ```bash
-go install github.com/tonycoder-hub/ptctl/cmd/ptctl@latest
+go install github.com/tonycoder-hub/ptctl/cmd/pt@main
+go install github.com/tonycoder-hub/ptctl/cmd/ptctl@main   # optional compatible name
 ```
 
-For a local checkout:
-
-```bash
-go build -trimpath -o ptctl ./cmd/ptctl
-go test ./...
-```
+Source builds report `dev` / `unknown` from `pt version`. CI stamps both
+commands with `<VERSION>+g<commit-prefix>` and the full commit (on pull
+requests, the tested merge commit). Maintainers stage releases with the
+[release procedure](docs/RELEASING.md): it builds an existing version tag and
+only ever creates an unpublished draft. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for local checks and synthetic binary acceptance.
 
 ## Five-minute start
 

@@ -27,6 +27,9 @@ import (
 )
 
 func (a *app) reconcileCommand(args []string) error {
+	if groupHelpRequested(args) {
+		return a.helpTopic([]string{"reconcile"})
+	}
 	if len(args) == 0 {
 		return usageError("reconcile requires report or refresh-report")
 	}

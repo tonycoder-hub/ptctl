@@ -18,14 +18,18 @@ design and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the controls.
 
 ## Checks
 
-These are exactly the CI steps. Run all four before you consider a change done:
+These are the CI checks. Run all five before you consider a change done:
 
 ```bash
 test -z "$(gofmt -l .)"
+python3 -B -m unittest discover -s scripts/tests
 go vet ./...
 go test -race ./...
-go build -trimpath ./cmd/ptctl
+go build -trimpath -o dist/ ./cmd/pt ./cmd/ptctl
 ```
+
+CI then packages both binaries and runs `scripts/readonly_acceptance.py`
+against them; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 CI runs them on Linux, macOS, and Windows with the Go version from `go.mod`.
 `internal/fsbind`, `internal/metastore`, and `internal/storage` contain
@@ -39,8 +43,8 @@ fixtures; nothing contacts a real tracker or downloader.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/ptctl` | `main`; calls `cli.Run` |
-| `internal/cli` | Flag parsing, credential stdin, table/JSON rendering, and exit codes. One file per command group: `site*.go`, `torrent.go`, `metafile_store.go`, `storage*.go`, `client*.go`, `seed.go`, `materialize.go`, `source_retire*.go`, `reconcile*.go`; shared output in `output.go`; dispatch and help in `run.go` |
+| `cmd/pt`, `cmd/ptctl` | Primary and compatible `main`; both call `cli.Run` |
+| `internal/cli` | Flag parsing, credential stdin, table/JSON rendering, and exit codes. One file per command group: `site*.go`, `torrent.go`, `metafile_store.go`, `storage*.go`, `client*.go`, `seed.go`, `materialize.go`, `source_retire*.go`, `reconcile*.go`; shared output in `output.go`; dispatch and help in `run.go`; read-only help topics in `help.go` |
 | `internal/domain` | Stable shared types: site descriptors, capabilities, auth methods, summaries, and snapshots |
 | `internal/metafile` | Bounded bencode, exact v1/v2/hybrid hashing, manifests, and content verification |
 | `internal/metastore` | Owner-only private store: exact-byte metafile artifacts and allowlisted sealed state records with atomic no-clobber publication |
