@@ -84,17 +84,20 @@ func TestLoginAcceptsOnlyUpstreamSuccessShapes(t *testing.T) {
 		body       string
 		cookieName string
 		wantOK     bool
+		wantErr    string
 	}{
 		// qBittorrent 4.x-5.1.x: 200 "Ok." with the SID cookie.
 		{name: "legacy-ok", status: http.StatusOK, body: "Ok.", cookieName: "SID", wantOK: true},
 		// qBittorrent 5.2.x: loginAction sets no result, so WebApplication
 		// answers 204 with an empty body and a QBT_SID_<port> cookie.
 		{name: "5.2-no-content", status: http.StatusNoContent, cookieName: "QBT_SID_8080", wantOK: true},
-		{name: "legacy-bad-credentials", status: http.StatusOK, body: "Fails."},
-		{name: "5.2-bad-credentials", status: http.StatusUnauthorized, body: "Unauthorized"},
-		{name: "banned", status: http.StatusForbidden, body: "Your IP address has been banned after too many failed authentication attempts."},
-		{name: "empty-200", status: http.StatusOK},
-		{name: "other-success-status", status: http.StatusAccepted, body: "Ok."},
+		{name: "legacy-bad-credentials", status: http.StatusOK, body: "Fails.", wantErr: "rejected the username or password"},
+		// 5.2+ bad credentials and, in every version, a Host header port that
+		// differs from the WebUI port both answer 401 "Unauthorized".
+		{name: "5.2-bad-credentials", status: http.StatusUnauthorized, body: "Unauthorized", wantErr: "Invalid Host header"},
+		{name: "banned", status: http.StatusForbidden, body: "Your IP address has been banned after too many failed authentication attempts.", wantErr: "repeated failed logins"},
+		{name: "empty-200", status: http.StatusOK, wantErr: "(HTTP 200)"},
+		{name: "other-success-status", status: http.StatusAccepted, body: "Ok.", wantErr: "(HTTP 202)"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var versionRequests atomic.Int32
@@ -133,6 +136,9 @@ func TestLoginAcceptsOnlyUpstreamSuccessShapes(t *testing.T) {
 			}
 			if err == nil || versionRequests.Load() != 0 {
 				t.Fatalf("rejected login was accepted: status=%#v versionRequests=%d err=%v", status, versionRequests.Load(), err)
+			}
+			if !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error = %q, want it to name %q", err, test.wantErr)
 			}
 		})
 	}

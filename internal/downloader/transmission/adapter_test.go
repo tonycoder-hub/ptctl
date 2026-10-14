@@ -172,6 +172,33 @@ func TestOpenTransportFailureIsCountedAndRedacted(t *testing.T) {
 	}
 }
 
+func TestRejectedHandshakeNamesTheCause(t *testing.T) {
+	for _, test := range []struct {
+		status  int
+		wantErr string
+	}{
+		{status: http.StatusUnauthorized, wantErr: "Transmission rejected the credentials"},
+		// rpc-whitelist and the anti-brute-force lock answer 403 before the
+		// credentials are checked, so 403 must not blame them.
+		{status: http.StatusForbidden, wantErr: "before checking the credentials"},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(test.status)
+			_, _ = w.Write([]byte("CANARY-TRANSMISSION-RESPONSE"))
+		}))
+		adapter, err := New(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		credential, _ := downloader.NewCredential("alice", "secret")
+		session, err := adapter.OpenReadSession(context.Background(), credential)
+		server.Close()
+		if session != nil || err == nil || !strings.Contains(err.Error(), test.wantErr) || strings.Contains(err.Error(), "CANARY") {
+			t.Fatalf("status %d: session=%t err=%v, want an error naming %q", test.status, session != nil, err, test.wantErr)
+		}
+	}
+}
+
 func TestInvalidUsernameStopsBeforeRequest(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))

@@ -111,7 +111,7 @@ func (s *readSession) mutateExistingJob(ctx context.Context, effect string, requ
 		return fail("csrf_expired", fmt.Errorf("Transmission CSRF session expired; automatic replay is disabled"))
 	}
 	if response.status == http.StatusUnauthorized || response.status == http.StatusForbidden {
-		return fail("http_rejected", fmt.Errorf("Transmission rejected the credentials"))
+		return fail("http_rejected", rejectedStatus(response.status))
 	}
 	if response.status != http.StatusOK {
 		return fail("http_rejected", fmt.Errorf("Transmission rejected the existing-job request"))
