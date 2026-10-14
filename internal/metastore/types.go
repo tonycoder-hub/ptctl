@@ -30,6 +30,12 @@ var (
 	// overwrites such an object automatically.
 	ErrCorruptArtifact = errors.New("private metafile artifact is corrupt")
 
+	// ErrArtifactUnparseable accompanies ErrCorruptArtifact when a stored
+	// object still matches its digest but no longer parses as a metafile, for
+	// example one stored before parsing became strictly canonical. The error
+	// names the artifact ID and wraps the parser's cause.
+	ErrArtifactUnparseable = errors.New("stored private metafile artifact does not parse")
+
 	// ErrDurabilityUnconfirmed means the final no-replace publication became
 	// visible and revalidated, but the platform could not confirm the final
 	// directory durability boundary. Callers must report the committed write;

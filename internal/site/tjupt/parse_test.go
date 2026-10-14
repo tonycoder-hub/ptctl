@@ -146,6 +146,28 @@ func TestClassifyValidEmptySearch(t *testing.T) {
 	}
 }
 
+// TestSearchAcceptsUpstreamEmptyMessages uses torrents.php's stdmsg markup with
+// the lang_torrents std_try_again and std_nothing_found strings.
+func TestSearchAcceptsUpstreamEmptyMessages(t *testing.T) {
+	u, _ := url.Parse("https://www.tjupt.org/torrents.php?search=none")
+	credential, err := site.NewCookieCredential("sid=secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []string{"没有种子。请用准确的关键字重试。\n", "沒有種子。請用準確的關鍵字重試。\n", "没有结果！", "Nothing found! Try again with a refined search string.\n"} {
+		body := []byte(`<html><a href="logout.php">退出</a><form action="torrents.php"><input name="search"></form><br /><table align="center" class="main" width="500" border="0" cellpadding="0" cellspacing="0"><tr><td class="embedded">
+<h2>搜索结果 "none"</h2>
+<table width="100%" border="1" cellspacing="0" cellpadding="10"><tr><td class="text">` + message + `</td></tr></table></td></tr></table>
+</html>`)
+		client := &accountFakeClient{body: body, finalURL: u}
+		adapter := New("")
+		adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
+		if got, err := adapter.Search(context.Background(), credential, "none"); err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("%q: got=%#v err=%v", message, got, err)
+		}
+	}
+}
+
 func TestSearchShellWithoutAuthenticatedMarkerIsIndeterminate(t *testing.T) {
 	u, _ := url.Parse("https://www.tjupt.org/torrents.php?search=none")
 	body := []byte(`<html><form action="torrents.php"><input name="search"></form><div>没有找到种子</div></html>`)

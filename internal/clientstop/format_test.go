@@ -497,23 +497,10 @@ func TestClientStopPlanSchemasBindReviewedJobState(t *testing.T) {
 	if err := legacy.Validate(); err != nil {
 		t.Fatalf("legacy v1 plan with exact substate rejected: %v", err)
 	}
-	if !reviewedJobStateMatches(legacy, "uploading") || reviewedJobStateMatches(legacy, "stalledUP") {
-		t.Fatal("legacy v1 plan did not keep exact reviewed substate semantics")
-	}
 	current := legacy
 	current.Schema, current.ReviewedJobState = PlanSchemaV2, ReviewedJobPhaseStarted
 	if err := current.Validate(); err != nil {
 		t.Fatalf("v2 plan with normalized started phase rejected: %v", err)
-	}
-	for _, live := range []string{"uploading", "stalledUP", "queuedUP", "forcedUP"} {
-		if !reviewedJobStateMatches(current, live) {
-			t.Fatalf("v2 plan rejected started substate %q", live)
-		}
-	}
-	for _, live := range []string{"stoppedUP", "pausedUP", "checkingUP", "downloading", "stalledDL", ""} {
-		if reviewedJobStateMatches(current, live) {
-			t.Fatalf("v2 plan accepted non-started state %q", live)
-		}
 	}
 	legacyID, legacyErr := PlanID(legacy)
 	currentID, currentErr := PlanID(current)

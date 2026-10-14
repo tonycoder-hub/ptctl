@@ -167,6 +167,9 @@ func Parse(data []byte) (*MetaInfo, error) {
 		if err := parseV2Files(meta, info); err != nil {
 			return nil, err
 		}
+		if !meta.MultiFile && string(meta.Files[0].RawPath[0]) != string(meta.NameRaw) {
+			return nil, fmt.Errorf("v2 single-file key %q differs from name %q; BEP 52 clients store the file under the key, so the layout is ambiguous", meta.Files[0].Path[0], meta.Name)
+		}
 		if err := validateV2PieceLayers(root, meta.Files, meta.PieceLength); err != nil {
 			return nil, err
 		}
@@ -262,7 +265,9 @@ func parseV2Files(meta *MetaInfo, info *Node) error {
 	if len(meta.Files) == 0 {
 		return fmt.Errorf("v2 file tree is empty")
 	}
-	if len(meta.Files) == 1 && len(meta.Files[0].RawPath) == 1 && string(meta.Files[0].RawPath[0]) == string(meta.NameRaw) {
+	// As in BEP 52 and libtorrent, only a lone top-level leaf is a single
+	// file, stored under its key. Anything else lives in a "name" directory.
+	if len(tree.Dict) == 1 && len(meta.Files) == 1 && len(meta.Files[0].RawPath) == 1 {
 		meta.MultiFile = false
 	}
 	return nil

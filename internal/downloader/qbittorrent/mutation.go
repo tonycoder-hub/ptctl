@@ -365,7 +365,7 @@ func acceptedAddResponse(raw []byte, identity downloader.TypedIdentity) bool {
 	if string(trimmed) == "Ok." {
 		return true
 	}
-	if len(trimmed) == 0 || trimmed[0] != '{' || validateStrictJSONStrings(trimmed, 4) != nil {
+	if validateStrictJSONStrings(trimmed, 4) != nil {
 		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
@@ -399,24 +399,15 @@ func acceptedAddResponse(raw []byte, identity downloader.TypedIdentity) bool {
 		decodeJSONInt64(fields["pending_count"], &pending) != nil || succeeded != 1 || failed != 0 || pending != 0 {
 		return false
 	}
-	rawIDs := bytes.TrimSpace(fields["added_torrent_ids"])
 	var ids []json.RawMessage
-	if len(rawIDs) == 0 || rawIDs[0] != '[' || json.Unmarshal(rawIDs, &ids) != nil || len(ids) != 1 {
+	if json.Unmarshal(fields["added_torrent_ids"], &ids) != nil || len(ids) != 1 {
 		return false
 	}
+	// The ID is libtorrent's best hash: the v1 infohash for v1 jobs, and the
+	// first 20 bytes of the v2 infohash for v2 or hybrid jobs (v1 for hybrid
+	// jobs on libtorrent 1.2 builds).
 	addedID, err := decodeStrictJSONStringValue(ids[0])
-	return err == nil && addedTorrentIDMatches(addedID, identity)
-}
-
-// addedTorrentIDMatches compares qBittorrent's TorrentID, which is
-// libtorrent's best hash: the v1 infohash for v1 jobs, and the first 20 bytes
-// of the v2 infohash for v2 or hybrid jobs (v1 for hybrid jobs on
-// libtorrent 1.2 builds).
-func addedTorrentIDMatches(value string, identity downloader.TypedIdentity) bool {
-	if identity.Validate() != nil || len(value) != 40 {
-		return false
-	}
-	return value == identity.InfoHashV1 || identity.InfoHashV2 != "" && value == identity.InfoHashV2[:40]
+	return err == nil && len(addedID) == 40 && (addedID == identity.InfoHashV1 || strings.HasPrefix(identity.InfoHashV2, addedID))
 }
 
 func canonicalAddVariantID(value string) bool {

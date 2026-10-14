@@ -102,9 +102,16 @@ rejected; use the resolved physical path (for example `/private/tmp/...` rather
 than `/tmp/...` on macOS).
 
 A killed import can leave a private staging file in the store's `tmp`
-directory. Later imports remove such files once they are more than 24 hours old,
-a few at a time and only when the name exactly matches ptctl's own random
-staging names; nothing else in `tmp` is ever deleted.
+directory. The first import of a later run removes such files once they are
+more than 24 hours old, a few at a time and only when the name exactly matches
+ptctl's own random staging names; nothing else in `tmp` is ever deleted.
+
+Metafiles are parsed as strictly canonical bencode. An object stored by an
+older ptctl that the current parser rejects still matches its digest, but every
+read of it fails with exit code 3, naming its variant ID and the parser's
+reason. Importing the same bytes again is rejected the same way: re-fetch the
+torrent with `ptctl site metafile fetch` or import a canonical copy, then use
+the new variant ID it reports.
 
 Publication assurance is invocation-scoped. A newly initialized store or newly
 stored object can report `confirmed_this_invocation`. Read-only inspection and

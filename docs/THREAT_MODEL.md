@@ -702,8 +702,8 @@ complete absence-before observation with one current exact stopped job;
 Transmission is stricter and requires the same invocation's explicit
 accepted-add response, so a duplicate response or later same-hash job does not
 establish attribution. Resume reads the current ledger first and does not repeat
-without both acknowledgements. Effectful recovery of adoption, activation, and
-stop journals publishes a staged intent, response, or completion marker, but
+without both acknowledgements. Effectful recovery of adoption, activation,
+stop, and removal journals publishes a staged intent, response, or completion marker, but
 discards a staged attempt marker whose destination is absent: attempts are
 published before their request is sent, so an unpublished attempt proves that
 no request was sent and must neither consume attempt budget nor support
@@ -973,14 +973,18 @@ which is reproduced by matching the reviewed path-mapping ID and save-path
 reference; it must lie inside the reviewed client root, have components valid
 for both namespaces, and stay confined below the resolved host root. The
 translated host path is then used only for metadata-only symlink resolution and
-`stat`; it is never opened, listed, or written. A root that lexically equals,
+`stat`, and, for a Windows client, for listing directories above the claim so a
+component without an exact host name resolves case-insensitively as a share
+would (simple folding or per-character upper/lower case; more than one
+candidate is incomplete); it is never read or written. A root that lexically equals,
 contains, or lies inside a source name, is the same file object as a source, or
 is the same directory as a source parent blocks with
 `source.other_client_job_overlap`. A job outside the reviewed mapping blocks
 with `source.other_client_job_unmapped`. A truncated, contradictory, or failed
 ledger, a missing plan job, a repeated job key, or a host observation failure
 other than absence yields `client.other_use_enumeration_incomplete`. Links or
-mounts nested inside another job's directory tree are not traversed, and other
+mounts nested inside another job's directory tree are not traversed, share name
+mangling and Unicode normalization are not modeled, and other
 ptctl records are not consulted because finals are independent byte copies.
 
 Source-retirement execution is a distinct irreversible boundary. `run` and

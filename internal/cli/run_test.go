@@ -31,6 +31,9 @@ func TestFlagParseErrorsPrintOneShortLineInsteadOfTheFullHelp(t *testing.T) {
 		{"seed", "retire", "parent-cleanup", "resume"},
 		{"reconcile", "report"},
 		{"reconcile", "refresh-report"},
+		{"storage", "index", "refresh"},
+		{"storage", "index", "prune"},
+		{"seed", "materialize", "run"},
 	}
 	for _, command := range commands {
 		name := strings.Join(command, " ")

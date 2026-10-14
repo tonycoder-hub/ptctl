@@ -360,26 +360,28 @@ func VerifyCurrentJobStopped(ctx context.Context, before *VerifiedCurrentUse, se
 	return after, observation, nil
 }
 
-// ProbeCurrentJobStopped is a cheap, read-only settle probe used after an
-// accepted stop response: downloaders such as qBittorrent apply a stop
-// asynchronously and publish the stopped state on a later status refresh. It
-// performs one bounded ledger observation of the same session and reports
-// whether the reviewed exact job now claims a complete stopped state. It is
-// never proof by itself; callers must still prove the transition with
+// AwaitCurrentJobStopped re-reads the same session's ledger on the
+// actionSettleDelays schedule after an accepted stop response and reports
+// whether the reviewed exact job came to claim a complete stopped state. The
+// claim is never proof by itself; callers must still prove the transition with
 // VerifyCurrentJobStopped, which also re-verifies the exact final.
-func ProbeCurrentJobStopped(ctx context.Context, before *VerifiedCurrentUse, session downloader.LedgerSession) (bool, error) {
+func AwaitCurrentJobStopped(ctx context.Context, before *VerifiedCurrentUse, session downloader.LedgerSession) bool {
 	if before == nil || !before.JobStarted() || !before.SameSession(session) || before.authority == nil {
-		return false, fmt.Errorf("%w: started current-use authority is unavailable", ErrPolicy)
+		return false
 	}
-	if err := ctx.Err(); err != nil {
-		return false, err
+	for _, delay := range actionSettleDelays {
+		if !waitSettleDelay(ctx, delay) {
+			return false
+		}
+		observed, err := observeClientBounded(ctx, before.authority.prepared, session)
+		if err != nil || observed.jobID != before.authority.plan.JobID || observed.fileLayoutID != before.authority.plan.ExpectedFileLayoutID {
+			return false
+		}
+		if completeStoppedState(observed.job.State) {
+			return true
+		}
 	}
-	observed, err := observeClientBounded(ctx, before.authority.prepared, session)
-	if err != nil {
-		return false, err
-	}
-	return observed.jobID == before.authority.plan.JobID && observed.fileLayoutID == before.authority.plan.ExpectedFileLayoutID &&
-		completeStoppedState(observed.job.State), nil
+	return false
 }
 
 // VerifyExpectedJobStopped is the recovery form of VerifyCurrentJobStopped.

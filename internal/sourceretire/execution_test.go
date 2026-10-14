@@ -515,6 +515,37 @@ func TestRunRejectsTargetRootReplacementBeforeSourceRemoval(t *testing.T) {
 	}
 }
 
+// The post-deletion client reobservation carries the only exact final
+// reverification before completion; a final changed across the unlink must
+// never be journaled as retired.
+func TestRunDoesNotCompleteWhenTheFinalChangesAcrossDeletion(t *testing.T) {
+	fixture := makeRetireFixture(t)
+	preview, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))
+	if err != nil || preview.Outcome != OutcomeEligible {
+		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	finalPath, _, ok := fixture.final.ProcessFilePath(0)
+	if !ok {
+		t.Fatal("final path unavailable")
+	}
+	var hookErr error
+	beforeSourceRemovalHook = func(int) error {
+		hookErr = os.WriteFile(finalPath, bytes.Repeat([]byte{'x'}, int(fixture.meta.TotalLength)), 0o600)
+		return hookErr
+	}
+	t.Cleanup(func() { beforeSourceRemovalHook = nil })
+	report, runErr := Run(context.Background(), RunOptions{Review: BuildOptions{Meta: fixture.meta, Discovery: &fixture.discovery,
+		Final: fixture.final, Activation: fixture.activation, ClientUse: fixture.currentUse, ClientSession: executionSession(fixture, 4)},
+		ExpectedPlanID: preview.Plan.ID, SearchRoots: []string{fixture.sourceRoot}, Acknowledge: true, Limits: DefaultExecutionLimits()})
+	if hookErr != nil {
+		t.Skipf("final rewrite is unavailable on this platform: %v", hookErr)
+	}
+	if !errors.Is(runErr, ErrExecutionIntegrity) || report.Outcome != ExecutionOutcomeIntegrity || report.Writes.NamesRemoved != 1 ||
+		report.Operation.Phase == "complete" {
+		t.Fatalf("run after final change=%#v err=%v", report, runErr)
+	}
+}
+
 func TestStatusRejectsCorruptIntentWithoutPathDisclosure(t *testing.T) {
 	fixture := makeRetireFixture(t)
 	preview, err := Build(context.Background(), retireBuildOptions(fixture, fixture.meta, &fixture.discovery, false))

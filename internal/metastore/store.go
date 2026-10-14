@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
@@ -39,6 +40,8 @@ var initPreparationMu sync.Mutex
 type Store struct {
 	root string
 	info StoreInfo
+	// stagingCollected is set once this handle has collected staging residue.
+	stagingCollected atomic.Bool
 }
 
 func (s *Store) Info() StoreInfo {
@@ -295,7 +298,7 @@ func (s *Store) importStream(ctx context.Context, reader io.Reader, limits Limit
 		return nil, ArtifactRef{}, receipt, safeError("import private metafile", err)
 	}
 	defer session.Close()
-	collectStagingResidue(ctx, session)
+	s.collectStagingResidueOnce(ctx, session)
 
 	temporaryName, err := randomRelativeName(temporaryDir, ".import-", ".torrent")
 	if err != nil {
@@ -689,8 +692,13 @@ func loadArtifact(ctx context.Context, session *rootSession, id ArtifactID, limi
 		return nil, nil, fmt.Errorf("%w: digest mismatch", ErrCorruptArtifact)
 	}
 	meta, err := metafile.Parse(raw)
-	if err != nil || meta.MetafileVariantID != id.String() {
-		return nil, nil, fmt.Errorf("%w: parse or variant mismatch", ErrCorruptArtifact)
+	if err != nil {
+		// Parser errors name byte offsets, indexes, and torrent-internal file
+		// names, never announce URLs.
+		return nil, nil, fmt.Errorf("%w: %w: %s: %w", ErrCorruptArtifact, ErrArtifactUnparseable, id, err)
+	}
+	if meta.MetafileVariantID != id.String() {
+		return nil, nil, fmt.Errorf("%w: variant mismatch", ErrCorruptArtifact)
 	}
 	return meta, raw, nil
 }
@@ -829,8 +837,8 @@ func randomRelativeName(directory, prefix, suffix string) (string, error) {
 
 // Staging residue is a one-shot random staging name left in tmp/ when a
 // process is killed before its deferred cleanup runs. It is never read back,
-// so it only consumes space; standalone writes to an initialized store
-// collect it on a best-effort basis.
+// so it only consumes space; the first standalone write through each Store
+// handle collects it on a best-effort basis.
 const (
 	stagingResidueMinimumAge  = 24 * time.Hour
 	stagingResidueScanLimit   = 256
@@ -861,6 +869,12 @@ func isStagingResidueName(name string) bool {
 		return true
 	}
 	return false
+}
+
+func (s *Store) collectStagingResidueOnce(ctx context.Context, session *rootSession) {
+	if s.stagingCollected.CompareAndSwap(false, true) {
+		collectStagingResidue(ctx, session)
+	}
 }
 
 // collectStagingResidue removes a bounded number of stale staging names from

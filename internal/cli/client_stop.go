@@ -184,7 +184,7 @@ func (a *app) prepareClientStopLocal(ctx context.Context, prepared preparedClien
 	}
 	meta, ref, err := store.Load(ctx, prepared.artifactID, metastore.DefaultLimits())
 	if errors.Is(err, metastore.ErrCorruptArtifact) {
-		return nil, &integrityErr{message: "client stop metafile failed digest or parse validation"}
+		return nil, storedMetafileIntegrityErr("client stop metafile", err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("client stop metafile could not be read")

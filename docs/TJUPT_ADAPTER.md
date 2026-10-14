@@ -32,7 +32,9 @@ result. Search rows are read from the NexusPHP `<table class="torrents">`
 with each row's nested `torrentname` table kept intact, so the later size
 cell is not cut off; sizes use NexusPHP's 1024-based `KB`/`MB`/`GB`/`TB`
 labels. A results page whose rows cannot be recognized is an error, not an
-empty result.
+empty result; only a recognized TJUPT empty-search message (such as
+`没有种子。请用准确的关键字重试。`, or `没有结果！` for the query `0`) yields
+zero results.
 Ordinary site reads perform no intentional filesystem write. TJUPT-related
 local store mutations are `metafile store init`, `metafile store import`, and
 the store phase of `site metafile fetch`, plus the intent/attempt/outcome record

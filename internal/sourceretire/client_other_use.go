@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/tonycoder-hub/ptctl/internal/clientactivate"
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
@@ -248,7 +251,7 @@ func (sources otherUseSources) compare(hostPath string) error {
 		return errOtherClientUseOverlap
 	}
 	resolved, err := filepath.EvalSymlinks(hostPath)
-	if errors.Is(err, os.ErrNotExist) {
+	if hostAbsent(err) {
 		return nil
 	}
 	if err != nil {
@@ -258,7 +261,7 @@ func (sources otherUseSources) compare(hostPath string) error {
 		return errOtherClientUseOverlap
 	}
 	info, err := os.Stat(resolved)
-	if errors.Is(err, os.ErrNotExist) {
+	if hostAbsent(err) {
 		return nil
 	}
 	if err != nil {
@@ -279,6 +282,12 @@ func (sources otherUseSources) compare(hostPath string) error {
 		}
 	}
 	return nil
+}
+
+// hostAbsent reports whether err proves that a host path names nothing. A
+// path through a non-directory (ENOTDIR) cannot name an object either.
+func hostAbsent(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 func (sources otherUseSources) lexicalOverlap(path string) bool {
@@ -303,6 +312,9 @@ type otherUseNamespace struct {
 	clientVolume string
 	clientParts  []string
 	windows      bool
+	// listings holds host directory names read while folding Windows claims
+	// in one check, so jobs sharing a directory list it once.
+	listings map[string][]string
 }
 
 // recoverNamespace finds the unique host/client root pair whose projection of
@@ -349,7 +361,8 @@ func (guard otherClientUseGuard) recoverNamespace(planJob downloader.Torrent) (o
 			projection, projectErr := guard.final.ProjectClientPaths(host, clientRoot, windows)
 			if projectErr == nil && projection.PathMappingID == guard.activation.PathMappingID &&
 				projection.PathSemantics == guard.activation.ClientPathSemantics && projection.SavePathRef == guard.activation.ExpectedSavePathRef {
-				return otherUseNamespace{hostRoot: host, clientVolume: volume, clientParts: append([]string(nil), prefix...), windows: windows}, nil
+				return otherUseNamespace{hostRoot: host, clientVolume: volume, clientParts: append([]string(nil), prefix...), windows: windows,
+					listings: map[string][]string{}}, nil
 			}
 		}
 	}
@@ -365,22 +378,22 @@ func (namespace otherUseNamespace) compareClaim(sources otherUseSources, claim s
 		return err
 	}
 	if namespace.windows {
-		if hostPath, err = foldExistingHostPath(namespace.hostRoot, hostPath); err != nil {
+		if hostPath, err = namespace.foldExistingHostPath(hostPath); err != nil {
 			return err
 		}
 	}
 	return sources.compare(hostPath)
 }
 
-// foldExistingHostPath resolves each component of hostPath below root the way
-// a case-insensitive share resolves a Windows client path on a case-sensitive
-// host: an existing exact name wins, otherwise the single directory entry equal
-// to the component under case folding is used. Without this, another job could
-// hide a source behind a spelling that differs only in case. More than one
-// folded match cannot be attributed and fails closed; no match leaves the
-// remaining components as claimed, which names nothing on the host.
-func foldExistingHostPath(root, hostPath string) (string, error) {
-	relative, err := filepath.Rel(root, hostPath)
+// foldExistingHostPath resolves each component of hostPath below the host root
+// the way a case-insensitive share resolves a Windows client path on a
+// case-sensitive host: an existing exact name wins, otherwise the single
+// directory entry equal to the component ignoring case is used. Without this,
+// another job could hide a source behind a spelling that differs only in case.
+// More than one match cannot be attributed and fails closed; no match leaves
+// the remaining components as claimed, which names nothing on the host.
+func (namespace otherUseNamespace) foldExistingHostPath(hostPath string) (string, error) {
+	relative, err := filepath.Rel(namespace.hostRoot, hostPath)
 	if err != nil {
 		return "", fmt.Errorf("%w: a job path could not be placed under the mapped host root", errOtherClientUseIncomplete)
 	}
@@ -388,7 +401,7 @@ func foldExistingHostPath(root, hostPath string) (string, error) {
 		return hostPath, nil
 	}
 	parts := strings.Split(relative, string(filepath.Separator))
-	current := root
+	current := namespace.hostRoot
 	for index, part := range parts {
 		exact := filepath.Join(current, part)
 		_, err := os.Lstat(exact)
@@ -396,22 +409,32 @@ func foldExistingHostPath(root, hostPath string) (string, error) {
 			current = exact
 			continue
 		}
-		if !errors.Is(err, os.ErrNotExist) {
+		if !hostAbsent(err) {
 			return "", fmt.Errorf("%w: another job root could not be observed on the host", errOtherClientUseIncomplete)
 		}
-		entries, err := os.ReadDir(current)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("%w: a directory above another job root could not be listed on the host", errOtherClientUseIncomplete)
+		names, cached := namespace.listings[current]
+		if !cached {
+			entries, err := os.ReadDir(current)
+			if err != nil && !hostAbsent(err) {
+				return "", fmt.Errorf("%w: a directory above another job root could not be listed on the host", errOtherClientUseIncomplete)
+			}
+			names = make([]string, len(entries))
+			for i, entry := range entries {
+				names[i] = entry.Name()
+			}
+			if namespace.listings != nil {
+				namespace.listings[current] = names
+			}
 		}
 		match := ""
-		for _, entry := range entries {
-			if !strings.EqualFold(entry.Name(), part) {
+		for _, name := range names {
+			if !equalIgnoringShareCase(name, part) {
 				continue
 			}
 			if match != "" {
 				return "", fmt.Errorf("%w: another job root matches more than one host name that differs only in case", errOtherClientUseIncomplete)
 			}
-			match = entry.Name()
+			match = name
 		}
 		if match == "" {
 			return filepath.Join(append([]string{current}, parts[index:]...)...), nil
@@ -419,6 +442,24 @@ func foldExistingHostPath(root, hostPath string) (string, error) {
 		current = filepath.Join(current, match)
 	}
 	return current, nil
+}
+
+// equalIgnoringShareCase reports whether a case-insensitive share may resolve
+// one name to the other. Samba compares each character by its upper- and
+// lower-case mapping, which also pairs dotless ı and dotted İ with I and i;
+// strings.EqualFold alone misses those pairs and would let a claim hide a
+// source. Accepting every relation can only add matches, which fail closed.
+func equalIgnoringShareCase(left, right string) bool {
+	for left != "" && right != "" {
+		leftRune, leftSize := utf8.DecodeRuneInString(left)
+		rightRune, rightSize := utf8.DecodeRuneInString(right)
+		if unicode.ToUpper(leftRune) != unicode.ToUpper(rightRune) && unicode.ToLower(leftRune) != unicode.ToLower(rightRune) &&
+			!strings.EqualFold(left[:leftSize], right[:rightSize]) {
+			return false
+		}
+		left, right = left[leftSize:], right[rightSize:]
+	}
+	return left == right
 }
 
 // hostPath translates one downloader path claim into the reviewed host

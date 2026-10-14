@@ -79,8 +79,19 @@ func TestStandaloneWritesCollectOnlyStaleOwnStagingResidue(t *testing.T) {
 		}
 	}
 
+	// Collection runs once per Store handle, not on every write.
 	again := placeStagingTestFile(t, filepath.Join(staging, ".record-import-"+strings.Repeat("c", 32)+recordSuffix), true)
 	if _, receipt, err := store.ImportRecord(context.Background(), RecordKindStorageProfileV1, bytes.NewReader([]byte("profile record")), DefaultRecordLimits()); err != nil || receipt.WritesPerformed != 1 {
+		t.Fatalf("ImportRecord receipt=%+v err=%v", receipt, err)
+	}
+	if _, err := os.Lstat(again); err != nil {
+		t.Fatalf("the same Store handle collected staging residue twice: %v", err)
+	}
+	reopened, err := Open(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, receipt, err := reopened.ImportRecord(context.Background(), RecordKindStorageProfileV1, bytes.NewReader([]byte("another record")), DefaultRecordLimits()); err != nil || receipt.WritesPerformed != 1 {
 		t.Fatalf("ImportRecord receipt=%+v err=%v", receipt, err)
 	}
 	if _, err := os.Lstat(again); !os.IsNotExist(err) {

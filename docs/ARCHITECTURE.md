@@ -453,6 +453,10 @@ Removing the intent before the attempt marker means no crash point or
 concurrent observer can see an intent without its at-most-once marker, so a
 stale submit process that still holds a verified intent cannot reserve again;
 `ReserveAttempt` also re-observes the exact intent before publishing a marker.
+Without a cross-record compare-and-swap, a prune between that check and the
+publication can only republish a pruned chain's marker after its intent is
+gone, which fails verification before any reservation; rerunning prune removes
+it.
 Each removal uses a deterministic private residue and brackets namespace
 deletion with content verification and directory durability. A crash is
 recovered only by repeating the same explicit selectors. Prepared state and an
@@ -596,13 +600,14 @@ not an encrypted vault: compromise of the account, backing filesystem, or
 privileged administrator still exposes private announce material.
 
 A process killed before its deferred staging cleanup leaves a random staging
-name in `tmp/`. Standalone artifact and sealed-record imports collect such
-residue best effort, without affecting their own result: only the exact
+name in `tmp/`. The first standalone artifact or sealed-record import through
+each opened store handle (normally once per process) collects such residue
+best effort, without affecting its own result: only the exact
 generated names (`.import-<32 hex>.torrent`, `.init-<32 hex>.marker`,
 `.record-import-<32 hex>.sealed`) qualify, each must still open through the
 bound session as a private regular file on the reviewed filesystem, and it
 must be more than 24 hours old. At most 16 names among the first 256 `tmp/`
-entries are removed per import. The deterministic record-removal recovery name
+entries are removed per pass. The deterministic record-removal recovery name
 and every other entry stay opaque; `Init`, read-only operations, and bound
 record sessions never collect. Removal only unlinks the `tmp/` name, so residue
 left between publication and staging cleanup never affects the published
@@ -822,8 +827,13 @@ It keeps the newest N distinct observed generations (default 3, so the default
 older, unprotected descriptor of the exact profile revision: first its
 unreferenced data record, then the descriptor, both by exact digest and size.
 A crash between the two leaves an older descriptor without data, which latest
-selection never chooses, an explicit read rejects, and a rerun removes;
-descriptor-first ordering would instead leak unlisted data. The rule only needs
+selection never chooses, an explicit read rejects, and a rerun removes. After a
+complete descriptor listing, prune also removes orphan data (from a failed or
+conflicting refresh) that no listed descriptor references and that decodes as a
+snapshot of the exact profile revision below the N-th newest generation; a
+refresh still holding such data fails its pre-commit check, because the newest
+generation is never pruned. `RefreshResult.RetentionOptions` lets a
+post-refresh pass reuse the refresh's committed listing. The rule only needs
 a subset of descriptors: a generation below the N-th newest observed one is
 also below the N-th newest overall, so prune and refresh use a larger
 10,000-record maintenance listing, and prune acts on a verified partial listing
@@ -962,7 +972,9 @@ bounded DFS opens one directory at a time, sorts entries deterministically,
 retains only wanted sizes, does not follow symlinks or Windows reparse points,
 and does not cross a filesystem boundary. Roots, depth, directories, entries,
 per-directory entries, retained candidates, retained raw path bytes, and issue
-count all have mandatory process hard caps.
+count all have mandatory process hard caps. On POSIX, inventory, verification,
+and source reads open a checked name non-blocking without following a final
+link and reject a non-regular object, so a FIFO swapped in cannot hang them.
 
 The public report uses a root ID plus relative components and raw base64.
 Absolute host paths are process-local details and are hidden unless explicitly

@@ -14,6 +14,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
 const forbiddenWindowsAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT |
@@ -159,7 +161,7 @@ func platformValidateComponent(component string) error {
 			return ErrInvalidPath
 		}
 	}
-	if windowsReservedDeviceName(component) {
+	if storage.WindowsReservedDeviceName(component) {
 		return ErrInvalidPath
 	}
 	return nil

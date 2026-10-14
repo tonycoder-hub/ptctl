@@ -48,6 +48,7 @@ type RefreshResult struct {
 	StopReasons           []string                      `json:"stop_reasons"`
 	authorityDigest       [sha256.Size]byte
 	authoritySet          bool
+	retention             *refreshListing
 }
 
 // HasLiveAuthority reports whether this is the unchanged process-local result
@@ -234,7 +235,7 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 		options.afterDataPublication()
 	}
 	// A refresh that lost the race fails here, before it can publish a tie.
-	if err := repository.checkGenerationUnclaimed(ctx, profile, generation, "", descriptorCache); err != nil {
+	if _, err := repository.checkGenerationUnclaimed(ctx, profile, generation, "", descriptorCache); err != nil {
 		result.StopReasons = appendUniqueString(result.StopReasons, generationCheckStopReason(err))
 		return result, err
 	}
@@ -275,10 +276,12 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 	// Two refreshes may pass the pre-commit check together. Neither may then
 	// claim a stored generation that latest selection reports as ambiguous;
 	// the tie remains until the next refresh supersedes it.
-	if err := repository.checkGenerationUnclaimed(ctx, profile, generation, descriptorRef.ID, descriptorCache); err != nil {
+	committed, err := repository.checkGenerationUnclaimed(ctx, profile, generation, descriptorRef.ID, descriptorCache)
+	if err != nil {
 		result.StopReasons = appendUniqueString(result.StopReasons, generationCheckStopReason(err))
 		return result, err
 	}
+	result.retention = &refreshListing{repository: repository, profileID: profile.ID, listing: committed}
 	result.Status = "stored"
 	result.authorityDigest = refreshAuthorityDigest(result)
 	result.authoritySet = true
@@ -298,7 +301,7 @@ func (repository *Repository) nextGeneration(ctx context.Context, profile Profil
 		return 0, err
 	}
 	if !listing.complete {
-		return 0, incompleteDescriptorListingError(listing, repository.maintenanceMaxRecords())
+		return 0, repository.incompleteDescriptorListingError(listing, repository.maintenanceMaxRecords())
 	}
 	maximum := uint64(0)
 	for _, candidate := range listing.descriptors {
@@ -316,23 +319,24 @@ func (repository *Repository) nextGeneration(ctx context.Context, profile Profil
 // the descriptor commit (own == "") any descriptor at or above generation is
 // a conflict. After it, only another descriptor at the same generation is: a
 // newer generation merely supersedes this one without making it ambiguous.
-func (repository *Repository) checkGenerationUnclaimed(ctx context.Context, profile Profile, generation uint64, own metastore.RecordID, cache map[metastore.RecordID]loadedDescriptor) error {
+// It returns the complete listing it checked.
+func (repository *Repository) checkGenerationUnclaimed(ctx context.Context, profile Profile, generation uint64, own metastore.RecordID, cache map[metastore.RecordID]loadedDescriptor) (descriptorListing, error) {
 	listing, err := repository.listDescriptors(ctx, profile.ID, repository.maintenanceMaxRecords(), false, cache)
 	if err != nil {
-		return err
+		return listing, err
 	}
 	if !listing.complete {
-		return fmt.Errorf("generation uniqueness could not be rechecked: %w", incompleteDescriptorListingError(listing, repository.maintenanceMaxRecords()))
+		return listing, fmt.Errorf("generation uniqueness could not be rechecked: %w", repository.incompleteDescriptorListingError(listing, repository.maintenanceMaxRecords()))
 	}
 	for _, candidate := range listing.descriptors {
 		if !descriptorMatchesProfile(candidate.descriptor, profile) || (own != "" && candidate.ref.ID == own) {
 			continue
 		}
 		if candidate.descriptor.Generation == generation || (own == "" && candidate.descriptor.Generation > generation) {
-			return fmt.Errorf("%w: generation %d was published concurrently; retry the refresh", ErrSnapshotGenerationConflict, generation)
+			return listing, fmt.Errorf("%w: generation %d was published concurrently; retry the refresh", ErrSnapshotGenerationConflict, generation)
 		}
 	}
-	return nil
+	return listing, nil
 }
 
 func generationCheckStopReason(err error) string {

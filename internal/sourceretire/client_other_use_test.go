@@ -112,7 +112,8 @@ func TestBuildBlocksOtherClientJobsThatMayUseTheSource(t *testing.T) {
 
 	t.Run("unrelated and absent jobs remain eligible", func(t *testing.T) {
 		jobs := []downloader.Torrent{otherJob(t, fixture, "unrelated", unrelated),
-			otherJob(t, fixture, "absent", filepath.Join(fixture.hostRoot, "absent", "payload"))}
+			otherJob(t, fixture, "absent", filepath.Join(fixture.hostRoot, "absent", "payload")),
+			otherJob(t, fixture, "through-file", filepath.Join(unrelated, "payload"))}
 		session := otherUseSession(fixture, jobs, jobs)
 		report, err := Build(context.Background(), otherUseBuildOptions(fixture, session))
 		if err != nil || report.Outcome != OutcomeEligible || report.ClientUse.RequestsMade != 3 ||
@@ -213,30 +214,41 @@ func TestOtherClientUseGuardResolvesWindowsClaimsLikeACaseInsensitiveShare(t *te
 	if err := os.Link(source, filepath.Join(root, "Other", "Linked.mkv")); err != nil {
 		t.Fatal(err)
 	}
-	sources, err := observeOtherUseSources(context.Background(), []string{source})
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(root, "Other", "notes.txt"), []byte("unrelated"), 0o644); err != nil {
 		t.Fatal(err)
-	}
-	namespace := otherUseNamespace{hostRoot: root, clientVolume: "M:", clientParts: []string{"Movies"}, windows: true}
-	for _, claim := range []string{`M:\movies\show`, `M:\MOVIES\SHOW\episode.MKV`, `M:\Movies\other\linked.mkv`} {
-		if err := namespace.compareClaim(sources, claim); !errors.Is(err, errOtherClientUseOverlap) {
-			t.Fatalf("%s: a claim naming the source in another case was accepted: %v", claim, err)
-		}
-	}
-	if err := namespace.compareClaim(sources, `M:\Movies\show\absent.mkv`); err != nil {
-		t.Fatalf("an absent sibling of the source was blocked: %v", err)
 	}
 	if err := os.Mkdir(filepath.Join(root, "Dup"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// A case-insensitive host cannot hold both names; there the exact lookup
 	// already succeeds.
-	if err := os.Mkdir(filepath.Join(root, "DUP"), 0o755); err == nil {
+	err = os.Mkdir(filepath.Join(root, "DUP"), 0o755)
+	bothCases := err == nil
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		t.Fatal(err)
+	}
+	sources, err := observeOtherUseSources(context.Background(), []string{source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace := otherUseNamespace{hostRoot: root, clientVolume: "M:", clientParts: []string{"Movies"}, windows: true, listings: map[string][]string{}}
+	// Samba also matches dotted İ and dotless ı with i, which EqualFold does not.
+	for _, claim := range []string{`M:\movies\show`, `M:\MOVIES\SHOW\episode.MKV`, `M:\Movies\other\linked.mkv`,
+		`M:\Movies\Show\EPİSODE.mkv`, `M:\Movies\show\epısode.mkv`, `M:\Movies\Show\Episode.mkv\extra`} {
+		if err := namespace.compareClaim(sources, claim); !errors.Is(err, errOtherClientUseOverlap) {
+			t.Fatalf("%s: a claim naming the source in another case was accepted: %v", claim, err)
+		}
+	}
+	// A path below a non-directory names nothing; it must not block retirement.
+	for _, claim := range []string{`M:\Movies\show\absent.mkv`, `M:\Movies\Other\notes.txt\payload`} {
+		if err := namespace.compareClaim(sources, claim); err != nil {
+			t.Fatalf("%s: a claim naming nothing on the host was blocked: %v", claim, err)
+		}
+	}
+	if bothCases {
 		if err := namespace.compareClaim(sources, `M:\Movies\dup\file.mkv`); !errors.Is(err, errOtherClientUseIncomplete) {
 			t.Fatalf("a claim matching two host names by case was accepted: %v", err)
 		}
-	} else if !errors.Is(err, os.ErrExist) {
-		t.Fatal(err)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,8 +79,9 @@ func TestPruneSnapshotsRecoversProfileOverSelectionBudget(t *testing.T) {
 	for generation := uint64(1); generation <= 6; generation++ {
 		importTestDescriptor(t, repository, profile, generation, fmt.Sprintf("over-%d", generation))
 	}
-	if _, err := repository.SelectSnapshot(ctx, profile, ""); !errors.Is(err, ErrSnapshotSelectionIncomplete) {
-		t.Fatalf("over-budget profile did not report incomplete selection: %v", err)
+	if _, err := repository.SelectSnapshot(ctx, profile, ""); !errors.Is(err, ErrSnapshotSelectionIncomplete) ||
+		!strings.Contains(err.Error(), "--retain-generations at most 4 divided by the number of profiles") {
+		t.Fatalf("over-budget profile did not report incomplete selection with a recovery: %v", err)
 	}
 	// Refresh uses the maintenance budget, so it still publishes a strictly
 	// newer generation rather than failing permanently.
@@ -177,6 +179,98 @@ func TestPruneSnapshotsConvergesAfterCrashBetweenDataAndDescriptorRemoval(t *tes
 	}
 	if testRecordPresent(t, repository, metastore.RecordKindStorageIndexDescriptorV1, first) || !testRecordPresent(t, repository, metastore.RecordKindStorageIndexDescriptorV1, latest) {
 		t.Fatal("prune left the crash residue or removed the latest descriptor")
+	}
+}
+
+func TestPruneSnapshotsCollectsOnlyAttributableSupersededOrphanData(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxSnapshots = 2
+	repository := testRepositoryWithLimits(t, limits)
+	ctx := context.Background()
+	clock := deterministicClock(time.Now().UTC())
+	profile := testIndexProfile(t, repository, "media")
+	other := testIndexProfile(t, repository, "other")
+	// lostRefresh publishes data at generation and then fails its pre-commit
+	// check because a competitor committed that generation first.
+	lostRefresh := func(target Profile, generation uint64, salt string) metastore.RecordID {
+		t.Helper()
+		lost, err := repository.Refresh(ctx, target, RefreshOptions{Clock: clock, afterDataPublication: func() {
+			importTestDescriptor(t, repository, target, generation, salt)
+		}})
+		if !errors.Is(err, ErrSnapshotGenerationConflict) || lost.Generation != generation || lost.DataRecord.ID == "" {
+			t.Fatalf("refresh did not lose generation %d: result=%#v err=%v", generation, lost, err)
+		}
+		return lost.DataRecord.ID
+	}
+	orphan := lostRefresh(profile, 1, "media-1")
+	foreign := lostRefresh(other, 1, "other-1")
+	if stored, err := repository.Refresh(ctx, profile, RefreshOptions{Clock: clock}); err != nil || stored.Generation != 2 {
+		t.Fatalf("refresh was not stored: result=%#v err=%v", stored, err)
+	}
+	// Data at the latest generation is what an in-flight refresh looks like.
+	inFlight := lostRefresh(profile, 3, "media-3")
+	garbage, _, err := repository.store.ImportRecord(ctx, metastore.RecordKindStorageIndexDataV1, strings.NewReader("not a snapshot\n"), repository.recordLimits(repository.limits.MaxSnapshots))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a complete descriptor listing nothing is provably unreferenced.
+	// Three of the four descriptors always include a media generation above 1.
+	repository.maintenanceRecords = 3
+	if partial, err := repository.PruneSnapshots(ctx, profile, PruneOptions{RetainGenerations: 1}); err != nil || partial.Status != "partial" ||
+		!testRecordPresent(t, repository, metastore.RecordKindStorageIndexDataV1, orphan) {
+		t.Fatalf("partial prune collected orphan data: result=%#v err=%v", partial, err)
+	}
+	repository.maintenanceRecords = 0
+
+	result, err := repository.PruneSnapshots(ctx, profile, PruneOptions{RetainGenerations: 1})
+	orphans := []PrunedSnapshot{}
+	for _, entry := range result.Pruned {
+		if entry.DescriptorRecordID == "" {
+			orphans = append(orphans, entry)
+		}
+	}
+	if err != nil || result.Status != "complete" || len(result.RetainedGenerations) != 1 || result.RetainedGenerations[0] != 3 || len(orphans) != 1 ||
+		orphans[0].Generation != 1 || orphans[0].DataRecordID != orphan || orphans[0].DataRemoval != "removed" || orphans[0].DescriptorRemoval != "already_absent" {
+		t.Fatalf("prune did not collect exactly the superseded orphan: result=%#v err=%v", result, err)
+	}
+	if testRecordPresent(t, repository, metastore.RecordKindStorageIndexDataV1, orphan) {
+		t.Fatal("superseded orphan data survived prune")
+	}
+	for _, kept := range []metastore.RecordID{inFlight, foreign, garbage.ID} {
+		if !testRecordPresent(t, repository, metastore.RecordKindStorageIndexDataV1, kept) {
+			t.Fatalf("prune removed unattributable or current orphan data %s", kept)
+		}
+	}
+	if again, err := repository.PruneSnapshots(ctx, profile, PruneOptions{RetainGenerations: 1}); err != nil || again.WritesPerformed != 0 || len(again.Pruned) != 0 {
+		t.Fatalf("orphan collection rerun was not idempotent: result=%#v err=%v", again, err)
+	}
+}
+
+func TestRefreshRetentionOptionsReuseCommittedListing(t *testing.T) {
+	repository := testRepository(t)
+	ctx := context.Background()
+	clock := deterministicClock(time.Now().UTC())
+	profile := testIndexProfile(t, repository, "media")
+	other := testIndexProfile(t, repository, "other")
+	first, err := repository.Refresh(ctx, profile, RefreshOptions{Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := repository.Refresh(ctx, profile, RefreshOptions{Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Published after the commit check, so absent from the reused listing.
+	importTestDescriptor(t, repository, other, 1, "other-1")
+	importTestDescriptor(t, repository, other, 2, "other-2")
+	result, err := repository.PruneSnapshots(ctx, profile, second.RetentionOptions(1))
+	if err != nil || result.Status != "complete" || result.RecordsConsidered != 2 || len(result.Pruned) != 1 ||
+		result.Pruned[0].DescriptorRecordID != first.DescriptorRecord.ID || !testRecordPresent(t, repository, metastore.RecordKindStorageIndexDescriptorV1, second.DescriptorRecord.ID) {
+		t.Fatalf("retention did not reuse the committed listing: result=%#v err=%v", result, err)
+	}
+	if foreign, err := repository.PruneSnapshots(ctx, other, second.RetentionOptions(1)); err != nil || foreign.RecordsConsidered != 3 || len(foreign.Pruned) != 1 {
+		t.Fatalf("another profile reused a refresh listing: result=%#v err=%v", foreign, err)
 	}
 }
 

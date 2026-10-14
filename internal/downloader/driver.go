@@ -49,9 +49,10 @@ const (
 // Torrent is one normalized ledger job. SizeBytes and Progress keep each
 // driver's native pair: qBittorrent reports selected (wanted) bytes and
 // progress over them, Transmission the full torrent size and progress over all
-// pieces. Progress 1 proves whole content only together with SizeBytes equal to
-// the full non-padding content size; per-file selection comes from the job file
-// ledger.
+// pieces. Transmission 4.0/4.1 ignore BEP 47 attr, so its size and file ledger
+// also count pad files. Progress 1 proves whole content only together with
+// SizeBytes equal to the full non-padding content size; per-file selection
+// comes from the job file ledger.
 type Torrent struct {
 	Hash             string         `json:"hash"`
 	InfoHashV1       string         `json:"info_hash_v1,omitempty"`

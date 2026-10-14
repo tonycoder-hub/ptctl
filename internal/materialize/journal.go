@@ -669,11 +669,9 @@ func (journal *journal) observeScratch(ctx context.Context) error {
 }
 
 // discardScratch removes one unpublished private scratch object by its
-// canonical name and the identity observed when it was created or
-// inventoried. The caller holds the operation lock, so no other invocation can
-// own the object. A different object under the name is never removed, and an
-// absent name is never treated as a successful removal. A negative size
-// accepts the size observed immediately before the identity-bound unlink.
+// canonical name and the identity (and size, unless negative) observed when it
+// was created or inventoried. The caller holds the operation lock. A different
+// or absent object is never treated as a successful removal.
 func (journal *journal) discardScratch(ctx context.Context, name string, expected fsbind.Identity, expectedSize int64, report *Report) error {
 	if journal == nil || journal.subtree == nil || expected.IsZero() || !validScratchEntryName(name) {
 		return fmt.Errorf("%w: scratch removal authority is unavailable", ErrCorruptJournal)
@@ -682,16 +680,16 @@ func (journal *journal) discardScratch(ctx context.Context, name string, expecte
 	if err != nil {
 		return err
 	}
-	named, err := journal.subtree.Inspect(ctx, path)
-	if err != nil {
-		return classifyJournalReadError(err, "retained scratch object is unavailable for removal")
-	}
-	if named.Kind != fsbind.ObjectKindRegular || named.SizeBytes < 0 || !named.Identity.Equal(expected) ||
-		(expectedSize >= 0 && named.SizeBytes != expectedSize) {
-		return fmt.Errorf("%w: retained scratch object changed before removal", ErrCorruptJournal)
-	}
 	journal.scratchObserved = false
-	removal, err := journal.subtree.RemoveRegularExact(ctx, path, expected, named.SizeBytes)
+	var removal fsbind.Removal
+	if expectedSize < 0 {
+		removal, err = journal.subtree.RemoveRegular(ctx, path, expected)
+	} else {
+		removal, err = journal.subtree.RemoveRegularExact(ctx, path, expected, expectedSize)
+	}
+	if err != nil && !removal.Attempted {
+		return classifyJournalReadError(err, "retained scratch object changed before removal")
+	}
 	if report != nil {
 		if removal.Removed {
 			report.WritesPerformed++
@@ -720,23 +718,18 @@ func (journal *journal) discardScratch(ctx context.Context, name string, expecte
 // and then requires a fresh empty inventory. Unexpected names, kinds, links,
 // identity drift, or an incomplete inventory fail closed in observeScratch.
 func (journal *journal) removeRetainedScratch(ctx context.Context, report *Report) error {
-	if journal == nil || journal.subtree == nil {
-		return fmt.Errorf("%w: journal handle is unavailable", ErrCorruptJournal)
-	}
 	journal.scratchObserved = false
-	if err := journal.observeScratch(ctx); err != nil {
+	if err := journal.observeScratch(ctx); err != nil || len(journal.scratchObjects) == 0 {
 		return err
 	}
-	objects := append([]scratchObject(nil), journal.scratchObjects...)
-	for _, object := range objects {
+	for _, object := range journal.scratchObjects {
 		if err := journal.discardScratch(ctx, object.name, object.identity, object.size, report); err != nil {
 			return err
 		}
 	}
-	if len(objects) != 0 && report != nil {
+	if report != nil {
 		report.Warnings = append(report.Warnings, "retained private scratch from an earlier failed or interrupted attempt was removed by exact name and identity before commit")
 	}
-	journal.scratchObserved = false
 	return journal.observeScratch(ctx)
 }
 

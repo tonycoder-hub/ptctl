@@ -159,11 +159,9 @@ func decodeLedgerJob(raw json.RawMessage, valueProtocol protocol) (downloader.To
 	}
 	state := normalizeState(status, progress)
 	if errorCode == transmissionLocalError {
-		// Transmission stops a job on local trouble (missing data, disk full,
-		// permissions) but keeps status 0 and its old progress, which would
-		// otherwise read as a complete stoppedUP job. Only this code describes
-		// the local job, like qBittorrent's "error" state; tracker warnings and
-		// errors (1, 2) leave the job state unchanged.
+		// A local error (missing data, disk full, permissions) stops the job
+		// but keeps status 0 and its old progress, which would otherwise read
+		// as complete stoppedUP. Tracker codes 1 and 2 leave the state as is.
 		state = "error"
 	}
 	downloaded, err := requiredInt64(fields, downloadedKey)

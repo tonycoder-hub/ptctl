@@ -271,7 +271,7 @@ func (s *Store) ImportRecord(ctx context.Context, kind RecordKind, reader io.Rea
 	defer session.Close()
 	// Bound protocol sessions keep their exact operation order; only this
 	// standalone write collects stale staging residue.
-	collectStagingResidue(ctx, session)
+	s.collectStagingResidueOnce(ctx, session)
 	return s.importRecordSession(ctx, session, kind, reader, limits)
 }
 

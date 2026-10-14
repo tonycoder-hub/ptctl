@@ -1023,16 +1023,16 @@ func stageManifestFile(ctx context.Context, layoutFile LayoutFile, source *metaf
 	hasher := sha256.New()
 	var copied int64
 	created := target.Identity()
-	// discard closes and removes the unpublished scratch object created by this
-	// call, bound to its exact name and creation identity. Removal is best
-	// effort: a retained object stays visible in the scratch inventory and is
-	// recovered before commit. Identity drift is never hidden.
+	// discard closes and removes this call's unpublished scratch object, bound
+	// to its exact name and creation identity, also after cancellation. A
+	// retained object stays in the scratch inventory and is recovered before
+	// commit. Identity drift is never hidden.
 	discard := func(failure error) (copyReceipt, error) {
 		_ = target.Close()
 		if created.IsZero() {
 			return copyReceipt{Bytes: copied}, failure
 		}
-		if cleanupErr := journal.discardScratch(ctx, scratchName, created, -1, report); cleanupErr == nil {
+		if cleanupErr := journal.discardScratch(context.WithoutCancel(ctx), scratchName, created, -1, report); cleanupErr == nil {
 			journal.releaseScratch(layoutFile.Length)
 		} else if errors.Is(cleanupErr, ErrCorruptJournal) {
 			failure = errors.Join(failure, cleanupErr)

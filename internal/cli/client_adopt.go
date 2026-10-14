@@ -278,7 +278,7 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	}
 	meta, ref, err := store.Load(ctx, artifactID, metastore.DefaultLimits())
 	if errors.Is(err, metastore.ErrCorruptArtifact) {
-		return result, &integrityErr{message: "stored metafile failed digest or parse validation"}
+		return result, storedMetafileIntegrityErr("stored metafile", err)
 	}
 	if err != nil {
 		return result, err
@@ -307,7 +307,7 @@ func prepareClientAdopt(ctx context.Context, fs *flag.FlagSet, values *clientAdo
 	if loadPayload {
 		loaded, loadErr := store.LoadPayload(ctx, artifactID, metastore.DefaultLimits())
 		if errors.Is(loadErr, metastore.ErrCorruptArtifact) {
-			return result, &integrityErr{message: "stored metafile payload failed digest or parse validation"}
+			return result, storedMetafileIntegrityErr("stored metafile payload", loadErr)
 		}
 		if loadErr != nil {
 			return result, loadErr

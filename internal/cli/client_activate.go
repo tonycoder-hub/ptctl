@@ -243,7 +243,7 @@ func prepareClientActivate(ctx context.Context, fs *flag.FlagSet, values *client
 	}
 	meta, ref, err := store.Load(ctx, artifactID, metastore.DefaultLimits())
 	if errors.Is(err, metastore.ErrCorruptArtifact) {
-		return result, &integrityErr{message: "stored metafile failed digest or parse validation"}
+		return result, storedMetafileIntegrityErr("stored metafile", err)
 	}
 	if err != nil {
 		return result, err
