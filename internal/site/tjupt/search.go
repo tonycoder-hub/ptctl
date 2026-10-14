@@ -80,13 +80,15 @@ func parseSearch(body []byte) []domain.TorrentSummary {
 		}
 		href := html.UnescapeString(string(link[1]))
 		id := idPattern.FindStringSubmatch(href)
-		if len(id) != 4 {
+		// A ref must round-trip into site detail and metafile fetch, which
+		// accept only canonical IDs.
+		if len(id) != 4 || !canonicalPositiveID(id[2]) {
 			continue
 		}
 		if _, exists := seen[id[2]]; exists {
 			continue
 		}
-		name := plainText(string(link[2]))
+		name := fullTorrentName(link[0], plainText(string(link[2])))
 		if name == "" {
 			continue
 		}
@@ -115,6 +117,50 @@ func parseSearch(body []byte) []domain.TorrentSummary {
 		results = append(results, summary)
 	}
 	return results
+}
+
+// fullTorrentName undoes torrenttable's truncation. A name longer than the
+// list allows (105 to 150 characters, by font size and subtitle) is shown cut
+// short with "..", while the link's title keeps the full name unless the user
+// enabled name tooltips. The title replaces the shown name only when it
+// extends exactly what was shown.
+func fullTorrentName(anchor []byte, shown string) string {
+	prefix := strings.TrimSpace(strings.TrimSuffix(shown, ".."))
+	if prefix == shown || prefix == "" {
+		return shown
+	}
+	title, ok := anchorTitle(anchor)
+	if !ok || !strings.HasPrefix(title, prefix) {
+		return shown
+	}
+	return title
+}
+
+// anchorTitle returns the opening <a> tag's sole title attribute, already
+// unescaped, with whitespace collapsed as plainText does for shown text.
+func anchorTitle(anchor []byte) (string, bool) {
+	tokenizer := xhtml.NewTokenizer(bytes.NewReader(anchor))
+	if tokenizer.Next() != xhtml.StartTagToken {
+		return "", false
+	}
+	name, more := tokenizer.TagName()
+	if string(name) != "a" {
+		return "", false
+	}
+	title, found := "", false
+	for more {
+		var key, value []byte
+		key, value, more = tokenizer.TagAttr()
+		if string(key) != "title" {
+			continue
+		}
+		if found {
+			return "", false
+		}
+		title, found = string(value), true
+	}
+	title = strings.TrimSpace(spacePattern.ReplaceAllString(strings.ReplaceAll(title, "\u00a0", " "), " "))
+	return title, found && title != ""
 }
 
 func fillSearchColumns(summary *domain.TorrentSummary, row []byte, cells [][]byte, nameCell int, columns searchColumns) {

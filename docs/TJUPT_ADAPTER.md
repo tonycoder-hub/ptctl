@@ -32,10 +32,11 @@ or unknown HTML is indeterminate/an error rather than a successful empty
 result. Search rows are read from the NexusPHP `<table class="torrents">`
 with each row's nested `torrentname` table kept intact, so the later size
 cell is not cut off; sizes use NexusPHP's 1024-based `KB`/`MB`/`GB`/`TB`/`PB`
-labels. A results page whose rows cannot be recognized is an error, not an
-empty result; only a recognized TJUPT empty-search message (such as
-`没有种子。请用准确的关键字重试。`, or `没有结果！` for the query `0`) yields
-zero results.
+labels, and a size of 2^63 bytes (8 EiB) or more is left absent rather than
+reported wrapped or clamped. A results page whose rows cannot be recognized
+is an error, not an empty result; only a recognized TJUPT empty-search message
+(such as `没有种子。请用准确的关键字重试。`, or `没有结果！` for the query `0`)
+yields zero results.
 
 The header row names its columns with icon classes (`time`, `size`,
 `seeders`, `leechers`, `snatched`) and the `类型` label. When each of those
@@ -50,6 +51,15 @@ factors, or an unknown `pro_*` icon leave the promotion unknown rather than
 guessed, and its end time is kept only from a single `剩余时间` title on a
 promoted row. A header or row that does not fit this shape keeps only the name
 and size.
+
+TJUPT's published source cuts a name longer than 105 to 150 characters
+(depending on font size and subtitle) two characters short and ends it with
+`..`. Unless the user has turned on name
+tooltips, the link's `title` keeps the full name. The result uses that title
+only when it extends exactly what the list shows; otherwise it keeps the
+shortened name. A row whose details link does not carry a canonical positive
+ID is skipped, because `site detail` and `site metafile fetch` could not use
+its ref.
 Ordinary site reads perform no intentional filesystem write. TJUPT-related
 local store mutations are `metafile store init`, `metafile store import`, and
 the store phase of `site metafile fetch`; storage profile/index commands are a
@@ -201,7 +211,8 @@ Parser tests use synthetic HTML with fictitious users and values, including
 challenge, maintenance, empty-search, torrent-detail, title-with-size, and
 bonus-form ambiguity/budget cases. The search table, user panel, detail rows,
 and bonus page fixtures follow the structure of pages observed live in
-October 2026. Captured TJUPT HTML is deliberately absent because it can contain
+October 2026. Fuzz targets check the search, bonus page, user panel, and size
+parsers' output invariants on arbitrary input. Captured TJUPT HTML is deliberately absent because it can contain
 account information, CSRF tokens, or identifiers. Any future fixture must be
 generated or reviewed for secret canaries before commit.
 
