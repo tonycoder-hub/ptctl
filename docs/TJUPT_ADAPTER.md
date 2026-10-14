@@ -43,6 +43,51 @@ the adapter does not scrape unrelated markup to fill optional fields.
 The snapshot is read-only and point-in-time. It neither authorizes a bonus form
 submission nor proves that a prior exchange caused a balance change.
 
+## Page shapes the parsers recognize
+
+No credentialed page has been captured. The parsers are instead modelled on
+TJUPT's published templates and on community site definitions:
+[sicalpath/tjupt](https://github.com/sicalpath/tjupt) (2016 source),
+[goldenraspberry/tjupt](https://github.com/goldenraspberry/tjupt) (2019
+source), [Jackett `tjupt.yml`](https://github.com/Jackett/Jackett/blob/master/src/Jackett.Common/Definitions/tjupt.yml),
+and [PT-depiler `tjupt.ts`](https://github.com/pt-plugins/PT-depiler/blob/master/src/packages/site/definitions/tjupt.ts).
+None of that code or markup is vendored; the tests use synthetic pages with the
+same structure.
+
+**Bonus balance.** `mybonusapps.php` shows the balance in its banner as
+`用你的魔力值（当前12,345.6）来玩儿吧！`; the older `当前魔力值：N` wording is
+also accepted. Every balance claim on the page must parse as a canonical,
+comma-grouped decimal and all of them must agree. Otherwise the balance is
+absent and status/account reads are indeterminate.
+
+**Bonus rows.** Exchange forms post to `?action=exchange` on the same page
+(`<tr><form action="?action=exchange" method="post">…</form></tr>`). An action
+naming `mybonusapps.php` is still accepted.
+
+**Search results.** `torrents.php` renders results in `table.torrents`. Each
+result row nests a `table.torrentname` for the name, promotion icons, subtitle,
+and download links. The parser reads the HTML tree rather than flat text:
+
+- A result is a link whose path is exactly `details.php` with one canonical
+  `id` and no `cmtpage`/`dllist` parameters or fragment. In particular the
+  `userdetails.php?id=N` link to the signed-in user, which is on every page, is
+  never a result.
+- Only rows of `table.torrents` count when that table is present, and repeated
+  IDs keep their first row.
+- The name is the link's `title` when it equals the visible text or extends a
+  visible text truncated with `..`. Otherwise it is the visible text, which may
+  stay truncated when the site's tooltip option is on.
+- The size comes from the column whose header holds the `size` image, falling
+  back to the first later cell that is exactly a size. A header with more than
+  one size column gives no size. NexusPHP divides by 1024 whatever the label,
+  so `KB`/`MB`/`GB`/`TB`/`PB` and their `iB` spellings are all binary. The value
+  is the page's rounded display, not the exact byte count.
+- An empty result must carry one of TJUPT's empty-state messages
+  (`没有种子。请用准确的关键字重试`, `没有结果！`, `没有种子:(`). A page that
+  links to `details.php` but yields no result row is an error, not an empty
+  result.
+- Seeders, leechers, and snatches are not parsed yet.
+
 ## Why the bonus catalog remains site-defined
 
 TJUPT identifies itself as NexusPHP. Its authenticated `mybonusapps.php` page
@@ -244,7 +289,9 @@ response details do not cross the CLI boundary.
 
 Parser tests use synthetic HTML with fictitious users and values, including
 challenge, maintenance, empty-search, torrent-detail, title-with-size, and
-bonus-form ambiguity/budget cases. Captured TJUPT HTML is deliberately absent because it can contain
+bonus-form ambiguity/budget cases. `fidelity_test.go` builds full pages that
+follow the published TJUPT templates, and `fuzz_test.go` checks the search,
+bonus, and size parsers' invariants on arbitrary input. Captured TJUPT HTML is deliberately absent because it can contain
 account information, CSRF tokens, or identifiers. Any future fixture must be
 generated or reviewed for secret canaries before commit.
 
