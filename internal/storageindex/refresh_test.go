@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,6 +164,119 @@ func TestRefreshRevalidatesDataAndDescriptorAfterPublication(t *testing.T) {
 	})
 	if err == nil || result.Status == "stored" || result.WritesPerformed != 2 || !containsString(result.StopReasons, "post_publish_revalidation_failed") {
 		t.Fatalf("split-root publication was reported stored: result=%#v err=%v", result, err)
+	}
+}
+
+func TestRefreshReportsIndependentDataImportFailure(t *testing.T) {
+	stateParent := physicalIndexTempDir(t)
+	stateRoot := filepath.Join(stateParent, "state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewRepository(store, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentRoot := physicalIndexTempDir(t)
+	writeTestFile(t, filepath.Join(contentRoot, "file.bin"), []byte("payload"))
+	profileReceipt, err := repository.CreateProfile(context.Background(), "media", []string{contentRoot}, false, DefaultScanLimits(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first clock read happens after snapshot selection and before the
+	// data import, so displacing the store root here makes only the import
+	// fail; the producer then fails as a consequence of the closed pipe.
+	clock := deterministicClock(time.Now().UTC())
+	var displace sync.Once
+	result, err := repository.Refresh(context.Background(), profileReceipt.Profile, RefreshOptions{Clock: func() time.Time {
+		displace.Do(func() {
+			if renameErr := os.Rename(stateRoot, filepath.Join(stateParent, "displaced-state")); renameErr != nil {
+				t.Errorf("displace store root: %v", renameErr)
+			}
+		})
+		return clock()
+	}})
+	if err == nil || errors.Is(err, context.Canceled) || result.Status == "stored" || result.WritesPerformed != 0 ||
+		!containsString(result.StopReasons, "data_publication_failed") ||
+		containsString(result.StopReasons, "inventory_stream_failed") || containsString(result.StopReasons, "context_cancelled") {
+		t.Fatalf("data import failure was swallowed by its producer consequence: result=%#v err=%v", result, err)
+	}
+}
+
+func TestRefreshLosingConcurrentPublicationFailsCleanlyAndRetrySupersedesTie(t *testing.T) {
+	repository := testRepository(t)
+	ctx := context.Background()
+	root := physicalIndexTempDir(t)
+	writeTestFile(t, filepath.Join(root, "payload.bin"), []byte("payload"))
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := profileReceipt.Profile
+	clock := deterministicClock(time.Now().UTC())
+
+	// A competitor commits the same generation before this descriptor commit:
+	// the loser publishes no descriptor and can simply retry.
+	var competitor metastore.RecordID
+	lost, err := repository.Refresh(ctx, profile, RefreshOptions{Clock: clock, afterDataPublication: func() {
+		competitor = importTestDescriptor(t, repository, profile, 1, "competitor-before-commit")
+	}})
+	if !errors.Is(err, ErrSnapshotGenerationConflict) || lost.Status == "stored" || lost.Generation != 1 || lost.WritesPerformed != 1 ||
+		lost.DescriptorRecord.ID != "" || lost.DescriptorPublication.WritesPerformed != 0 || !containsString(lost.StopReasons, "generation_conflict") {
+		t.Fatalf("pre-commit generation conflict was not reported cleanly: result=%#v err=%v", lost, err)
+	}
+	if selected, err := repository.SelectSnapshot(ctx, profile, ""); err != nil || selected.DescriptorRecordID != competitor {
+		t.Fatalf("losing refresh disturbed the winner: selection=%#v err=%v", selected, err)
+	}
+
+	// Both refreshes passed the pre-commit check: neither reports the tie as
+	// stored, and selection stays fail-closed until a retry supersedes it.
+	tied, err := repository.Refresh(ctx, profile, RefreshOptions{Clock: clock, afterDescriptorPublication: func() {
+		importTestDescriptor(t, repository, profile, 2, "competitor-after-commit")
+	}})
+	if !errors.Is(err, ErrSnapshotGenerationConflict) || tied.Status == "stored" || tied.Generation != 2 || tied.WritesPerformed != 2 ||
+		tied.HasLiveAuthority(profile) || !containsString(tied.StopReasons, "generation_conflict") {
+		t.Fatalf("post-commit generation tie was not reported as a conflict: result=%#v err=%v", tied, err)
+	}
+	if _, err := repository.SelectSnapshot(ctx, profile, ""); !errors.Is(err, ErrSnapshotAmbiguous) {
+		t.Fatalf("published tie was not ambiguous: %v", err)
+	}
+	retry, err := repository.Refresh(ctx, profile, RefreshOptions{Clock: clock})
+	if err != nil || retry.Status != "stored" || retry.Generation != 3 || !retry.HasLiveAuthority(profile) {
+		t.Fatalf("retry did not supersede the ambiguous generation: result=%#v err=%v", retry, err)
+	}
+	selected, err := repository.SelectSnapshot(ctx, profile, "")
+	if err != nil || selected.Status != "selected" || selected.DescriptorRecordID != retry.DescriptorRecord.ID {
+		t.Fatalf("ambiguous profile did not recover: selection=%#v err=%v", selected, err)
+	}
+
+	// A newer competitor after the commit only supersedes this generation.
+	superseded, err := repository.Refresh(ctx, profile, RefreshOptions{Clock: clock, afterDescriptorPublication: func() {
+		importTestDescriptor(t, repository, profile, 5, "newer-competitor")
+	}})
+	if err != nil || superseded.Status != "stored" || superseded.Generation != 4 {
+		t.Fatalf("newer concurrent generation made a unique commit fail: result=%#v err=%v", superseded, err)
+	}
+}
+
+func TestRefreshReportsSnapshotByteLimitAsDistinctIncompleteReason(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxSnapshotBytes = 4 << 10
+	repository := testRepositoryWithLimits(t, limits)
+	ctx := context.Background()
+	root := physicalIndexTempDir(t)
+	for index := 0; index < 64; index++ {
+		writeTestFile(t, filepath.Join(root, fmt.Sprintf("payload-with-a-long-enough-name-%03d.bin", index)), []byte("x"))
+	}
+	profileReceipt, err := repository.CreateProfile(ctx, "media", []string{root}, false, DefaultScanLimits(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := repository.Refresh(ctx, profileReceipt.Profile, RefreshOptions{Clock: deterministicClock(time.Now().UTC())})
+	if err != nil || result.Status == "stored" || result.WritesPerformed != 0 || result.DataRecord.ID != "" ||
+		!containsString(result.StopReasons, "snapshot_byte_limit") || containsString(result.StopReasons, "inventory_stream_failed") {
+		t.Fatalf("snapshot byte budget was not reported as a distinct incomplete reason: result=%#v err=%v", result, err)
 	}
 }
 

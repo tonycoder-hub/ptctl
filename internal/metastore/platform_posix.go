@@ -142,6 +142,52 @@ func platformRejectNamedInfo(info os.FileInfo) bool {
 	return info == nil || info.Mode()&os.ModeSymlink != 0
 }
 
+// posixRequireOpenType checks a descriptor opened with O_NONBLOCK: anything
+// other than the wanted regular file or directory (a FIFO, socket, or device)
+// is rejected before any read, and blocking mode is then restored so the
+// validated handle behaves like an ordinary file.
+func posixRequireOpenType(fd int, wantDirectory bool) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("inspect opened store object failed")
+	}
+	wanted := uint32(unix.S_IFREG)
+	if wantDirectory {
+		wanted = unix.S_IFDIR
+	}
+	if uint32(stat.Mode)&unix.S_IFMT != wanted {
+		return fmt.Errorf("opened store object has the wrong type")
+	}
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		return fmt.Errorf("inspect opened store object failed")
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags&^unix.O_NONBLOCK); err != nil {
+		return fmt.Errorf("restore blocking mode failed")
+	}
+	return nil
+}
+
+// platformOpenSourceFile opens an import source that was just checked by name
+// as a regular non-link file. A FIFO or device swapped in after that check is
+// rejected without blocking; identity is still rechecked by the caller.
+func platformOpenSourceFile(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open source failed")
+	}
+	if err := posixRequireOpenType(fd, false); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("wrap source handle failed")
+	}
+	return file, nil
+}
+
 func platformValidateSourceFile(file *os.File) error {
 	if file == nil {
 		return fmt.Errorf("source handle is unavailable")

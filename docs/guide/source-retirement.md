@@ -36,7 +36,8 @@ bounded file-ledger reads. It never retries or mutates the client. Transmission
 source retirement is v1-only because its audited ledger exposes no typed v2
 identity. The exact published final and selected source bytes are reverified
 inside that live-client bracket, and a selected source inside or aliasing the
-final is rejected. Default output
+final is rejected; if a source or the final cannot be resolved for that check,
+the plan is incomplete rather than eligible. Default output
 contains one-way source-path references; raw source paths
 require `--show-absolute-paths`. Only content-bearing regular-file names are
 represented. Empty files, padding, directories, and cleanup remain out of
@@ -46,6 +47,31 @@ historical; current job identity, state, and effective paths are established
 separately by the bounded live reads. Those values are still non-atomic client
 claims and do not prove a remote open inode. Serialized plan JSON is not
 execution authority. JSON kind is `content.source_retirement_plan`.
+
+No other downloader job may still use a source name. The same complete
+job-ledger responses that prove current use of the plan job are checked for
+every other job, without extra requests: its content root (or its save path
+when it claims no content root) is translated only through the exact reviewed
+`--host-root`/`--client-root` mapping, confined below the host root, and
+compared with each selected source name using metadata-only calls. For a
+Windows client, a path component with no exact host name is matched
+case-insensitively against its host directory, as a share would resolve it; more
+than one candidate is reported as incomplete. Planning is
+blocked with `source.other_client_job_overlap` when another job's root equals,
+contains, or lies inside a source name before or after host symlink resolution,
+is the same file object as a source (for example a hard-linked cross-seed copy),
+or is the same directory as a source parent (for example a bind mount). It is
+blocked with `source.other_client_job_unmapped` when another job's path lies
+outside the reviewed client root, or the reviewed mapping cannot be reproduced,
+because non-overlap cannot then be proven; remove or relocate that job, or use
+an activation mapping whose client root covers every job. A truncated,
+contradictory, or failed ledger, or a host observation that fails for any reason
+other than absence, reports `client.other_use_enumeration_incomplete` and never
+yields an eligible plan. The check does not descend into another job's
+directory tree, so a link or mount nested inside that tree is not detected; it
+does not model share name mangling or Unicode normalization; and
+it does not consult other ptctl records: materialized finals are independent
+byte copies, and adopted finals are covered as downloader jobs.
 
 The examples use qBittorrent. For a terminal Transmission v1 activation, use
 `--driver transmission`, the full RPC URL, and the Transmission credential;
@@ -247,19 +273,38 @@ bound, no-follow unlink; a durable completion marker follows confirmed
 absence. A crash after the attempt but before completion is recoverable only as
 `absence_after_durable_attempt_and_parent_durability_recovered`. Absence without a prior attempt,
 identity replacement, a changed parent/root, corrupt journal data, final proof
-change, or client identity/layout change fails closed. Once every name is
-retired, the exact final is reverified and the same authenticated client
-session reobserves current use before the terminal marker is published.
+change, or client identity/layout change fails closed. A read error while
+comparing source and final bytes is reported as an interrupted, resumable
+observation; only differing bytes or lengths are integrity failures. Immediately before the
+first unlink of each `run` or `resume` invocation, after the long source and
+final reads and the durable attempt marker, one more complete job-ledger read
+repeats the other-job check for every name not yet retired. A blocker leaves
+every name in place and the operation resumable; a failed or incomplete read is
+reported as interrupted, also resumable. Once every name is
+retired, the same authenticated client session first reobserves current use and
+the exact final is then reverified; the terminal marker is published only after
+both. ptctl never re-logs in or retries inside a session, so an expired or
+failed downloader session after a removal leaves a journaled, resumable
+`partial` operation: `resume` with a fresh session re-proves current use and
+completes without removing anything again. Resume verifies remaining source
+bytes before its first downloader read, so only the per-name comparisons that
+bracket each unlink fall inside the session's before/after window.
 
-A normal qBittorrent single-file run makes one login and three bounded ledger
-reads (four HTTP requests total); Transmission makes its fixed two-request
-bootstrap plus those three reads (five total). Ordinary multi-file runs add
-three bounded file-list reads, for seven qBittorrent or eight Transmission
-requests. Active resume uses two proof observations after bootstrap: three/five
-qBittorrent or four/six Transmission requests for single/multi-file. There are
+A normal qBittorrent single-file run makes one login and four bounded ledger
+reads (five HTTP requests total); Transmission makes its fixed two-request
+bootstrap plus those four reads (six total). Ordinary multi-file runs add
+three bounded file-list reads, for eight qBittorrent or nine Transmission
+requests. Active resume uses two proof observations after bootstrap plus the
+pre-unlink ledger read when a name remains to unlink: four/six qBittorrent or
+five/seven Transmission requests for single/multi-file (one fewer when resume
+only recovers already-absent names). There are
 no retries and no client mutations. `status` reads only one explicit private
 journal or retained tombstone and neither reads credentials nor contacts the
-client. Terminal resume also avoids credential I/O. Source-name retirement
+client. Terminal resume also avoids credential I/O and does not require the
+source parent directories: a parent removed after completion (for example by
+parent cleanup) counts as absence of its retired names, while a present parent
+must still be the recorded directory and must not contain a retired name.
+Source-name retirement
 itself does not remove a parent directory, the final, another name for a
 hardlinked inode, an empty/padding entry, or a downloader job, and no report
 claims reclaimed storage or rollback. Execution JSON kind is

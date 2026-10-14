@@ -138,11 +138,13 @@ func buildMaterializePlan(ctx context.Context, meta *metafile.MetaInfo, verified
 		_ = targetSession.Close()
 	}
 	allTargetPaths := make([][][]byte, 0, len(meta.Files))
+	padding := make([]bool, 0, len(meta.Files))
 	for _, file := range meta.Files {
 		components := targetComponents(meta, file)
 		allTargetPaths = append(allTargetPaths, components)
+		padding = append(padding, strings.Contains(file.Attribute, "p"))
 	}
-	if err := storage.ValidateManifestPaths(allTargetPaths, semantics); err != nil {
+	if err := storage.ValidateManifestPathsWithPadding(allTargetPaths, padding, semantics); err != nil {
 		return Plan{}, fmt.Errorf("unsafe target layout: %w", err)
 	}
 

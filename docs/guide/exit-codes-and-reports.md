@@ -100,9 +100,17 @@ Storage profile creation is idempotent for the same name and immutable
 declaration; reusing a name for different roots or policy fails. A complete
 index refresh normally commits two writes (data then descriptor). Budget or
 enumeration incompleteness prints a report and returns `4` without publishing a
-descriptor. Publication/I/O failure returns `1`; a published-but-unconfirmed
+descriptor; an encoded snapshot that would exceed the 32 MiB index record
+budget stops with `snapshot_byte_limit` (narrow the roots or use a profile with
+lower `--max-files`/`--max-path-bytes`). Publication/I/O failure returns `1`; a published-but-unconfirmed
 record keeps its nonzero write receipt and is never rolled back or silently
-reported as durable.
+reported as durable. A concurrent refresh of the same profile that claimed the
+same generation returns `1` with stop reason `generation_conflict`; rerun it.
+Post-refresh retention reports its own `retention` writes: a retention failure
+after a `stored` refresh returns `1`, and a retention pass over a partial
+listing returns `4`; in both cases run `storage index prune`. `storage index
+prune` returns `2` without `--acknowledge-index-prune`, `0` when the outcome is
+`complete`, `4` for `partial` (rerun it), and `1` for store or removal failures.
 
 `site metafile fetch` returns `0` only after both the exact artifact and its
 sealed historical binding are verified (newly published or already present),

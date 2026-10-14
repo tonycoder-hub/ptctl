@@ -139,6 +139,63 @@ func TestRepositoryClassifiesInvalidIndexRecordsAndBindingsAsIntegrity(t *testin
 	})
 }
 
+func TestInvalidDescriptorOnlyBlocksTheProfileItNames(t *testing.T) {
+	ctx := context.Background()
+	importRaw := func(t *testing.T, repository *Repository, raw string) metastore.RecordID {
+		t.Helper()
+		ref, _, err := repository.store.ImportRecord(ctx, metastore.RecordKindStorageIndexDescriptorV1, bytes.NewBufferString(raw), repository.recordLimits(repository.limits.MaxSnapshots))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref.ID
+	}
+	setup := func(t *testing.T) (*Repository, Profile, Profile, metastore.RecordID) {
+		t.Helper()
+		repository := testRepository(t)
+		healthy := testIndexProfile(t, repository, "healthy")
+		damaged := testIndexProfile(t, repository, "damaged")
+		latest := importTestDescriptor(t, repository, healthy, 1, "healthy")
+		return repository, healthy, damaged, latest
+	}
+
+	t.Run("attributed_to_other_profile", func(t *testing.T) {
+		repository, healthy, damaged, latest := setup(t)
+		importRaw(t, repository, `{"profile_id":"`+damaged.ID+`","generation":"bad"}`+"\n")
+		selected, err := repository.SelectSnapshot(ctx, healthy, "")
+		if err != nil || selected.DescriptorRecordID != latest || selected.ForeignInvalidDescriptors != 1 {
+			t.Fatalf("another profile's invalid descriptor blocked selection: selection=%#v err=%v", selected, err)
+		}
+		if _, err := repository.SelectSnapshot(ctx, damaged, ""); !errors.Is(err, ErrIntegrity) {
+			t.Fatalf("invalid descriptor did not fail closed for the profile it names: %v", err)
+		}
+		if _, err := repository.Refresh(ctx, damaged, RefreshOptions{}); !errors.Is(err, ErrIntegrity) {
+			t.Fatalf("refresh of the damaged profile did not fail closed: %v", err)
+		}
+		if _, err := repository.PruneSnapshots(ctx, healthy, PruneOptions{RetainGenerations: 1}); err != nil {
+			t.Fatalf("healthy profile retention was blocked: %v", err)
+		}
+	})
+
+	for name, raw := range map[string]string{
+		"unattributable":     "{}\n",
+		"duplicate_key":      `{"profile_id":"PLACEHOLDER","profile_id":"PLACEHOLDER"}` + "\n",
+		"non_string_profile": `{"profile_id":["PLACEHOLDER"]}` + "\n",
+		"same_profile":       `{"profile_id":"SELF","generation":"bad"}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository, healthy, damaged, _ := setup(t)
+			raw = strings.ReplaceAll(strings.ReplaceAll(raw, "SELF", healthy.ID), "PLACEHOLDER", damaged.ID)
+			if name == "duplicate_key" {
+				raw = strings.Replace(raw, damaged.ID, healthy.ID, 1)
+			}
+			importRaw(t, repository, raw)
+			if selected, err := repository.SelectSnapshot(ctx, healthy, ""); !errors.Is(err, ErrIntegrity) || selected.Status == "selected" {
+				t.Fatalf("unsafe invalid descriptor did not fail closed: selection=%#v err=%v", selected, err)
+			}
+		})
+	}
+}
+
 func testRepository(t *testing.T) *Repository {
 	t.Helper()
 	store, _, err := metastore.Init(filepath.Join(physicalIndexTempDir(t), "state"))

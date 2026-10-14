@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/tonycoder-hub/ptctl/internal/storage"
 )
 
 type SourceBinding struct {
@@ -280,7 +282,7 @@ func openSourceBinding(binding SourceBinding) (SourceFile, error) {
 	if binding.Open != nil {
 		file, err = binding.Open()
 	} else {
-		file, err = os.Open(binding.Path)
+		file, err = storage.OpenRegular(binding.Path)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("open verified source: %w", err)

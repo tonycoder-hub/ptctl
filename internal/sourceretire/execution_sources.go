@@ -158,8 +158,12 @@ func bindRunSources(ctx context.Context, meta *metafile.MetaInfo, discovery *see
 			SourceObjectIdentity: observed.Identity.String()}
 		intentFiles[sequence], set.files[sequence] = intent, boundSourceFile{intent: intent, session: session}
 	}
+	fresh, _, err := final.Reverify(ctx)
+	if err != nil {
+		return fail(classifyFinalProofError(err))
+	}
 	state := executionJournalState{Intent: ExecutionIntent{Files: intentFiles}}
-	if err := verifyRemainingBoundSources(ctx, state, set, meta, final); err != nil {
+	if err := verifyRemainingBoundSources(ctx, state, set, meta, fresh); err != nil {
 		return fail(err)
 	}
 	return set, intentFiles, nil
@@ -212,14 +216,13 @@ func bindIntentSources(ctx context.Context, state executionJournalState, roots [
 	return set, nil
 }
 
+// verifyRemainingBoundSources compares every name not yet retired with final,
+// which the caller must have just reverified, and then reverifies final again.
 func verifyRemainingBoundSources(ctx context.Context, state executionJournalState, sources *boundSourceSet, meta *metafile.MetaInfo, final *materialize.VerifiedFinal) error {
 	if meta == nil || final == nil || !final.Verified() || len(sources.files) != len(state.Intent.Files) {
 		return fmt.Errorf("%w: source verification authority is unavailable", ErrExecutionPolicy)
 	}
-	fresh, _, err := final.Reverify(ctx)
-	if err != nil {
-		return classifyFinalProofError(err)
-	}
+	remaining := make([]int, 0, len(state.Intent.Files))
 	for sequence, file := range state.Intent.Files {
 		if len(state.DeletedPresent) == len(state.Intent.Files) && state.DeletedPresent[sequence] {
 			continue
@@ -229,7 +232,16 @@ func verifyRemainingBoundSources(ctx context.Context, state executionJournalStat
 				continue
 			}
 		}
-		finalPath, size, ok := fresh.ProcessFilePath(file.ManifestIndex)
+		remaining = append(remaining, sequence)
+	}
+	if len(remaining) == 0 {
+		// No source bytes remain to compare, and the final is reverified
+		// again before completion is journaled.
+		return nil
+	}
+	for _, sequence := range remaining {
+		file := state.Intent.Files[sequence]
+		finalPath, size, ok := final.ProcessFilePath(file.ManifestIndex)
 		if !ok || size != file.SizeBytes {
 			return fmt.Errorf("%w: final file mapping disagrees", ErrExecutionIntegrity)
 		}
@@ -237,8 +249,7 @@ func verifyRemainingBoundSources(ctx context.Context, state executionJournalStat
 			return err
 		}
 	}
-	_, _, err = fresh.Reverify(ctx)
-	if err != nil {
+	if _, _, err := final.Reverify(ctx); err != nil {
 		return classifyFinalProofError(err)
 	}
 	return nil
@@ -295,23 +306,26 @@ func compareReadersContext(ctx context.Context, left, right io.Reader, expected 
 		}
 		leftN, leftErr := io.ReadFull(left, leftBuffer)
 		rightN, rightErr := io.ReadFull(right, rightBuffer)
+		leftDone := errors.Is(leftErr, io.EOF) || errors.Is(leftErr, io.ErrUnexpectedEOF)
+		rightDone := errors.Is(rightErr, io.EOF) || errors.Is(rightErr, io.ErrUnexpectedEOF)
+		// A read failure is not evidence that the bytes differ. Report it as an
+		// interrupted, retryable observation instead of an integrity verdict;
+		// the source is never deleted on this path either way.
+		if leftErr != nil && !leftDone {
+			return fmt.Errorf("source read failed during byte comparison: %w", leftErr)
+		}
+		if rightErr != nil && !rightDone {
+			return fmt.Errorf("final read failed during byte comparison: %w", rightErr)
+		}
 		if leftN != rightN || !bytes.Equal(leftBuffer[:leftN], rightBuffer[:rightN]) {
 			return fmt.Errorf("%w: source bytes differ from the exact final", ErrExecutionIntegrity)
 		}
 		compared += int64(leftN)
-		leftDone := errors.Is(leftErr, io.EOF) || errors.Is(leftErr, io.ErrUnexpectedEOF)
-		rightDone := errors.Is(rightErr, io.EOF) || errors.Is(rightErr, io.ErrUnexpectedEOF)
 		if leftDone || rightDone {
 			if !leftDone || !rightDone || compared != expected {
 				return fmt.Errorf("%w: source/final length differs", ErrExecutionIntegrity)
 			}
 			return nil
-		}
-		if leftErr != nil {
-			return leftErr
-		}
-		if rightErr != nil {
-			return rightErr
 		}
 	}
 }
@@ -340,6 +354,59 @@ func validateResumeAuthorities(intent ExecutionIntent, options ResumeOptions) er
 		final.OperationID != intent.MaterializeOperationID || final.MaterializePlanID != intent.MaterializePlanID ||
 		activation.OperationID != intent.ActivationOperationID || activation.PlanID != intent.ActivationPlanID || activation.TerminalMarkerID != intent.ClientCompletionID {
 		return fmt.Errorf("%w: resume selectors disagree with the durable intent", ErrExecutionPolicy)
+	}
+	return nil
+}
+
+// requireCompletedSourceNamesAbsent proves the durable completion of a retired
+// operation without requiring every source parent to still exist. A source
+// parent that is gone (for example after parent cleanup) cannot contain the
+// retired name; a present parent must still be the recorded directory and must
+// not contain the retired name again.
+func requireCompletedSourceNamesAbsent(ctx context.Context, state executionJournalState, roots []string) error {
+	checked := make(map[string]*fsbind.Session)
+	defer func() {
+		for _, session := range checked {
+			if session != nil {
+				_ = session.Close()
+			}
+		}
+	}()
+	for sequence, file := range state.Intent.Files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(state.DeletedPresent) != len(state.Intent.Files) || !state.DeletedPresent[sequence] {
+			return fmt.Errorf("%w: source retirement is not complete", ErrExecutionIntegrity)
+		}
+		if !withinExecutionRoots(roots, filepath.Join(file.ParentPath, file.Name)) {
+			return fmt.Errorf("%w: durable source path lies outside the explicit roots", ErrExecutionPolicy)
+		}
+		session, seen := checked[file.ParentPath]
+		if !seen {
+			bound, _, err := fsbind.BindExisting(file.ParentPath)
+			if errors.Is(err, fsbind.ErrNotFound) {
+				checked[file.ParentPath] = nil
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			checked[file.ParentPath] = bound
+			if bound.Info().Identity.String() != file.ParentIdentity {
+				return fmt.Errorf("%w: source parent identity changed", ErrExecutionIntegrity)
+			}
+			session = bound
+		}
+		if session == nil {
+			continue
+		}
+		if _, err := session.InspectRootRegular(ctx, file.Name); !errors.Is(err, fsbind.ErrNotFound) {
+			if err == nil {
+				err = fmt.Errorf("%w: a retired source name exists", ErrExecutionIntegrity)
+			}
+			return err
+		}
 	}
 	return nil
 }

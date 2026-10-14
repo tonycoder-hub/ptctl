@@ -15,6 +15,8 @@ import (
 	"github.com/tonycoder-hub/ptctl/internal/downloader"
 )
 
+var testAddIdentity = downloader.TypedIdentity{InfoHashV1: strings.Repeat("ab", 20)}
+
 type testMetafilePayload struct {
 	raw     []byte
 	size    int64
@@ -123,8 +125,18 @@ func TestAddStoppedSubmitsExactPayloadOnce(t *testing.T) {
 				return
 			}
 			if request.FormValue("savepath") != "/downloads/new" || request.FormValue("paused") != "true" ||
-				request.FormValue("stopped") != "true" || request.FormValue("skip_checking") != "false" {
+				request.FormValue("stopped") != "true" || request.FormValue("skip_checking") != "false" ||
+				request.FormValue("autoTMM") != "false" || request.FormValue("contentLayout") != "Original" ||
+				request.FormValue("root_folder") != "true" {
 				t.Errorf("unexpected form values: %#v", request.MultipartForm.Value)
+			}
+			for name, values := range request.MultipartForm.Value {
+				if len(values) != 1 {
+					t.Errorf("form field %q repeated: %#v", name, values)
+				}
+			}
+			if len(request.MultipartForm.Value) != 7 {
+				t.Errorf("unexpected form fields: %#v", request.MultipartForm.Value)
 			}
 			files := request.MultipartForm.File["torrents"]
 			if len(files) != 1 || files[0].Filename != "metafile.torrent" {
@@ -160,13 +172,118 @@ func TestAddStoppedSubmitsExactPayloadOnce(t *testing.T) {
 	}
 	defer session.Close()
 	payload := &testMetafilePayload{raw: raw}
-	receipt, err := session.AddStopped(context.Background(), downloader.AddStoppedRequest{Metafile: payload, SavePath: "/downloads/new"})
+	receipt, err := session.AddStopped(context.Background(), downloader.AddStoppedRequest{Metafile: payload, SavePath: "/downloads/new", Identity: testAddIdentity})
 	if err != nil || !receipt.Complete || receipt.RequestsAttempted != 1 || receipt.AutomaticRetries != 0 ||
 		receipt.RedirectsFollowed != 0 || !receipt.BytesSubmittedKnown || receipt.BytesSubmitted != int64(len(raw)) {
 		t.Fatalf("receipt=%#v err=%v", receipt, err)
 	}
 	if requests.Load() != 2 || session.RequestsMade() != 2 || !payload.opened {
 		t.Fatalf("requests=%d/%d opened=%t", requests.Load(), session.RequestsMade(), payload.opened)
+	}
+}
+
+func TestAddStoppedRejectsMissingIdentityBeforeRequest(t *testing.T) {
+	var adds atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/v2/auth/login" {
+			_, _ = w.Write([]byte("Ok."))
+			return
+		}
+		adds.Add(1)
+	}))
+	defer server.Close()
+	adapter, _ := New(server.URL)
+	credential, _ := downloader.NewCredential("alice", "secret")
+	session, err := adapter.OpenMutationSession(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	payload := &testMetafilePayload{raw: []byte("d4:infod4:name1:xee")}
+	receipt, err := session.AddStopped(context.Background(), downloader.AddStoppedRequest{Metafile: payload, SavePath: "/downloads"})
+	if err == nil || receipt.StopReason != "payload_invalid" || receipt.RequestsAttempted != 0 || payload.opened || adds.Load() != 0 || session.RequestsMade() != 1 {
+		t.Fatalf("receipt=%#v opened=%t adds=%d requests=%d err=%v", receipt, payload.opened, adds.Load(), session.RequestsMade(), err)
+	}
+}
+
+func TestAddStoppedResponseShapesAcrossVersions(t *testing.T) {
+	v1 := strings.Repeat("ab", 20)
+	v2 := strings.Repeat("cd", 32)
+	summary := func(id string) string {
+		// qBittorrent 5.2.4 addAction; QJsonDocument::Compact sorts keys.
+		return `{"added_torrent_ids":["` + id + `"],"failure_count":0,"pending_count":0,"success_count":1}`
+	}
+	for _, test := range []struct {
+		name       string
+		identity   downloader.TypedIdentity
+		status     int
+		body       string
+		wantReason string
+	}{
+		{name: "4.x-5.1 accepted", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: "Ok."},
+		{name: "5.2 v1 accepted", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: summary(v1)},
+		{name: "5.2 hybrid truncated v2", identity: downloader.TypedIdentity{InfoHashV1: v1, InfoHashV2: v2}, status: http.StatusOK, body: summary(v2[:40])},
+		{name: "5.2 hybrid libtorrent 1.2 v1", identity: downloader.TypedIdentity{InfoHashV1: v1, InfoHashV2: v2}, status: http.StatusOK, body: summary(v1)},
+		{name: "5.2 v2-only truncated v2", identity: downloader.TypedIdentity{InfoHashV2: v2}, status: http.StatusOK, body: summary(v2[:40])},
+		{name: "4.x-5.1 failed", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: "Fails.", wantReason: "response_invalid"},
+		{name: "5.2 all failed", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusConflict, body: "Conflict", wantReason: "http_rejected"},
+		{name: "5.2 pending", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusAccepted, body: `{"added_torrent_ids":[],"failure_count":0,"pending_count":1,"success_count":0}`, wantReason: "http_rejected"},
+		{name: "5.2 other identity", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: summary(strings.Repeat("ef", 20)), wantReason: "response_invalid"},
+		{name: "5.2 v2 identity as v1", identity: downloader.TypedIdentity{InfoHashV2: v2}, status: http.StatusOK, body: summary(v1), wantReason: "response_invalid"},
+		{name: "5.2 uppercase id", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: summary(strings.ToUpper(v1)), wantReason: "response_invalid"},
+		{name: "5.2 partial failure", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: `{"added_torrent_ids":["` + v1 + `"],"failure_count":1,"pending_count":0,"success_count":1}`, wantReason: "response_invalid"},
+		{name: "5.2 two ids", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: `{"added_torrent_ids":["` + v1 + `","` + v1 + `"],"failure_count":0,"pending_count":0,"success_count":1}`, wantReason: "response_invalid"},
+		{name: "5.2 missing count", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: `{"added_torrent_ids":["` + v1 + `"],"failure_count":0,"success_count":1}`, wantReason: "response_invalid"},
+		{name: "5.2 duplicate key", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: `{"added_torrent_ids":["` + v1 + `"],"failure_count":0,"pending_count":0,"success_count":1,"success_count":1}`, wantReason: "response_invalid"},
+		{name: "5.2 trailing data", identity: downloader.TypedIdentity{InfoHashV1: v1}, status: http.StatusOK, body: summary(v1) + "{}", wantReason: "response_invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var adds atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/api/v2/auth/login":
+					http.SetCookie(w, &http.Cookie{Name: "QBT_SID_8080", Value: "synthetic", Path: "/"})
+					w.WriteHeader(http.StatusNoContent)
+				case "/api/v2/torrents/add":
+					adds.Add(1)
+					// Like qBittorrent, read the whole form before answering.
+					// AddStopped sends Connection: close, so answering early
+					// lets the server reset the connection under the unread
+					// body and the client may see a transport failure instead.
+					_, _ = io.Copy(io.Discard, request.Body)
+					if strings.HasPrefix(test.body, "{") {
+						w.Header().Set("Content-Type", "application/json")
+					}
+					w.WriteHeader(test.status)
+					_, _ = w.Write([]byte(test.body))
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			defer server.Close()
+			adapter, _ := New(server.URL)
+			credential, _ := downloader.NewCredential("alice", "secret")
+			session, err := adapter.OpenMutationSession(context.Background(), credential)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			receipt, err := session.AddStopped(context.Background(), downloader.AddStoppedRequest{
+				Metafile: &testMetafilePayload{raw: []byte("d4:infod4:name1:xee")}, SavePath: "/downloads", Identity: test.identity,
+			})
+			if adds.Load() != 1 || receipt.RequestsAttempted != 1 || receipt.AutomaticRetries != 0 || session.RequestsMade() != 2 {
+				t.Fatalf("adds=%d receipt=%#v requests=%d", adds.Load(), receipt, session.RequestsMade())
+			}
+			if test.wantReason == "" {
+				if err != nil || !receipt.Complete || receipt.StopReason != "" {
+					t.Fatalf("accepted shape was rejected: receipt=%#v err=%v", receipt, err)
+				}
+				return
+			}
+			if err == nil || receipt.Complete || receipt.StopReason != test.wantReason {
+				t.Fatalf("receipt=%#v err=%v, want stop reason %q", receipt, err, test.wantReason)
+			}
+		})
 	}
 }
 
@@ -197,7 +314,7 @@ func TestAddStoppedTransportFailureDoesNotLeakPathOrPayload(t *testing.T) {
 	}
 	defer session.Close()
 	receipt, err := session.AddStopped(context.Background(), downloader.AddStoppedRequest{
-		Metafile: &testMetafilePayload{raw: []byte(canary)}, SavePath: "/" + canary,
+		Metafile: &testMetafilePayload{raw: []byte(canary)}, SavePath: "/" + canary, Identity: testAddIdentity,
 	})
 	if err == nil || receipt.RequestsAttempted != 1 || receipt.Complete || strings.Contains(err.Error(), canary) {
 		t.Fatalf("receipt=%#v err=%v", receipt, err)
@@ -215,6 +332,7 @@ func TestAddStoppedNeverFollowsRedirectOrRetries(t *testing.T) {
 			_, _ = writer.Write([]byte("Ok."))
 		case "/api/v2/torrents/add":
 			add.Add(1)
+			_, _ = io.Copy(io.Discard, request.Body)
 			writer.Header().Set("Location", "/redirected?secret="+canary)
 			writer.WriteHeader(http.StatusTemporaryRedirect)
 		case "/redirected":
@@ -236,7 +354,7 @@ func TestAddStoppedNeverFollowsRedirectOrRetries(t *testing.T) {
 	}
 	defer session.Close()
 	receipt, err := session.AddStopped(context.Background(), downloader.AddStoppedRequest{
-		Metafile: &testMetafilePayload{raw: []byte("d4:infod4:name1:xee")}, SavePath: "/downloads",
+		Metafile: &testMetafilePayload{raw: []byte("d4:infod4:name1:xee")}, SavePath: "/downloads", Identity: testAddIdentity,
 	})
 	if err == nil || receipt.Complete || receipt.RequestsAttempted != 1 || receipt.AutomaticRetries != 0 ||
 		receipt.RedirectsFollowed != 0 || login.Load() != 1 || add.Load() != 1 || redirected.Load() != 0 ||
@@ -334,6 +452,14 @@ func TestExistingJobControlRejectsUnsupportedVersionAndPreCanceledMutation(t *te
 	defer session.Close()
 	if _, err := session.ReadExistingJobControlDescriptor(context.Background()); err == nil {
 		t.Fatal("unsupported qBittorrent major was accepted")
+	}
+	for _, job := range []string{"all", "a|b"} {
+		for _, mutate := range []func(context.Context, downloader.ExistingJobMutationRequest) (downloader.ExistingJobMutationReceipt, error){session.Recheck, session.Start} {
+			receipt, err := mutate(context.Background(), downloader.ExistingJobMutationRequest{JobKey: job})
+			if err == nil || receipt.RequestsAttempted != 0 || receipt.StopReason != "job_locator_invalid" || mutations.Load() != 0 || session.RequestsMade() != 2 {
+				t.Fatalf("broad selector %q receipt=%#v mutations=%d requests=%d err=%v", job, receipt, mutations.Load(), session.RequestsMade(), err)
+			}
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

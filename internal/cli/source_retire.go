@@ -316,11 +316,7 @@ func (a *app) seedRetirePlan(args []string) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		detail := strings.TrimSpace(flagOutput.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		return usageError("seed retire plan: %s", detail)
+		return flagParseError("seed retire plan", err)
 	}
 	if fs.NArg() != 0 {
 		return usageError("seed retire plan accepts flags only")

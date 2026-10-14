@@ -2,6 +2,7 @@ package tjupt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -50,7 +51,37 @@ func newGuardedClient(baseURL, cookie string, minInterval time.Duration) (guarde
 		// wrapping a nil *httpguard.Client.
 		return nil, err
 	}
-	return client, nil
+	return loginRedirectClient{Client: client}, nil
+}
+
+// loginRedirectID is the only redirect a TJUPT GET classifies. TJUPT answers
+// a request with an expired or invalid cookie by redirecting to its own
+// login.php (loggedinorreturn), so that redirect is an authentication
+// failure rather than an unrecognized redirect. It is never followed.
+const loginRedirectID = "tjupt.login_redirect.v1"
+
+// errLoginRedirect reports a GET that TJUPT redirected to its own login page.
+var errLoginRedirect = errors.New("TJUPT session is not authenticated")
+
+func classifyLoginRedirect(target *url.URL) (string, bool) {
+	if target == nil || !strings.HasSuffix(strings.ToLower(target.Path), "/login.php") {
+		return "", false
+	}
+	return loginRedirectID, true
+}
+
+// loginRedirectClient binds the login redirect classifier to every TJUPT GET.
+// Form POSTs keep their own explicit classifiers.
+type loginRedirectClient struct {
+	*httpguard.Client
+}
+
+func (client loginRedirectClient) Get(ctx context.Context, path string, query url.Values) ([]byte, *url.URL, error) {
+	return client.Client.GetClassified(ctx, path, query, classifyLoginRedirect)
+}
+
+func (client loginRedirectClient) GetOnce(ctx context.Context, path string, query url.Values, accept string, maxBody, maxHeaderBytes int64) (httpguard.StrictResponse, error) {
+	return client.Client.GetOnceClassified(ctx, path, query, accept, maxBody, maxHeaderBytes, classifyLoginRedirect)
 }
 
 func New(baseURL string) *Adapter {
@@ -89,6 +120,9 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 
 func (a *Adapter) CheckSession(ctx context.Context, credential site.Credential) (domain.SessionStatus, error) {
 	body, finalURL, err := a.get(ctx, credential, "mybonusapps.php", nil)
+	if errors.Is(err, errLoginRedirect) {
+		return domain.SessionStatus{State: domain.AuthenticationUnauthenticated, ObservedAt: time.Now().UTC()}, nil
+	}
 	if err != nil {
 		return domain.SessionStatus{}, err
 	}
@@ -111,7 +145,11 @@ func (a *Adapter) Search(ctx context.Context, credential site.Credential, query 
 	case domain.AuthenticationIndeterminate:
 		return nil, fmt.Errorf("TJUPT returned an unrecognized search page; refusing to treat it as an empty result")
 	}
-	return parseSearch(body), nil
+	results := parseSearch(body)
+	if len(results) == 0 && !emptySearch.Match(body) {
+		return nil, fmt.Errorf("TJUPT search result structure was not recognized; refusing to treat it as an empty result")
+	}
+	return results, nil
 }
 
 func (a *Adapter) BonusCatalog(ctx context.Context, credential site.Credential) (domain.BonusCatalog, error) {
@@ -150,7 +188,12 @@ func (a *Adapter) get(ctx context.Context, credential site.Credential, path stri
 		return nil, nil, err
 	}
 	defer client.Close()
-	return client.Get(ctx, path, query)
+	body, finalURL, err := client.Get(ctx, path, query)
+	var redirect *httpguard.RedirectError
+	if errors.As(err, &redirect) && redirect.ID == loginRedirectID {
+		return nil, nil, errLoginRedirect
+	}
+	return body, finalURL, err
 }
 
 func (a *Adapter) clientFactory() guardedClientFactory {

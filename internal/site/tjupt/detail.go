@@ -223,6 +223,8 @@ func classifyDetailResponse(response httpguard.StrictResponse, ref domain.Torren
 		return "not_found", fmt.Errorf("TJUPT torrent detail was not found")
 	case response.StatusCode == http.StatusTooManyRequests:
 		return "rate_limited", fmt.Errorf("TJUPT rate limited the torrent detail request")
+	case response.StatusCode >= 300 && response.StatusCode <= 399 && response.RedirectID == loginRedirectID:
+		return "authentication_required", fmt.Errorf("TJUPT redirected to its login page; the session is not authenticated")
 	case response.StatusCode >= 300 && response.StatusCode <= 399:
 		return "redirect_rejected", fmt.Errorf("TJUPT torrent detail redirect was rejected")
 	case response.StatusCode != http.StatusOK:

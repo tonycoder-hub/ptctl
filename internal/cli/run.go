@@ -144,9 +144,10 @@ Usage:
   ptctl storage map --host-root PATH --client-root PATH [--client-style posix|windows] HOST_PATH
   ptctl storage profile create --state-store DIR --name NAME --search-root PATH [--search-root PATH...] [--output table|json]
   ptctl storage profile inspect --state-store DIR [--output table|json] PROFILE
-  ptctl storage index refresh --state-store DIR --profile PROFILE [--output table|json]
+  ptctl storage index refresh --state-store DIR --profile PROFILE [--retain-generations N] [--output table|json]
   ptctl storage index refresh-discover --state-store DIR --profile PROFILE (--torrent FILE.torrent | --metafile-store DIR --metafile-variant ID) [--target PATH] [--output table|json]
   ptctl storage index inspect --state-store DIR --profile PROFILE [--snapshot-record ID] [--output table|json]
+  ptctl storage index prune --state-store DIR --profile PROFILE --acknowledge-index-prune [--retain-generations N] [--output table|json]
 
   ptctl client status --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
   ptctl client list --driver qbittorrent|transmission --url URL --username USER --password-stdin [--output table|json]
@@ -262,6 +263,14 @@ func (e *usageErr) Error() string { return e.message }
 
 func usageError(format string, args ...any) error {
 	return &usageErr{message: fmt.Sprintf(format, args...)}
+}
+
+// flagParseError reports a flag parse failure as one short usage line. The
+// flag package error already names the offending flag; a FlagSet whose Usage
+// renders full help into a buffer must not echo that help as the error, where
+// terminal escaping would fold it onto one unreadable line.
+func flagParseError(command string, err error) error {
+	return usageError("%s: %v (see 'ptctl %s --help')", command, err, command)
 }
 
 type integrityErr struct{ message string }

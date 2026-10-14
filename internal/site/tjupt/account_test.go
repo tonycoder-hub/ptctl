@@ -157,6 +157,76 @@ func TestAccountPreflightAndErrorsDoNotLeakCredential(t *testing.T) {
 	}
 }
 
+func TestLoginRedirectIsAnAuthenticationFailure(t *testing.T) {
+	base, err := url.Parse(DefaultBaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// TJUPT's loggedinorreturn answers an expired cookie with a relative
+	// "Location: login.php?returnto=<page>"; NexusPHP forks may send it absolute.
+	for _, raw := range []string{"login.php?returnto=mybonusapps.php", "https://www.tjupt.org/login.php?returnto=torrents.php%3Fsearch%3Dx", "/LOGIN.PHP"} {
+		reference, _ := url.Parse(raw)
+		if id, ok := classifyLoginRedirect(base.ResolveReference(reference)); !ok || id != loginRedirectID {
+			t.Fatalf("%s: id=%q ok=%v", raw, id, ok)
+		}
+	}
+	for _, raw := range []string{"mybonusapps.php?do=upload", "/login.php.bak", "/takelogin.php", "/login.php/extra"} {
+		reference, _ := url.Parse(raw)
+		if id, ok := classifyLoginRedirect(base.ResolveReference(reference)); ok || id != "" {
+			t.Fatalf("%s: id=%q ok=%v", raw, id, ok)
+		}
+	}
+	if id, ok := classifyLoginRedirect(nil); ok || id != "" {
+		t.Fatalf("nil: id=%q ok=%v", id, ok)
+	}
+
+	production, err := newGuardedClient(DefaultBaseURL, "sid=secret", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := production.(loginRedirectClient); !ok {
+		t.Fatalf("production client %T does not classify login redirects", production)
+	}
+	if _, ok := production.(guardedExchangeClient); !ok {
+		t.Fatalf("production client %T lost the exchange port", production)
+	}
+	_ = production.Close()
+
+	credential, err := site.NewCookieCredential("sid=secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withErr := func(err error) (*Adapter, *accountFakeClient) {
+		client := &accountFakeClient{err: err}
+		adapter := New("")
+		adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
+		return adapter, client
+	}
+	adapter, client := withErr(&httpguard.RedirectError{ID: loginRedirectID})
+	status, err := adapter.CheckSession(context.Background(), credential)
+	if err != nil || status.State != domain.AuthenticationUnauthenticated || status.Username != "" || status.ObservedAt.IsZero() || client.requests != 1 || client.closeCalls != 1 {
+		t.Fatalf("check status=%#v err=%v client=%#v", status, err, client)
+	}
+	adapter, client = withErr(&httpguard.RedirectError{ID: loginRedirectID})
+	if _, err := adapter.Search(context.Background(), credential, "query"); err == nil || err.Error() != "TJUPT session is not authenticated" || client.requests != 1 {
+		t.Fatalf("search err=%v client=%#v", err, client)
+	}
+	adapter, client = withErr(&httpguard.RedirectError{ID: loginRedirectID})
+	if _, err := adapter.BonusCatalog(context.Background(), credential); err == nil || err.Error() != "TJUPT session is not authenticated" || client.requests != 1 {
+		t.Fatalf("catalog err=%v client=%#v", err, client)
+	}
+	adapter, client = withErr(&httpguard.RedirectError{ID: loginRedirectID})
+	if _, err := adapter.Account(context.Background(), credential); err == nil || err.Error() != "TJUPT session is not authenticated" || client.requests != 1 {
+		t.Fatalf("account err=%v client=%#v", err, client)
+	}
+	for _, other := range []error{&httpguard.RedirectError{ID: "tjupt.other"}, errors.New("site redirect was rejected")} {
+		adapter, client = withErr(other)
+		if status, err := adapter.CheckSession(context.Background(), credential); err == nil || status.State != "" || client.requests != 1 {
+			t.Fatalf("other redirect status=%#v err=%v", status, err)
+		}
+	}
+}
+
 func accountPage(username, balance string) []byte {
 	return []byte(`<html><head><title>PT :: ` + username + `&#30340;&#39764;&#21147;&#20540;</title></head><body><div>&#24403;&#21069;&#39764;&#21147;&#20540;: ` + balance + `</div></body></html>`)
 }

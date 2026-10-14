@@ -26,6 +26,32 @@ func TestRejectDangerousWindowsPaths(t *testing.T) {
 	}
 }
 
+func TestWindowsReservedDeviceNames(t *testing.T) {
+	semantics := PathSemantics{Windows: true, CaseSensitive: false}
+	for _, name := range []string{
+		"CON", "con.txt", "CON .txt", "Con  .tar.gz", "nul.", "AUX", "PRN.log",
+		"CONIN$", "conin$.txt", "CONOUT$", "conout$ .log", "CLOCK$", "clock$", "Com1 .x.y",
+		"COM1", "com9.txt", "COM0", "LPT0.log", "COM¹", "com².txt", "LPT³", "lpt¹ .txt",
+	} {
+		if !WindowsReservedDeviceName(name) {
+			t.Fatalf("%q was not treated as a reserved device name", name)
+		}
+		if err := ValidateComponents([][]byte{[]byte(name)}, semantics); err == nil {
+			t.Fatalf("%q was accepted as a Windows path component", name)
+		}
+	}
+	for _, name := range []string{
+		"CONSOLE", "CON_", " CON", "CONIN", "CONOUT", "COM10", "LPT", "COM", "COM⁴", "LPT¹0", "COM1x.txt", "x.CON", "data.nul", "NULL.txt",
+	} {
+		if WindowsReservedDeviceName(name) {
+			t.Fatalf("%q was treated as a reserved device name", name)
+		}
+		if err := ValidateComponents([][]byte{[]byte(name)}, semantics); err != nil {
+			t.Fatalf("%q was rejected: %v", name, err)
+		}
+	}
+}
+
 func TestSecureJoinExistingRejectsLinkTraversal(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "real")
@@ -56,6 +82,47 @@ func TestRejectFileDirectoryPrefixCollision(t *testing.T) {
 	paths := [][][]byte{{[]byte("a")}, {[]byte("a"), []byte("b.mkv")}}
 	if err := ValidateManifestPaths(paths, PathSemantics{CaseSensitive: true}); err == nil {
 		t.Fatal("expected file/directory prefix collision")
+	}
+}
+
+func TestManifestPathsAllowOnlyPaddingToRepeat(t *testing.T) {
+	pad := [][]byte{[]byte(".pad"), []byte("16383")}
+	media := [][]byte{[]byte("a.mkv")}
+	semantics := PathSemantics{CaseSensitive: true}
+	if err := ValidateManifestPathsWithPadding([][][]byte{media, pad, {[]byte("b.mkv")}, pad}, []bool{false, true, false, true}, semantics); err != nil {
+		t.Fatalf("repeated BEP 47 padding paths rejected: %v", err)
+	}
+	if err := ValidateManifestPaths([][][]byte{pad, pad}, semantics); err == nil {
+		t.Fatal("ValidateManifestPaths accepted a repeated path")
+	}
+	folded := [][][]byte{pad, {[]byte(".PAD"), []byte("16383")}}
+	if err := ValidateManifestPathsWithPadding(folded, []bool{true, true}, PathSemantics{Windows: true}); err != nil {
+		t.Fatalf("case-folded padding paths rejected: %v", err)
+	}
+	for name, test := range map[string]struct {
+		paths   [][][]byte
+		padding []bool
+	}{
+		"padding then real file": {[][][]byte{pad, pad}, []bool{true, false}},
+		"real file then padding": {[][][]byte{media, media}, []bool{false, true}},
+		"padding prefix":         {[][][]byte{{[]byte(".pad")}, pad}, []bool{true, true}},
+		"unsafe padding":         {[][][]byte{{[]byte(".."), []byte("1")}}, []bool{true}},
+		"flag count mismatch":    {[][][]byte{pad, pad}, []bool{true}},
+	} {
+		if err := ValidateManifestPathsWithPadding(test.paths, test.padding, semantics); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+}
+
+func TestDarwinLetterlikeSingletonsCollideThroughCaseFolding(t *testing.T) {
+	// Without NFD tables, the Kelvin, Ohm, and Angstrom signs are still caught
+	// because their lowercase mappings equal the decomposed letters' mappings.
+	darwin := PathSemantics{CaseSensitive: false, UnicodeNormalization: true}
+	for _, pair := range [][2]string{{"\u212bngstrom", "\u00c5ngstrom"}, {"\u2126", "\u03a9"}, {"\u212a.bin", "K.bin"}} {
+		if err := ValidateManifestPaths([][][]byte{{[]byte(pair[0])}, {[]byte(pair[1])}}, darwin); err == nil {
+			t.Fatalf("%q and %q did not collide", pair[0], pair[1])
+		}
 	}
 }
 

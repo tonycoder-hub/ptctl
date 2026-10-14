@@ -167,16 +167,15 @@ func Parse(data []byte) (*MetaInfo, error) {
 		if err := parseV2Files(meta, info); err != nil {
 			return nil, err
 		}
+		if !meta.MultiFile && string(meta.Files[0].RawPath[0]) != string(meta.NameRaw) {
+			return nil, fmt.Errorf("v2 single-file key %q differs from name %q; BEP 52 clients store the file under the key, so the layout is ambiguous", meta.Files[0].Path[0], meta.Name)
+		}
 		if err := validateV2PieceLayers(root, meta.Files, meta.PieceLength); err != nil {
 			return nil, err
 		}
 		meta.Validation = "v2_manifest_structural"
 	}
-	manifestPaths := make([][][]byte, len(meta.Files))
-	for i := range meta.Files {
-		manifestPaths[i] = meta.Files[i].RawPath
-	}
-	if err := storage.ValidateManifestPaths(manifestPaths, storage.PathSemantics{CaseSensitive: true}); err != nil {
+	if err := validateManifestPaths(meta.Files, storage.PathSemantics{CaseSensitive: true}); err != nil {
 		return nil, fmt.Errorf("unsafe torrent manifest: %w", err)
 	}
 	meta.V1PieceCount = len(meta.pieceHashes)
@@ -266,7 +265,9 @@ func parseV2Files(meta *MetaInfo, info *Node) error {
 	if len(meta.Files) == 0 {
 		return fmt.Errorf("v2 file tree is empty")
 	}
-	if len(meta.Files) == 1 && len(meta.Files[0].RawPath) == 1 && string(meta.Files[0].RawPath[0]) == string(meta.NameRaw) {
+	// As in BEP 52 and libtorrent, only a lone top-level leaf is a single
+	// file, stored under its key. Anything else lives in a "name" directory.
+	if len(tree.Dict) == 1 && len(meta.Files) == 1 && len(meta.Files[0].RawPath) == 1 {
 		meta.MultiFile = false
 	}
 	return nil
@@ -357,8 +358,11 @@ func reconcileHybridLayouts(v1, v2 *MetaInfo) error {
 	for fileIndex := range v1.Files {
 		file := &v1.Files[fileIndex]
 		if strings.Contains(file.Attribute, "p") {
-			if nonPaddingIndex == 0 || nonPaddingIndex >= len(v2Files) || offset%v1.PieceLength == 0 {
-				return fmt.Errorf("hybrid v1 padding file %d is leading, trailing, or starts at an aligned offset", fileIndex)
+			// A pad may follow the last real file: libtorrent >= 2.0.8 emits
+			// this BEP 52 tail padding by default and accepts it on load. The
+			// aligned-offset check still rejects a second consecutive pad.
+			if nonPaddingIndex == 0 || offset%v1.PieceLength == 0 {
+				return fmt.Errorf("hybrid v1 padding file %d is leading or starts at an aligned offset", fileIndex)
 			}
 			expected := v1.PieceLength - (offset % v1.PieceLength)
 			if file.Length != expected {
@@ -387,6 +391,18 @@ func reconcileHybridLayouts(v1, v2 *MetaInfo) error {
 		return fmt.Errorf("hybrid v1 layout is missing non-padding files")
 	}
 	return nil
+}
+
+// validateManifestPaths validates every manifest path, padding included, but
+// lets BEP 47 padding files repeat each other's path (".pad/<length>").
+func validateManifestPaths(files []File, semantics storage.PathSemantics) error {
+	paths := make([][][]byte, len(files))
+	padding := make([]bool, len(files))
+	for i := range files {
+		paths[i] = files[i].RawPath
+		padding[i] = strings.Contains(files[i].Attribute, "p")
+	}
+	return storage.ValidateManifestPathsWithPadding(paths, padding, semantics)
 }
 
 func nonPaddingFiles(files []File) []*File {

@@ -942,10 +942,10 @@ func writeMaterializeHuman(out io.Writer, report materialize.Report) error {
 		terminalSafe(report.Target.Publication), report.Target.RootIdentityBound, report.Target.SameFilesystemStage,
 		report.Target.NoClobberCapable, report.Target.NoClobber, terminalSafe(report.Target.StabilityAssurance),
 		report.Target.StageContentVerified, report.Target.FinalContentVerified, report.Target.DurabilityConfirmed)
-	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nOPERATION SUBTREES\t%d\nJOURNAL DIRECTORIES\t%d\nINTENT OBJECTS\t%d\nJOURNAL EVENTS\t%d\nJOURNAL PUBLICATION ATTEMPTS\t%d\nJOURNAL DURABILITY CONFIRMATIONS\t%d\nSCRATCH FILES\t%d\nSCRATCH BYTES WRITTEN\t%d\nSTAGED FILES\t%d\nSTAGE PUBLICATION ATTEMPTS\t%d\nSTAGED DIRECTORIES\t%d\nFINAL LAYOUT PUBLICATIONS\t%d\nFINAL PUBLICATION ATTEMPTS\t%d\nAMBIGUOUS PUBLICATIONS\t%d\nBYTES WRITTEN\t%d\n",
+	fmt.Fprintf(w, "\nWRITE BREAKDOWN\nOPERATION SUBTREES\t%d\nJOURNAL DIRECTORIES\t%d\nINTENT OBJECTS\t%d\nJOURNAL EVENTS\t%d\nJOURNAL PUBLICATION ATTEMPTS\t%d\nJOURNAL DURABILITY CONFIRMATIONS\t%d\nSCRATCH FILES\t%d\nSCRATCH FILES REMOVED\t%d\nSCRATCH BYTES WRITTEN\t%d\nSTAGED FILES\t%d\nSTAGE PUBLICATION ATTEMPTS\t%d\nSTAGED DIRECTORIES\t%d\nFINAL LAYOUT PUBLICATIONS\t%d\nFINAL PUBLICATION ATTEMPTS\t%d\nAMBIGUOUS PUBLICATIONS\t%d\nBYTES WRITTEN\t%d\n",
 		report.Writes.OperationSubtrees, report.Writes.JournalDirectories, report.Writes.IntentObjects, report.Writes.JournalEvents,
 		report.Writes.JournalPublicationAttempts, report.Writes.JournalDurabilityConfirms,
-		report.Writes.ScratchFilesCreated, report.Writes.ScratchBytesWritten,
+		report.Writes.ScratchFilesCreated, report.Writes.ScratchFilesRemoved, report.Writes.ScratchBytesWritten,
 		report.Writes.StagedFiles, report.Writes.StagePublicationAttempts, report.Writes.StagedDirectories,
 		report.Writes.FinalLayoutPublications, report.Writes.FinalPublicationAttempts,
 		report.Writes.AmbiguousPublications, report.Writes.BytesWritten)

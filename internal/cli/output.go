@@ -73,6 +73,8 @@ func jsonKind(data any) string {
 		return typed.kind
 	case storageIndexInspectReport:
 		return typed.kind
+	case storageIndexPruneReport:
+		return typed.kind
 	case metafile.VerificationResult:
 		return "content.verification"
 	case storage.ProbeResult:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 
 	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
@@ -77,7 +78,18 @@ func loadMetafileInput(ctx context.Context, input metafileInput) (*metafile.Meta
 	}
 	meta, _, err := store.Load(ctx, input.variantID, metastore.DefaultLimits())
 	if errors.Is(err, metastore.ErrCorruptArtifact) {
-		return nil, &integrityErr{message: "stored metafile failed digest or parse validation"}
+		return nil, storedMetafileIntegrityErr("stored metafile", err)
 	}
 	return meta, err
+}
+
+// storedMetafileIntegrityErr maps a corrupt stored artifact to an integrity
+// failure. One that still matches its digest but no longer parses was stored
+// under a less strict parser; the same bytes are rejected again, so the
+// remedy is a canonical copy under a new variant ID.
+func storedMetafileIntegrityErr(subject string, err error) error {
+	if errors.Is(err, metastore.ErrArtifactUnparseable) {
+		return &integrityErr{message: fmt.Sprintf("%s: %v; re-fetch it with ptctl site metafile fetch or import a canonical copy with ptctl metafile store import (the same bytes are rejected again), then use the new variant ID", subject, err)}
+	}
+	return &integrityErr{message: subject + " failed digest or parse validation"}
 }

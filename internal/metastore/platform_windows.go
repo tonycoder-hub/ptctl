@@ -314,6 +314,13 @@ func platformRejectNamedInfo(info os.FileInfo) bool {
 	return true
 }
 
+// platformOpenSourceFile opens an import source that was just checked by name.
+// Windows has no FIFO in the file namespace; the caller rechecks identity and
+// attributes on the opened handle.
+func platformOpenSourceFile(path string) (*os.File, error) {
+	return os.Open(path)
+}
+
 func platformValidateSourceFile(file *os.File) error {
 	if file == nil {
 		return fmt.Errorf("source handle is unavailable")

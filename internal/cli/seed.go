@@ -127,11 +127,7 @@ func (a *app) seedDiscover(args []string) error {
 			fmt.Fprint(a.stdout, flagOutput.String())
 			return nil
 		}
-		detail := strings.TrimSpace(flagOutput.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		return usageError("seed discover: %s", detail)
+		return flagParseError("seed discover", err)
 	}
 	if fs.NArg() != 0 {
 		return usageError("seed discover accepts flags only; unexpected argument %q", fs.Arg(0))

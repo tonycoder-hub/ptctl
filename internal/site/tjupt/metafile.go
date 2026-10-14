@@ -172,7 +172,7 @@ func (session *metafileFetchSession) FetchMetafile(ctx context.Context, ref doma
 		receipt.StopReason = "response_accounting_invalid"
 		return nil, receipt, fmt.Errorf("TJUPT metafile response accounting is invalid")
 	}
-	if stopReason, classificationErr := classifyMetafileResponse(response.StatusCode, response.MediaType, response.Body); classificationErr != nil {
+	if stopReason, classificationErr := classifyMetafileResponse(response.StatusCode, response.RedirectID, response.MediaType, response.Body); classificationErr != nil {
 		receipt.StopReason = stopReason
 		return nil, receipt, classificationErr
 	}
@@ -213,12 +213,14 @@ func (session *metafileFetchSession) Close() error {
 	return nil
 }
 
-func classifyMetafileResponse(status int, mediaType string, body []byte) (string, error) {
+func classifyMetafileResponse(status int, redirectID, mediaType string, body []byte) (string, error) {
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return "authentication_required", fmt.Errorf("TJUPT authentication was rejected")
 	case status == http.StatusTooManyRequests:
 		return "rate_limited", fmt.Errorf("TJUPT rate limited the metafile request")
+	case status >= 300 && status <= 399 && redirectID == loginRedirectID:
+		return "authentication_required", fmt.Errorf("TJUPT redirected to its login page; the session is not authenticated")
 	case status >= 300 && status <= 399:
 		return "redirect_rejected", fmt.Errorf("TJUPT metafile redirect was rejected")
 	case status != http.StatusOK:

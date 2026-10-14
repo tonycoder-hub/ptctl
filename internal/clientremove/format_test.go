@@ -144,20 +144,9 @@ func TestClientRemovalJournalRejectsProtocolMismatchedRequestID(t *testing.T) {
 	}
 }
 
-func TestClientRemovalJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
-	root, plan := testRemovalPlan(t)
-	planID, _ := PlanID(plan)
-	handle, _, err := createJournal(context.Background(), root, plan, planID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	attempt := testAttempt(OperationIDForPlan(planID), planID, plan, now, 1, "")
-	raw, attemptID, err := encodeAttempt(attempt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending, _ := fsbind.PathFromComponents([]string{scratchDirectory, pendingName(attemptFileName(1))})
+func stageClientRemovalPendingMarker(t *testing.T, handle *journalHandle, destination string, raw []byte) {
+	t.Helper()
+	pending, _ := fsbind.PathFromComponents([]string{scratchDirectory, pendingName(destination)})
 	file, err := handle.subtree.CreateRegular(context.Background(), pending)
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +161,26 @@ func TestClientRemovalJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
 	if err := handle.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestClientRemovalJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
+	root, plan := testRemovalPlan(t)
+	planID, _ := PlanID(plan)
+	handle, _, err := createJournal(context.Background(), root, plan, planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
 	operation := OperationIDForPlan(planID)
+	attempt := testAttempt(operation, planID, plan, now, 1, "")
+	raw, attemptID, err := encodeAttempt(attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An attempt is published before the removal request is sent, so an
+	// unpublished staged attempt proves no request was sent: recovery
+	// discards it instead of inventing an attempt.
+	stageClientRemovalPendingMarker(t, handle, attemptFileName(1), raw)
 	if _, _, err := openJournal(context.Background(), root, operation, false, nil); !errors.Is(err, ErrInitializationIncomplete) {
 		t.Fatalf("read-only open recovered or misclassified pending marker: %v", err)
 	}
@@ -180,9 +188,31 @@ func TestClientRemovalJournalRecoversOneCanonicalPendingMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer recovered.Close()
-	if len(recovered.state.Attempts) != 1 || recovered.state.AttemptIDs[0] != attemptID || !receipt.Marker.Publication.Published || recovered.state.Pending != "" {
-		t.Fatalf("state=%#v receipt=%#v", recovered.state, receipt)
+	attemptPath, _ := fsbind.PathFromComponents([]string{attemptFileName(1)})
+	if _, inspectErr := recovered.subtree.Inspect(context.Background(), attemptPath); len(recovered.state.Attempts) != 0 ||
+		recovered.state.Pending != "" || receipt.Marker.Publication.Published || !receipt.Marker.TemporaryRemoved ||
+		receipt.Marker.TemporaryRemovalUncertain || !errors.Is(inspectErr, fsbind.ErrNotFound) {
+		t.Fatalf("state=%#v receipt=%#v inspect=%v", recovered.state, receipt, inspectErr)
+	}
+
+	// A staged response records an observed fact after a published attempt,
+	// so recovery still publishes it.
+	if _, published, appendErr := recovered.appendAttempt(context.Background(), attempt); appendErr != nil || published != attemptID {
+		t.Fatalf("append attempt id=%s err=%v", published, appendErr)
+	}
+	responseRaw, responseID, err := encodeResponse(testResponse(operation, planID, attemptID, now.Add(time.Second), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageClientRemovalPendingMarker(t, recovered, responseFileName(1), responseRaw)
+	republished, receipt, err := openJournal(context.Background(), root, operation, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer republished.Close()
+	if len(republished.state.Attempts) != 1 || republished.state.AttemptIDs[0] != attemptID || republished.state.ResponseIDs[1] != responseID ||
+		!receipt.Marker.Publication.Published || republished.state.Pending != "" {
+		t.Fatalf("state=%#v receipt=%#v", republished.state, receipt)
 	}
 }
 
