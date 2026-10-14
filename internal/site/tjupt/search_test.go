@@ -172,3 +172,55 @@ func TestTopLevelCellsKeepsNestedTablesInTheirCell(t *testing.T) {
 		t.Fatalf("cells=%q", cells)
 	}
 }
+
+func TestSearchRecoversTruncatedNamesFromTheLinkTitle(t *testing.T) {
+	long := "The.Lord.of.the.Rings.The.Fellowship.of.the.Ring.2001.EXTENDED.2160p.UHD.BluRay.REMUX.HDR.HEVC.DTS-X.7.1-CANARY &amp; Friends.Part.Two"
+	full := strings.ReplaceAll(long, "&amp;", "&")
+	cut := func(name string, keep int) string { return string([]rune(name)[:keep]) + ".." }
+	tests := []struct {
+		name, anchor, want string
+	}{
+		{"truncated", `<a title="` + long + `" href="details.php?id=42&amp;hit=1"><b>` + cut(long, 118) + `</b></a>`, full},
+		{"cut after a space", `<a title="CANARY Long Name Part" href="details.php?id=42"><b>CANARY Long ..</b></a>`, "CANARY Long Name Part"},
+		{"title with line breaks", "<a title=\"CANARY Long\n Name\" href=\"details.php?id=42\"><b>CANARY Lo..</b></a>", "CANARY Long Name"},
+		{"tooltip mode has no title", `<a onmouseover="get_ext_info_ajax()" href="details.php?id=42&amp;hit=1"><b>CANARY Lo..</b></a>`, "CANARY Lo.."},
+		{"unrelated title", `<a title="Other" href="details.php?id=42"><b>CANARY Lo..</b></a>`, "CANARY Lo.."},
+		{"two titles", `<a title="CANARY Long" title="CANARY Loose" href="details.php?id=42"><b>CANARY Lo..</b></a>`, "CANARY Lo.."},
+		{"name ending in dots", `<a title="CANARY Name.." href="details.php?id=42"><b>CANARY Name..</b></a>`, "CANARY Name.."},
+		{"not truncated", `<a title="CANARY Longer" href="details.php?id=42"><b>CANARY Long</b></a>`, "CANARY Long"},
+		{"only dots", `<a title="CANARY" href="details.php?id=42"><b>..</b></a>`, ".."},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := strings.Replace(defaultLiveRow("42").String(), `<a title="Release 42" href="details.php?id=42&amp;hit=1"><b>Release 42</b></a>`, test.anchor, 1)
+			got := parseSearch(tjuptLiveSearchPage(row))
+			if len(got) != 1 || got[0].Name != test.want || got[0].Ref.RemoteID != "42" || got[0].SizeBytes == nil {
+				t.Fatalf("got=%#v, want name %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSearchSkipsNonCanonicalTorrentIDs(t *testing.T) {
+	for _, id := range []string{"042", "0", "12345678901234567890"} {
+		row := strings.Replace(defaultLiveRow("42").String(), `href="details.php?id=42&amp;hit=1"><b>`, `href="details.php?id=`+id+`&amp;hit=1"><b>`, 1)
+		if got := parseSearch(tjuptLiveSearchPage(row)); len(got) != 0 {
+			t.Fatalf("id %q: got=%#v", id, got)
+		}
+	}
+}
+
+func TestSearchIgnoresTheSignedInUserLink(t *testing.T) {
+	// Every page header links the signed-in user as userdetails.php?id=N,
+	// which must never read as a torrent or shadow one with the same ID.
+	header := `<a href='logout.php'>退出</a>`
+	withUser := header + `<a href="userdetails.php?id=42" class="User_Name"><b>CANARY-USER</b></a>`
+	body := []byte(strings.Replace(string(tjuptLiveSearchPage(defaultLiveRow("42").String())), header, withUser, 1))
+	if got := parseSearch(body); len(got) != 1 || got[0].Ref.RemoteID != "42" || got[0].Name != "Release 42" {
+		t.Fatalf("got=%#v", got)
+	}
+	empty := []byte(strings.Replace(string(tjuptLiveSearchPage(`<tr><td class="text">没有种子。请用准确的关键字重试。</td></tr>`)), header, withUser, 1))
+	if got := parseSearch(empty); len(got) != 0 {
+		t.Fatalf("empty page got=%#v", got)
+	}
+}
