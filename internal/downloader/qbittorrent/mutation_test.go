@@ -246,6 +246,11 @@ func TestAddStoppedResponseShapesAcrossVersions(t *testing.T) {
 					w.WriteHeader(http.StatusNoContent)
 				case "/api/v2/torrents/add":
 					adds.Add(1)
+					// Like qBittorrent, read the whole form before answering.
+					// AddStopped sends Connection: close, so answering early
+					// lets the server reset the connection under the unread
+					// body and the client may see a transport failure instead.
+					_, _ = io.Copy(io.Discard, request.Body)
 					if strings.HasPrefix(test.body, "{") {
 						w.Header().Set("Content-Type", "application/json")
 					}
@@ -327,6 +332,7 @@ func TestAddStoppedNeverFollowsRedirectOrRetries(t *testing.T) {
 			_, _ = writer.Write([]byte("Ok."))
 		case "/api/v2/torrents/add":
 			add.Add(1)
+			_, _ = io.Copy(io.Discard, request.Body)
 			writer.Header().Set("Location", "/redirected?secret="+canary)
 			writer.WriteHeader(http.StatusTemporaryRedirect)
 		case "/redirected":

@@ -220,11 +220,36 @@ func TestStoredMetafileThatNoLongerParsesNamesTheRemedy(t *testing.T) {
 		t.Fatalf("init code=%d stderr=%q", code, errOut.String())
 	}
 	// A digest-valid object the strict canonical parser rejects, as one an
-	// older ptctl stored would be.
+	// older ptctl stored would be. It reuses a store-created object file so it
+	// keeps the private mode and Windows DACL the store requires of objects.
 	raw := []byte("d4:infod6:lengthi05eee")
 	digest := sha256.Sum256(raw)
 	variant := "sha256:" + hex.EncodeToString(digest[:])
-	if err := os.WriteFile(filepath.Join(storeRoot, "objects", hex.EncodeToString(digest[:])+".torrent"), raw, 0o600); err != nil {
+	validPath := filepath.Join(physicalCLITempDir(t), "valid.torrent")
+	if err := os.WriteFile(validPath, testV1Metafile("valid.bin", []byte("valid")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"metafile", "store", "import", "--store", storeRoot, "--output", "json", validPath}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("import code=%d stderr=%q", code, errOut.String())
+	}
+	var imported struct {
+		Data struct {
+			Artifact struct {
+				VariantID string `json:"metafile_variant_id"`
+			} `json:"artifact"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &imported); err != nil {
+		t.Fatal(err)
+	}
+	objects := filepath.Join(storeRoot, "objects")
+	planted := filepath.Join(objects, hex.EncodeToString(digest[:])+".torrent")
+	if err := os.Rename(filepath.Join(objects, strings.TrimPrefix(imported.Data.Artifact.VariantID, "sha256:")+".torrent"), planted); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planted, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
