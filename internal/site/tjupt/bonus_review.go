@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	BonusReviewOrigin        = "https://www.tjupt.org"
+	BonusReviewOrigin        = Origin
 	BonusReviewRouteID       = "tjupt.mybonusapps_offer_review.v1"
 	BonusExchangeRouteID     = "tjupt.mybonusapps_exchange_post.v1"
 	bonusUnknownActionRoute  = "tjupt.bonus_action_unrecognized.v1"
@@ -50,7 +50,7 @@ func (a *Adapter) ValidateBonusReviewSelector(selector string) error {
 }
 
 func (a *Adapter) BonusReviewConfig() (site.BonusReviewConfig, error) {
-	if a == nil || a.baseURL != DefaultBaseURL {
+	if !a.productionOrigin() {
 		return site.BonusReviewConfig{}, fmt.Errorf("TJUPT bonus review is unavailable for this origin")
 	}
 	config, err := site.NewBonusReviewConfig(BonusReviewOrigin, BonusReviewRouteID)
@@ -95,7 +95,7 @@ func (session *bonusReviewSession) ReadBonusReview(ctx context.Context, selector
 	now := time.Now().UTC()
 	receipt := site.BonusReviewReceipt{
 		Effect:          site.BonusReviewReadEffect,
-		SiteID:          "tjupt",
+		SiteID:          SiteID,
 		Selector:        selector,
 		Origin:          session.config.Origin,
 		RouteID:         session.config.RouteID,
@@ -266,6 +266,8 @@ func classifyBonusReviewResponse(response httpguard.StrictResponse) (string, err
 		return "not_found", fmt.Errorf("TJUPT bonus page was not found")
 	case response.StatusCode == http.StatusTooManyRequests:
 		return "rate_limited", fmt.Errorf("TJUPT rate limited the bonus review request")
+	case response.StatusCode >= 300 && response.StatusCode <= 399 && response.RedirectID == loginRedirectID:
+		return "authentication_required", fmt.Errorf("TJUPT redirected to its login page; the session is not authenticated")
 	case response.StatusCode >= 300 && response.StatusCode <= 399:
 		return "redirect_rejected", fmt.Errorf("TJUPT bonus review redirect was rejected")
 	case response.StatusCode != http.StatusOK:
@@ -586,7 +588,7 @@ func parseBonusOfferReviewInto(body []byte, selector string, limits site.BonusRe
 		availability = site.BonusReviewAvailabilityUnknown
 	}
 	review := domain.BonusOfferReview{
-		SiteID:        "tjupt",
+		SiteID:        SiteID,
 		Selector:      selector,
 		Balance:       parseBonusBalance(body),
 		Columns:       append([]string(nil), match.cells...),

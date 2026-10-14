@@ -3048,13 +3048,18 @@ func sanitizedDiscovery(value seed.DiscoveryResult, showAbsolute bool) seed.Disc
 	return value
 }
 
+// activeState reports whether the downloader may currently read or write the
+// job's files. Every started state is active, including seeding that is
+// stalled or queued, which resumes reads without a state change visible to the
+// bracket. Only explicitly paused or stopped jobs and the error states in which
+// the client does not serve the job are quiet; an unrecognized state is
+// treated as active so the warning fails safe.
 func activeState(state string) bool {
 	switch state {
-	case "uploading", "forcedUP", "allocating", "downloading", "metaDL", "forcedMetaDL", "pausedDL", "queuedDL", "stalledDL", "checkingDL", "forcedDL", "stoppedDL",
-		"checkingResumeData", "moving", "checkingUP":
-		return true
-	default:
+	case "pausedUP", "stoppedUP", "pausedDL", "stoppedDL", "error", "missingFiles":
 		return false
+	default:
+		return true
 	}
 }
 

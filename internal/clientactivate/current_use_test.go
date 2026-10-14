@@ -81,6 +81,51 @@ func TestCurrentUseRequiresStableCompleteExactJob(t *testing.T) {
 	}
 }
 
+func TestCurrentUseReobserveStartedToleratesOnlyStartedSubstateJitter(t *testing.T) {
+	fixture := makeActivationFixture(t)
+	completion := completeRecheckOnlyForCurrentUse(t, fixture)
+	hostRoot, err := filepath.EvalSymlinks(fixture.targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := PrepareCurrentUse(fixture.verifiedFinal, completion, CurrentUseOptions{
+		ClientConfigID: fixture.clientConfig, HostRoot: hostRoot, ClientRoot: "/downloads",
+		FileLimits: downloader.DefaultJobFileLedgerLimits(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	uploading, stalled, stopped := fixture.job("uploading", 1), fixture.job("stalledUP", 1), fixture.job("stoppedUP", 1)
+
+	strictSession := newActivationSession(fixture,
+		activationLedger(fixture.meta, &uploading, now),
+		activationLedger(fixture.meta, &stalled, now.Add(time.Second)))
+	strictBefore, _, err := VerifyCurrentUse(context.Background(), authority, strictSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := strictBefore.Reobserve(context.Background(), strictSession); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("exact Reobserve accepted a started substate change: %v", err)
+	}
+
+	session := newActivationSession(fixture,
+		activationLedger(fixture.meta, &uploading, now.Add(2*time.Second)),
+		activationLedger(fixture.meta, &stalled, now.Add(3*time.Second)),
+		activationLedger(fixture.meta, &stopped, now.Add(4*time.Second)))
+	before, _, err := VerifyCurrentUse(context.Background(), authority, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, afterObservation, err := before.ReobserveStarted(context.Background(), session)
+	if err != nil || !after.JobStarted() || afterObservation.JobState != "stalledUP" {
+		t.Fatalf("started substate jitter rejected: %#v err=%v", afterObservation, err)
+	}
+	if _, _, err := after.ReobserveStarted(context.Background(), session); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("ReobserveStarted accepted a stopped job: %v", err)
+	}
+}
+
 func TestCurrentUseProvesStableStoppedTransition(t *testing.T) {
 	fixture := makeActivationFixture(t)
 	completion := completeRecheckOnlyForCurrentUse(t, fixture)

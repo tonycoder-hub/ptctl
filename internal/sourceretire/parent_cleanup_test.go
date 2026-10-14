@@ -41,7 +41,7 @@ func completedNestedRetirementFixture(t *testing.T) (retireFixture, Plan, Operat
 	if err != nil || preview.Outcome != OutcomeEligible {
 		t.Fatalf("nested retirement preview=%#v err=%v", preview, err)
 	}
-	session := executionSession(fixture, 3)
+	session := executionSession(fixture, 4)
 	report, err := Run(context.Background(), RunOptions{Review: BuildOptions{
 		Meta: fixture.meta, Discovery: &fixture.discovery, Final: fixture.final, Activation: fixture.activation,
 		ClientUse: fixture.currentUse, ClientSession: session,

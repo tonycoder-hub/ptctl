@@ -216,7 +216,7 @@ func (a *app) prepareClientRemoveLocal(ctx context.Context, prepared preparedCli
 	}
 	meta, ref, err := store.Load(ctx, prepared.artifactID, metastore.DefaultLimits())
 	if errors.Is(err, metastore.ErrCorruptArtifact) {
-		return nil, &integrityErr{message: "client removal metafile failed digest or parse validation"}
+		return nil, storedMetafileIntegrityErr("client removal metafile", err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("client removal metafile could not be read")

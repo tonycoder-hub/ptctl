@@ -1,5 +1,7 @@
 # Materialize operation retention
 
+[Documentation index](README.md) · [Architecture](ARCHITECTURE.md#journaled-copy-only-materialization)
+
 This document defines materialize operation-state retention and the narrower
 irreversible boundary for deleting its last tombstone. It is a follow-on to
 copy-only journaled materialization, not a general filesystem cleaner and not

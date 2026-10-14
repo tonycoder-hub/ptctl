@@ -728,7 +728,34 @@ func (handle *journalHandle) recoverPending(ctx context.Context, name string) (m
 	if err := validatePendingRaw(handle.state, destination, raw); err != nil {
 		return markerWriteReceipt{}, err
 	}
+	if isAttemptName(destination) {
+		return handle.discardUnpublishedAttempt(ctx, name, raw)
+	}
 	return handle.writeMarker(ctx, destination, raw)
+}
+
+// discardUnpublishedAttempt removes a staged attempt marker whose destination
+// is absent. An attempt is durably published before the stop request is sent,
+// so an unpublished attempt proves the request was never sent. Publishing it
+// during recovery would invent an attempt that consumes the attempt budget.
+func (handle *journalHandle) discardUnpublishedAttempt(ctx context.Context, name string, raw []byte) (markerWriteReceipt, error) {
+	var receipt markerWriteReceipt
+	identity, err := handle.verifyNamedBytes(ctx, []string{scratchDirectory, name}, raw)
+	if err != nil {
+		return receipt, err
+	}
+	pendingPath, _ := fsbind.PathFromComponents([]string{scratchDirectory, name})
+	removal, err := handle.subtree.RemoveRegularExact(ctx, pendingPath, identity, int64(len(raw)))
+	receipt.TemporaryRemovalAttempted = removal.Attempted
+	receipt.TemporaryRemoved = err == nil && removal.Removed
+	receipt.TemporaryRemovalUncertain = err != nil || (removal.Attempted && (!removal.Removed || removal.Durability != "confirmed"))
+	if err != nil {
+		return receipt, err
+	}
+	if receipt.TemporaryRemovalUncertain || !removal.Removed {
+		return receipt, fmt.Errorf("%w: unpublished client stop attempt could not be discarded durably", ErrIntegrity)
+	}
+	return receipt, nil
 }
 
 func validatePendingRaw(state journalState, destination string, raw []byte) error {

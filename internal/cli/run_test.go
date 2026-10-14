@@ -20,6 +20,40 @@ func (r *trackingReader) Read([]byte) (int, error) {
 	return 0, fmt.Errorf("unexpected secret read")
 }
 
+func TestFlagParseErrorsPrintOneShortLineInsteadOfTheFullHelp(t *testing.T) {
+	commands := [][]string{
+		{"seed", "discover"},
+		{"seed", "retire", "plan"},
+		{"seed", "retire", "run"},
+		{"seed", "retire", "resume"},
+		{"seed", "retire", "parent-cleanup", "plan"},
+		{"seed", "retire", "parent-cleanup", "run"},
+		{"seed", "retire", "parent-cleanup", "resume"},
+		{"reconcile", "report"},
+		{"reconcile", "refresh-report"},
+		{"storage", "index", "refresh"},
+		{"storage", "index", "prune"},
+		{"seed", "materialize", "run"},
+	}
+	for _, command := range commands {
+		name := strings.Join(command, " ")
+		t.Run(name, func(t *testing.T) {
+			secret := &trackingReader{}
+			var out, errOut bytes.Buffer
+			code := Run(append(append([]string{}, command...), "--no-such-flag"), secret, &out, &errOut)
+			want := "error: " + name + ": flag provided but not defined: -no-such-flag (see 'ptctl " + name + " --help')\nrun 'pt help' for usage (ptctl is also supported)\n"
+			if code != 2 || out.Len() != 0 || secret.read || errOut.String() != want {
+				t.Fatalf("code=%d stdout=%q stderr=%q secretRead=%t", code, out.String(), errOut.String(), secret.read)
+			}
+			out.Reset()
+			errOut.Reset()
+			if code := Run(append(append([]string{}, command...), "--help"), secret, &out, &errOut); code != 0 || !strings.HasPrefix(out.String(), "Usage:\n") || errOut.Len() != 0 {
+				t.Fatalf("help code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
 func TestHelpAndSiteList(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Run([]string{"site", "list"}, strings.NewReader(""), &out, &errOut); code != 0 {

@@ -154,7 +154,12 @@ func (session *Session) completePrune(ctx context.Context, retention RetentionRe
 		}
 		return receipt, err
 	}
-	for index, record := range []metastore.RecordRef{retention.OutcomeRef, retention.AttemptRef, retention.IntentRef} {
+	// Remove the intent first and the attempt marker before the outcome. At
+	// every crash point an absent marker then implies an absent intent, and an
+	// absent outcome implies an absent marker, so a stale process holding a
+	// VerifiedIntent can never observe "intent present, marker absent" and
+	// reserve (and POST) a second time. Rerunning Prune resumes from any point.
+	for index, record := range []metastore.RecordRef{retention.IntentRef, retention.AttemptRef, retention.OutcomeRef} {
 		removed, removeErr := session.bound.RemoveRecordExact(ctx, record, session.repository.recordLimits())
 		receipt.RemovalReceipts = append(receipt.RemovalReceipts, removed)
 		receipt.WritesPerformed += removed.WritesPerformed
@@ -520,7 +525,7 @@ func (session *Session) listRetentionKind(ctx context.Context, kind metastore.Re
 		return nil, err
 	}
 	if !listed.Complete {
-		return nil, ErrStatusIncomplete
+		return nil, fmt.Errorf("%w: %w", ErrStatusIncomplete, listed.IncompleteError())
 	}
 	return listed.Records, nil
 }

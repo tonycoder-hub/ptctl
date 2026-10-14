@@ -19,6 +19,10 @@ func NewCookieCredential(cookie string) (Credential, error) {
 	return NewCredential(domain.AuthMethodCookieHeader, cookie)
 }
 
+func NewAPIKeyCredential(key string) (Credential, error) {
+	return NewCredential(domain.AuthMethodAPIKeyHeader, key)
+}
+
 func NewCredential(method domain.AuthMethod, secret string) (Credential, error) {
 	if method == "" {
 		return Credential{}, fmt.Errorf("empty authentication method")
@@ -66,10 +70,23 @@ type Registry struct {
 	adapters map[string]Adapter
 }
 
+// NewRegistry panics on a nil adapter, an empty site ID, or a duplicate site
+// ID. Registration is a programming decision, so a silent overwrite would hide
+// a wiring bug behind whichever adapter happened to be listed last.
 func NewRegistry(adapters ...Adapter) *Registry {
 	r := &Registry{adapters: make(map[string]Adapter, len(adapters))}
 	for _, adapter := range adapters {
-		r.adapters[adapter.Descriptor().ID] = adapter
+		if adapter == nil {
+			panic("site: nil adapter registered")
+		}
+		id := adapter.Descriptor().ID
+		if id == "" {
+			panic("site: adapter registered with an empty site ID")
+		}
+		if _, exists := r.adapters[id]; exists {
+			panic(fmt.Sprintf("site: duplicate adapter registered for site ID %q", id))
+		}
+		r.adapters[id] = adapter
 	}
 	return r
 }

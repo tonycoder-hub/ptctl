@@ -24,6 +24,10 @@ type RefreshOptions struct {
 	// afterDataPublication is a package-local test seam for exercising a
 	// store-root replacement between the two immutable publications.
 	afterDataPublication func()
+	// afterDescriptorPublication is a package-local test seam for exercising
+	// a concurrent publication between the descriptor commit and its
+	// generation uniqueness recheck.
+	afterDescriptorPublication func()
 }
 
 type RefreshResult struct {
@@ -44,6 +48,7 @@ type RefreshResult struct {
 	StopReasons           []string                      `json:"stop_reasons"`
 	authorityDigest       [sha256.Size]byte
 	authoritySet          bool
+	retention             *refreshListing
 }
 
 // HasLiveAuthority reports whether this is the unchanged process-local result
@@ -86,6 +91,15 @@ var errHistoricalInventoryIncomplete = errors.New("historical inventory capture 
 // immutable data record followed by its descriptor commit. A data object can
 // become an orphan if descriptor publication fails; latest selection ignores
 // such objects because it lists descriptors only.
+//
+// The store has no exclusive lock, so publication is optimistic: the
+// generation is one more than the highest published generation of the exact
+// profile (a tie at that maximum is superseded rather than blocking), and the
+// same-profile descriptors are re-listed immediately before and after the
+// descriptor commit. A refresh that observes a competing descriptor at its
+// generation (or a newer one before committing) fails with
+// ErrSnapshotGenerationConflict and never reports a tie as stored; retrying
+// publishes a newer unique generation. Refresh never removes records.
 func (repository *Repository) Refresh(ctx context.Context, profile Profile, options RefreshOptions) (RefreshResult, error) {
 	result := RefreshResult{
 		Effect: refreshEffect, Status: "incomplete", ProfileID: profile.ID, ProfileRevision: profile.Revision,
@@ -111,18 +125,10 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 	result.ProfileID = profile.ID
 	result.ProfileRevision = profile.Revision
 
-	generation := uint64(1)
-	latest, latestErr := repository.SelectSnapshot(ctx, profile, "")
-	switch {
-	case latestErr == nil:
-		if latest.Descriptor.Generation == math.MaxUint64 {
-			return result, fmt.Errorf("storage index generation is exhausted")
-		}
-		generation = latest.Descriptor.Generation + 1
-	case errors.Is(latestErr, ErrSnapshotNotFound):
-		// The first descriptor is generation one.
-	default:
-		return result, latestErr
+	descriptorCache := map[metastore.RecordID]loadedDescriptor{}
+	generation, err := repository.nextGeneration(ctx, profile, descriptorCache)
+	if err != nil {
+		return result, err
 	}
 	result.Generation = generation
 
@@ -185,7 +191,8 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 		streamed <- streamedInventory{result: scan, footer: footer}
 	}()
 
-	dataRef, dataReceipt, importErr := repository.store.ImportRecord(ctx, metastore.RecordKindStorageIndexDataV1, reader, repository.recordLimits(repository.limits.MaxSnapshots))
+	dataSource := &producerErrorReader{reader: reader}
+	dataRef, dataReceipt, importErr := repository.store.ImportRecord(ctx, metastore.RecordKindStorageIndexDataV1, dataSource, repository.recordLimits(repository.limits.MaxSnapshots))
 	_ = reader.Close()
 	if importErr != nil {
 		cancelStream()
@@ -196,9 +203,18 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 	result.DataRecord = dataRef
 	result.DataPublication = dataReceipt
 	result.WritesPerformed += dataReceipt.WritesPerformed
+	if importErr != nil && dataSource.err == nil && !errors.Is(importErr, context.Canceled) && !errors.Is(importErr, context.DeadlineExceeded) {
+		// The import failed without observing a producer error. Closing the
+		// pipe and cancelling the scan then made the producer fail too, so its
+		// error is a consequence; report the publication failure instead.
+		result.StopReasons = appendUniqueString(result.StopReasons, publicationStopReason("data", importErr))
+		return result, importErr
+	}
 	if streamResult.err != nil {
 		result.StopReasons = appendUniqueString(result.StopReasons, streamStopReason(streamResult))
-		if errors.Is(streamResult.err, errHistoricalInventoryIncomplete) {
+		if errors.Is(streamResult.err, errHistoricalInventoryIncomplete) || errors.Is(streamResult.err, errSnapshotByteBudget) {
+			// Both are budget/enumeration incompleteness: no data record is
+			// published and the report carries a distinct stop reason.
 			return result, nil
 		}
 		if errors.Is(streamResult.err, context.Canceled) || errors.Is(streamResult.err, context.DeadlineExceeded) {
@@ -217,6 +233,11 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 	}
 	if options.afterDataPublication != nil {
 		options.afterDataPublication()
+	}
+	// A refresh that lost the race fails here, before it can publish a tie.
+	if _, err := repository.checkGenerationUnclaimed(ctx, profile, generation, "", descriptorCache); err != nil {
+		result.StopReasons = appendUniqueString(result.StopReasons, generationCheckStopReason(err))
+		return result, err
 	}
 
 	descriptor := SnapshotDescriptor{
@@ -249,10 +270,83 @@ func (repository *Repository) Refresh(ctx context.Context, profile Profile, opti
 		result.StopReasons = appendUniqueString(result.StopReasons, "post_publish_revalidation_failed")
 		return result, fmt.Errorf("%w: storage index publication could not be revalidated", ErrIntegrity)
 	}
+	if options.afterDescriptorPublication != nil {
+		options.afterDescriptorPublication()
+	}
+	// Two refreshes may pass the pre-commit check together. Neither may then
+	// claim a stored generation that latest selection reports as ambiguous;
+	// the tie remains until the next refresh supersedes it.
+	committed, err := repository.checkGenerationUnclaimed(ctx, profile, generation, descriptorRef.ID, descriptorCache)
+	if err != nil {
+		result.StopReasons = appendUniqueString(result.StopReasons, generationCheckStopReason(err))
+		return result, err
+	}
+	result.retention = &refreshListing{repository: repository, profileID: profile.ID, listing: committed}
 	result.Status = "stored"
 	result.authorityDigest = refreshAuthorityDigest(result)
 	result.authoritySet = true
 	return result, nil
+}
+
+// nextGeneration returns one more than the highest generation published for
+// the exact profile revision. Unlike latest selection it tolerates a tie at
+// that maximum, because publishing a strictly newer complete generation is
+// the recovery for a profile left ambiguous by concurrent refreshes. It uses
+// the larger maintenance listing budget so an installation that already
+// exceeds MaxSnapshots descriptors can still refresh and then be pruned. Any
+// invalid descriptor that could belong to this profile still fails closed.
+func (repository *Repository) nextGeneration(ctx context.Context, profile Profile, cache map[metastore.RecordID]loadedDescriptor) (uint64, error) {
+	listing, err := repository.listDescriptors(ctx, profile.ID, repository.maintenanceMaxRecords(), false, cache)
+	if err != nil {
+		return 0, err
+	}
+	if !listing.complete {
+		return 0, repository.incompleteDescriptorListingError(listing, repository.maintenanceMaxRecords())
+	}
+	maximum := uint64(0)
+	for _, candidate := range listing.descriptors {
+		if descriptorMatchesProfile(candidate.descriptor, profile) && candidate.descriptor.Generation > maximum {
+			maximum = candidate.descriptor.Generation
+		}
+	}
+	if maximum == math.MaxUint64 {
+		return 0, fmt.Errorf("storage index generation is exhausted")
+	}
+	return maximum + 1, nil
+}
+
+// checkGenerationUnclaimed re-lists the exact profile's descriptors. Before
+// the descriptor commit (own == "") any descriptor at or above generation is
+// a conflict. After it, only another descriptor at the same generation is: a
+// newer generation merely supersedes this one without making it ambiguous.
+// It returns the complete listing it checked.
+func (repository *Repository) checkGenerationUnclaimed(ctx context.Context, profile Profile, generation uint64, own metastore.RecordID, cache map[metastore.RecordID]loadedDescriptor) (descriptorListing, error) {
+	listing, err := repository.listDescriptors(ctx, profile.ID, repository.maintenanceMaxRecords(), false, cache)
+	if err != nil {
+		return listing, err
+	}
+	if !listing.complete {
+		return listing, fmt.Errorf("generation uniqueness could not be rechecked: %w", repository.incompleteDescriptorListingError(listing, repository.maintenanceMaxRecords()))
+	}
+	for _, candidate := range listing.descriptors {
+		if !descriptorMatchesProfile(candidate.descriptor, profile) || (own != "" && candidate.ref.ID == own) {
+			continue
+		}
+		if candidate.descriptor.Generation == generation || (own == "" && candidate.descriptor.Generation > generation) {
+			return listing, fmt.Errorf("%w: generation %d was published concurrently; retry the refresh", ErrSnapshotGenerationConflict, generation)
+		}
+	}
+	return listing, nil
+}
+
+func generationCheckStopReason(err error) string {
+	if errors.Is(err, ErrSnapshotGenerationConflict) {
+		return "generation_conflict"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "context_cancelled"
+	}
+	return "generation_check_failed"
 }
 
 func fullInventoryRoots(profile Profile) ([]storage.FullInventoryRoot, error) {
@@ -308,9 +402,28 @@ func emptyFullInventoryResult(profile Profile) storage.FullInventoryResult {
 	}
 }
 
+// producerErrorReader records a non-EOF read error from the snapshot pipe.
+// ImportRecord reads synchronously in the Refresh goroutine, so the field is
+// only accessed there.
+type producerErrorReader struct {
+	reader io.Reader
+	err    error
+}
+
+func (source *producerErrorReader) Read(buffer []byte) (int, error) {
+	count, err := source.reader.Read(buffer)
+	if err != nil && err != io.EOF && source.err == nil {
+		source.err = err
+	}
+	return count, err
+}
+
 func streamStopReason(stream streamedInventory) string {
 	if errors.Is(stream.err, errHistoricalInventoryIncomplete) {
 		return "inventory_incomplete"
+	}
+	if errors.Is(stream.err, errSnapshotByteBudget) {
+		return "snapshot_byte_limit"
 	}
 	if errors.Is(stream.err, context.Canceled) || errors.Is(stream.err, context.DeadlineExceeded) {
 		return "context_cancelled"

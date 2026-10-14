@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,8 +21,10 @@ import (
 	"time"
 
 	"github.com/tonycoder-hub/ptctl/internal/materialize"
+	"github.com/tonycoder-hub/ptctl/internal/metafile"
 	"github.com/tonycoder-hub/ptctl/internal/metastore"
 	"github.com/tonycoder-hub/ptctl/internal/seed"
+	"github.com/tonycoder-hub/ptctl/internal/site/sites"
 	"github.com/tonycoder-hub/ptctl/internal/storage"
 	"github.com/tonycoder-hub/ptctl/internal/storageindex"
 )
@@ -245,6 +249,50 @@ func TestStorageIndexRefreshDiscoverManifestBudgetPerformsNoWrite(t *testing.T) 
 	after, err := store.ListRecords(ctx, metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
 	if err != nil || len(after.Records) != len(before.Records) {
 		t.Fatalf("manifest budget published descriptor: before=%d after=%d err=%v", len(before.Records), len(after.Records), err)
+	}
+}
+
+func TestStorageIndexRefreshDiscoverUsesInjectedRefreshDiscovery(t *testing.T) {
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
+	store, _, err := metastore.Init(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := storageindex.NewRepository(store, storageindex.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentRoot := physicalCLITempDir(t)
+	if _, err := repository.CreateProfile(t.Context(), "media", []string{contentRoot}, false, storageindex.DefaultScanLimits(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(physicalCLITempDir(t), "source.torrent")
+	if err := os.WriteFile(torrentPath, testV1Metafile("final.bin", []byte("injected-seam")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected refresh discovery failure")
+	var calls int
+	var out, errOut bytes.Buffer
+	a := &app{
+		stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, registry: sites.NewRegistry(),
+		refreshDiscovery: func(ctx context.Context, repository *storageindex.Repository, meta *metafile.MetaInfo, profile storageindex.Profile, limits storageindex.CandidateLimits, options seed.DiscoverOptions, refreshOptions storageindex.RefreshOptions) (seed.DiscoveryResult, error) {
+			calls++
+			if repository == nil || meta == nil || profile.Name != "media" {
+				t.Errorf("injected refresh discovery received unexpected inputs: profile=%q", profile.Name)
+			}
+			return seed.DiscoveryResult{SourceOutcome: "incomplete"}, injected
+		},
+	}
+	code := runWithApp([]string{
+		"storage", "index", "refresh-discover", "--state-store", stateRoot, "--profile", "media",
+		"--torrent", torrentPath, "--output", "json",
+	}, a)
+	if calls != 1 || code == 0 || !strings.Contains(errOut.String(), injected.Error()) {
+		t.Fatalf("refresh-discover bypassed injection seam: calls=%d code=%d stdout=%s stderr=%s", calls, code, out.String(), errOut.String())
+	}
+	descriptors, err := store.ListRecords(t.Context(), metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+	if err != nil || len(descriptors.Records) != 0 {
+		t.Fatalf("injected refresh discovery still published through the real refresh: %#v err=%v", descriptors, err)
 	}
 }
 
@@ -566,6 +614,7 @@ func TestStorageProfileAndIndexSubcommandHelpIsDiscoverable(t *testing.T) {
 		{"storage", "index", "refresh", "--help"},
 		{"storage", "index", "refresh-discover", "--help"},
 		{"storage", "index", "inspect", "--help"},
+		{"storage", "index", "prune", "--help"},
 	}
 	for _, command := range commands {
 		var out, errOut bytes.Buffer
@@ -573,6 +622,97 @@ func TestStorageProfileAndIndexSubcommandHelpIsDiscoverable(t *testing.T) {
 		if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "Usage:") || !strings.Contains(out.String(), "Flags:") {
 			t.Fatalf("help contract failed for %v: code=%d stdout=%q stderr=%q", command, code, out.String(), errOut.String())
 		}
+	}
+}
+
+func TestStorageIndexRefreshRetainsGenerationsAndPruneIsAcknowledged(t *testing.T) {
+	stateRoot := filepath.Join(physicalCLITempDir(t), "private-state")
+	if _, _, err := metastore.Init(stateRoot); err != nil {
+		t.Fatal(err)
+	}
+	contentRoot := physicalCLITempDir(t)
+	if err := os.WriteFile(filepath.Join(contentRoot, "payload.bin"), []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"storage", "profile", "create", "--state-store", stateRoot, "--name", "media", "--search-root", contentRoot}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("profile create: code=%d stderr=%s", code, errOut.String())
+	}
+	descriptorCount := func() int {
+		t.Helper()
+		store, err := metastore.Open(stateRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listed, err := store.ListRecords(context.Background(), metastore.RecordKindStorageIndexDescriptorV1, metastore.DefaultRecordLimits())
+		if err != nil || !listed.Complete {
+			t.Fatalf("list descriptors: listing=%#v err=%v", listed, err)
+		}
+		return len(listed.Records)
+	}
+	refresh := func(extra ...string) map[string]any {
+		t.Helper()
+		out.Reset()
+		errOut.Reset()
+		args := append([]string{"storage", "index", "refresh", "--state-store", stateRoot, "--profile", "media", "--output", "json"}, extra...)
+		if code := Run(args, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+			t.Fatalf("index refresh: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+		}
+		assertJSONDoesNotContain(t, out.Bytes(), stateRoot, contentRoot)
+		var envelope map[string]any
+		if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope["data"].(map[string]any)
+	}
+
+	var last map[string]any
+	for index := 0; index < 5; index++ {
+		last = refresh()
+	}
+	retention, ok := last["retention"].(map[string]any)
+	if !ok || last["outcome"] != "stored" || last["writes_performed"] != float64(2) || last["generation"] != float64(5) ||
+		retention["status"] != "complete" || retention["writes_performed"] == float64(0) {
+		t.Fatalf("refresh did not report separate retention: %#v", last)
+	}
+	pruned := retention["pruned"].([]any)
+	if len(pruned) != 1 || pruned[0].(map[string]any)["generation"] != float64(2) || descriptorCount() != storageindex.DefaultRetainedSnapshotGenerations {
+		t.Fatalf("refresh retention did not keep exactly the newest generations: retention=%#v descriptors=%d", retention, descriptorCount())
+	}
+	if disabled := refresh("--retain-generations", "0"); disabled["retention"] != nil || descriptorCount() != 4 {
+		t.Fatalf("disabled retention still pruned: %#v descriptors=%d", disabled, descriptorCount())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"storage", "index", "prune", "--state-store", stateRoot, "--profile", "media", "--retain-generations", "1"}, strings.NewReader(""), &out, &errOut); code != 2 ||
+		!strings.Contains(errOut.String(), "--acknowledge-index-prune") || descriptorCount() != 4 {
+		t.Fatalf("unacknowledged prune was not rejected: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"storage", "index", "prune", "--state-store", stateRoot, "--profile", "media", "--retain-generations", "1", "--acknowledge-index-prune", "--output", "json"}, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("prune: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	assertJSONDoesNotContain(t, out.Bytes(), stateRoot, contentRoot)
+	var envelope map[string]any
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil || envelope["kind"] != "storage.index.prune" || envelope["schema"] != "ptctl.dev/v1" {
+		t.Fatalf("unexpected prune envelope: %#v err=%v", envelope, err)
+	}
+	data := envelope["data"].(map[string]any)
+	if data["outcome"] != "complete" || len(data["pruned"].([]any)) != 3 || descriptorCount() != 1 {
+		t.Fatalf("prune did not keep only the latest generation: %#v descriptors=%d", data, descriptorCount())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"storage", "index", "inspect", "--state-store", stateRoot, "--profile", "media", "--output", "json"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), `"generation": 6`) {
+		t.Fatalf("latest generation was not selectable after prune: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"storage", "index", "prune", "--state-store", stateRoot, "--profile", "media", "--acknowledge-index-prune"}, strings.NewReader(""), &out, &errOut); code != 0 ||
+		!strings.Contains(out.String(), "GENERATIONS PRUNED") || !strings.Contains(out.String(), "complete") {
+		t.Fatalf("idempotent table prune failed: code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
 	}
 }
 

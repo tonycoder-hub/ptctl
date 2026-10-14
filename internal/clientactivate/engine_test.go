@@ -544,7 +544,14 @@ func TestTransmissionActivationUsesExactV1ControlAndCompletesAcrossResume(t *tes
 	}
 }
 
+func shortenActionSettleDelays(t *testing.T) {
+	previous := actionSettleDelays
+	actionSettleDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { actionSettleDelays = previous })
+}
+
 func TestActivationDoesNotReplayUnknownRecheckWithoutExplicitRepeat(t *testing.T) {
+	shortenActionSettleDelays(t)
 	fixture := makeActivationFixture(t)
 	now := time.Now().UTC()
 	complete := fixture.job("stoppedUP", 1)
@@ -588,6 +595,87 @@ func TestActivationDoesNotReplayUnknownRecheckWithoutExplicitRepeat(t *testing.T
 		later.Journal.RecheckCompletionDurable || laterComplete.recheckCalls != 0 || laterComplete.startCalls != 0 {
 		t.Fatalf("later=%#v recheck=%d start=%d err=%v", later, laterComplete.recheckCalls, laterComplete.startCalls, err)
 	}
+}
+
+func TestActivationSettlesLaggingRecheckObservationWithinOneInvocation(t *testing.T) {
+	fixture := makeActivationFixture(t)
+	now := time.Now().UTC()
+	incomplete := fixture.job("stoppedDL", 0)
+	complete := fixture.job("stoppedUP", 1)
+	preview, err := Preview(context.Background(), fixture.authority,
+		newActivationSession(fixture, activationLedger(fixture.meta, &incomplete, now)), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first post-request observation still shows the cached pre-request
+	// state (qBittorrent refreshes later); a later read-only probe in the same
+	// invocation sees the complete stopped job.
+	runSession := newActivationSession(fixture, activationLedger(fixture.meta, &incomplete, now.Add(time.Second)),
+		activationLedger(fixture.meta, &incomplete, now.Add(2*time.Second)),
+		activationLedger(fixture.meta, &incomplete, now.Add(3*time.Second)),
+		activationLedger(fixture.meta, &complete, now.Add(4*time.Second)))
+	run, err := Run(context.Background(), RunOptions{Authority: fixture.authority, ExpectedPlanID: preview.Plan.ID,
+		Session: runSession, AcknowledgeRecheck: true})
+	if err != nil || run.Outcome != OutcomeCheckedStopped || !run.Journal.RecheckCompletionDurable || run.Operation.Resumable ||
+		runSession.recheckCalls != 1 || run.Journal.RecheckAttempts != 1 || run.Client.LedgerReads != 4 || run.Client.JobState != "stoppedUP" {
+		t.Fatalf("run=%#v calls=%d err=%v", run, runSession.recheckCalls, err)
+	}
+}
+
+func TestActivationReportsExhaustedRecheckBudgetWithoutAnotherRequest(t *testing.T) {
+	shortenActionSettleDelays(t)
+	fixture := makeActivationFixture(t)
+	now := time.Now().UTC()
+	complete := fixture.job("stoppedUP", 1)
+	preview, err := Preview(context.Background(), fixture.authority,
+		newActivationSession(fixture, activationLedger(fixture.meta, &complete, now)), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every observation, including the bounded settle probe, shows the same
+	// complete stopped job, so no checking or completion edge is ever proven.
+	completeSession := func(offset time.Duration) *activationSession {
+		return newActivationSession(fixture, activationLedger(fixture.meta, &complete, now.Add(offset)),
+			activationLedger(fixture.meta, &complete, now.Add(offset+100*time.Millisecond)),
+			activationLedger(fixture.meta, &complete, now.Add(offset+200*time.Millisecond)),
+			activationLedger(fixture.meta, &complete, now.Add(offset+300*time.Millisecond)))
+	}
+	runSession := completeSession(time.Second)
+	run, err := Run(context.Background(), RunOptions{Authority: fixture.authority, ExpectedPlanID: preview.Plan.ID,
+		Session: runSession, AcknowledgeRecheck: true})
+	if !errors.Is(err, ErrRequestUnknown) || run.Journal.RecheckAttempts != 1 {
+		t.Fatalf("run=%#v err=%v", run, err)
+	}
+	operationID, _ := ParseOperationID(run.Operation.ID)
+	for attempt := 2; attempt <= maximumActionAttempts; attempt++ {
+		repeat := completeSession(time.Duration(attempt) * time.Second)
+		resumed, resumeErr := Resume(context.Background(), operationID, RunOptions{Authority: fixture.authority,
+			ExpectedPlanID: preview.Plan.ID, Session: repeat, AcknowledgeRecheck: true, RepeatRecheck: true})
+		if !errors.Is(resumeErr, ErrRequestUnknown) || resumed.Journal.RecheckAttempts != attempt || repeat.recheckCalls != 1 {
+			t.Fatalf("attempt %d resume=%#v calls=%d err=%v", attempt, resumed, repeat.recheckCalls, resumeErr)
+		}
+	}
+	status, err := Status(context.Background(), StatusOptions{TargetRoot: fixture.targetRoot, OperationID: operationID})
+	if err != nil || status.Outcome != OutcomeBlocked || status.Operation.Resumable || status.Operation.Status != "attempt_budget_exhausted" ||
+		!hasActivationBlocker(status.Blockers, "client_activation.recheck_attempt_budget_exhausted") {
+		t.Fatalf("status=%#v err=%v", status, err)
+	}
+	exhausted := completeSession(10 * time.Second)
+	blocked, err := Resume(context.Background(), operationID, RunOptions{Authority: fixture.authority,
+		ExpectedPlanID: preview.Plan.ID, Session: exhausted, AcknowledgeRecheck: true, RepeatRecheck: true})
+	if !errors.Is(err, ErrPolicy) || blocked.Outcome != OutcomeBlocked || blocked.Operation.Resumable ||
+		blocked.Operation.Status != "attempt_budget_exhausted" || exhausted.recheckCalls != 0 || blocked.Journal.RecheckAttempts != maximumActionAttempts {
+		t.Fatalf("blocked=%#v calls=%d err=%v", blocked, exhausted.recheckCalls, err)
+	}
+}
+
+func hasActivationBlocker(values []Finding, code string) bool {
+	for _, value := range values {
+		if value.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func TestActivationRejectsOutOfOrderActionBracket(t *testing.T) {
