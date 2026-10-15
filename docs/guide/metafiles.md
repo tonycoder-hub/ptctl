@@ -99,7 +99,8 @@ directory guards. A rename, replacement, mount change, or volume change fails
 closed. Volatile memory filesystems such as tmpfs and ramfs are not accepted as
 durable stores. A store path whose existing prefix contains a symbolic link is
 rejected; use the resolved physical path (for example `/private/tmp/...` rather
-than `/tmp/...` on macOS).
+than `/tmp/...` on macOS). Initialization creates only the store directory
+itself, so its parent directory must already exist.
 
 A killed import can leave a private staging file in the store's `tmp`
 directory. The first import of a later run removes such files once they are
