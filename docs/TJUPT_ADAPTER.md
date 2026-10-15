@@ -180,6 +180,11 @@ capability, its `BonusExchangeConfig` reports exchange unavailable, and
 `site bonus exchange submit ... tjupt OPTION` is refused as usage before stdin
 is read. The catalog and review are unaffected.
 
+On the live site, posting an offer's form to `mybonus.php?action=exchange`
+returns a `确认操作` page that states the price and the offer and carries a new
+form with only the hidden `option` and a `passwd` password field. The balance
+does not change until that form is confirmed.
+
 The form machinery stays in the adapter: a fresh review GET, an exact-option
 rebind against the review ID, at most one POST of the freshly observed form
 after a durable attempt marker, and fixed outcome codes from the audited
