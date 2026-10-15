@@ -216,6 +216,12 @@ exactly one `<h2>`:
 | `兑换价格有变化` | rejected | `server_price_changed` |
 | anything else | unknown | `submission_response_unrecognized` |
 
+The first two rows were verified on the live site in October 2026 with
+option 14 (the 7-day no-ad offer, 7,000 bonus). A deliberately wrong password
+was rejected with the balance unchanged. One real exchange was confirmed: the
+balance dropped by exactly 7,000, and a repeated `submit` was refused before
+stdin was read.
+
 The price-change page is only produced for offers that take extra input, which
 `submit` does not send. It echoes the submitted password in a hidden field;
 response bodies are never retained or emitted. The allowlisted NexusPHP `do=`
