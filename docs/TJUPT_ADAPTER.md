@@ -302,7 +302,9 @@ addresses keeps the `site.ErrAddressBlocked` cause.
 
 TJUPT blocks the client IP after ten failed logins, so a failed login is never
 retried. In October 2026 a login without a code returned the two-step page
-with all ten attempts still offered.
+with all ten attempts still offered, and a login with a code from a password
+manager issued a seven-day `access_token` in two requests that `site status`
+and `site account` then accepted.
 
 ## Fixtures
 
