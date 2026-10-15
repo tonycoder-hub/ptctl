@@ -29,7 +29,8 @@ const tjuptDescriptorJSON = `    {
         "torrent.detail",
         "torrent.metafile.read_effectful",
         "bonus.offer.review",
-        "bonus.exchange.submit_effectful"
+        "bonus.exchange.submit_effectful",
+        "auth.login_effectful"
       ]
     }`
 
@@ -64,7 +65,7 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 		{args: []string{"site", "list"}, want: "" +
 			"ID     NAME           STABILITY     BASE URL                 CAPABILITIES\n" +
 			"mteam  M-Team / 馒头PT  experimental  https://api2.m-team.cc/  3\n" +
-			"tjupt  TJUPT / 北洋园PT  experimental  https://www.tjupt.org/   8\n"},
+			"tjupt  TJUPT / 北洋园PT  experimental  https://www.tjupt.org/   9\n"},
 		{args: []string{"site", "capabilities", "tjupt"}, want: "" +
 			"SITE   KIND        VALUE\n" +
 			"tjupt  auth        cookie_header\n" +
@@ -75,7 +76,8 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 			"tjupt  capability  torrent.detail\n" +
 			"tjupt  capability  torrent.metafile.read_effectful\n" +
 			"tjupt  capability  bonus.offer.review\n" +
-			"tjupt  capability  bonus.exchange.submit_effectful\n"},
+			"tjupt  capability  bonus.exchange.submit_effectful\n" +
+			"tjupt  capability  auth.login_effectful\n"},
 		{args: []string{"site", "capabilities", "mteam"}, want: "" +
 			"SITE   KIND        VALUE\n" +
 			"mteam  auth        api_key_header\n" +

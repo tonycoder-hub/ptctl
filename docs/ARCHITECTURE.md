@@ -353,6 +353,13 @@ Capabilities are small and explicit:
 - `bonus.catalog.read`
 - `bonus.offer.review`
 - `bonus.exchange.submit_effectful`
+- `auth.login_effectful`
+
+`auth.login_effectful` (`site.SessionLoginer`) signs in with an account
+password and optional one-time code, read from one stdin bundle, and returns a
+verified cookie credential that ptctl writes only to a non-terminal stdout and
+never stores. It sends one login request and at most one verifying read, never
+retries, and reports a refusal only by a fixed stop reason.
 
 Site-specific form or action writes live under narrow namespaced typed ports
 and durable action schemas. They are not forced into universal fields. The effectful

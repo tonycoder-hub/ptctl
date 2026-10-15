@@ -103,6 +103,7 @@ constant, a port interface, and one entry there.
 | `torrent.metafile.read_effectful` | `MetafileFetcher` | config and session | `site metafile fetch` |
 | `bonus.offer.review` | `BonusReviewReader` | config and session | `site bonus review` |
 | `bonus.exchange.submit_effectful` | `BonusExchangeWriter` | config and session | `site bonus exchange prepare`, `submit` |
+| `auth.login_effectful` | `SessionLoginer` | login | `site login` |
 
 ### Direct ports
 
@@ -157,6 +158,25 @@ If the site confirms each exchange with the account password, also implement
 cookie-only open is refused. Keep the `AccountPassword` value out of every
 error, receipt, and formatted struct; TJUPT is the reference.
 
+### Login port
+
+`SessionLoginer` signs in and returns a new session `Credential`. Declare
+`auth.login_effectful` only when the site's login form is understood well
+enough to recognize every refusal page. `LoginConfig` lists the session
+lengths the site offers and its default; the CLI rejects any other length
+before reading stdin. `Login` must:
+
+- return an error wrapping `context.Canceled` with zero requests when the
+  context is already done (`sitetest` checks this);
+- send one login request with no retry, and accept a session only after one
+  verifying read with it names the same account;
+- report recognized outcomes with a `*site.LoginError` and one of the
+  `site.Login*` stop reasons, including the site's remaining-attempts count
+  when its page states one;
+- clear any response body that may echo the password, and keep
+  `LoginCredentials` and the issued cookie out of every error and formatted
+  value. TJUPT is the reference.
+
 ## Stop reasons
 
 Receipts carry a stop reason, and the CLI publishes only values it already
@@ -168,6 +188,7 @@ knows. Any other value collapses into a generic code:
 | Bonus review | `safeBonusReviewStopReason` in `site_bonus.go` | `site.bonus_review_failed` |
 | Metafile fetch | `publicMetafileStopReason` in `site_metafile.go` | `site.fetch_failed` |
 | Bonus exchange submit | `safeBonusExchangeSubmitStop` in `site_bonus_exchange.go` | `site.exchange_failed` |
+| Login | `knownLoginStopReason` in `site_login.go` | `site login failed` |
 
 Reuse an existing stop reason whenever one fits. A new one is a public-contract
 change: add it to the allowlist and to the CLI tests in the same commit.
@@ -187,7 +208,8 @@ reaches the user. An adapter may wrap one of the sentinels in
 | `site.ErrAddressBlocked` | `httpguard.ErrBlockedAddress`: DNS returned only private or reserved addresses, as with fake-IP proxies. |
 
 Wrapping a sentinel changes that adapter's public error text, so add it
-deliberately and pin it in tests. TJUPT wraps none of them.
+deliberately and pin it in tests. TJUPT's reads wrap none of them; its login
+wraps `site.ErrAddressBlocked`, which `site login` names the same way.
 
 ## Persisted identity
 
