@@ -268,6 +268,108 @@ func (c *Client) GetOnceClassified(ctx context.Context, relativePath string, que
 // body is intentionally non-replayable, the dedicated transport is fresh and
 // H1-only, and the only redirect data retained is an allowlisted classifier ID.
 func (c *Client) PostFormOnce(ctx context.Context, relativePath string, query url.Values, fields []FormField, accept string, maxFields int, maxFormBytes, maxBody, maxHeaderBytes int64, classify RedirectClassifier) (StrictResponse, error) {
+	return c.postFormOnce(ctx, relativePath, query, fields, accept, maxFields, maxFormBytes, maxBody, maxHeaderBytes, classify, nil)
+}
+
+// SessionCookie is one Set-Cookie value a caller explicitly asked
+// PostLoginFormOnce to keep. The value is a secret: it formats as redacted and
+// sits behind a pointer, so formatting a struct that holds a SessionCookie
+// prints an address rather than the value.
+type SessionCookie struct {
+	Name string
+	// Expires is zero for a cookie that lasts only for the browser session.
+	Expires time.Time
+	value   *string
+}
+
+// NewSessionCookie builds a captured cookie, for adapter test doubles.
+func NewSessionCookie(name, value string, expires time.Time) SessionCookie {
+	return SessionCookie{Name: name, Expires: expires, value: &value}
+}
+
+func (cookie SessionCookie) Value() string {
+	if cookie.value == nil {
+		return ""
+	}
+	return *cookie.value
+}
+
+func (cookie SessionCookie) String() string   { return "[REDACTED]" }
+func (cookie SessionCookie) GoString() string { return "httpguard.SessionCookie{[REDACTED]}" }
+
+const (
+	maxCapturedCookieNames = 8
+	maxCapturedCookieBytes = 8 << 10
+)
+
+// PostLoginFormOnce is PostFormOnce for a login form. It also returns the
+// Set-Cookie values named in cookieNames, and no others. A cookie the response
+// deletes or expires is not returned, and two live values for one name fail
+// the request rather than picking one. Nothing else from the response headers
+// crosses this boundary.
+func (c *Client) PostLoginFormOnce(ctx context.Context, relativePath string, fields []FormField, accept string, maxFields int, maxFormBytes, maxBody, maxHeaderBytes int64, classify RedirectClassifier, cookieNames []string) (StrictResponse, []SessionCookie, error) {
+	if len(cookieNames) == 0 || len(cookieNames) > maxCapturedCookieNames {
+		return StrictResponse{}, nil, fmt.Errorf("site session cookie names are invalid")
+	}
+	wanted := make(map[string]bool, len(cookieNames))
+	for _, name := range cookieNames {
+		if !cookieToken(name) || wanted[name] {
+			return StrictResponse{}, nil, fmt.Errorf("site session cookie names are invalid")
+		}
+		wanted[name] = true
+	}
+	var captured []SessionCookie
+	capture := func(resp *http.Response) error {
+		now := time.Now()
+		byName := make(map[string]SessionCookie, len(wanted))
+		for _, cookie := range resp.Cookies() {
+			if !wanted[cookie.Name] {
+				continue
+			}
+			expires := cookie.Expires
+			if cookie.MaxAge > 0 {
+				expires = now.Add(time.Duration(cookie.MaxAge) * time.Second)
+			}
+			if cookie.MaxAge < 0 || (!expires.IsZero() && !expires.After(now)) || cookie.Value == "" || cookie.Value == "deleted" {
+				continue
+			}
+			if len(cookie.Value) > maxCapturedCookieBytes || !asciiHeaderValue(cookie.Value) || strings.ContainsAny(cookie.Value, " ;,") {
+				return fmt.Errorf("site session cookie was invalid")
+			}
+			if previous, seen := byName[cookie.Name]; seen && previous.Value() != cookie.Value {
+				return fmt.Errorf("site session cookie was ambiguous")
+			}
+			value := cookie.Value
+			byName[cookie.Name] = SessionCookie{Name: cookie.Name, Expires: expires.UTC(), value: &value}
+		}
+		for _, name := range cookieNames {
+			if cookie, ok := byName[name]; ok {
+				captured = append(captured, cookie)
+			}
+		}
+		return nil
+	}
+	response, err := c.postFormOnce(ctx, relativePath, nil, fields, accept, maxFields, maxFormBytes, maxBody, maxHeaderBytes, classify, capture)
+	if err != nil {
+		return response, nil, err
+	}
+	return response, captured, nil
+}
+
+func cookieToken(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) postFormOnce(ctx context.Context, relativePath string, query url.Values, fields []FormField, accept string, maxFields int, maxFormBytes, maxBody, maxHeaderBytes int64, classify RedirectClassifier, capture func(*http.Response) error) (StrictResponse, error) {
 	var result StrictResponse
 	if maxBody <= 0 || maxBody > 32<<20 || maxHeaderBytes <= 0 || maxHeaderBytes > hardMaxResponseHeaders {
 		return result, fmt.Errorf("site response budget is invalid")
@@ -307,7 +409,7 @@ func (c *Client) PostFormOnce(ctx context.Context, relativePath string, query ur
 	req.Header.Set("User-Agent", "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; explicit-effect-client)")
 	c.applyCredential(req)
 	req.Close = true
-	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, classify)
+	return c.roundTripCapturing(ctx, req, result, maxBody, maxHeaderBytes, classify, capture)
 }
 
 // PostReadOnce performs one non-following, non-retrying POST for APIs that
@@ -367,6 +469,13 @@ func (c *Client) applyCredential(req *http.Request) {
 // roundTrip sends req exactly once and applies the shared response checks in
 // a fixed order. Only callers that accept redirects pass a classifier.
 func (c *Client) roundTrip(ctx context.Context, req *http.Request, result StrictResponse, maxBody, maxHeaderBytes int64, classify RedirectClassifier) (StrictResponse, error) {
+	return c.roundTripCapturing(ctx, req, result, maxBody, maxHeaderBytes, classify, nil)
+}
+
+// roundTripCapturing is roundTrip with an optional hook that sees the response
+// headers after they pass the shared checks and before the body is read. Only
+// PostLoginFormOnce passes one.
+func (c *Client) roundTripCapturing(ctx context.Context, req *http.Request, result StrictResponse, maxBody, maxHeaderBytes int64, classify RedirectClassifier, capture func(*http.Response) error) (StrictResponse, error) {
 	if c.strictHTTP == nil {
 		return result, fmt.Errorf("strict site transport is unavailable")
 	}
@@ -417,6 +526,12 @@ func (c *Client) roundTrip(ctx context.Context, req *http.Request, result Strict
 					result.RedirectID = redirectID
 				}
 			}
+		}
+	}
+	if capture != nil {
+		if err := capture(resp); err != nil {
+			result.ObservedAtEnd = time.Now().UTC()
+			return result, err
 		}
 	}
 	if resp.ContentLength > maxBody {

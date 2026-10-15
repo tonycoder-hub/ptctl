@@ -102,6 +102,7 @@ Per-command details are in
 | `--site-cookie-stdin` | `reconcile report` with a live site observation and no downloader | The complete `Cookie` header value |
 | `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}` |
 | `--credential-bundle-stdin` | `site bonus exchange submit` for sites that confirm with the account password (TJUPT) | `{"schema":"ptctl.credentials/v1","site_cookie":"...","site_password":"..."}` |
+| `--credential-bundle-stdin` | `site login` | `{"schema":"ptctl.credentials/v1","site_username":"...","site_password":"...","site_totp":"123456"}`; `site_totp` is optional |
 
 - An interactive terminal on stdin is refused; the secret must be piped.
 - Single secrets are limited to 64 KiB and the bundle to 128 KiB. The bundle is
@@ -109,7 +110,9 @@ Per-command details are in
 - Site reads, metafile fetch, and reconciliation validate usage, capabilities,
   and local inputs before reading stdin.
 - Credentials stay in memory. They are never persisted, printed, or forwarded
-  in error text.
+  in error text. The one exception is the session cookie `site login` issues:
+  it is written to stdout, which must be a pipe or an owner-only file, so the
+  caller decides where it is kept.
 - `ptctl site capabilities SITE` lists the authentication methods a site
   accepts: `cookie_header` takes `--cookie-stdin`, `api_key_header` takes
   `--api-key-stdin`. Omitting the flag names the one the site needs.
@@ -122,7 +125,7 @@ Per-command details are in
 ## Effects and acknowledgements
 
 Every write and every tracker-visible or downloader effect requires its own
-flag. Each effectful run also takes the ID printed by its zero-write review
+flag, except `site login`, whose only effect is the sign-in the command names. Each effectful run also takes the ID printed by its zero-write review
 (`--expect-plan-id`, `--expect-adoption-plan-id`,
 `--expect-activation-plan-id`, `--expect-stop-plan-id`,
 `--expect-removal-plan-id`, `--expect-cleanup-plan-id`, or

@@ -17,6 +17,7 @@ const (
 
 const (
 	CapabilityAuthCheck     Capability = "auth.check"
+	CapabilityLogin         Capability = "auth.login_effectful"
 	CapabilityAccountRead   Capability = "account.read"
 	CapabilitySearch        Capability = "torrent.search"
 	CapabilityDetail        Capability = "torrent.detail"

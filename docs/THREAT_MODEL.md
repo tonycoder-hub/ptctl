@@ -124,6 +124,13 @@ for an explicit numeric loopback address.
 ### Retry storms and account bans
 
 The TJUPT adapter sends at most one bounded GET per command and never retries.
+`site login` is the exception: one login POST, then one verifying GET only if
+the site issued a session cookie. Because TJUPT blocks the client IP after ten
+failed logins, a failed or ambiguous login is never retried, the site's own
+remaining-attempts count is surfaced when its page states one, and the
+two-step page, which echoes the password in a hidden field, is cleared after
+classification. The issued cookie is written only to a pipe or an owner-only
+stdout file and is kept only after the verifying read names the same account.
 The M-Team adapter sends at most one bounded POST per command to one of two
 read-only JSON API endpoints (`member/profile` and `torrent/search`), with a
 non-replayable body of at most 16 KiB, and never retries. HTTP 429 is terminal. There is no cross-process limiter in the alpha, so

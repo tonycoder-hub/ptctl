@@ -34,6 +34,54 @@ TJUPT search results also carry the category ID, publish time (in UTC),
 seeders, leechers, snatches, and promotion when the results table has its
 usual shape; otherwise a result keeps only its name and size.
 
+Instead of copying the cookie out of a browser, `site login` can sign in with
+the account password and write a new session cookie for the commands above.
+It takes one strict `ptctl.credentials/v1` bundle on stdin with
+`site_username`, `site_password`, and, for an account with two-step
+verification, the current one-time code in `site_totp`. Stdout must be a pipe
+or an owner-only file: the command refuses a terminal, a device, or a file
+other users can read. One way to build the bundle without putting a secret in
+argv, here with the 1Password CLI supplying the code:
+
+```bash
+(umask 077
+ jq -n --arg user "$TJUPT_USER" \
+   --rawfile password "$PASSWORD_FILE" \
+   --rawfile totp <(op item get "$TJUPT_ITEM" --otp) \
+   '{schema: "ptctl.credentials/v1",
+     site_username: $user,
+     site_password: ($password | rtrimstr("\n")),
+     site_totp: ($totp | rtrimstr("\n"))}' | \
+   ptctl site login --credential-bundle-stdin tjupt > "$COOKIE_FILE")
+
+ptctl site status --cookie-stdin tjupt < "$COOKIE_FILE"
+```
+
+Leave out `site_totp` when the account has no two-step verification.
+`--session-days` picks the session length the site offers (TJUPT: 1, 7, 14, 30,
+or 90; default 7). On success, stdout holds only the cookie line and stderr
+reports `site login succeeded: site=tjupt username=... session_expires=...
+requests=2`.
+
+Login sends one POST and never retries. If the site issues a session cookie,
+ptctl waits two seconds and makes one read with it, and keeps the cookie only
+if that read shows the same signed-in account. Otherwise it exits `1` with
+`site login stopped: REASON`:
+
+| Reason | Meaning |
+|---|---|
+| `login_credentials_rejected` | The site refused the username or password. |
+| `login_two_factor_required` | The account needs a one-time code and the bundle had none. |
+| `login_two_factor_rejected` | The one-time code was wrong or expired. |
+| `login_response_unrecognized` | The site answered with a page ptctl does not recognize. |
+| `login_session_unverified` | A cookie was issued, but the verifying read did not show the same signed-in account. The cookie is discarded. |
+| `login_request_failed` | The request failed or its response was rejected before classification. The site may still have counted the attempt. |
+
+TJUPT blocks the client IP after ten failed logins. When the page states how
+many attempts are left, the error line ends with `(the site reports N login
+attempts left before it blocks this IP)`. Fix the input before trying again,
+and never loop `site login`. Usage errors exit `2` before stdin is read.
+
 M-Team reads use a site-issued API key instead of a cookie, passed with
 `--api-key-stdin` under the same stdin-only rules. `status`, `account`, and
 `search` each send one read-only POST to M-Team's JSON API and never retry;
