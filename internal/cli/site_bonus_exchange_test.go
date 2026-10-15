@@ -23,6 +23,7 @@ type fakeBonusExchangeAdapter struct {
 	reviewReceipt      site.BonusReviewReceipt
 	submissionOutcome  string
 	submissionStop     string
+	confirmationCode   string
 	submitErr          error
 	configErr          error
 	openErr            error
@@ -115,6 +116,9 @@ func (session *fakeBonusExchangeSession) SubmitFreshBonusExchange(_ context.Cont
 	}
 	if receipt.Outcome == site.BonusExchangeOutcomeConfirmed {
 		receipt.ConfirmationCode = "fake.bonus_exchange.confirmed.v1"
+		if session.adapter.confirmationCode != "" {
+			receipt.ConfirmationCode = session.adapter.confirmationCode
+		}
 		receipt.StopReason = ""
 	}
 	if session.adapter.invalidObservation {
@@ -138,6 +142,207 @@ func (session *fakeBonusExchangeSession) Close() error {
 	}
 	session.closed = true
 	return session.adapter.closeErr
+}
+
+// fakePasswordBonusExchangeAdapter confirms every exchange with the account
+// password, as TJUPT does, so it refuses cookie-only sessions.
+type fakePasswordBonusExchangeAdapter struct {
+	*fakeBonusExchangeAdapter
+	cookieOnlyOpens int
+	passwordOpens   int
+	password        string
+}
+
+func (adapter *fakePasswordBonusExchangeAdapter) OpenBonusExchangeSession(context.Context, site.Credential) (site.BonusExchangeSession, error) {
+	adapter.cookieOnlyOpens++
+	return nil, errors.New("fake bonus exchange requires the account password")
+}
+
+func (adapter *fakePasswordBonusExchangeAdapter) OpenPasswordConfirmedBonusExchangeSession(ctx context.Context, credential site.Credential, password site.AccountPassword) (site.BonusExchangeSession, error) {
+	adapter.passwordOpens++
+	adapter.password = password.SecretValue()
+	return adapter.fakeBonusExchangeAdapter.OpenBonusExchangeSession(ctx, credential)
+}
+
+const (
+	fakeBundleCookie   = "sid=COOKIE-BUNDLE-CANARY"
+	fakeBundlePassword = "PASSWORD-BUNDLE-CANARY"
+)
+
+func fakeCredentialBundle(t *testing.T, cookie, password string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"schema": "ptctl.credentials/v1", "site_cookie": cookie, "site_password": password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestSiteBonusExchangePasswordBundleSubmitsOnceWithoutDisclosure(t *testing.T) {
+	adapter := &fakePasswordBonusExchangeAdapter{fakeBonusExchangeAdapter: successfulFakeBonusExchange(t)}
+	adapter.confirmationCode = "fake.bonus_exchange.confirm" + site.BonusExchangeMessageConfirmationSuffix
+	stateRoot := initializedBonusExchangeStore(t)
+	reviewID := adapter.review.ReviewID
+	prepared := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"prepare", "--state-store", stateRoot, "--expect-review-id", reviewID, "--output", "json", "fakept", "1",
+	}, false)
+
+	var out bytes.Buffer
+	bundle := fakeCredentialBundle(t, fakeBundleCookie, fakeBundlePassword)
+	a := &app{stdin: strings.NewReader(bundle), stdout: &out, registry: site.NewRegistry(adapter)}
+	if err := a.siteBonusExchange([]string{
+		"submit", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--expect-review-id", reviewID, "--credential-bundle-stdin", "--acknowledge-bonus-exchange", "--output", "json", "fakept", "1",
+	}); err != nil || strings.Contains(out.String(), "CANARY") {
+		t.Fatalf("err=%v out=%s", err, out.String())
+	}
+	var envelope struct {
+		Data siteBonusExchangeReport `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	submitted := envelope.Data
+	if submitted.Outcome != bonusexchange.StateConfirmed || submitted.FormSubmissionAttempts != 1 || !submitted.Persistence.OutcomeDurable ||
+		submitted.Request.Submission.ConfirmationCode != "allowlisted_site_message" ||
+		adapter.passwordOpens != 1 || adapter.cookieOnlyOpens != 0 || adapter.submissions != 1 {
+		t.Fatalf("submitted=%#v adapter=%#v", submitted, adapter)
+	}
+	if adapter.credential != fakeBundleCookie || adapter.password != fakeBundlePassword {
+		t.Fatalf("bundle was not delivered exactly: cookie=%t password=%t", adapter.credential == fakeBundleCookie, adapter.password == fakeBundlePassword)
+	}
+	assertDirectoryExcludesText(t, stateRoot, fakeBundleCookie)
+	assertDirectoryExcludesText(t, stateRoot, fakeBundlePassword)
+
+	status := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"status", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(), "--output", "json",
+	}, false)
+	if status.Outcome != bonusexchange.StateConfirmed || status.Operation.OutcomeRecord == nil {
+		t.Fatalf("status=%#v", status)
+	}
+
+	retryReader := &trackingReader{}
+	_ = runBonusExchangeCLI(t, &app{stdin: retryReader, registry: site.NewRegistry(adapter)}, []string{
+		"submit", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+		"--expect-review-id", reviewID, "--credential-bundle-stdin", "--acknowledge-bonus-exchange", "--output", "json", "fakept", "1",
+	}, true)
+	if retryReader.read || adapter.passwordOpens != 1 || adapter.submissions != 1 {
+		t.Fatalf("confirmed exchange was retried: read=%t adapter=%#v", retryReader.read, adapter)
+	}
+}
+
+func TestSiteBonusExchangePasswordRejectionsArePublicStopReasons(t *testing.T) {
+	for _, stop := range []string{"server_password_rejected", "server_password_required", "server_price_changed"} {
+		adapter := &fakePasswordBonusExchangeAdapter{fakeBonusExchangeAdapter: successfulFakeBonusExchange(t)}
+		adapter.submissionOutcome = site.BonusExchangeOutcomeRejected
+		adapter.submissionStop = stop
+		stateRoot := initializedBonusExchangeStore(t)
+		prepared := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+			"prepare", "--state-store", stateRoot, "--expect-review-id", adapter.review.ReviewID, "--output", "json", "fakept", "1",
+		}, false)
+		var out bytes.Buffer
+		a := &app{stdin: strings.NewReader(fakeCredentialBundle(t, fakeBundleCookie, fakeBundlePassword)), stdout: &out, registry: site.NewRegistry(adapter)}
+		err := a.siteBonusExchange([]string{
+			"submit", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+			"--expect-review-id", adapter.review.ReviewID, "--credential-bundle-stdin", "--acknowledge-bonus-exchange", "--output", "json", "fakept", "1",
+		})
+		var envelope struct {
+			Data siteBonusExchangeReport `json:"data"`
+		}
+		if decodeErr := json.Unmarshal(out.Bytes(), &envelope); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if err == nil || strings.Contains(err.Error(), "CANARY") || strings.Contains(out.String(), "CANARY") ||
+			envelope.Data.Outcome != bonusexchange.StateRejected || envelope.Data.Request.Submission.StopReason != stop ||
+			envelope.Data.Request.Submission.ConfirmationCode != "" || adapter.submissions != 1 {
+			t.Fatalf("stop=%s err=%v report=%#v", stop, err, envelope.Data)
+		}
+		assertDirectoryExcludesText(t, stateRoot, fakeBundlePassword)
+	}
+}
+
+func TestSiteBonusExchangeInvalidPasswordBundleNeverOpensASession(t *testing.T) {
+	adapter := &fakePasswordBonusExchangeAdapter{fakeBonusExchangeAdapter: successfulFakeBonusExchange(t)}
+	stateRoot := initializedBonusExchangeStore(t)
+	prepared := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"prepare", "--state-store", stateRoot, "--expect-review-id", adapter.review.ReviewID, "--output", "json", "fakept", "1",
+	}, false)
+	cases := []string{
+		"",
+		fakeBundleCookie,
+		`{"schema":"ptctl.credentials/v1","site_cookie":"sid=COOKIE-BUNDLE-CANARY"}`,
+		`{"schema":"ptctl.credentials/v1","site_cookie":"sid=COOKIE-BUNDLE-CANARY","site_password":"PASSWORD-BUNDLE-CANARY","extra":"x"}`,
+		`{"schema":"ptctl.credentials/v1","site_cookie":"sid=COOKIE-BUNDLE-CANARY","downloader_password":"PASSWORD-BUNDLE-CANARY"}`,
+		`{"schema":"ptctl.credentials/v2","site_cookie":"sid=COOKIE-BUNDLE-CANARY","site_password":"PASSWORD-BUNDLE-CANARY"}`,
+		`{"schema":"ptctl.credentials/v1","site_cookie":"sid=COOKIE-BUNDLE-CANARY","site_password":"PASSWORD-BUNDLE-CANARY","site_password":"PASSWORD-BUNDLE-CANARY"}`,
+		`{"schema":"ptctl.credentials/v1","site_cookie":"sid=COOKIE-BUNDLE-CANARY","site_password":"PASSWORD-BUNDLE-CANARY"} {}`,
+		fakeCredentialBundle(t, fakeBundleCookie, ""),
+		fakeCredentialBundle(t, fakeBundleCookie, "PASSWORD-BUNDLE-CANARY\n"),
+		fakeCredentialBundle(t, "", fakeBundlePassword),
+		fakeCredentialBundle(t, "sid=COOKIE-BUNDLE-CANARY\n", fakeBundlePassword),
+	}
+	for index, input := range cases {
+		var out bytes.Buffer
+		a := &app{stdin: strings.NewReader(input), stdout: &out, registry: site.NewRegistry(adapter)}
+		err := a.siteBonusExchange([]string{
+			"submit", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(),
+			"--expect-review-id", adapter.review.ReviewID, "--credential-bundle-stdin", "--acknowledge-bonus-exchange", "--output", "json", "fakept", "1",
+		})
+		var envelope struct {
+			Data siteBonusExchangeReport `json:"data"`
+		}
+		if decodeErr := json.Unmarshal(out.Bytes(), &envelope); decodeErr != nil {
+			t.Fatalf("case %d: %v", index, decodeErr)
+		}
+		if err == nil || err.Error() != "read site credential failed" || strings.Contains(out.String(), "CANARY") ||
+			len(envelope.Data.Blockers) != 1 || envelope.Data.Blockers[0].Code != "credential.read_failed" ||
+			envelope.Data.WritesPerformed != 0 || adapter.passwordOpens != 0 || adapter.cookieOnlyOpens != 0 || adapter.opened != 0 {
+			t.Fatalf("case %d err=%v report=%#v adapter=%#v", index, err, envelope.Data, adapter)
+		}
+	}
+	status := runBonusExchangeCLI(t, &app{stdin: &trackingReader{}, registry: site.NewRegistry(adapter)}, []string{
+		"status", "--state-store", stateRoot, "--intent-record", prepared.Operation.IntentRecord.ID.String(), "--output", "json",
+	}, false)
+	if status.Outcome != bonusexchange.StatePrepared || status.Operation.AttemptRecord != nil {
+		t.Fatalf("invalid bundles changed durable state: %#v", status)
+	}
+	assertDirectoryExcludesText(t, stateRoot, "CANARY")
+}
+
+func TestSiteBonusExchangeCredentialFlagsMatchTheSite(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "MUST-NOT-BE-OPENED")
+	intent := "sha256:" + strings.Repeat("a", 64)
+	review := "sha256:" + strings.Repeat("c", 64)
+	cookieOnly := successfulFakeBonusExchange(t)
+	password := &fakePasswordBonusExchangeAdapter{fakeBonusExchangeAdapter: successfulFakeBonusExchange(t)}
+	tests := []struct {
+		adapter site.Adapter
+		flags   []string
+		want    string
+	}{
+		{password, []string{"--cookie-stdin"}, `site "fakept" confirms bonus exchange with the account password; submit requires --credential-bundle-stdin`},
+		{cookieOnly, []string{"--credential-bundle-stdin"}, `site "fakept" bonus exchange takes only --cookie-stdin`},
+		{password, []string{"--cookie-stdin", "--credential-bundle-stdin"}, "accepts --cookie-stdin or --credential-bundle-stdin, not both"},
+		{cookieOnly, nil, "requires --cookie-stdin and --acknowledge-bonus-exchange"},
+	}
+	for _, test := range tests {
+		reader := &trackingReader{}
+		var out bytes.Buffer
+		a := &app{stdin: reader, stdout: &out, registry: site.NewRegistry(test.adapter)}
+		args := append([]string{"submit", "--state-store", missing, "--intent-record", intent, "--expect-review-id", review}, test.flags...)
+		args = append(args, "--acknowledge-bonus-exchange", "fakept", "1")
+		err := a.siteBonusExchange(args)
+		var usage *usageErr
+		if err == nil || !errors.As(err, &usage) || !strings.Contains(err.Error(), test.want) || reader.read || out.Len() != 0 {
+			t.Fatalf("flags=%v err=%v read=%t out=%q", test.flags, err, reader.read, out.String())
+		}
+		if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+			t.Fatalf("flags=%v accessed the store: %v", test.flags, statErr)
+		}
+	}
+	if cookieOnly.opened != 0 || password.passwordOpens != 0 || password.cookieOnlyOpens != 0 {
+		t.Fatalf("usage errors opened a site session")
+	}
 }
 
 func TestSiteBonusExchangePrepareSubmitStatusAndNoRetry(t *testing.T) {
@@ -689,28 +894,29 @@ func TestSiteBonusExchangeRetentionUsagePrecedesStoreAccess(t *testing.T) {
 func TestSiteBonusExchangeHelpAndDispatch(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Run([]string{"site", "bonus", "exchange", "help"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), "deterministic at-most-once attempt marker") || !strings.Contains(out.String(), "never chooses a latest operation") ||
-		!strings.Contains(out.String(), "acknowledge-state-prune") || !strings.Contains(out.String(), "acknowledge-history-forget") || !strings.Contains(out.String(), "submission-unknown operations are never pruned") {
+		!strings.Contains(out.String(), "acknowledge-state-prune") || !strings.Contains(out.String(), "acknowledge-history-forget") || !strings.Contains(out.String(), "submission-unknown operations are never pruned") ||
+		!strings.Contains(out.String(), "(--cookie-stdin | --credential-bundle-stdin)") || !strings.Contains(out.String(), "site_password") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()
 	errOut.Reset()
-	// TJUPT confirms each exchange with the account password, so it keeps
-	// review but no longer declares exchange.
 	if code := Run([]string{"site", "capabilities", "--output", "json", "tjupt"}, strings.NewReader(""), &out, &errOut); code != 0 ||
-		!strings.Contains(out.String(), string(domain.CapabilityBonusReview)) || strings.Contains(out.String(), string(domain.CapabilityBonusExchange)) {
+		!strings.Contains(out.String(), string(domain.CapabilityBonusReview)) || !strings.Contains(out.String(), string(domain.CapabilityBonusExchange)) {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
+	// TJUPT confirms each exchange with the account password, so a
+	// cookie-only submit is a usage error before any store or stdin access.
 	missing := filepath.Join(t.TempDir(), "MUST-NOT-BE-OPENED")
 	reader := &trackingReader{}
 	out.Reset()
 	errOut.Reset()
 	if code := Run([]string{"site", "bonus", "exchange", "submit", "--state-store", missing, "--intent-record", "sha256:" + strings.Repeat("a", 64),
 		"--expect-review-id", "sha256:" + strings.Repeat("c", 64), "--cookie-stdin", "--acknowledge-bonus-exchange", "tjupt", "14"}, reader, &out, &errOut); code != 2 ||
-		reader.read || out.Len() != 0 || !strings.Contains(errOut.String(), `site "tjupt" does not support acknowledged bonus exchange`) {
+		reader.read || out.Len() != 0 || !strings.Contains(errOut.String(), `site "tjupt" confirms bonus exchange with the account password; submit requires --credential-bundle-stdin`) {
 		t.Fatalf("code=%d read=%t out=%q err=%q", code, reader.read, out.String(), errOut.String())
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
-		t.Fatalf("an undeclared exchange accessed the store: %v", err)
+		t.Fatalf("a cookie-only TJUPT exchange accessed the store: %v", err)
 	}
 }
 

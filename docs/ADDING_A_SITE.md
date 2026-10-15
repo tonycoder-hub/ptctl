@@ -150,6 +150,13 @@ consumed by at most one submission. Read the
 [bonus exchange design](ARCHITECTURE.md#durable-at-most-once-bonus-exchange)
 before implementing it.
 
+If the site confirms each exchange with the account password, also implement
+`PasswordConfirmedBonusExchangeWriter` and make the cookie-only
+`OpenBonusExchangeSession` fail. The CLI then requires the
+`site_cookie`/`site_password` bundle, and `sitetest` checks that the
+cookie-only open is refused. Keep the `AccountPassword` value out of every
+error, receipt, and formatted struct; TJUPT is the reference.
+
 ## Stop reasons
 
 Receipts carry a stop reason, and the CLI publishes only values it already
