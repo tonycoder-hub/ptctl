@@ -128,6 +128,7 @@ func TestKnownCapabilitiesCoverEveryDomainCapabilityOnce(t *testing.T) {
 	for _, capability := range []domain.Capability{
 		domain.CapabilityAuthCheck, domain.CapabilityAccountRead, domain.CapabilitySearch, domain.CapabilityDetail,
 		domain.CapabilityMetafile, domain.CapabilityBonusRead, domain.CapabilityBonusReview, domain.CapabilityBonusExchange,
+		domain.CapabilityLogin,
 	} {
 		if !seen[capability] {
 			t.Fatalf("missing %q", capability)

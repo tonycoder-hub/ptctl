@@ -84,6 +84,7 @@ var capabilityPorts = map[domain.Capability]func(Adapter) bool{
 	domain.CapabilityMetafile:      func(a Adapter) bool { _, ok := a.(MetafileFetcher); return ok },
 	domain.CapabilityBonusReview:   func(a Adapter) bool { _, ok := a.(BonusReviewReader); return ok },
 	domain.CapabilityBonusExchange: func(a Adapter) bool { _, ok := a.(BonusExchangeWriter); return ok },
+	domain.CapabilityLogin:         func(a Adapter) bool { _, ok := a.(SessionLoginer); return ok },
 }
 
 // KnownCapabilities returns every capability that has a typed port, in a
@@ -98,6 +99,7 @@ func KnownCapabilities() []domain.Capability {
 		domain.CapabilityMetafile,
 		domain.CapabilityBonusReview,
 		domain.CapabilityBonusExchange,
+		domain.CapabilityLogin,
 	}
 }
 

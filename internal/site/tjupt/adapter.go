@@ -28,6 +28,8 @@ const (
 type Adapter struct {
 	baseURL   string
 	newClient guardedClientFactory
+	// sleep replaces the real wait between dependent requests in tests.
+	sleep func(context.Context, time.Duration) error
 }
 
 type guardedClient interface {
@@ -106,7 +108,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 		domain.CapabilityBonusRead,
 	}
 	if a.productionOrigin() {
-		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview, domain.CapabilityBonusExchange)
+		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview, domain.CapabilityBonusExchange, domain.CapabilityLogin)
 	}
 	return domain.SiteDescriptor{
 		ID:           SiteID,

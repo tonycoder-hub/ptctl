@@ -5,7 +5,7 @@
 TJUPT is the first experimental site implementation, not a special case
 embedded in the content core. Its read commands were run against the live site
 with a real session in October 2026. The adapter declares six ordinary read
-capabilities plus two separately acknowledged effectful capabilities:
+capabilities plus three effectful capabilities:
 
 - session check;
 - account snapshot read;
@@ -15,10 +15,13 @@ capabilities plus two separately acknowledged effectful capabilities:
 - exact-option, zero-write bonus-offer review;
 - acknowledged metafile fetch into the private store;
 - acknowledged, at-most-once bonus exchange, confirmed with the account
-  password (see [Bonus exchange](#bonus-exchange)).
+  password (see [Bonus exchange](#bonus-exchange));
+- password login with an optional two-step code, issuing a new session cookie
+  (see [Login](#login)).
 
-Every TJUPT read sends at most one bounded GET. Only `site bonus exchange
-submit` submits a form: one fresh review GET, then at most one POST.
+Every TJUPT read sends at most one bounded GET. Only two commands submit a
+form: `site bonus exchange submit` sends one fresh review GET, then at most one
+POST, and `site login` sends one login POST, then at most one verifying GET.
 All site transports use the configured
 TJUPT HTTPS origin, do not retry, and refuse to follow redirects. Each
 effectful acknowledgement is therefore scoped to a fixed request count.
@@ -237,9 +240,10 @@ The generic workflow is described in
 
 ## Authentication
 
-The adapter does not automate login, bypass CAPTCHA/Cloudflare, or read browser
-cookie stores. A caller may provide the complete Cookie header value through
-stdin for one process:
+The adapter does not bypass CAPTCHA/Cloudflare or read browser cookie stores.
+A caller provides the complete Cookie header value through stdin for one
+process, either copied from a browser session or issued by `site login`
+([below](#login)):
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
@@ -257,6 +261,50 @@ port, and a nonblank search query where relevant before it reads stdin.
 Adapter runtime errors are exposed only as fixed safe diagnostics, with typed
 context cancellation or deadline causes preserved; raw cookie, request, and
 response details do not cross the CLI boundary.
+
+### Login
+
+`site login --credential-bundle-stdin tjupt` implements
+`auth.login_effectful`, declared only on the default origin. Usage, the
+session length, and stdout safety are checked before stdin is read; the bundle
+then carries `site_username`, `site_password`, and an optional `site_totp`,
+which TJUPT requires to be exactly six digits. Command usage, output, and stop
+reasons are in the [sites guide](guide/sites.md).
+
+TJUPT's `login.php` posts `username`, `password`, and `logout` (the session
+length in days: 1, 7, 14, 30, or 90) to `takelogin.php`. An account with
+two-step verification gets a `verifyform` page back that re-posts the same
+fields plus `verify_code`, so one POST that already carries `verify_code`
+completes the login. The adapter sends exactly that one form POST over fresh
+HTTP/1.1 with no cookie, no connection reuse, no redirect following, and no
+retry, within a 1 MiB body and 32 KiB header budget. Only an `access_token`
+`Set-Cookie` is captured; deleted or expired values are ignored, and two
+different values fail closed. The response is classified in this order:
+
+- a `text/html` page with the `verifyform` form and its `verify_code` input:
+  `login_two_factor_required`, or `login_two_factor_rejected` when a code was
+  sent;
+- a `text/html` 200 page with no session cookie and a `登录失败` / `登錄失敗` /
+  `login failed` marker: `login_credentials_rejected`;
+- exactly one live `access_token` with status 200–399: a candidate session;
+- anything else: `login_response_unrecognized`.
+
+When a refusal page states `你还有 N 次尝试机会`, N is reported with the stop
+reason. The two-step page echoes the password in a hidden field, so the
+response body is cleared right after classification and never logged. A
+candidate session is kept only after a two-second pause and one
+`mybonus.php` read with it that is authenticated and names the same username
+(case-insensitively); otherwise the stop reason is `login_session_unverified`
+and the cookie is dropped. The reported expiry is the cookie's own `Expires`.
+A request that fails in transport, or whose response the shared guard rejects,
+stops with `login_request_failed`; a host that resolves only to blocked
+addresses keeps the `site.ErrAddressBlocked` cause.
+
+TJUPT blocks the client IP after ten failed logins, so a failed login is never
+retried. In October 2026 a login without a code returned the two-step page
+with all ten attempts still offered, and a login with a code from a password
+manager issued a seven-day `access_token` in two requests that `site status`
+and `site account` then accepted.
 
 ## Fixtures
 

@@ -84,6 +84,14 @@ func decodeReconciliationCredentialBundle(raw []byte) (map[string]string, error)
 // decodeCredentialBundle strictly decodes one JSON object whose keys are
 // exactly fields, each once, with string values and no trailing data.
 func decodeCredentialBundle(raw []byte, fields ...string) (map[string]string, error) {
+	return decodeCredentialBundleOptional(raw, fields, nil)
+}
+
+// decodeCredentialBundleOptional is decodeCredentialBundle with optional keys:
+// every required key must appear, each optional key may appear, and any other
+// key is rejected.
+func decodeCredentialBundleOptional(raw []byte, required, optional []string) (map[string]string, error) {
+	fields := append(append([]string(nil), required...), optional...)
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	first, err := decoder.Token()
 	if err != nil || first != json.Delim('{') {
@@ -119,8 +127,10 @@ func decodeCredentialBundle(raw []byte, fields ...string) (map[string]string, er
 	if token, err := decoder.Token(); err != io.EOF || token != nil {
 		return nil, fmt.Errorf("credential bundle has trailing data")
 	}
-	if len(values) != len(fields) {
-		return nil, fmt.Errorf("credential bundle field is missing")
+	for _, field := range required {
+		if _, present := values[field]; !present {
+			return nil, fmt.Errorf("credential bundle field is missing")
+		}
 	}
 	return values, nil
 }
