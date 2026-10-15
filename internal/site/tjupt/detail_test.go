@@ -114,6 +114,9 @@ func TestTorrentDetailHappyPathUsesOneNoHitRequest(t *testing.T) {
 
 func TestTorrentDetailResponseClassificationFailsClosed(t *testing.T) {
 	valid := `<a href="logout.php">logout</a><h1 id="top">Release</h1><a href="download.php?id=42">download</a>`
+	missingBox := "<table align=\"center\" class=\"main\" width=\"500\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\"><tr><td class=\"embedded\">\n" +
+		"<h2>错误</h2>\n<table width=\"100%\" border=\"1\" cellspacing=\"0\" cellpadding=\"10\"><tr><td class=\"text\">没有该ID的种子</td></tr></table></td></tr></table>\n"
+	chrome := `<a href="logout.php">logout</a><a href="details.php?id=7">CANARY nav</a>`
 	tests := []struct {
 		name       string
 		status     int
@@ -137,6 +140,12 @@ func TestTorrentDetailResponseClassificationFailsClosed(t *testing.T) {
 		{name: "duplicate ref", status: http.StatusOK, mediaType: "text/html", body: []byte(`<a href="logout.php">logout</a><h1 id="top">Release</h1><a href="download.php?id=42&amp;id=42">download</a>`), stopReason: "unrecognized_response"},
 		{name: "absolute ref", status: http.StatusOK, mediaType: "text/html", body: []byte(`<a href="logout.php">logout</a><h1 id="top">Release</h1><a href="https://other.invalid/download.php?id=42">download</a>`), stopReason: "unrecognized_response"},
 		{name: "missing title", status: http.StatusOK, mediaType: "text/html", body: []byte(`<a href="logout.php">logout</a><a href="download.php?id=42">download</a>`), stopReason: "unrecognized_response"},
+		{name: "no torrent with that ID", status: http.StatusOK, mediaType: "text/html", body: []byte(chrome + missingBox), stopReason: "not_found"},
+		{name: "no torrent message without auth marker", status: http.StatusOK, mediaType: "text/html", body: []byte(missingBox), stopReason: "unrecognized_response"},
+		{name: "no torrent message beside a detail heading", status: http.StatusOK, mediaType: "text/html", body: []byte(chrome + `<h1 id="top">Release</h1>` + missingBox), stopReason: "unrecognized_response"},
+		{name: "repeated no torrent message", status: http.StatusOK, mediaType: "text/html", body: []byte(chrome + missingBox + missingBox), stopReason: "unrecognized_response"},
+		{name: "other stderr message", status: http.StatusOK, mediaType: "text/html", body: []byte(chrome + strings.Replace(missingBox, "没有该ID的种子", "CANARY 权限不足", 1)), stopReason: "unrecognized_response"},
+		{name: "no torrent text outside the message box", status: http.StatusOK, mediaType: "text/html", body: []byte(chrome + `<td class="text">没有该ID的种子</td>`), stopReason: "unrecognized_response"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -245,6 +254,26 @@ func TestParseTorrentDetailReadsSizeAndSnatches(t *testing.T) {
 		if err != nil || (detail.SizeBytes != nil) != test.size || (detail.Snatches != nil) != test.snatches {
 			t.Fatalf("%s: detail=%#v err=%v", test.name, detail, err)
 		}
+	}
+}
+
+func TestTorrentDetailRecognizedPageWinsOverNotFoundMessage(t *testing.T) {
+	missingBox := `<h2>错误</h2><table width="100%" border="1" cellspacing="0" cellpadding="10"><tr><td class="text">没有该ID的种子</td></tr></table>`
+	body := tjuptDetailPage(liveDetailBasic+missingBox, liveDetailHeat)
+	start := time.Now().UTC()
+	client := &fakeGuardedClient{response: httpguard.StrictResponse{
+		StatusCode: http.StatusOK, MediaType: "text/html", Body: body,
+		ObservedAtStart: start, ObservedAtEnd: start, ResponseBytesRead: int64(len(body)), ResponseBytesKnown: true,
+	}}
+	adapter := New("")
+	adapter.newClient = func(string, string, time.Duration) (guardedClient, error) { return client, nil }
+	session, err := adapter.OpenTorrentDetailSession(context.Background(), mustCredential(t, "sid=secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, receipt, readErr := session.ReadTorrentDetail(context.Background(), domain.TorrentRef{SiteID: "tjupt", RemoteID: "42"}, site.DefaultTorrentDetailLimits())
+	if readErr != nil || detail == nil || !receipt.Complete || receipt.StopReason != "" {
+		t.Fatalf("detail=%#v receipt=%#v err=%v", detail, receipt, readErr)
 	}
 }
 
