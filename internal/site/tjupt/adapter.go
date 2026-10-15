@@ -28,11 +28,6 @@ const (
 type Adapter struct {
 	baseURL   string
 	newClient guardedClientFactory
-	// exchangeEnabled gates the bonus exchange port. New never sets it:
-	// TJUPT answers the first exchange POST with a page that asks for the
-	// account password, so the single reviewed POST cannot complete an
-	// exchange. Tests set it to keep the port's fail-closed checks covered.
-	exchangeEnabled bool
 }
 
 type guardedClient interface {
@@ -111,10 +106,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 		domain.CapabilityBonusRead,
 	}
 	if a.productionOrigin() {
-		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview)
-		if a.exchangeEnabled {
-			capabilities = append(capabilities, domain.CapabilityBonusExchange)
-		}
+		capabilities = append(capabilities, domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview, domain.CapabilityBonusExchange)
 	}
 	return domain.SiteDescriptor{
 		ID:           SiteID,

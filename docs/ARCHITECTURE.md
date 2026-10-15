@@ -393,10 +393,12 @@ non-authoritative.
 ## Durable at-most-once bonus exchange
 
 `site bonus exchange prepare|submit|status|list|prune|forget` is the first concrete
-`bonus.exchange.submit_effectful` workflow. Its TJUPT implementation is
-currently withheld: TJUPT confirms each exchange with the account password,
-which ptctl does not take, so the production adapter does not declare the
-capability. `prepare` stores one canonical
+`bonus.exchange.submit_effectful` workflow. A site that confirms each exchange
+with the account password, as TJUPT does, implements
+`site.PasswordConfirmedBonusExchangeWriter`: `submit` then reads the cookie and
+password together from one strict `ptctl.credentials/v1` stdin bundle, refuses
+`--cookie-stdin`, and the adapter adds the password to its single POST.
+`prepare` stores one canonical
 private intent containing a random operation ID, the exact reviewed semantic
 ID, canonical site/option/origin/route identifiers, and fixed review/submit
 budgets. It performs no site request. `submit` revalidates the installed
@@ -420,7 +422,8 @@ after a restart or losing a publication race never authorizes a POST.
 The same site session may consume its exact fresh review authority once. Its
 dedicated HTTP/1.1 POST body is non-replayable, connection reuse and HTTP/2 are
 disabled, redirects are observed but never followed, and only an allowlisted
-same-origin redirect classification crosses the transport boundary. A second
+same-origin redirect classification, or the adapter's fixed classification of
+a complete bounded result page, crosses the transport boundary. A second
 opaque `ObservedBonusExchange` ties the complete safe receipt to the adapter
 invocation. The state layer requires both that observation and the matching
 `ReservedAttempt` before sealing a deterministic outcome. JSON round trips of

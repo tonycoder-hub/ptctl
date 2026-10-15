@@ -163,6 +163,20 @@ timeout, transport ambiguity, unrecognized response,
 or local outcome-write failure is recorded as rejected/unknown when possible
 and is never used to justify another automatic request.
 
+A site that confirms exchanges with the account password (TJUPT) widens the
+secret surface to that password, so its handling is narrower than the cookie's.
+It is read only from the strict stdin bundle after every local check, never
+from argv or a terminal, and lives in a type whose formatting is
+`[REDACTED]`. The adapter appends it as one `passwd` field to the single POST;
+the encoded body is never logged, and receipts count only the reviewed form's
+bytes so the password length is not disclosed. A fresh form that already
+carries a `passwd` control is refused before the attempt marker rather than
+merged. TJUPT's price-change page echoes the submitted password in a hidden
+field, which is one more reason response bodies never leave the adapter. The
+password grants account-level authority beyond bonus exchange, so it is worth
+keeping in a dedicated owner-only file or password manager rather than shell
+history.
+
 This coordination applies to one prepared operation and assumes one preserved
 private-store history. A separately prepared operation is a separate explicit
 submission. Copying or rolling back the store before the attempt marker, or

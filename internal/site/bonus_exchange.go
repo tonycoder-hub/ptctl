@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -94,6 +96,15 @@ type BonusExchangeReceipt struct {
 	StopReason       string              `json:"stop_reason,omitempty"`
 }
 
+// BonusExchangeMessageConfirmationSuffix ends every ConfirmationCode an
+// adapter derives from an allowlisted success page rather than an allowlisted
+// redirect, so reports can say which kind of evidence confirmed the exchange.
+const BonusExchangeMessageConfirmationSuffix = ".success_message.v1"
+
+func IsBonusExchangeMessageConfirmation(code string) bool {
+	return validateRouteID(code) == nil && strings.HasSuffix(code, BonusExchangeMessageConfirmationSuffix)
+}
+
 type BonusExchangeConfig struct {
 	Origin        string `json:"origin"`
 	ReviewRouteID string `json:"review_route_id"`
@@ -129,6 +140,56 @@ type BonusExchangeWriter interface {
 	// The first remote request must be the bounded ReadFreshBonusReview call so
 	// callers can finish all policy and credential ordering before any effect.
 	OpenBonusExchangeSession(context.Context, Credential) (BonusExchangeSession, error)
+}
+
+// PasswordConfirmedBonusExchangeWriter is a BonusExchangeWriter whose site
+// confirms every exchange with the account password inside the same single
+// form POST. Its OpenBonusExchangeSession must refuse; callers open sessions
+// with the password instead. The password is a second process-local secret:
+// it never enters a receipt, record, report, or error. A receipt counts its
+// field in FormFieldsSubmitted but leaves its bytes out of FormBytesSubmitted,
+// so the receipt does not reveal the password's length.
+type PasswordConfirmedBonusExchangeWriter interface {
+	BonusExchangeWriter
+	OpenPasswordConfirmedBonusExchangeSession(context.Context, Credential, AccountPassword) (BonusExchangeSession, error)
+}
+
+// AccountPassword is a site account password held only in process memory.
+// Like Credential it formats as redacted. The secret sits behind a pointer, so
+// formatting a struct that keeps an AccountPassword in an unexported field
+// (where fmt cannot call String) prints an address rather than the password.
+type AccountPassword struct {
+	secret *string
+}
+
+func NewAccountPassword(password string) (AccountPassword, error) {
+	if password == "" {
+		return AccountPassword{}, fmt.Errorf("empty account password")
+	}
+	if len(password) > 1024 {
+		return AccountPassword{}, fmt.Errorf("account password exceeds 1 KiB")
+	}
+	if !utf8.ValidString(password) {
+		return AccountPassword{}, fmt.Errorf("account password is not valid UTF-8")
+	}
+	for _, r := range password {
+		if r < 0x20 || r == 0x7f {
+			return AccountPassword{}, fmt.Errorf("account password contains a control character")
+		}
+	}
+	return AccountPassword{secret: &password}, nil
+}
+
+func (password AccountPassword) SecretValue() string {
+	if password.secret == nil {
+		return ""
+	}
+	return *password.secret
+}
+
+func (password AccountPassword) String() string { return "[REDACTED]" }
+func (password AccountPassword) GoString() string {
+	return "site.AccountPassword{[REDACTED]}"
 }
 
 // BonusExchangeSession first returns a fresh review authority, then may consume
