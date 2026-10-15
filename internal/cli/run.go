@@ -138,7 +138,7 @@ Usage:
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
   ptctl site bonus review --cookie-stdin [--output table|json] SITE OPTION
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
-  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID --cookie-stdin --acknowledge-bonus-exchange [--output table|json] SITE OPTION
+  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID (--cookie-stdin | --credential-bundle-stdin) --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
   ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]

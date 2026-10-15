@@ -45,22 +45,58 @@ func readReconciliationCredentialBundle(reader io.Reader, username string) (site
 	return siteCredential, clientCredential, nil
 }
 
+// readBonusExchangeCredentialBundle reads the site cookie and the account
+// password a password-confirmed bonus exchange needs, as one
+// ptctl.credentials/v1 bundle on stdin.
+func readBonusExchangeCredentialBundle(reader io.Reader) (site.Credential, site.AccountPassword, error) {
+	if err := rejectTTYSecret(reader); err != nil {
+		return site.Credential{}, site.AccountPassword{}, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(reader, maxCredentialBundleBytes+1))
+	if err != nil {
+		return site.Credential{}, site.AccountPassword{}, fmt.Errorf("read bonus exchange credential bundle from stdin failed")
+	}
+	if len(raw) == 0 || len(raw) > maxCredentialBundleBytes || !utf8.Valid(raw) {
+		return site.Credential{}, site.AccountPassword{}, fmt.Errorf("bonus exchange credential bundle is invalid")
+	}
+	values, err := decodeCredentialBundle(raw, "schema", "site_cookie", "site_password")
+	if err != nil {
+		return site.Credential{}, site.AccountPassword{}, fmt.Errorf("bonus exchange credential bundle is invalid")
+	}
+	if values["schema"] != reconciliationCredentialSchema {
+		return site.Credential{}, site.AccountPassword{}, fmt.Errorf("bonus exchange credential bundle schema is unsupported")
+	}
+	siteCredential, err := canonicalCookieCredential([]byte(values["site_cookie"]))
+	if err != nil {
+		return site.Credential{}, site.AccountPassword{}, fmt.Errorf("bonus exchange site credential is invalid")
+	}
+	password, err := site.NewAccountPassword(values["site_password"])
+	if err != nil {
+		return site.Credential{}, site.AccountPassword{}, fmt.Errorf("bonus exchange account password is invalid")
+	}
+	return siteCredential, password, nil
+}
+
 func decodeReconciliationCredentialBundle(raw []byte) (map[string]string, error) {
+	return decodeCredentialBundle(raw, "schema", "site_cookie", "downloader_password")
+}
+
+// decodeCredentialBundle strictly decodes one JSON object whose keys are
+// exactly fields, each once, with string values and no trailing data.
+func decodeCredentialBundle(raw []byte, fields ...string) (map[string]string, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	first, err := decoder.Token()
 	if err != nil || first != json.Delim('{') {
 		return nil, fmt.Errorf("credential bundle is not an object")
 	}
-	values := make(map[string]string, 3)
+	values := make(map[string]string, len(fields))
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		key, ok := keyToken.(string)
 		if err != nil || !ok {
 			return nil, fmt.Errorf("credential bundle key is invalid")
 		}
-		switch key {
-		case "schema", "site_cookie", "downloader_password":
-		default:
+		if !credentialBundleField(fields, key) {
 			return nil, fmt.Errorf("credential bundle field is unknown")
 		}
 		if _, exists := values[key]; exists {
@@ -83,10 +119,19 @@ func decodeReconciliationCredentialBundle(raw []byte) (map[string]string, error)
 	if token, err := decoder.Token(); err != io.EOF || token != nil {
 		return nil, fmt.Errorf("credential bundle has trailing data")
 	}
-	if len(values) != 3 {
+	if len(values) != len(fields) {
 		return nil, fmt.Errorf("credential bundle field is missing")
 	}
 	return values, nil
+}
+
+func credentialBundleField(fields []string, key string) bool {
+	for _, field := range fields {
+		if field == key {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeStrictCredentialString(raw []byte) (string, error) {

@@ -5,7 +5,7 @@
 TJUPT is the first experimental site implementation, not a special case
 embedded in the content core. Its read commands were run against the live site
 with a real session in October 2026. The adapter declares six ordinary read
-capabilities plus one separately acknowledged effectful capability:
+capabilities plus two separately acknowledged effectful capabilities:
 
 - session check;
 - account snapshot read;
@@ -13,12 +13,12 @@ capabilities plus one separately acknowledged effectful capability:
 - bounded torrent-detail observation;
 - bonus catalog inspection;
 - exact-option, zero-write bonus-offer review;
-- acknowledged metafile fetch into the private store.
+- acknowledged metafile fetch into the private store;
+- acknowledged, at-most-once bonus exchange, confirmed with the account
+  password (see [Bonus exchange](#bonus-exchange)).
 
-It does not declare bonus exchange; see
-[Bonus exchange is withheld](#bonus-exchange-is-withheld).
-
-Every TJUPT command sends at most one bounded GET, and none submits a form.
+Every TJUPT read sends at most one bounded GET. Only `site bonus exchange
+submit` submits a form: one fresh review GET, then at most one POST.
 All site transports use the configured
 TJUPT HTTPS origin, do not retry, and refuse to follow redirects. Each
 effectful acknowledgement is therefore scoped to a fixed request count.
@@ -170,28 +170,68 @@ permanent TJUPT identifiers. If parser hardening changes which controls affect
 submission, their values may change intentionally and the operator must perform
 a fresh review and prepare a new intent.
 
-## Bonus exchange is withheld
+## Bonus exchange
 
-TJUPT does not declare `bonus.exchange.submit_effectful`. Its exchange form
-does not complete on the first POST: the site answers with a page that asks for
-the account password, and ptctl does not take account passwords. Rather than
-send a POST that can only stop halfway, the production adapter withholds the
-capability, its `BonusExchangeConfig` reports exchange unavailable, and
-`site bonus exchange submit ... tjupt OPTION` is refused as usage before stdin
-is read. The catalog and review are unaffected.
+Only the exact built-in production origin declares
+`bonus.exchange.submit_effectful`. TJUPT confirms every exchange with the
+account password. On the live site, posting an offer's form to
+`mybonus.php?action=exchange` without `passwd` returns a `确认操作` page that
+states the price and asks for the password; the balance does not change. The
+same POST with `passwd` completes the exchange in one step.
 
-On the live site, posting an offer's form to `mybonus.php?action=exchange`
-returns a `确认操作` page that states the price and the offer and carries a new
-form with only the hidden `option` and a `passwd` password field. The balance
-does not change until that form is confirmed.
+The adapter is therefore a `site.PasswordConfirmedBonusExchangeWriter`.
+`site bonus exchange submit ... tjupt OPTION` requires
+`--credential-bundle-stdin` with strict JSON on stdin:
 
-The form machinery stays in the adapter: a fresh review GET, an exact-option
-rebind against the review ID, at most one POST of the freshly observed form
-after a durable attempt marker, and fixed outcome codes from the audited
-NexusPHP route's `do=` redirects. Its action route ID is
-`tjupt.mybonus_exchange_post.v1`. Its tests run against a test-only adapter
-that enables it, so a future design that handles the password step can build
-on it. The generic workflow is described in
+```json
+{"schema":"ptctl.credentials/v1","site_cookie":"...","site_password":"..."}
+```
+
+`--cookie-stdin` is refused as usage for TJUPT before the store or stdin is
+touched, and a cookie-only session cannot be opened. The password must be valid
+UTF-8 without control characters and at most 1024 bytes. It stays in memory as
+an `AccountPassword`, which formats as `[REDACTED]`; it is never placed in argv,
+persisted, or printed.
+
+The workflow is otherwise the generic one: a fresh review GET, an exact-option
+rebind against the review ID, a durable attempt marker, and at most one POST.
+That POST carries the freshly observed form followed by one `passwd` field,
+with no second request. A fresh form that already contains a `passwd` control
+is refused as `submission_form_unsupported` before the marker. The password
+counts against the sealed field and byte budgets
+(`submission_form_budget_exceeded`), but `form_bytes_submitted` reports only
+the reviewed form's bytes, so a receipt does not reveal the password length.
+The action route ID stays `tjupt.mybonus_exchange_post.v1`.
+
+TJUPT answers the POST with HTTP 200 and a NexusPHP `stdmsg` box: one `<h2>`
+heading and one text cell. The adapter classifies only a valid UTF-8,
+authenticated page (exact logout link, no login or challenge markers) with
+exactly one `<h2>`:
+
+| Heading and text | Outcome | Public code |
+|---|---|---|
+| `成功` | confirmed | `allowlisted_site_message` |
+| `出错了！`, text starting with `密码不正确` | rejected | `server_password_rejected` |
+| `确认操作` with a password input | rejected | `server_password_required` |
+| `兑换价格有变化` | rejected | `server_price_changed` |
+| anything else | unknown | `submission_response_unrecognized` |
+
+The first two rows were verified on the live site in October 2026 with
+option 14 (the 7-day no-ad offer, 7,000 bonus). A deliberately wrong password
+was rejected with the balance unchanged. One real exchange was confirmed: the
+balance dropped by exactly 7,000, and a repeated `submit` was refused before
+stdin was read.
+
+The price-change page is only produced for offers that take extra input, which
+`submit` does not send. It echoes the submitted password in a hidden field;
+response bodies are never retained or emitted. The allowlisted NexusPHP `do=`
+redirects from the earlier audit are still classified as before. TJUPT answers
+some refusals, such as a no-ad offer while one is already active or for an
+exempt user class, with a bare alert and no `<h2>`. These are reported as
+unknown, so check the balance with `site account` before preparing a new
+operation.
+
+The generic workflow is described in
 [ARCHITECTURE.md](ARCHITECTURE.md#durable-at-most-once-bonus-exchange) and the
 [sites guide](guide/sites.md).
 

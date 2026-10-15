@@ -2,6 +2,8 @@ package site
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,5 +71,33 @@ func validBonusExchangeReceiptForTest() BonusExchangeReceipt {
 			TotalRequestsAttempted: 2, ReviewRequestsAttempted: 1, SubmissionRequestsAttempted: 1,
 			FormFieldsSubmitted: 2, FormBytesSubmitted: 24, ResponseBytesKnown: true,
 		},
+	}
+}
+
+func TestAccountPasswordIsValidatedAndNeverFormatted(t *testing.T) {
+	const canary = "PASSWORD-CANARY 密码"
+	password, err := NewAccountPassword(canary)
+	if err != nil || password.SecretValue() != canary {
+		t.Fatalf("password err=%v", err)
+	}
+	holder := struct {
+		label    string
+		password AccountPassword
+	}{label: "holder", password: password}
+	raw, _ := json.Marshal(password)
+	formatted := fmt.Sprintf("%v %+v %#v %s %v %+v %#v", password, password, password, password, holder, holder, holder) + string(raw)
+	if strings.Contains(formatted, "PASSWORD-CANARY") {
+		t.Fatalf("password was formatted: %s", formatted)
+	}
+	if (AccountPassword{}).SecretValue() != "" {
+		t.Fatal("zero password has a value")
+	}
+	for _, invalid := range []string{"", "line\nbreak", "tab\tseparated", "del\x7f", string([]byte{0xff}), strings.Repeat("a", 1025)} {
+		if _, err := NewAccountPassword(invalid); err == nil || strings.Contains(err.Error(), invalid) && invalid != "" {
+			t.Fatalf("invalid password %q err=%v", invalid, err)
+		}
+	}
+	if _, err := NewAccountPassword(strings.Repeat("a", 1024)); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -524,6 +524,7 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 	intentValue := fs.String("intent-record", "", "sealed intent record ID")
 	expectedReview := fs.String("expect-review-id", "", "exact review ID approved by the user")
 	cookieStdin := fs.Bool("cookie-stdin", false, "read one Cookie header value from stdin")
+	bundleStdin := fs.Bool("credential-bundle-stdin", false, "read a ptctl.credentials/v1 bundle with site_cookie and site_password from stdin")
 	acknowledge := fs.Bool("acknowledge-bonus-exchange", false, "acknowledge one bonus exchange form submission")
 	timeout := fs.Duration("timeout", bonusExchangeDefaultTimeout, "fresh review and submission timeout")
 	if err := fs.Parse(args); err != nil {
@@ -532,7 +533,10 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 	if fs.NArg() != 2 || fs.Arg(0) == "" || fs.Arg(1) == "" || *storeRoot == "" || *intentValue == "" || *expectedReview == "" {
 		return usageError("site bonus exchange submit requires state store, intent record, expected review ID, SITE, and OPTION")
 	}
-	if !*cookieStdin || !*acknowledge {
+	if *cookieStdin && *bundleStdin {
+		return usageError("site bonus exchange submit accepts --cookie-stdin or --credential-bundle-stdin, not both")
+	}
+	if (!*cookieStdin && !*bundleStdin) || !*acknowledge {
 		return usageError("site bonus exchange submit requires --cookie-stdin and --acknowledge-bonus-exchange")
 	}
 	if err := validateOutput(*output); err != nil {
@@ -551,6 +555,13 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 	descriptor, writer, config, err := a.bonusExchangeWriter(fs.Arg(0), fs.Arg(1))
 	if err != nil {
 		return err
+	}
+	passwordWriter, needsPassword := writer.(site.PasswordConfirmedBonusExchangeWriter)
+	if needsPassword && !*bundleStdin {
+		return usageError("site %q confirms bonus exchange with the account password; submit requires --credential-bundle-stdin", descriptor.ID)
+	}
+	if !needsPassword && *bundleStdin {
+		return usageError("site %q bonus exchange takes only --cookie-stdin", descriptor.ID)
 	}
 	report := newSiteBonusExchangeReport("site.bonus.exchange.submit", descriptor.ID, fs.Arg(1), *expectedReview, config)
 	report.Effect = []string{site.BonusReviewReadEffect, bonusexchange.ReserveEffect, site.BonusExchangeSubmitEffect, bonusexchange.OutcomeEffect}
@@ -602,13 +613,24 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 		return a.finishSiteBonusExchange(*output, report, fmt.Errorf("bonus exchange submission is already reserved"))
 	}
 
-	credential, err := readEffectfulSiteCredential(a.stdin)
-	if err != nil {
-		_ = stateSession.Close()
-		addBonusExchangeBlocker(&report, "credential.read_failed", "the site credential could not be read")
-		return a.finishSiteBonusExchange(*output, report, fmt.Errorf("read site credential failed"))
+	var siteSession site.BonusExchangeSession
+	if needsPassword {
+		credential, password, readErr := readBonusExchangeCredentialBundle(a.stdin)
+		if readErr != nil {
+			_ = stateSession.Close()
+			addBonusExchangeBlocker(&report, "credential.read_failed", "the site credential could not be read")
+			return a.finishSiteBonusExchange(*output, report, fmt.Errorf("read site credential failed"))
+		}
+		siteSession, err = passwordWriter.OpenPasswordConfirmedBonusExchangeSession(ctx, credential, password)
+	} else {
+		credential, readErr := readEffectfulSiteCredential(a.stdin)
+		if readErr != nil {
+			_ = stateSession.Close()
+			addBonusExchangeBlocker(&report, "credential.read_failed", "the site credential could not be read")
+			return a.finishSiteBonusExchange(*output, report, fmt.Errorf("read site credential failed"))
+		}
+		siteSession, err = writer.OpenBonusExchangeSession(ctx, credential)
 	}
-	siteSession, err := writer.OpenBonusExchangeSession(ctx, credential)
 	if err != nil || siteSession == nil {
 		_ = stateSession.Close()
 		addBonusExchangeBlocker(&report, "site.session_open_failed", "the bounded bonus exchange session could not be opened")
@@ -770,7 +792,7 @@ func newSiteBonusExchangeReport(kind, siteID, selector, reviewID string, config 
 		Warnings: []string{
 			"the deterministic attempt marker is written before the form POST; an existing marker is never retried",
 			"at-most-once coordination is per prepared operation within one preserved, uncloned private-store history; do not roll back, duplicate, or manually delete its records; terminal prune and forget require their explicit acknowledged commands",
-			"confirmed means an allowlisted site-local redirect was observed, not a signed statement or atomic balance proof",
+			"confirmed means an allowlisted site-local redirect or result page was observed, not a signed statement or atomic balance proof",
 			"after a POST, a missing durable outcome remains submission-unknown and requires status inspection, never automatic retry",
 		},
 	}
@@ -1002,6 +1024,9 @@ func publicBonusExchangeReceipt(intent bonusexchange.IntentRecord, receipt site.
 	}
 	if result.Outcome == site.BonusExchangeOutcomeConfirmed && receipt.ConfirmationCode != "" {
 		result.ConfirmationCode = "allowlisted_site_redirect"
+		if site.IsBonusExchangeMessageConfirmation(receipt.ConfirmationCode) {
+			result.ConfirmationCode = "allowlisted_site_message"
+		}
 	}
 	return result
 }
@@ -1038,7 +1063,8 @@ func safeBonusExchangeOutcome(value string) string {
 
 func safeBonusExchangeSubmitStop(value string) string {
 	switch value {
-	case "context_before_submission", "submission_not_sent", "submission_transport_uncertain", "submission_response_unrecognized", "server_duplicate_lock", "server_permission_rejected", "site.exchange_receipt_invalid":
+	case "context_before_submission", "submission_not_sent", "submission_transport_uncertain", "submission_response_unrecognized", "server_duplicate_lock", "server_permission_rejected",
+		"server_password_rejected", "server_password_required", "server_price_changed", "site.exchange_receipt_invalid":
 		return value
 	case "":
 		return ""
@@ -1260,7 +1286,7 @@ func bonusRecordID(ref *metastore.RecordRef) string {
 func (a *app) siteBonusExchangeHelp() {
 	fmt.Fprint(a.stdout, `Usage:
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
-  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID --cookie-stdin --acknowledge-bonus-exchange [--output table|json] SITE OPTION
+  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID (--cookie-stdin | --credential-bundle-stdin) --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
   ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]
@@ -1270,6 +1296,11 @@ Prepare writes only a private reviewed intent. Submit validates that intent and
 the production adapter before reading stdin, performs one fresh bounded review,
 durably publishes a deterministic at-most-once attempt marker, and only then
 may submit the exact opaque form once. There are no redirects or retries.
+
+A site that confirms each exchange with the account password, such as TJUPT,
+requires --credential-bundle-stdin instead of --cookie-stdin. Pipe strict JSON
+containing schema "ptctl.credentials/v1", site_cookie, and site_password. The
+password is added to that single POST only; it is never stored or printed.
 
 After the POST, a bounded local finalization interval may persist the exact
 adapter observation even if the network context ended. If no durable outcome
