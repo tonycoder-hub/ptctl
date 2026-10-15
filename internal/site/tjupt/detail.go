@@ -42,6 +42,10 @@ var (
 	// or in related torrents, from being read as this torrent's size.
 	detailSizePattern  = regexp.MustCompile(`(?i)种子ID\s*[:：]\s*([0-9]+)\s*\|\s*大小\s*[:：]\s*([0-9]+(?:\.[0-9]+)?\s*(?:KiB|MiB|GiB|TiB|PiB|KB|MB|GB|TB|PB))\b`)
 	snatchCountPattern = regexp.MustCompile(`^([0-9][0-9,]*)\s*次?$`)
+	// TJUPT answers an ID with no visible torrent (never existed, deleted, or
+	// moved to the recycle bin) with HTTP 200 and NexusPHP's stderr() message
+	// box inside the normal authenticated page.
+	detailNotFoundPattern = regexp.MustCompile(`(?is)<h2>\s*错误\s*</h2\s*>\s*<table\b[^>]*>\s*<tr>\s*<td\s+class\s*=\s*"text"\s*>\s*没有该ID的种子\s*</td\s*>`)
 )
 
 var (
@@ -180,6 +184,10 @@ func (session *torrentDetailSession) ReadTorrentDetail(ctx context.Context, ref 
 	}
 	detail, err := parseTorrentDetail(response.Body, ref)
 	if err != nil {
+		if isDetailNotFoundPage(response.Body) {
+			receipt.StopReason = "not_found"
+			return nil, receipt, fmt.Errorf("TJUPT torrent detail was not found")
+		}
 		receipt.StopReason = "unrecognized_response"
 		return nil, receipt, fmt.Errorf("TJUPT torrent detail page was not recognized")
 	}
@@ -295,6 +303,22 @@ func parseTorrentDetail(body []byte, ref domain.TorrentRef) (domain.TorrentDetai
 		DownloadReferenceObserved: downloadBound,
 		EvidenceBasis:             basis,
 	}, nil
+}
+
+// isDetailNotFoundPage is consulted only after parseTorrentDetail rejected the
+// page, so a recognizable detail page always wins. It requires the
+// authenticated page chrome, no detail heading, and exactly one stderr box
+// stating that the ID has no torrent.
+func isDetailNotFoundPage(body []byte) bool {
+	if !utf8.Valid(body) || !hasExactLogoutLink(body) {
+		return false
+	}
+	for _, match := range detailHeadingPattern.FindAllSubmatch(body, 32) {
+		if len(match) == 3 && topIDAttribute.Match(match[1]) {
+			return false
+		}
+	}
+	return len(detailNotFoundPattern.FindAllIndex(body, 2)) == 1
 }
 
 func validDetailTitle(value string) bool {
