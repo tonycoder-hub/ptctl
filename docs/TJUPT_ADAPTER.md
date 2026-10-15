@@ -35,8 +35,8 @@ cell is not cut off; sizes use NexusPHP's 1024-based `KB`/`MB`/`GB`/`TB`/`PB`
 labels, and a size of 2^63 bytes (8 EiB) or more is left absent rather than
 reported wrapped or clamped. A results page whose rows cannot be recognized
 is an error, not an empty result; only a recognized TJUPT empty-search message
-(such as `没有种子。请用准确的关键字重试。`, or `没有结果！` for the query `0`)
-yields zero results.
+(such as `没有种子。请用准确的关键字重试。`) yields zero results. The query `0`
+is not special on the live site: it returns the ordinary listing.
 
 The header row names its columns with icon classes (`time`, `size`,
 `seeders`, `leechers`, `snatched`) and the `类型` label. When each of those
@@ -60,10 +60,18 @@ only when it extends exactly what the list shows; otherwise it keeps the
 shortened name. A row whose details link does not carry a canonical positive
 ID is skipped, because `site detail` and `site metafile fetch` could not use
 its ref.
+
 Ordinary site reads perform no intentional filesystem write. TJUPT-related
 local store mutations are `metafile store init`, `metafile store import`, and
 the store phase of `site metafile fetch`; storage profile/index commands are a
 separate filesystem-ledger boundary and never contact TJUPT.
+
+The live site occasionally stalls partway through a response or resets the
+connection. Each read is one HTTP request that must finish within 30 seconds
+and is never retried automatically, so such a read fails closed (a generic
+`site ... failed` error, or `site_request_failed` in a detail or review
+receipt) rather than returning partial data. Rerunning the read-only command is
+safe.
 
 ## Account snapshot
 
@@ -242,6 +250,14 @@ names the same torrent ID (`种子ID: ID | 大小: SIZE`), and the snatch count 
 from links to `viewsnatches.php?id=ID`; statements that disagree leave either
 field absent. The report never emits the raw HTML, request/download URL,
 description, cookie, redirect location, or arbitrary server diagnostics.
+
+TJUPT answers an ID with no visible torrent (one that never existed, was
+deleted, or sits in the recycle bin) with HTTP 200 and a `错误` /
+`没有该ID的种子` message box inside the normal authenticated page. A page that
+is not a recognizable detail page, has no detail heading, and carries exactly
+one such box stops with `not_found` rather than `unrecognized_response`. Any
+other site message, such as the permission page for a banned torrent, stays
+`unrecognized_response`.
 
 The result is only a same-invocation site-page observation. Its display title
 may include promotion decoration; names, peer counts, size, snatches, and
