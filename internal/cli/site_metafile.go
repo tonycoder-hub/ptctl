@@ -491,6 +491,12 @@ func readEffectfulSiteCredential(reader io.Reader) (site.Credential, error) {
 	} else if bytes.HasSuffix(raw, []byte("\n")) {
 		raw = raw[:len(raw)-1]
 	}
+	return canonicalCookieCredential(raw)
+}
+
+// canonicalCookieCredential accepts one Cookie header value with no
+// surrounding whitespace and only printable ASCII.
+func canonicalCookieCredential(raw []byte) (site.Credential, error) {
 	if len(raw) == 0 || len(raw) > 64<<10 || raw[0] == ' ' || raw[len(raw)-1] == ' ' || raw[0] == '\t' || raw[len(raw)-1] == '\t' {
 		return site.Credential{}, fmt.Errorf("site credential is not a canonical Cookie header value")
 	}

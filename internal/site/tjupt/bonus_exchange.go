@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/site"
@@ -17,8 +20,33 @@ import (
 const (
 	bonusExchangeAccept = "text/html"
 
+	// bonusPasswordField is the control TJUPT's 确认操作 page asks for.
+	// Sending it with the reviewed form completes the exchange in that one
+	// POST instead of stopping at the confirmation page.
+	bonusPasswordField = "passwd"
+
 	bonusRedirectDuplicate    = "tjupt.bonus_exchange.redirect.duplicated.v1"
 	bonusRedirectNoPermission = "tjupt.bonus_exchange.redirect.no_permission.v1"
+	bonusMessageConfirmed     = "tjupt.bonus_exchange.confirm" + site.BonusExchangeMessageConfirmationSuffix
+)
+
+// TJUPT answers the exchange POST with HTTP 200 and NexusPHP's stdmsg() box
+// inside the normal authenticated page: one <h2> heading followed by a
+// bordered table whose single text cell holds the message.
+var (
+	bonusMessagePattern       = regexp.MustCompile(`(?is)<h2>\s*([^<]{1,64}?)\s*</h2\s*>\s*<table\b[^>]*>\s*(?:<tbody>\s*)?<tr>\s*<td\s+class\s*=\s*"text"\s*>(.*?)</td\s*>`)
+	bonusMessageHeadingTag    = regexp.MustCompile(`(?i)<h2\b`)
+	bonusPasswordInputPattern = regexp.MustCompile(`(?i)<input\s+type\s*=\s*"?password"?\s+name\s*=\s*"?passwd"?[\s/>]`)
+)
+
+type bonusMessage int
+
+const (
+	bonusMessageUnrecognized bonusMessage = iota
+	bonusMessageSuccess
+	bonusMessagePasswordRequired
+	bonusMessagePasswordRejected
+	bonusMessagePriceChanged
 )
 
 var bonusSuccessRedirects = map[string]string{
@@ -39,8 +67,8 @@ var bonusSuccessRedirects = map[string]string{
 }
 
 var (
-	_ site.BonusExchangeWriter  = (*Adapter)(nil)
-	_ site.BonusExchangeSession = (*bonusExchangeSession)(nil)
+	_ site.PasswordConfirmedBonusExchangeWriter = (*Adapter)(nil)
+	_ site.BonusExchangeSession                 = (*bonusExchangeSession)(nil)
 )
 
 func (a *Adapter) ValidateBonusExchangeSelector(selector string) error {
@@ -54,9 +82,6 @@ func (a *Adapter) BonusExchangeConfig() (site.BonusExchangeConfig, error) {
 	if !a.productionOrigin() {
 		return site.BonusExchangeConfig{}, fmt.Errorf("TJUPT bonus exchange is unavailable for this origin")
 	}
-	if !a.exchangeEnabled {
-		return site.BonusExchangeConfig{}, fmt.Errorf("TJUPT bonus exchange is unavailable: the site confirms each exchange with the account password, which ptctl does not handle")
-	}
 	config, err := site.NewBonusExchangeConfig(BonusReviewOrigin, BonusReviewRouteID, BonusExchangeRouteID)
 	if err != nil {
 		return site.BonusExchangeConfig{}, fmt.Errorf("TJUPT bonus exchange configuration is invalid")
@@ -64,7 +89,20 @@ func (a *Adapter) BonusExchangeConfig() (site.BonusExchangeConfig, error) {
 	return config, nil
 }
 
-func (a *Adapter) OpenBonusExchangeSession(ctx context.Context, credential site.Credential) (site.BonusExchangeSession, error) {
+// OpenBonusExchangeSession always refuses: TJUPT confirms every exchange with
+// the account password, so a POST without it can only stop at the 确认操作
+// page.
+func (a *Adapter) OpenBonusExchangeSession(ctx context.Context, _ site.Credential) (site.BonusExchangeSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := a.BonusExchangeConfig(); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("TJUPT bonus exchange requires the account password")
+}
+
+func (a *Adapter) OpenPasswordConfirmedBonusExchangeSession(ctx context.Context, credential site.Credential, password site.AccountPassword) (site.BonusExchangeSession, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -77,6 +115,9 @@ func (a *Adapter) OpenBonusExchangeSession(ctx context.Context, credential site.
 	}
 	if !validCookieHeader(credential.SecretValue()) {
 		return nil, fmt.Errorf("TJUPT cookie credential is invalid")
+	}
+	if password.SecretValue() == "" {
+		return nil, fmt.Errorf("TJUPT account password is invalid")
 	}
 	readClient, err := a.clientFactory()(DefaultBaseURL, credential.SecretValue(), 2*time.Second)
 	if err != nil || readClient == nil {
@@ -93,13 +134,14 @@ func (a *Adapter) OpenBonusExchangeSession(ctx context.Context, credential site.
 		return nil, fmt.Errorf("open TJUPT bonus exchange session failed")
 	}
 	reviewer := &bonusReviewSession{client: client, config: reviewConfig, captureSubmission: true}
-	return &bonusExchangeSession{client: client, config: config, reviewer: reviewer}, nil
+	return &bonusExchangeSession{client: client, config: config, reviewer: reviewer, password: password}, nil
 }
 
 type bonusExchangeSession struct {
 	client         guardedExchangeClient
 	config         site.BonusExchangeConfig
 	reviewer       *bonusReviewSession
+	password       site.AccountPassword
 	mu             sync.Mutex
 	closed         bool
 	reviewed       bool
@@ -107,6 +149,7 @@ type bonusExchangeSession struct {
 	observed       *site.ObservedBonusReview
 	receipt        site.BonusReviewReceipt
 	submission     *bonusFormSubmission
+	reviewedBytes  int64
 	exchangeLimits site.BonusExchangeLimits
 }
 
@@ -138,7 +181,20 @@ func (session *bonusExchangeSession) ReadFreshBonusReview(ctx context.Context, s
 		receipt.StopReason = "submission_form_unavailable"
 		return nil, receipt, fmt.Errorf("TJUPT bonus exchange form is unavailable")
 	}
-	if _, _, validationErr := httpguard.ValidateFormFields(submission.fields, exchangeLimits.MaxFormFields, exchangeLimits.MaxFormBytes); validationErr != nil {
+	for _, field := range submission.fields {
+		// The reviewed form never carries the password itself; one that does
+		// is not the catalog form ptctl reviewed.
+		if field.Name == bonusPasswordField {
+			receipt.Complete = false
+			receipt.StopReason = "submission_form_unsupported"
+			return nil, receipt, fmt.Errorf("TJUPT bonus exchange form is unsupported")
+		}
+	}
+	_, reviewedBytes, validationErr := httpguard.ValidateFormFields(submission.fields, exchangeLimits.MaxFormFields, exchangeLimits.MaxFormBytes)
+	if validationErr == nil {
+		_, _, validationErr = httpguard.ValidateFormFields(session.passwordConfirmedFields(submission.fields), exchangeLimits.MaxFormFields, exchangeLimits.MaxFormBytes)
+	}
+	if validationErr != nil {
 		receipt.Complete = false
 		receipt.StopReason = "submission_form_budget_exceeded"
 		return nil, receipt, fmt.Errorf("TJUPT bonus exchange form exceeds the configured budget")
@@ -147,9 +203,18 @@ func (session *bonusExchangeSession) ReadFreshBonusReview(ctx context.Context, s
 	session.observed = observed
 	session.receipt = receipt
 	session.submission = submission
+	session.reviewedBytes = reviewedBytes
 	session.exchangeLimits = exchangeLimits
 	session.mu.Unlock()
 	return observed, receipt, nil
+}
+
+// passwordConfirmedFields returns the reviewed fields followed by the
+// account password, the one control the confirmation page adds.
+func (session *bonusExchangeSession) passwordConfirmedFields(fields []httpguard.FormField) []httpguard.FormField {
+	result := make([]httpguard.FormField, 0, len(fields)+1)
+	result = append(result, fields...)
+	return append(result, httpguard.FormField{Name: bonusPasswordField, Value: session.password.SecretValue()})
 }
 
 func (session *bonusExchangeSession) SubmitFreshBonusExchange(ctx context.Context, observed *site.ObservedBonusReview, expectedReviewID string, limits site.BonusExchangeLimits) (*site.ObservedBonusExchange, site.BonusExchangeReceipt, error) {
@@ -181,6 +246,7 @@ func (session *bonusExchangeSession) SubmitFreshBonusExchange(ctx context.Contex
 	}
 	freshReceipt := session.receipt
 	submission := session.submission
+	reviewedBytes := session.reviewedBytes
 	session.submitted = true
 	client := session.client
 	session.mu.Unlock()
@@ -207,7 +273,7 @@ func (session *bonusExchangeSession) SubmitFreshBonusExchange(ctx context.Contex
 	}
 
 	response, submitErr := client.PostFormOnce(
-		ctx, submission.target.path, submission.target.query, submission.fields,
+		ctx, submission.target.path, submission.target.query, session.passwordConfirmedFields(submission.fields),
 		bonusExchangeAccept, limits.MaxFormFields, limits.MaxFormBytes,
 		limits.MaxResponseBytes, limits.MaxResponseHeaderBytes, classifyBonusExchangeRedirect,
 	)
@@ -219,7 +285,11 @@ func (session *bonusExchangeSession) SubmitFreshBonusExchange(ctx context.Contex
 		receipt.Used.SubmissionRequestsAttempted = 0
 	}
 	receipt.Used.FormFieldsSubmitted = response.RequestFields
-	receipt.Used.FormBytesSubmitted = response.RequestBytes
+	if response.RequestFields > 0 {
+		// Count the password field but not its bytes, so the receipt does not
+		// reveal the password's length.
+		receipt.Used.FormBytesSubmitted = reviewedBytes
+	}
 	receipt.Used.ResponseBytesRead = response.ResponseBytesRead
 	receipt.Used.ResponseBytesKnown = response.ResponseBytesKnown
 	receipt.RequestAttempted = receipt.Used.SubmissionRequestsAttempted == 1
@@ -257,6 +327,26 @@ func (session *bonusExchangeSession) SubmitFreshBonusExchange(ctx context.Contex
 	case (response.StatusCode == http.StatusFound || response.StatusCode == http.StatusSeeOther) && response.RedirectID == bonusRedirectNoPermission:
 		receipt.Outcome = site.BonusExchangeOutcomeRejected
 		receipt.StopReason = "server_permission_rejected"
+	case response.StatusCode == http.StatusOK && (response.MediaType == "" || response.MediaType == bonusExchangeAccept) &&
+		response.ResponseBytesKnown && response.ResponseBytesRead == int64(len(response.Body)):
+		switch classifyBonusExchangeMessage(response.Body) {
+		case bonusMessageSuccess:
+			receipt.Outcome = site.BonusExchangeOutcomeConfirmed
+			receipt.ConfirmationCode = bonusMessageConfirmed
+			receipt.StopReason = ""
+		case bonusMessagePasswordRejected:
+			receipt.Outcome = site.BonusExchangeOutcomeRejected
+			receipt.StopReason = "server_password_rejected"
+		case bonusMessagePasswordRequired:
+			receipt.Outcome = site.BonusExchangeOutcomeRejected
+			receipt.StopReason = "server_password_required"
+		case bonusMessagePriceChanged:
+			receipt.Outcome = site.BonusExchangeOutcomeRejected
+			receipt.StopReason = "server_price_changed"
+		default:
+			receipt.Outcome = site.BonusExchangeOutcomeUnknown
+			receipt.StopReason = "submission_response_unrecognized"
+		}
 	default:
 		receipt.Outcome = site.BonusExchangeOutcomeUnknown
 		receipt.StopReason = "submission_response_unrecognized"
@@ -325,6 +415,37 @@ func classifyBonusExchangeRedirect(target *url.URL) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// classifyBonusExchangeMessage recognizes only the stdmsg() pages TJUPT
+// prints for an exchange POST, inside an authenticated page with exactly one
+// <h2>. Anything else, including a bare die() text, stays unrecognized so
+// the outcome is reported as unknown rather than guessed.
+func classifyBonusExchangeMessage(body []byte) bonusMessage {
+	if len(body) == 0 || !utf8.Valid(body) || isLoginPage(nil, body) || challengeMarker.Match(body) ||
+		len(bonusMessageHeadingTag.FindAllIndex(body, 2)) != 1 || !hasExactLogoutLink(body) {
+		return bonusMessageUnrecognized
+	}
+	match := bonusMessagePattern.FindSubmatch(body)
+	if len(match) != 3 {
+		return bonusMessageUnrecognized
+	}
+	text := string(match[2])
+	switch string(match[1]) {
+	case "成功":
+		return bonusMessageSuccess
+	case "出错了！":
+		if strings.HasPrefix(strings.TrimSpace(text), "密码不正确") {
+			return bonusMessagePasswordRejected
+		}
+	case "确认操作":
+		if bonusPasswordInputPattern.MatchString(text) {
+			return bonusMessagePasswordRequired
+		}
+	case "兑换价格有变化":
+		return bonusMessagePriceChanged
+	}
+	return bonusMessageUnrecognized
 }
 
 func isBonusSuccessRedirect(value string) bool {

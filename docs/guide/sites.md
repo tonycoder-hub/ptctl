@@ -70,10 +70,10 @@ deliberately non-authoritative; the separate exchange workflow therefore
 fetches a fresh page, reproduces the reviewed semantics, and crosses an
 explicit acknowledgement and recovery boundary.
 
-TJUPT currently withholds bonus exchange: the site confirms each exchange with
-the account password, which ptctl does not take, so `submit` refuses `tjupt`
-before reading stdin. The workflow below applies to a site that declares
-`bonus.exchange.submit_effectful`; no built-in site does today.
+TJUPT confirms each exchange with the account password, so its `submit` takes
+the cookie and password together as one strict JSON bundle on stdin
+(`--credential-bundle-stdin`) and refuses `--cookie-stdin`; see the TJUPT
+example below. A site that needs only the cookie takes `--cookie-stdin`.
 
 To cross that boundary, first initialize a private state store (the same
 versioned owner-only store format used by metafile artifacts), review the exact
@@ -125,6 +125,31 @@ ptctl site bonus exchange forget \
   --acknowledge-history-forget
 ```
 
+For TJUPT, replace the `submit` stdin and flag with the bundle. One way to
+build it without putting either secret in argv, assuming each is kept in its
+own owner-only file:
+
+```bash
+jq -n --rawfile cookie "$COOKIE_FILE" --rawfile password "$PASSWORD_FILE" \
+  '{schema: "ptctl.credentials/v1",
+    site_cookie: ($cookie | rtrimstr("\n")),
+    site_password: ($password | rtrimstr("\n"))}' | \
+  ptctl site bonus exchange submit \
+    --state-store "$PTCTL_STATE" \
+    --intent-record INTENT_RECORD_ID \
+    --expect-review-id REVIEW_ID \
+    --credential-bundle-stdin \
+    --acknowledge-bonus-exchange \
+    tjupt OPTION
+```
+
+The password is sent only inside that one POST and is never stored or printed.
+A wrong password is `rejected` with `server_password_rejected` and spends
+nothing; like every terminal outcome, that operation is not retried, so prepare
+a new intent after fixing the password. See
+[the TJUPT adapter](../TJUPT_ADAPTER.md#bonus-exchange) for the result pages
+it recognizes.
+
 `list` is a credential-free recovery aid when an earlier command's output is
 no longer available. It performs detected-stable bounded inventories of live
 intent records and historical retention/forget markers, hash-verifies and
@@ -142,8 +167,9 @@ encoder against the intent's field and encoded-byte budgets;
 those same limits are bound to the live authority consumed by the POST. Only
 the invocation that newly and durably creates the marker may send that exact
 freshly observed form, once. The POST uses HTTP/1.1 with no connection reuse,
-redirect following, or retry. An allowlisted site-local redirect can confirm
-the site response; other complete responses are rejected or unknown. If the
+redirect following, or retry. An allowlisted site-local redirect or an
+allowlisted result page can confirm the site response; other complete
+responses are rejected or unknown. If the
 POST may have started but its outcome cannot be durably recorded, `status` remains
 `attempt_reserved_submission_unknown`. Re-running `submit` is refused before
 stdin is read. Hidden form values and the cookie remain in memory only; sealed

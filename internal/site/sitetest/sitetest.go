@@ -145,6 +145,10 @@ type configuredPort struct {
 	accept func() error
 	reject []func() error
 	open   func(context.Context, site.Credential) (*portSession, error)
+	// refusedOpen, when set, is a second way to open the session that must
+	// always fail, such as a cookie-only open on a bonus exchange writer that
+	// needs the account password.
+	refusedOpen func(context.Context, site.Credential) error
 	// invalidStop is the receipt stop reason for an input the session rejects.
 	invalidStop string
 	// closedStop is the receipt stop reason after Close, or "" when the port
@@ -287,16 +291,34 @@ func configuredPorts(adapter site.Adapter, descriptor domain.SiteDescriptor, sam
 		})
 	}
 	if port, ok := adapter.(site.BonusExchangeWriter); ok {
+		openExchange := port.OpenBonusExchangeSession
+		var refusedOpen func(context.Context, site.Credential) error
+		if passwordPort, ok := port.(site.PasswordConfirmedBonusExchangeWriter); ok {
+			// The suite's password is synthetic; no session path that must fail
+			// before the first request ever sends it.
+			password, _ := site.NewAccountPassword("sitetest-PASSWORD-CANARY")
+			openExchange = func(ctx context.Context, credential site.Credential) (site.BonusExchangeSession, error) {
+				return passwordPort.OpenPasswordConfirmedBonusExchangeSession(ctx, credential, password)
+			}
+			refusedOpen = func(ctx context.Context, credential site.Credential) error {
+				session, err := port.OpenBonusExchangeSession(ctx, credential)
+				if session != nil {
+					_ = session.Close()
+				}
+				return err
+			}
+		}
 		ports = append(ports, configuredPort{
 			capability: domain.CapabilityBonusExchange,
 			config: func() (string, []string, error) {
 				config, err := port.BonusExchangeConfig()
 				return config.Origin, []string{config.ReviewRouteID, config.ActionRouteID}, err
 			},
-			accept: func() error { return port.ValidateBonusExchangeSelector(samples.BonusSelector) },
-			reject: rejectSelectors(port.ValidateBonusExchangeSelector),
+			accept:      func() error { return port.ValidateBonusExchangeSelector(samples.BonusSelector) },
+			reject:      rejectSelectors(port.ValidateBonusExchangeSelector),
+			refusedOpen: refusedOpen,
 			open: func(ctx context.Context, credential site.Credential) (*portSession, error) {
-				session, err := port.OpenBonusExchangeSession(ctx, credential)
+				session, err := openExchange(ctx, credential)
 				if err != nil || session == nil {
 					return nil, sessionOpenError(err)
 				}
@@ -360,6 +382,9 @@ func testDeclaredPort(t *testing.T, descriptor domain.SiteDescriptor, port confi
 		session.close()
 		t.Fatal("opened a session with an undeclared auth method")
 	}
+	if port.refusedOpen != nil && port.refusedOpen(context.Background(), samples.Credential) == nil {
+		t.Fatal("opened a session through a path the port must refuse")
+	}
 
 	openSession := func(t *testing.T) *portSession {
 		t.Helper()
@@ -416,6 +441,9 @@ func testUndeclaredPort(t *testing.T, port configuredPort, samples Samples) {
 	if session, err := port.open(context.Background(), samples.Credential); err == nil {
 		session.close()
 		t.Fatal("undeclared port opened a session")
+	}
+	if port.refusedOpen != nil && port.refusedOpen(context.Background(), samples.Credential) == nil {
+		t.Fatal("undeclared port opened a session through a refused path")
 	}
 }
 

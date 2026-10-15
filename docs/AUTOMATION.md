@@ -96,11 +96,12 @@ Per-command details are in
 
 | Flag | Used by | Stdin content |
 |---|---|---|
-| `--cookie-stdin` | `site` reads, `site bonus exchange submit`, `site metafile fetch` | The complete `Cookie` header value |
+| `--cookie-stdin` | `site` reads, `site bonus exchange submit` for cookie-only sites, `site metafile fetch` | The complete `Cookie` header value |
 | `--api-key-stdin` | `site status`, `site account`, and `site search` for sites that authenticate with an API key (M-Team) | The site-issued API key |
 | `--password-stdin` | `client` commands, `seed retire` commands that contact a downloader, and `reconcile` with a downloader | The downloader password |
 | `--site-cookie-stdin` | `reconcile report` with a live site observation and no downloader | The complete `Cookie` header value |
 | `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}` |
+| `--credential-bundle-stdin` | `site bonus exchange submit` for sites that confirm with the account password (TJUPT) | `{"schema":"ptctl.credentials/v1","site_cookie":"...","site_password":"..."}` |
 
 - An interactive terminal on stdin is refused; the secret must be piped.
 - Single secrets are limited to 64 KiB and the bundle to 128 KiB. The bundle is

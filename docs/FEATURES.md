@@ -81,8 +81,9 @@ deliberately does not. For step-by-step usage, see the
   omit NexusPHP's view-counting `hit` parameter; bonus review records a bounded
   form-shape digest and semantic review ID but never submits the form; both
   remain site claims only;
-- an explicitly acknowledged, durable bonus-exchange state machine (withheld
-  for TJUPT, which confirms each exchange with the account password):
+- an explicitly acknowledged, durable bonus-exchange state machine (TJUPT
+  confirms each exchange with the account password, read with the cookie from
+  one strict stdin bundle and sent in the same single POST):
   private reviewed intent, fresh exact-option re-observation, deterministic
   no-clobber attempt marker, at most one non-retried POST, and a separately
   sealed confirmed/rejected/unknown outcome; its credential-free bounded
