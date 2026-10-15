@@ -131,6 +131,7 @@ are supplied. See docs/READ_ONLY_QUICKSTART.md for the short read-only guide.
 Usage:
   ptctl site list [--output table|json]
   ptctl site capabilities [--output table|json] [SITE]
+  ptctl site login --credential-bundle-stdin [--session-days N] SITE
   ptctl site status (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
   ptctl site account (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
   ptctl site search (--cookie-stdin | --api-key-stdin) [--output table|json] SITE QUERY...
@@ -218,6 +219,7 @@ Usage:
 Safety defaults:
   * Ordinary site reads are one bounded request per invocation: a GET, or a read-only POST for JSON API sites such as M-Team. Bonus exchange is one fresh GET plus at most one acknowledged POST after a durable marker. Site requests are never automatically retried.
   * Session cookies and site API keys are accepted only through stdin and are never persisted.
+  * Site login reads the account password and optional one-time code only from stdin, sends one login request plus one verifying read, never retries, and writes the new session cookie only to a non-terminal stdout.
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.

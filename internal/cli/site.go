@@ -26,6 +26,8 @@ func (a *app) site(args []string) error {
 		return a.siteRead(args[0], args[1:])
 	case "detail":
 		return a.siteDetail(args[1:])
+	case "login":
+		return a.siteLogin(args[1:])
 	case "bonus":
 		if len(args) >= 2 {
 			switch args[1] {

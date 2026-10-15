@@ -62,6 +62,9 @@ func TestAdapter(t *testing.T, adapter site.Adapter, samples Samples) {
 			}
 		})
 	}
+	if loginer, ok := adapter.(site.SessionLoginer); ok && descriptor.Supports(domain.CapabilityLogin) {
+		t.Run(string(domain.CapabilityLogin), func(t *testing.T) { testLogin(t, loginer) })
+	}
 	for _, port := range configuredPorts(adapter, descriptor, samples) {
 		t.Run(string(port.capability), func(t *testing.T) {
 			if descriptor.Supports(port.capability) {
@@ -70,6 +73,38 @@ func TestAdapter(t *testing.T, adapter site.Adapter, samples Samples) {
 				testUndeclaredPort(t, port, samples)
 			}
 		})
+	}
+}
+
+// testLogin checks the login config and that a done context stops a login
+// before its first request. The credentials are synthetic.
+func testLogin(t *testing.T, loginer site.SessionLoginer) {
+	config := loginer.LoginConfig()
+	seen := map[int]bool{}
+	for _, days := range config.SessionDays {
+		if days <= 0 || seen[days] {
+			t.Fatalf("login session days %v must be positive and unique", config.SessionDays)
+		}
+		seen[days] = true
+	}
+	if !config.Allows(config.DefaultSessionDays) {
+		t.Fatalf("default login session days %d is not offered in %v", config.DefaultSessionDays, config.SessionDays)
+	}
+	config.SessionDays[0] = -1
+	if loginer.LoginConfig().Allows(-1) {
+		t.Fatal("LoginConfig shares its session days with callers")
+	}
+	password, err := site.NewAccountPassword("sitetest-PASSWORD-CANARY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := site.NewLoginCredentials("sitetest-user", password, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := loginer.Login(canceledContext(), credentials, loginer.LoginConfig().DefaultSessionDays)
+	if !errors.Is(err, context.Canceled) || result.Session != (site.Credential{}) || result.RequestsAttempted != 0 {
+		t.Fatalf("canceled login err=%v requests=%d, want context.Canceled before any request", err, result.RequestsAttempted)
 	}
 }
 
