@@ -62,6 +62,35 @@ type TorrentSearcher interface {
 	Search(context.Context, Credential, string) ([]domain.TorrentSummary, error)
 }
 
+// SearchOptions narrows one search beyond its query. The zero value asks for
+// the site's default first page, the same search TorrentSearcher.Search runs.
+type SearchOptions struct {
+	// Page is 1-based; zero means the first page.
+	Page int
+	// Mode is a site-defined search area, such as M-Team's "adult"; empty
+	// means the site's default area.
+	Mode string
+	// Categories keeps only torrents in these site category IDs.
+	Categories []string
+	// FreeOnly keeps only torrents whose download is not counted.
+	FreeOnly bool
+}
+
+// IsZero reports whether the options ask for nothing beyond the default
+// first page.
+func (options SearchOptions) IsZero() bool {
+	return options.Page == 0 && options.Mode == "" && len(options.Categories) == 0 && !options.FreeOnly
+}
+
+// OptionTorrentSearcher is a TorrentSearcher that also takes SearchOptions.
+// ValidateSearchOptions runs before any credential is read, so an option the
+// site cannot honor is refused without a request.
+type OptionTorrentSearcher interface {
+	TorrentSearcher
+	ValidateSearchOptions(SearchOptions) error
+	SearchWithOptions(context.Context, Credential, string, SearchOptions) ([]domain.TorrentSummary, error)
+}
+
 type BonusCatalogReader interface {
 	BonusCatalog(context.Context, Credential) (domain.BonusCatalog, error)
 }

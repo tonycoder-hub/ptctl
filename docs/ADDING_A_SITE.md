@@ -119,6 +119,13 @@ A direct port makes its request when it is called. It must:
 - fail closed: a login page is unauthenticated, and a maintenance, challenge,
   or unrecognized response is an error, never an empty result.
 
+A `TorrentSearcher` may also implement `OptionTorrentSearcher` to take
+`site.SearchOptions`: a page, a site-defined mode, category IDs, and a
+free-only filter, behind `site search --page`, `--mode`, `--category`, and
+`--free`. `ValidateSearchOptions` must refuse anything the site cannot honor;
+the CLI calls it before the credential is read and turns its error into a
+usage error. A site without the port refuses those flags.
+
 The CLI replaces every error from a direct port with a fixed
 `site <command> failed` message, keeping only typed cancellation and deadline
 causes, so adapter error text never reaches the user.

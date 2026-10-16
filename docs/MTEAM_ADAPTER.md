@@ -49,6 +49,7 @@ ptctl site status mteam
 ptctl site account mteam
 ptctl site search mteam "Ubuntu"
 ptctl site search --output json mteam "Ubuntu"
+ptctl site search --page 2 --category 419,439 --free mteam "Ubuntu"
 ptctl site detail mteam REMOTE_ID
 ptctl site metafile fetch --acknowledge-site-effect --metafile-store "$PTCTL_STORE" mteam REMOTE_ID
 ```
@@ -81,7 +82,7 @@ see [Metafile download](#metafile-download)):
 | Command | Request | Body |
 |---|---|---|
 | `site status`, `site account` | `POST /api/member/profile` | an empty `multipart/form-data` form |
-| `site search` | `POST /api/torrent/search` | `{"mode":"normal","keyword":QUERY,"pageNumber":1,"pageSize":50}` |
+| `site search` | `POST /api/torrent/search` | `{"mode":"normal","keyword":QUERY,"pageNumber":1,"pageSize":50}`; the options below add `categories` and `discount` and change `mode` and `pageNumber` |
 | `site detail` | `POST /api/torrent/detail` | a `multipart/form-data` form with the one field `id` |
 
 The API exposes these reads as POST requests. All three endpoints only read;
@@ -112,7 +113,20 @@ limiter that spans processes.
 counter that is missing or malformed is left absent rather than guessed, but a
 profile without a username is an error rather than a partial account.
 
-**Search.** The first page of up to 50 results in normal mode. Each row has the
+**Search.** One page of up to 50 results, by default the first page in
+normal mode. Options narrow it, still in one request:
+
+| Option | API field | Accepts |
+|---|---|---|
+| `--page N` | `pageNumber` | 1 to 1000 |
+| `--mode MODE` | `mode` | `normal` (films, series, music, and the rest) or `adult`; adult categories need `--mode adult` |
+| `--category ID` | `categories` | Category IDs from the table under **Categories**, repeated or comma-separated, at most 32 |
+| `--free` | `discount: "FREE"` | Torrents whose download is not counted; rows the API returns with any other promotion are dropped, so a page can hold fewer than 50 rows |
+
+A page past the last one is empty. Invalid options are usage errors (exit 2)
+before the key is read or any request is sent.
+
+Each row has the
 ref `mteam/ID`, name, size, category ID and name, publish time, seeders,
 leechers, completed count, and promotion. The table view adds `SEEDERS`,
 `LEECHERS`, `PROMOTION`, and, last, `CATEGORY` columns. A response without a

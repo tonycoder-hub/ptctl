@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -120,6 +121,13 @@ func (a *app) siteRead(command string, args []string) error {
 	output := fs.String("output", "table", "table or json")
 	cookieStdin := fs.Bool("cookie-stdin", false, "read session Cookie header value from stdin")
 	apiKeyStdin := fs.Bool("api-key-stdin", false, "read a site-issued API key from stdin")
+	var searchOptions site.SearchOptions
+	if command == "search" {
+		fs.IntVar(&searchOptions.Page, "page", 0, "result page, from 1 (default: the first page)")
+		fs.StringVar(&searchOptions.Mode, "mode", "", "site search area, such as normal or adult on M-Team")
+		fs.Var((*categoryListFlag)(&searchOptions.Categories), "category", "keep only this site category ID; repeat or separate with commas")
+		fs.BoolVar(&searchOptions.FreeOnly, "free", false, "keep only torrents whose download is not counted")
+	}
 	if err := fs.Parse(args); err != nil {
 		return usageError("site %s: %v", command, err)
 	}
@@ -190,6 +198,23 @@ func (a *app) siteRead(command string, args []string) error {
 		}
 		read = func(ctx context.Context, credential site.Credential) (any, error) {
 			return reader.Search(ctx, credential, query)
+		}
+		pageSet := false
+		fs.Visit(func(flag *flag.Flag) { pageSet = pageSet || flag.Name == "page" })
+		if pageSet && searchOptions.Page < 1 {
+			return usageError("--page must be 1 or more")
+		}
+		if !searchOptions.IsZero() {
+			optionReader, ok := adapter.(site.OptionTorrentSearcher)
+			if !ok {
+				return usageError("site %q does not support --page, --mode, --category, or --free", descriptor.ID)
+			}
+			if err := optionReader.ValidateSearchOptions(searchOptions); err != nil {
+				return usageError("%v", err)
+			}
+			read = func(ctx context.Context, credential site.Credential) (any, error) {
+				return optionReader.SearchWithOptions(ctx, credential, query, searchOptions)
+			}
 		}
 	case "bonus-catalog":
 		reader, ok := adapter.(site.BonusCatalogReader)
@@ -375,4 +400,23 @@ func promotionLabel(promotion *domain.Promotion) string {
 		label += " until " + promotion.EndsAt.UTC().Format(time.RFC3339)
 	}
 	return label
+}
+
+// categoryListFlag collects site category IDs from repeated or
+// comma-separated --category values.
+type categoryListFlag []string
+
+func (values *categoryListFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *categoryListFlag) Set(value string) error {
+	for _, category := range strings.Split(value, ",") {
+		category = strings.TrimSpace(category)
+		if category == "" {
+			return fmt.Errorf("category must not be empty")
+		}
+		*values = append(*values, category)
+	}
+	return nil
 }
