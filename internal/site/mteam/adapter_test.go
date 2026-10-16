@@ -86,6 +86,7 @@ func TestIdentityIsPinned(t *testing.T) {
 		Capabilities: []domain.Capability{
 			domain.CapabilityAuthCheck, domain.CapabilityAccountRead, domain.CapabilitySearch, domain.CapabilityBonusRead,
 			domain.CapabilityDetail, domain.CapabilityMetafile, domain.CapabilityBonusReview, domain.CapabilityBonusExchange,
+			domain.CapabilityAccountTorrents,
 		},
 	}
 	if got := New().Descriptor(); !reflect.DeepEqual(got, want) {

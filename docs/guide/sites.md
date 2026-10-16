@@ -163,7 +163,11 @@ API and never retry; search results add seeders, leechers, promotion, and
 category-name columns, and `search` takes `--page N`, `--mode normal|adult`,
 `--category ID`, and `--free`. `site metafile fetch` downloads one `.torrent` into the
 private store through M-Team's signed link, as described in
-[metafiles.md](metafiles.md). `bonus-catalog` and `bonus review` read M-Team's
+[metafiles.md](metafiles.md). `torrents` lists the account's own seeding,
+leeching, completed, incomplete, or uploaded torrents with `--state` and
+`--page`, reading the profile and then the list on one client; each row says
+whether its traffic is the account's total or the running client's session.
+`bonus-catalog` and `bonus review` read M-Team's
 bonus shop, and `bonus exchange submit` buys one unit of goods that need no
 input with the API key alone. `reconcile --site-live` reads live detail with the
 saved key. Setup, results, and error lines are in
@@ -176,6 +180,8 @@ ptctl site account mteam
 ptctl site search mteam "Ubuntu"
 ptctl site search --page 2 --free mteam "Ubuntu"
 ptctl site detail mteam REMOTE_ID
+ptctl site torrents mteam
+ptctl site torrents --state completed mteam
 ptctl site bonus-catalog mteam
 ptctl site bonus review mteam GOODS_ID
 printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
