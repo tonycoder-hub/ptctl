@@ -50,8 +50,8 @@ Every JSON result is a single object on stdout, indented with two spaces:
 | Area | Kinds |
 |---|---|
 | General | `version` |
-| Site reads | `site.descriptor.list` (`site list`, `site capabilities`), `site.session`, `site.account`, `site.torrent.list`, `site.torrent.detail`, `site.bonus.catalog`, `site.bonus.offer_review` |
-| Site login | `site.login` |
+| Site reads | `site.descriptor.list` (`site list`, `site capabilities`), `site.session`, `site.account`, `site.torrent.list`, `site.torrent.detail`, `site.account.torrent.list` (`site torrents`), `site.bonus.catalog`, `site.bonus.offer_review` |
+| Site login | `site.login`, `site.logout` |
 | Bonus exchange | `site.bonus.exchange.prepare`, `site.bonus.exchange.submit`, `site.bonus.exchange.status`, `site.bonus.exchange.operation_list`, `site.bonus.exchange.prune`, `site.bonus.exchange.forget` |
 | Site metafiles | `site.metafile.fetch`, `site.metafile.binding.list`, `site.metafile.binding.inspect` |
 | Metafiles | `metafile.manifest` (`torrent inspect`), `content.verification` (`torrent verify`), `metafile.store.init`, `metafile.store.import`, `metafile.store.inspect` |
