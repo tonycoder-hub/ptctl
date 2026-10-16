@@ -524,6 +524,7 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 	intentValue := fs.String("intent-record", "", "sealed intent record ID")
 	expectedReview := fs.String("expect-review-id", "", "exact review ID approved by the user")
 	cookieStdin := fs.Bool("cookie-stdin", false, "read one Cookie header value from stdin")
+	apiKeyStdin := fs.Bool("api-key-stdin", false, "read a site-issued API key from stdin")
 	bundleStdin := fs.Bool("credential-bundle-stdin", false, "read a ptctl.credentials/v1 bundle with site_cookie and site_password from stdin")
 	acknowledge := fs.Bool("acknowledge-bonus-exchange", false, "acknowledge one bonus exchange form submission")
 	timeout := fs.Duration("timeout", bonusExchangeDefaultTimeout, "fresh review and submission timeout")
@@ -535,6 +536,9 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 	}
 	if *cookieStdin && *bundleStdin {
 		return usageError("site bonus exchange submit accepts --cookie-stdin or --credential-bundle-stdin, not both")
+	}
+	if *apiKeyStdin && (*cookieStdin || *bundleStdin) {
+		return usageError("site bonus exchange submit accepts one of --cookie-stdin, --api-key-stdin, or --credential-bundle-stdin")
 	}
 	if !*acknowledge {
 		return usageError("site bonus exchange submit requires --acknowledge-bonus-exchange")
@@ -557,15 +561,23 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 		return err
 	}
 	passwordWriter, needsPassword := writer.(site.PasswordConfirmedBonusExchangeWriter)
-	if needsPassword && *cookieStdin {
+	if needsPassword && (*cookieStdin || *apiKeyStdin) {
 		return usageError("site %q confirms bonus exchange with the account password; submit requires --credential-bundle-stdin", descriptor.ID)
 	}
 	if !needsPassword && *bundleStdin {
-		return usageError("site %q bonus exchange takes only --cookie-stdin", descriptor.ID)
+		return usageError("site %q bonus exchange takes only %s", descriptor.ID, credentialStdinFlag(defaultSiteAuthMethod(descriptor)))
 	}
-	// Without a flag the saved cookie is used, and a site that confirms with
-	// the account password asks for it, hidden, on this terminal.
-	source := siteCredentialSource{method: domain.AuthMethodCookieHeader, saved: !*cookieStdin && !*bundleStdin}
+	// Without a flag the saved credential is used, and a site that confirms
+	// with the account password asks for it, hidden, on this terminal.
+	source := siteCredentialSource{method: domain.AuthMethodCookieHeader, saved: !*bundleStdin}
+	if !*bundleStdin {
+		if source, err = siteCredentialSourceFor(descriptor, *cookieStdin, *apiKeyStdin); err != nil {
+			return err
+		}
+	}
+	if needsPassword && source.method != domain.AuthMethodCookieHeader {
+		return usageError("site %q bonus exchange is unavailable", descriptor.ID)
+	}
 	var terminal promptTerminal
 	if source.saved && needsPassword {
 		var ok bool
@@ -655,7 +667,11 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 		}
 		siteSession, err = passwordWriter.OpenPasswordConfirmedBonusExchangeSession(ctx, credential, password)
 	} else {
-		credential, readErr := a.readSiteCredential(source, readEffectfulSiteCredential)
+		readSecret := readEffectfulSiteCredential
+		if source.method == domain.AuthMethodAPIKeyHeader {
+			readSecret = readEffectfulAPIKeyCredential
+		}
+		credential, readErr := a.readSiteCredential(source, readSecret)
 		if readErr != nil {
 			_ = stateSession.Close()
 			addBonusExchangeBlocker(&report, "credential.read_failed", "the site credential could not be read")
@@ -783,7 +799,7 @@ func (a *app) bonusExchangeWriter(siteID, selector string) (domain.SiteDescripto
 		return domain.SiteDescriptor{}, nil, site.BonusExchangeConfig{}, usageError("unknown site %q", siteID)
 	}
 	descriptor := adapter.Descriptor()
-	if !descriptor.Supports(domain.CapabilityBonusExchange) || !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
+	if !descriptor.Supports(domain.CapabilityBonusExchange) {
 		return descriptor, nil, site.BonusExchangeConfig{}, usageError("site %q does not support acknowledged bonus exchange", descriptor.ID)
 	}
 	writer, ok := adapter.(site.BonusExchangeWriter)
@@ -1096,7 +1112,8 @@ func safeBonusExchangeOutcome(value string) string {
 func safeBonusExchangeSubmitStop(value string) string {
 	switch value {
 	case "context_before_submission", "submission_not_sent", "submission_transport_uncertain", "submission_response_unrecognized", "server_duplicate_lock", "server_permission_rejected",
-		"server_password_rejected", "server_password_required", "server_price_changed", "site.exchange_receipt_invalid":
+		"server_password_rejected", "server_password_required", "server_price_changed", "server_refused", "server_rate_limited", "server_authentication_rejected",
+		"site.exchange_receipt_invalid":
 		return value
 	case "":
 		return ""
@@ -1318,7 +1335,7 @@ func bonusRecordID(ref *metastore.RecordRef) string {
 func (a *app) siteBonusExchangeHelp() {
 	fmt.Fprint(a.stdout, `Usage:
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
-  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID [--cookie-stdin | --credential-bundle-stdin] --acknowledge-bonus-exchange [--output table|json] SITE OPTION
+  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID [--cookie-stdin | --api-key-stdin | --credential-bundle-stdin] --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
   ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]
@@ -1329,13 +1346,15 @@ the production adapter before reading stdin, performs one fresh bounded review,
 durably publishes a deterministic at-most-once attempt marker, and only then
 may submit the exact opaque form once. There are no redirects or retries.
 
-Without a credential flag, submit uses the session cookie 'ptctl site login
-SITE' saved. A site that confirms each exchange with the account password, such
-as TJUPT, then asks for the password on this terminal with echo off. Scripts
-pipe credentials instead: --cookie-stdin for a cookie alone, or, for a site
-that needs the password, --credential-bundle-stdin with strict JSON containing
-schema "ptctl.credentials/v1", site_cookie, and site_password. The password is
-added to that single POST only; it is never stored or printed.
+Without a credential flag, submit uses the session cookie or API key 'ptctl
+site login SITE' saved. A site that confirms each exchange with the account
+password, such as TJUPT, then asks for the password on this terminal with echo
+off. Scripts pipe credentials instead: --cookie-stdin or --api-key-stdin for a
+cookie or API key alone, or, for a site that needs the password,
+--credential-bundle-stdin with strict JSON containing schema
+"ptctl.credentials/v1", site_cookie, and site_password. The password is added
+to that single POST only; it is never stored or printed. M-Team needs no
+password: an API key alone exchanges goods that take no input, one unit each.
 
 After the POST, a bounded local finalization interval may persist the exact
 adapter observation even if the network context ended. If no durable outcome

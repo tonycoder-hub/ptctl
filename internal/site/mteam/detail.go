@@ -312,11 +312,15 @@ func validateTorrentRef(ref domain.TorrentRef) error {
 	return nil
 }
 
-// formBody encodes one multipart field. Callers pass only canonical IDs, so
-// the value never needs quoting.
-func formBody(name, value string) []byte {
-	return []byte("--" + formBoundary + "\r\n" +
-		"Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" +
-		value + "\r\n" +
-		"--" + formBoundary + "--\r\n")
+// formBody encodes multipart fields given as name, value pairs. Callers pass
+// only fixed names and canonical decimal values, so nothing needs quoting.
+func formBody(pairs ...string) []byte {
+	var body strings.Builder
+	for i := 0; i+1 < len(pairs); i += 2 {
+		body.WriteString("--" + formBoundary + "\r\n" +
+			"Content-Disposition: form-data; name=\"" + pairs[i] + "\"\r\n\r\n" +
+			pairs[i+1] + "\r\n")
+	}
+	body.WriteString("--" + formBoundary + "--\r\n")
+	return []byte(body.String())
 }
