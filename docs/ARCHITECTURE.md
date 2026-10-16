@@ -356,10 +356,12 @@ Capabilities are small and explicit:
 - `auth.login_effectful`
 
 `auth.login_effectful` (`site.SessionLoginer`) signs in with an account
-password and optional one-time code, read from one stdin bundle, and returns a
-verified cookie credential that ptctl writes only to a non-terminal stdout and
-never stores. It sends one login request and at most one verifying read, never
-retries, and reports a refusal only by a fixed stop reason.
+password and optional one-time code, typed at hidden terminal prompts or read
+from one stdin bundle, and returns a verified cookie credential. The CLI saves
+it to an owner-only file, by default under the user config directory, or
+writes it to a non-terminal stdout, and never reads it back on its own. It
+sends one login request and at most one verifying read, never retries, and
+reports a refusal only by a fixed stop reason.
 
 Site-specific form or action writes live under narrow namespaced typed ports
 and durable action schemas. They are not forced into universal fields. The effectful

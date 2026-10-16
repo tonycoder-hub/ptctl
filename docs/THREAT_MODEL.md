@@ -129,8 +129,16 @@ the site issued a session cookie. Because TJUPT blocks the client IP after ten
 failed logins, a failed or ambiguous login is never retried, the site's own
 remaining-attempts count is surfaced when its page states one, and the
 two-step page, which echoes the password in a hidden field, is cleared after
-classification. The issued cookie is written only to a pipe or an owner-only
-stdout file and is kept only after the verifying read names the same account.
+classification. The issued cookie is kept only after the verifying read names
+the same account. It is then renamed into place from an owner-only temporary
+file created before the login request, so an unwritable destination never
+costs an attempt and a failed login leaves an earlier cookie file untouched.
+Without a cookie file it goes only to a pipe or an owner-only stdout file. The
+interactive default reads the password and one-time code from the terminal
+with echo turned off before each prompt appears (input typed ahead of a prompt
+can still be echoed), restores echo if interrupted, and saves the cookie under the
+user config directory, which no command reads back implicitly; a terminal is
+accepted only there, never with `--credential-bundle-stdin`.
 The M-Team adapter sends at most one bounded POST per command to one of two
 read-only JSON API endpoints (`member/profile` and `torrent/search`), with a
 non-replayable body of at most 16 KiB, and never retries. HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
@@ -1501,7 +1509,8 @@ upgrade storage, client, path, or private-variant proof.
 ### Supply chain
 
 The runtime uses the Go standard library plus `golang.org/x/sys` for audited
-OS-specific filesystem security primitives. GitHub Actions are pinned to full
+OS-specific filesystem security primitives and echo-off terminal input, and
+`golang.org/x/net/html` for site page parsing. GitHub Actions are pinned to full
 commit SHAs and receive read-only repository permission. Tests construct
 synthetic metafiles; real tracker artifacts are forbidden.
 

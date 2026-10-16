@@ -264,12 +264,13 @@ response details do not cross the CLI boundary.
 
 ### Login
 
-`site login --credential-bundle-stdin tjupt` implements
-`auth.login_effectful`, declared only on the default origin. Usage, the
-session length, and stdout safety are checked before stdin is read; the bundle
-then carries `site_username`, `site_password`, and an optional `site_totp`,
-which TJUPT requires to be exactly six digits. Command usage, output, and stop
-reasons are in the [sites guide](guide/sites.md).
+`site login tjupt` implements `auth.login_effectful`, declared only on the
+default origin. Usage, the session length, and the cookie destination are
+checked before the command prompts on the terminal or, with
+`--credential-bundle-stdin`, reads stdin. Either way the credentials are a
+username, a password, and an optional two-step code, which TJUPT requires to
+be exactly six digits. Command usage, output, and stop reasons are in the
+[sites guide](guide/sites.md) and `ptctl help login`.
 
 TJUPT's `login.php` posts `username`, `password`, and `logout` (the session
 length in days: 1, 7, 14, 30, or 90) to `takelogin.php`. An account with
@@ -304,7 +305,9 @@ TJUPT blocks the client IP after ten failed logins, so a failed login is never
 retried. In October 2026 a login without a code returned the two-step page
 with all ten attempts still offered, and a login with a code from a password
 manager issued a seven-day `access_token` in two requests that `site status`
-and `site account` then accepted.
+and `site account` then accepted. The interactive default did the same on a
+terminal: neither hidden answer appeared in the terminal output, and
+`site status` accepted the cookie file it saved.
 
 ## Fixtures
 

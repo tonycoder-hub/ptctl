@@ -72,7 +72,7 @@ The complete inventory, including what is deliberately not implemented, is in
 |---|---|---|
 | Zero-write | `torrent inspect/verify`, `storage probe/map`, `seed discover/plan`, `client status/list`, ordinary `site` reads and `site bonus review`, `reconcile report`, and every `plan`, `status`, `list`, and `inspect` subcommand | None. Reads can still update atime, hydrate offline placeholders, or be recorded by the remote side. |
 | Private store | `metafile store init/import`, `storage profile create`, `storage index refresh/refresh-discover`, `reconcile refresh-report`, `site bonus exchange prepare` | The explicit command itself. Owner-only and no-clobber; not encrypted. |
-| Tracker-visible | `site metafile fetch` (one GET), `site bonus exchange submit` (at most one POST), `site login` (one POST and one verifying GET) | `--acknowledge-site-effect`, `--acknowledge-bonus-exchange`; `site login` is the command itself, with the cookie written only to a pipe or owner-only file |
+| Tracker-visible | `site metafile fetch` (one GET), `site bonus exchange submit` (at most one POST), `site login` (one POST and one verifying GET) | `--acknowledge-site-effect`, `--acknowledge-bonus-exchange`; `site login` is the command itself, with the cookie saved only to an owner-only file or a pipe |
 | Target filesystem | `seed materialize run/resume/abandon` | `--acknowledge-filesystem-write`, `--acknowledge-abandon` |
 | Downloader | `client adopt/activate/stop/remove run/resume` | `--acknowledge-client-add`, `--acknowledge-client-recheck`, `--acknowledge-client-stop`, `--acknowledge-client-removal`; repeats, re-adds, and observation-only adoption have their own flags |
 | Source deletion | `seed retire run/resume`, `seed retire parent-cleanup run/resume` | `--acknowledge-source-deletion`, `--acknowledge-empty-parent-removal` |
@@ -130,8 +130,10 @@ stdin; interactive TTY input is refused, and the cookie is never persisted:
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
 ```
 
-For TJUPT, `site login --credential-bundle-stdin tjupt` can issue that cookie
-from the account password and two-step code instead; see
+For TJUPT, `ptctl site login tjupt` can issue that cookie instead: it prompts
+for the username, the hidden password, and the two-step code, then saves the
+cookie to an owner-only file and prints its path. Scripts and agents use
+`--credential-bundle-stdin`; see `ptctl help login` and
 [Site reads and bonus exchange](docs/guide/sites.md).
 
 M-Team uses an API key from 控制台 → 实验室 → 建立存取令牌 instead of a cookie,

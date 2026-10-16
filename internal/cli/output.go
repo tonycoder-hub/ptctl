@@ -57,6 +57,8 @@ func jsonKind(data any) string {
 		return typed.kind
 	case domain.BonusCatalog:
 		return "site.bonus.catalog"
+	case siteLoginReport:
+		return "site.login"
 	case *metafile.MetaInfo:
 		return "metafile.manifest"
 	case metafileStoreReport:

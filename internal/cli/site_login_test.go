@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -242,5 +243,262 @@ func TestSiteLoginRefusesUnsafeStdout(t *testing.T) {
 	}
 	if session, err := readCredential(bytes.NewReader(written)); err != nil || session.SecretValue() != loginSessionCanary {
 		t.Fatalf("written cookie is not readable by --cookie-stdin: err=%v", err)
+	}
+}
+
+// fakeTerminal answers prompts in order and records whether each read had
+// echo off. It reports EOF once the answers run out.
+type fakeTerminal struct {
+	answers []string
+	secret  []bool
+}
+
+func (terminal *fakeTerminal) next(secret bool) (string, error) {
+	terminal.secret = append(terminal.secret, secret)
+	if len(terminal.answers) == 0 {
+		return "", io.EOF
+	}
+	answer := terminal.answers[0]
+	terminal.answers = terminal.answers[1:]
+	return answer, nil
+}
+
+func (terminal *fakeTerminal) ReadLine() (string, error) { return terminal.next(false) }
+
+func (terminal *fakeTerminal) ReadSecret(showPrompt func()) (string, error) {
+	showPrompt()
+	return terminal.next(true)
+}
+
+// useTempConfigDir points the user config directory at a temporary directory
+// on every platform and returns the default cookie path for fakept.
+func useTempConfigDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("AppData", dir)
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(config, "ptctl", "sessions", "fakept.cookie")
+}
+
+func runInteractiveLogin(adapter site.Adapter, terminal *fakeTerminal, stdout io.Writer, args ...string) (int, string) {
+	var errOut bytes.Buffer
+	a := &app{
+		stdin: &trackingReader{}, stdout: stdout, stderr: &errOut,
+		registry: site.NewRegistry(adapter, readOnlyFakeSite{}),
+		terminal: func(io.Reader) (promptTerminal, bool) { return terminal, terminal != nil },
+	}
+	code := runWithApp(append([]string{"site", "login"}, args...), a)
+	return code, errOut.String()
+}
+
+func assertOnlyEntries(t *testing.T, dir string, want ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("%s holds %q, want %q", dir, names, want)
+	}
+}
+
+func TestSiteLoginPromptsByDefaultAndSavesTheCookieOwnerOnly(t *testing.T) {
+	cookiePath := useTempConfigDir(t)
+	adapter := successfulLoginAdapter(t)
+	terminal := &fakeTerminal{answers: []string{" CanaryUser ", "PASSWORD-CANARY", " 123 456 "}}
+	var out bytes.Buffer
+	code, stderr := runInteractiveLogin(adapter, terminal, &out, "fakept")
+	if code != 0 || out.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), stderr)
+	}
+	if fmt.Sprint(terminal.secret) != "[false true true]" {
+		t.Fatalf("echo-off reads=%v, want username echoed and password and code hidden", terminal.secret)
+	}
+	if adapter.calls != 1 || adapter.username != "CanaryUser" || adapter.password != "PASSWORD-CANARY" || !adapter.hasCode || adapter.code != "123456" || adapter.sessionDays != 7 {
+		t.Fatalf("login calls=%d username=%q days=%d hasCode=%v", adapter.calls, adapter.username, adapter.sessionDays, adapter.hasCode)
+	}
+	written, err := os.ReadFile(cookiePath)
+	if err != nil || string(written) != loginSessionCanary+"\n" {
+		t.Fatalf("cookie file content mismatch err=%v", err)
+	}
+	if session, err := readCredential(bytes.NewReader(written)); err != nil || session.SecretValue() != loginSessionCanary {
+		t.Fatalf("saved cookie is not readable by --cookie-stdin: err=%v", err)
+	}
+	if runtime.GOOS != "windows" {
+		for path, want := range map[string]os.FileMode{cookiePath: 0o600, filepath.Dir(cookiePath): 0o700} {
+			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != want {
+				t.Fatalf("%s mode=%v err=%v, want %v", path, info.Mode().Perm(), err, want)
+			}
+		}
+	}
+	assertOnlyEntries(t, filepath.Dir(cookiePath), "fakept.cookie")
+	for _, want := range []string{
+		"Username: ", "Password (hidden): ", "Two-step code (hidden; press Enter if none): ",
+		"site login succeeded: site=fakept username=CanaryUser session_expires=2026-10-22T15:04:33Z requests=2\n",
+		"session cookie saved to " + cookiePath + " (owner-only)\n",
+		"use it with: ",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr lacks %q: %q", want, stderr)
+		}
+	}
+	assertNoLoginLeak(t, stderr)
+
+	// A second login replaces the file, and a looser mode does not survive.
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(cookiePath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter = successfulLoginAdapter(t)
+	terminal = &fakeTerminal{answers: []string{"CanaryUser", "PASSWORD-CANARY", ""}}
+	code, stderr = runInteractiveLogin(adapter, terminal, &out, "--session-days", "30", "fakept")
+	if code != 0 || adapter.hasCode || adapter.sessionDays != 30 {
+		t.Fatalf("relogin code=%d hasCode=%v days=%d stderr=%q", code, adapter.hasCode, adapter.sessionDays, stderr)
+	}
+	if info, err := os.Stat(cookiePath); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+		t.Fatalf("replaced cookie file err=%v", err)
+	}
+	assertOnlyEntries(t, filepath.Dir(cookiePath), "fakept.cookie")
+}
+
+func TestSiteLoginReportsJSONWithoutTheCookie(t *testing.T) {
+	useTempConfigDir(t)
+	dir := t.TempDir()
+	for _, mode := range []string{"prompt", "bundle"} {
+		adapter := successfulLoginAdapter(t)
+		cookiePath := filepath.Join(dir, mode+".cookie")
+		var out bytes.Buffer
+		var code int
+		var stderr string
+		if mode == "prompt" {
+			terminal := &fakeTerminal{answers: []string{"CanaryUser", "PASSWORD-CANARY", "123456"}}
+			code, stderr = runInteractiveLogin(adapter, terminal, &out, "--cookie-file", cookiePath, "--output", "json", "fakept")
+		} else {
+			code, stderr = runSiteLogin(adapter, strings.NewReader(loginBundle()), &out, "--credential-bundle-stdin", "--cookie-file", cookiePath, "--output", "json", "fakept")
+		}
+		want := `{
+  "schema": "ptctl.dev/v1",
+  "kind": "site.login",
+  "data": {
+    "site_id": "fakept",
+    "username": "CanaryUser",
+    "session_days": 7,
+    "session_expires_at": "2026-10-22T15:04:33Z",
+    "cookie_file": ` + strconv.Quote(cookiePath) + `,
+    "requests_attempted": 2
+  }
+}
+`
+		if code != 0 || out.String() != want || strings.Contains(stderr, "site login succeeded") {
+			t.Fatalf("%s: code=%d stdout=%s stderr=%q", mode, code, out.String(), stderr)
+		}
+		if written, err := os.ReadFile(cookiePath); err != nil || string(written) != loginSessionCanary+"\n" {
+			t.Fatalf("%s: cookie file content mismatch err=%v", mode, err)
+		}
+		assertNoLoginLeak(t, out.String(), stderr)
+	}
+	assertOnlyEntries(t, dir, "bundle.cookie", "prompt.cookie")
+}
+
+func TestSiteLoginInteractiveUsageErrorsNeverPrompt(t *testing.T) {
+	useTempConfigDir(t)
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"--cookie-file", dir, "fakept"},
+		{"--cookie-file", filepath.Join(dir, "missing", "fakept.cookie"), "fakept"},
+		{"--output", "yaml", "fakept"},
+		{"--session-days", "2", "fakept"},
+		{"unknown"},
+		{"readonly"},
+		{"--credential-bundle-stdin", "--output", "json", "fakept"},
+	} {
+		adapter := successfulLoginAdapter(t)
+		terminal := &fakeTerminal{answers: []string{"CanaryUser", "PASSWORD-CANARY", ""}}
+		var out bytes.Buffer
+		code, stderr := runInteractiveLogin(adapter, terminal, &out, args...)
+		if code != 2 || len(terminal.secret) != 0 || adapter.calls != 0 || out.Len() != 0 || strings.Contains(stderr, "Username:") {
+			t.Fatalf("args=%q code=%d prompts=%d calls=%d stderr=%q", args, code, len(terminal.secret), adapter.calls, stderr)
+		}
+	}
+	assertOnlyEntries(t, dir)
+
+	adapter := successfulLoginAdapter(t)
+	var out bytes.Buffer
+	code, stderr := runInteractiveLogin(adapter, nil, &out, "fakept")
+	if code != 2 || adapter.calls != 0 || !strings.Contains(stderr, "pipe the credentials with --credential-bundle-stdin") {
+		t.Fatalf("no terminal code=%d calls=%d stderr=%q", code, adapter.calls, stderr)
+	}
+}
+
+func TestSiteLoginInteractiveFailuresKeepNoCookieFile(t *testing.T) {
+	cookiePath := useTempConfigDir(t)
+	tests := []struct {
+		answers []string
+		err     error
+		want    string
+	}{
+		{answers: []string{"CanaryUser"}, want: "site login canceled before anything was sent"},
+		{answers: []string{"", "PASSWORD-CANARY", ""}, want: "site login username is invalid"},
+		{answers: []string{"CanaryUser", "", ""}, want: "site login account password is invalid"},
+		{answers: []string{"CanaryUser", "PASSWORD-CANARY", "12a456"}, want: "site login one-time code is invalid"},
+		{answers: []string{"CanaryUser", "PASSWORD-CANARY", "123456"}, err: &site.LoginError{Reason: site.LoginTwoFactorRejected}, want: "site login stopped: login_two_factor_rejected"},
+	}
+	for _, test := range tests {
+		adapter := successfulLoginAdapter(t)
+		adapter.err = test.err
+		var out bytes.Buffer
+		code, stderr := runInteractiveLogin(adapter, &fakeTerminal{answers: test.answers}, &out, "fakept")
+		if code != 1 || out.Len() != 0 || !strings.HasSuffix(stderr, "error: "+test.want+"\n") {
+			t.Fatalf("answers=%q code=%d stderr=%q", test.answers, code, stderr)
+		}
+		if wantCalls := map[bool]int{true: 1, false: 0}[test.err != nil]; adapter.calls != wantCalls {
+			t.Fatalf("answers=%q login calls=%d", test.answers, adapter.calls)
+		}
+		assertOnlyEntries(t, filepath.Dir(cookiePath))
+		assertNoLoginLeak(t, stderr)
+	}
+
+	// A failed login leaves an earlier cookie file untouched.
+	if err := os.WriteFile(cookiePath, []byte("access_token=OLD\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := successfulLoginAdapter(t)
+	adapter.err = &site.LoginError{Reason: site.LoginCredentialsRejected}
+	if code, stderr := runInteractiveLogin(adapter, &fakeTerminal{answers: []string{"CanaryUser", "PASSWORD-CANARY", ""}}, io.Discard, "fakept"); code != 1 {
+		t.Fatalf("code=%d stderr=%q", code, stderr)
+	}
+	if written, err := os.ReadFile(cookiePath); err != nil || string(written) != "access_token=OLD\n" {
+		t.Fatalf("earlier cookie file changed: %q err=%v", written, err)
+	}
+	assertOnlyEntries(t, filepath.Dir(cookiePath), "fakept.cookie")
+}
+
+func TestSiteLoginHelpExplainsEveryFlag(t *testing.T) {
+	for _, args := range [][]string{{"site", "login", "--help"}, {"help", "login"}, {"help", "site", "login"}} {
+		reader := &trackingReader{}
+		var out, errOut bytes.Buffer
+		if code := Run(args, reader, &out, &errOut); code != 0 || reader.read || errOut.Len() != 0 || out.String() != siteLoginHelp {
+			t.Fatalf("args=%q code=%d stderr=%q", args, code, errOut.String())
+		}
+	}
+	for _, want := range []string{
+		"--cookie-file PATH", "--session-days N", "--output table|json", "--credential-bundle-stdin",
+		`"schema":"ptctl.credentials/v1"`, "site_totp", "<user config dir>/ptctl/sessions/SITE.cookie",
+		site.LoginCredentialsRejected, site.LoginTwoFactorRequired, site.LoginTwoFactorRejected,
+		site.LoginResponseUnrecognized, site.LoginSessionUnverified, site.LoginRequestFailed,
+	} {
+		if !strings.Contains(siteLoginHelp, want) {
+			t.Fatalf("site login help lacks %q", want)
+		}
 	}
 }
