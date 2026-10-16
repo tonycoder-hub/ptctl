@@ -62,6 +62,9 @@ func TestAdapter(t *testing.T, adapter site.Adapter, samples Samples) {
 			}
 		})
 	}
+	if lister, ok := adapter.(site.AccountTorrentLister); ok && descriptor.Supports(domain.CapabilityAccountTorrents) {
+		t.Run(string(domain.CapabilityAccountTorrents)+"/query", func(t *testing.T) { testAccountTorrentQuery(t, lister) })
+	}
 	if loginer, ok := adapter.(site.SessionLoginer); ok && descriptor.Supports(domain.CapabilityLogin) {
 		t.Run(string(domain.CapabilityLogin), func(t *testing.T) { testLogin(t, loginer) })
 	}
@@ -73,6 +76,23 @@ func TestAdapter(t *testing.T, adapter site.Adapter, samples Samples) {
 				testUndeclaredPort(t, port, samples)
 			}
 		})
+	}
+}
+
+// testAccountTorrentQuery checks that every lister serves the seeding list
+// and refuses an unknown state or a negative page.
+func testAccountTorrentQuery(t *testing.T, lister site.AccountTorrentLister) {
+	if err := lister.ValidateAccountTorrentQuery(site.AccountTorrentQuery{State: domain.AccountTorrentsSeeding}); err != nil {
+		t.Fatalf("seeding query rejected: %v", err)
+	}
+	for _, query := range []site.AccountTorrentQuery{
+		{},
+		{State: "sitetest-unknown"},
+		{State: domain.AccountTorrentsSeeding, Page: -1},
+	} {
+		if err := lister.ValidateAccountTorrentQuery(query); err == nil {
+			t.Fatalf("query %+v accepted", query)
+		}
 	}
 }
 
@@ -164,6 +184,12 @@ func directPorts(adapter site.Adapter) []directPort {
 	if port, ok := adapter.(site.BonusCatalogReader); ok {
 		ports = append(ports, directPort{domain.CapabilityBonusRead, func(ctx context.Context, credential site.Credential) error {
 			_, err := port.BonusCatalog(ctx, credential)
+			return err
+		}})
+	}
+	if port, ok := adapter.(site.AccountTorrentLister); ok {
+		ports = append(ports, directPort{domain.CapabilityAccountTorrents, func(ctx context.Context, credential site.Credential) error {
+			_, err := port.AccountTorrents(ctx, credential, site.AccountTorrentQuery{State: domain.AccountTorrentsSeeding})
 			return err
 		}})
 	}

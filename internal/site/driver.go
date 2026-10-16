@@ -95,6 +95,22 @@ type BonusCatalogReader interface {
 	BonusCatalog(context.Context, Credential) (domain.BonusCatalog, error)
 }
 
+// AccountTorrentQuery picks one page of one of the account's own torrent
+// lists.
+type AccountTorrentQuery struct {
+	State domain.AccountTorrentState
+	// Page is 1-based; zero means the first page.
+	Page int
+}
+
+// AccountTorrentLister reads the account's own torrent lists.
+// ValidateAccountTorrentQuery runs before any credential is read, so a state
+// or page the site cannot serve is refused without a request.
+type AccountTorrentLister interface {
+	ValidateAccountTorrentQuery(AccountTorrentQuery) error
+	AccountTorrents(context.Context, Credential, AccountTorrentQuery) (domain.AccountTorrentList, error)
+}
+
 type Registry struct {
 	adapters map[string]Adapter
 }

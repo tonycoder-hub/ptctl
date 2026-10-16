@@ -114,9 +114,12 @@ deliberately does not. For step-by-step usage, see the
 - an experimental M-Team session check, account snapshot (username, uploaded
   and downloaded bytes, ratio, and bonus), torrent search by page, mode,
   category, and free promotion with seeders, leechers, promotion factors, and
-  category names, torrent detail for one remote ID, and a bonus-shop catalog
-  and exact-goods review, through read-only POSTs to the official JSON API (one
-  per invocation; the catalog reads the balance and the shop on one client),
+  category names, torrent detail for one remote ID, the account's own
+  seeding, leeching, completed, incomplete, and uploaded torrent lists with
+  each row's traffic scope, and a bonus-shop catalog and exact-goods review,
+  through read-only POSTs to the official JSON API (one per invocation; the
+  torrent lists read the account ID and the list, and the catalog the balance
+  and the shop, on one client),
   authenticated by a site-issued API key saved by `site login` or piped on
   stdin, with no redirect, proxy, or retry;
 - an explicitly acknowledged M-Team metafile fetch for one remote ID: one
