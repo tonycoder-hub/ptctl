@@ -25,7 +25,7 @@ func samples(t *testing.T) map[string]sitetest.Samples {
 	}
 	return map[string]sitetest.Samples{
 		tjupt.SiteID: {Credential: cookie, RemoteID: "1", BonusSelector: "1"},
-		mteam.SiteID: {Credential: apiKey, RemoteID: "1"},
+		mteam.SiteID: {Credential: apiKey, RemoteID: "1", BonusSelector: "1"},
 	}
 }
 

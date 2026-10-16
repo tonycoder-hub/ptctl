@@ -179,10 +179,11 @@ session or revoke the key on the site. Account and downloader passwords are
 never saved. The file is not encrypted; an OS keyring or credential helper
 remains future work (see
 [Known gaps](#known-gaps-before-broader-mutation-support)).
-The M-Team adapter's reads send at most one bounded POST per command to one of
-three read-only JSON API endpoints (`member/profile`, `torrent/search`, and
-`torrent/detail`), with a non-replayable body of at most 16 KiB, and never
-retry. Its metafile fetch sends one token POST, waits three seconds, and then
+The M-Team adapter's reads send bounded POSTs to four read-only JSON API
+endpoints (`member/profile`, `torrent/search`, `torrent/detail`, and
+`mall/list`), one per command except `bonus-catalog`, which sends `member/profile`
+then `mall/list` on one client spaced three seconds apart. Each body is
+non-replayable and at most 16 KiB, and nothing is retried. Its metafile fetch sends one token POST, waits three seconds, and then
 makes at most two GETs as described above; the site's per-torrent daily
 download limit and burst refusals stop it as `rate_limited`. HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
 callers must not loop or parallelize site commands. There is no Cloudflare or
@@ -200,7 +201,8 @@ preserved, never arbitrary cookie, key, URL, header, or response text.
 The detail route sends
 only the canonical `id`; it deliberately omits NexusPHP's view-counting `hit`
 parameter and never follows the download reference found in the page.
-Bonus review sends only the one GET and has no POST-capable transport surface.
+TJUPT's bonus review sends only the one GET and has no POST-capable transport
+surface; M-Team's sends the one read-only `mall/list` POST.
 The account projection accepts only the exact authenticated bonus-page route,
 valid UTF-8, a bounded username, and a canonical bonus decimal. Optional
 fields come only from the page's single user-panel table, and only when every
@@ -220,6 +222,14 @@ ambiguously published marker terminates the invocation before POST. After POST,
 timeout, transport ambiguity, unrecognized response,
 or local outcome-write failure is recorded as rejected/unknown when possible
 and is never used to justify another automatic request.
+
+On M-Team the fresh review is the one read-only `mall/list` POST and the
+submission is one `mall/exchange` POST sent through `PostEffectOnce`, whose
+`User-Agent` names an explicit-effect client. The body holds only `goodsId` and
+`num`, fixed at `1`, and goods that need user input or are not plainly
+available never get one. The API key is the only credential. API code `0` is
+confirmed and any other API code is rejected; a status, media type, or body
+that is not recognized, or a cut-off answer, is unknown and is not retried.
 
 A site that confirms exchanges with the account password (TJUPT) widens the
 secret surface to that password, so its handling is narrower than the cookie's.

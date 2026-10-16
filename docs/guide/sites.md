@@ -163,9 +163,11 @@ API and never retry; search results add seeders, leechers, promotion, and
 category-name columns, and `search` takes `--page N`, `--mode normal|adult`,
 `--category ID`, and `--free`. `site metafile fetch` downloads one `.torrent` into the
 private store through M-Team's signed link, as described in
-[metafiles.md](metafiles.md). Bonus commands are not available for M-Team yet,
-and `reconcile` reads live site detail with a cookie only. Setup, results, and
-error lines are in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md):
+[metafiles.md](metafiles.md). `bonus-catalog` and `bonus review` read M-Team's
+bonus shop, and `bonus exchange submit` buys one unit of goods that need no
+input with the API key alone. `reconcile --site-live` reads live detail with the
+saved key. Setup, results, and error lines are in
+[MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md):
 
 ```bash
 ptctl site login mteam
@@ -174,6 +176,8 @@ ptctl site account mteam
 ptctl site search mteam "Ubuntu"
 ptctl site search --page 2 --free mteam "Ubuntu"
 ptctl site detail mteam REMOTE_ID
+ptctl site bonus-catalog mteam
+ptctl site bonus review mteam GOODS_ID
 printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
 ```
 
@@ -205,9 +209,9 @@ flag, its `submit` uses the saved session cookie and asks for the password on
 the terminal with echo off; the password is used for that one exchange and
 never saved. Scripts pass the cookie and password together as one strict JSON
 bundle on stdin (`--credential-bundle-stdin`), and `--cookie-stdin` is refused;
-see the TJUPT example below. A site that needs only the cookie uses the saved
-cookie, or takes `--cookie-stdin`. A saved credential never stands in for
-`--acknowledge-bonus-exchange`.
+see the TJUPT example below. A site that needs only the cookie or API key, such
+as M-Team, uses the saved one, or takes `--cookie-stdin` or `--api-key-stdin`.
+A saved credential never stands in for `--acknowledge-bonus-exchange`.
 
 To cross that boundary, first initialize a private state store (the same
 versioned owner-only store format used by metafile artifacts), review the exact

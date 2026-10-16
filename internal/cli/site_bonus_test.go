@@ -24,12 +24,19 @@ type fakeBonusReviewAdapter struct {
 	closeErr   error
 	opened     int
 	credential string
+	// authMethod is the one method the fake site accepts; empty means cookies.
+	authMethod       domain.AuthMethod
+	credentialMethod domain.AuthMethod
 }
 
-func (*fakeBonusReviewAdapter) Descriptor() domain.SiteDescriptor {
+func (adapter *fakeBonusReviewAdapter) Descriptor() domain.SiteDescriptor {
+	method := domain.AuthMethodCookieHeader
+	if adapter.authMethod != "" {
+		method = adapter.authMethod
+	}
 	return domain.SiteDescriptor{
 		ID: "fakept", Name: "Fake PT", BaseURL: "https://fake.invalid/", Stability: "test",
-		AuthMethods: []domain.AuthMethod{domain.AuthMethodCookieHeader}, Capabilities: []domain.Capability{domain.CapabilityBonusReview},
+		AuthMethods: []domain.AuthMethod{method}, Capabilities: []domain.Capability{domain.CapabilityBonusReview},
 	}
 }
 
@@ -55,7 +62,7 @@ func (adapter *fakeBonusReviewAdapter) OpenBonusReviewSession(ctx context.Contex
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	adapter.credential = credential.SecretValue()
+	adapter.credential, adapter.credentialMethod = credential.SecretValue(), credential.Method()
 	if adapter.openErr != nil {
 		return nil, adapter.openErr
 	}

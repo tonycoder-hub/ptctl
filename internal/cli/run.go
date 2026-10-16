@@ -141,10 +141,10 @@ Usage:
   ptctl site account [--cookie-stdin | --api-key-stdin] [--output table|json] SITE
   ptctl site search [--cookie-stdin | --api-key-stdin] [--page N] [--mode MODE] [--category ID]... [--free] [--output table|json] SITE QUERY...
   ptctl site detail [--cookie-stdin | --api-key-stdin] [--output table|json] SITE REMOTE_ID
-  ptctl site bonus-catalog [--cookie-stdin] [--output table|json] SITE
-  ptctl site bonus review [--cookie-stdin] [--output table|json] SITE OPTION
+  ptctl site bonus-catalog [--cookie-stdin | --api-key-stdin] [--output table|json] SITE
+  ptctl site bonus review [--cookie-stdin | --api-key-stdin] [--output table|json] SITE OPTION
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
-  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID [--cookie-stdin | --credential-bundle-stdin] --acknowledge-bonus-exchange [--output table|json] SITE OPTION
+  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID [--cookie-stdin | --api-key-stdin | --credential-bundle-stdin] --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
   ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]
