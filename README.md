@@ -16,8 +16,8 @@ For an extracted macOS/Linux package, run `sh examples/readonly/try.sh` for an
 offline walkthrough. Discover the core commands with `pt torrent --help`,
 `pt help client list`, and `pt help config`.
 
-> Status: `v0.4.0-alpha` development. Ordinary inspection, downloader reads,
-> content proof, discovery, planning, and reconciliation are intentionally
+> Status: `v0.4.0-alpha.1`, an alpha release. Ordinary inspection, downloader
+> reads, content proof, discovery, planning, and reconciliation are intentionally
 > zero-write. Persistent writes and tracker-visible effects are confined to
 > explicit store/index commands and separately acknowledged operations; see
 > [write boundaries](#write-boundaries) and the full
@@ -83,29 +83,32 @@ Run `ptctl help` for the exact flags of every command.
 
 ## Install
 
-Preview packages for Windows amd64, Linux amd64, and macOS arm64 are built by
-CI after tests and extracted-binary acceptance. Download the
-`pt-cli-bundle-<commit>-<attempt>` artifact from a successful `ci` run on
-[Actions](https://github.com/tonycoder-hub/ptctl/actions) (artifacts expire
-after 14 days), then follow the
+Packages for Windows amd64, Linux amd64, and macOS arm64 are on
+[Releases](https://github.com/tonycoder-hub/ptctl/releases), with
+`SHA256SUMS` and `release-manifest.json`; follow the
 [checksum and extraction steps](docs/READ_ONLY_QUICKSTART.md). Each package
 contains both commands, the short guide, synthetic samples, licenses, build
 identity, and SHA-256 checksums. Packages are not code-signed or notarized.
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md). Preview
+packages of any commit are the `pt-cli-bundle-<commit>-<attempt>` artifact of
+a successful `ci` run on
+[Actions](https://github.com/tonycoder-hub/ptctl/actions) (artifacts expire
+after 14 days).
 
-To build from source you need Go 1.24 or newer. The published tags predate the
-current code, so install from `main`:
+To build from source you need Go 1.24 or newer:
 
 ```bash
-go install github.com/tonycoder-hub/ptctl/cmd/pt@main
-go install github.com/tonycoder-hub/ptctl/cmd/ptctl@main   # optional compatible name
+go install github.com/tonycoder-hub/ptctl/cmd/pt@v0.4.0-alpha.1
+go install github.com/tonycoder-hub/ptctl/cmd/ptctl@v0.4.0-alpha.1   # optional compatible name
 ```
 
-Source builds report `dev` / `unknown` from `pt version`. CI stamps both
-commands with `<VERSION>+g<commit-prefix>` and the full commit (on pull
-requests, the tested merge commit). Maintainers stage releases with the
-[release procedure](docs/RELEASING.md): it builds an existing version tag and
-only ever creates an unpublished draft. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for local checks and synthetic binary acceptance.
+Use `@main` instead for unreleased changes. Source builds report `dev` /
+`unknown` from `pt version`. CI stamps both commands with
+`<VERSION>+g<commit-prefix>` and the full commit (on pull requests, the tested
+merge commit). A merge to `main` that changes `VERSION` publishes that version;
+see the [release procedure](docs/RELEASING.md). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for local checks and synthetic binary
+acceptance.
 
 ## Five-minute start
 
