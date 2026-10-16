@@ -57,6 +57,8 @@ func jsonKind(data any) string {
 		return typed.kind
 	case domain.BonusCatalog:
 		return "site.bonus.catalog"
+	case domain.AccountTorrentList:
+		return "site.account.torrent.list"
 	case siteLoginReport:
 		return "site.login"
 	case siteLogoutReport:

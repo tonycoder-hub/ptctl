@@ -14,8 +14,9 @@ commit **整体成功**的 `ci` run，下载 `pt-cli-bundle-<commit>-<attempt>`
 artifact，或单独的 `pt-cli-windows-amd64-<commit>-<attempt>` artifact。
 bundle 同时含 Windows amd64、Linux amd64、macOS arm64 包。PR run 的版本标识
 是实际测试的 merge commit。artifact 保留 14 天。已正式发布的版本可以从
-仓库 Releases 下载对应 ZIP、`SHA256SUMS` 和 `release-manifest.json`；维护者
-创建的 Draft 不等于已公开发布。所有包均无代码签名或 macOS notarization。
+仓库 [Releases](https://github.com/tonycoder-hub/ptctl/releases) 下载对应 ZIP、
+`SHA256SUMS` 和 `release-manifest.json`；它们没有外层 artifact ZIP，其余校验
+步骤相同。所有包均无代码签名或 macOS notarization。
 
 先解开 GitHub 下载的 artifact 外层 ZIP；其中是产品 ZIP 和 `SHA256SUMS`。
 在该目录打开 PowerShell，验证并解包：

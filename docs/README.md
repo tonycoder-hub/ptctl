@@ -32,7 +32,7 @@ documents that matter to them.
   adapter and its page-level contract.
 - [Materialize retention](MATERIALIZE_RETENTION.md): the prune/forget state
   machine for materialize operations.
-- [Releasing](RELEASING.md): VERSION and tag rules, and the draft-only release
+- [Releasing](RELEASING.md): VERSION and CHANGELOG rules, and the merge-triggered release
   workflow.
 
 ## Coding agents and automation

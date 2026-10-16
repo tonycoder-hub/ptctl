@@ -179,22 +179,26 @@ session or revoke the key on the site. Account and downloader passwords are
 never saved. The file is not encrypted; an OS keyring or credential helper
 remains future work (see
 [Known gaps](#known-gaps-before-broader-mutation-support)).
-The M-Team adapter's reads send bounded POSTs to four read-only JSON API
-endpoints (`member/profile`, `torrent/search`, `torrent/detail`, and
-`mall/list`), one per command except `bonus-catalog`, which sends `member/profile`
-then `mall/list` on one client spaced three seconds apart. Each body is
+The M-Team adapter's reads send bounded POSTs to five read-only JSON API
+endpoints (`member/profile`, `torrent/search`, `torrent/detail`,
+`member/getUserTorrentList`, and `mall/list`), one per command except
+`torrents` and `bonus-catalog`, which send `member/profile` then
+`member/getUserTorrentList` or `mall/list` on one client spaced three seconds
+apart. The torrent list answer carries the account's peer addresses, peer ID,
+and client name; the adapter never decodes them, so they cannot reach output
+or logs. Each body is
 non-replayable and at most 16 KiB, and nothing is retried. Its metafile fetch sends one token POST, waits three seconds, and then
 makes at most two GETs as described above; the site's per-torrent daily
 download limit and burst refusals stop it as `rate_limited`. HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
 callers must not loop or parallelize site commands. There is no Cloudflare or
 CAPTCHA bypass.
 
-Ordinary status, account, search, bonus catalog/review, and detail reads use the
+Ordinary status, account, search, own-torrent-list, bonus catalog/review, and detail reads use the
 same fresh HTTP/1.1, no-reuse, no-redirect transport as the effectful fetch.
-For the shared ordinary read path (`status`, `account`, `search`, and
-`bonus-catalog`), output mode, site/capability/authentication support, the
-actual typed port, and a nonblank search query are checked before credential
-stdin is consumed. Runtime adapter errors are mapped to fixed diagnostics;
+For the shared ordinary read path (`status`, `account`, `search`, `torrents`,
+and `bonus-catalog`), output mode, site/capability/authentication support, the
+actual typed port, a nonblank search query, and the torrent list's state and
+page are checked before credential stdin is consumed. Runtime adapter errors are mapped to fixed diagnostics;
 only cancellation and deadline causes, plus four fixed causes an adapter may
 opt in to (malformed or rejected credential, rate limit, blocked address), are
 preserved, never arbitrary cookie, key, URL, header, or response text.

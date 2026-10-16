@@ -107,6 +107,7 @@ constant, a port interface, and one entry there.
 | `bonus.offer.review` | `BonusReviewReader` | config and session | `site bonus review` |
 | `bonus.exchange.submit_effectful` | `BonusExchangeWriter` | config and session | `site bonus exchange prepare`, `submit` |
 | `auth.login_effectful` | `SessionLoginer` | login | `site login` |
+| `account.torrents.read` | `AccountTorrentLister` | direct | `site torrents` |
 
 ### Direct ports
 
@@ -209,7 +210,7 @@ change: add it to the allowlist and to the CLI tests in the same commit.
 
 ## Public failure causes
 
-Ordinary reads (`status`, `account`, `search`, `bonus-catalog`) fold every
+Ordinary reads (`status`, `account`, `search`, `torrents`, `bonus-catalog`) fold every
 adapter error into `site CMD failed`, so an adapter's own error text never
 reaches the user. An adapter may wrap one of the sentinels in
 `internal/site/errors.go` to let the CLI name a fixed, secret-free cause:
@@ -269,7 +270,7 @@ and do it in a separate behavior-preserving commit.
 | NexusPHP forks, including TJUPT | Cookie sessions match `cookie_header`, and HTML responses match the existing ports. | Page recognition and parsers for that fork, with synthetic fixtures. Forks differ, so do not assume TJUPT's pages. |
 | Unit3D | Cookie-session web pages fit. | Using its token-authenticated API instead runs into the gaps below. |
 | Gazelle-based trackers | Cookie sessions fit; their JSON responses need a JSON parser rather than HTML recognition. | Where an API key replaces the session cookie, the gaps below apply. |
-| M-Team | Status, account, search, detail, the bonus shop catalog, review, and exchange, the signed-link metafile download, and live-site reconciliation are implemented in `internal/site/mteam` over the JSON API with an API key. | RSS, seeding lists, and messages are not implemented. |
+| M-Team | Status, account, search, detail, the account's own torrent lists, the bonus shop catalog, review, and exchange, the signed-link metafile download, and live-site reconciliation are implemented in `internal/site/mteam` over the JSON API with an API key. | Messages need a browser login the API key cannot replace, and RSS links are rotating secrets; neither is implemented. |
 
 ## Gaps for API-token sites
 
@@ -282,7 +283,7 @@ or a security control, so it needs its own review.
 | Gap | Status | Where | What is left |
 |---|---|---|---|
 | Only one auth method existed | Done | `domain.AuthMethodAPIKeyHeader` (`api_key_header`); `knownAuthMethod` in `internal/site/descriptor.go` | Nothing. |
-| Credential input was cookie-only | Done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, `detail`, `bonus-catalog`, and `bonus review`; `site metafile fetch` and `site bonus exchange submit` read it with `readEffectfulAPIKeyCredential`; `reconcile` takes `--site-api-key-stdin`, `--site-live`, and the bundle's `site_api_key` | Nothing. The `--credential-bundle-stdin` of `site bonus exchange submit` still carries a cookie, because only TJUPT confirms an exchange with the password. |
+| Credential input was cookie-only | Done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, `torrents`, `detail`, `bonus-catalog`, and `bonus review`; `site metafile fetch` and `site bonus exchange submit` read it with `readEffectfulAPIKeyCredential`; `reconcile` takes `--site-api-key-stdin`, `--site-live`, and the bundle's `site_api_key` | Nothing. The `--credential-bundle-stdin` of `site bonus exchange submit` still carries a cookie, because only TJUPT confirms an exchange with the password. |
 | The CLI gated on cookies | Done | Every site command picks the method with `siteCredentialSourceFor` and checks that the site supports it | Nothing. |
 | The transport only sent `Cookie` | Done | `httpguard.NewWithHeaderCredential` binds one validated, non-reserved header | Nothing. |
 | Redaction did not know the header | Done | `security.Redact` covers `x-api-key` header lines and `apiKey`-style fields | Nothing. |

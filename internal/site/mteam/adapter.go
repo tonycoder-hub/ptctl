@@ -92,6 +92,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 			domain.CapabilityMetafile,
 			domain.CapabilityBonusReview,
 			domain.CapabilityBonusExchange,
+			domain.CapabilityAccountTorrents,
 		},
 	}
 }

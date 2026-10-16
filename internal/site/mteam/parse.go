@@ -127,36 +127,46 @@ func parseSearch(data json.RawMessage) ([]domain.TorrentSummary, error) {
 	results := make([]domain.TorrentSummary, 0, len(*response.Data))
 	seen := make(map[string]struct{}, len(*response.Data))
 	for _, item := range *response.Data {
-		if !item.ID.set || !canonicalID(item.ID.value) || item.Name == nil {
-			return nil, fmt.Errorf("M-Team search row was not recognized")
-		}
-		name, ok := cleanText(*item.Name, 1024)
-		if !ok || name == "" {
+		summary, ok := summaryFromItem(item)
+		if !ok {
 			return nil, fmt.Errorf("M-Team search row was not recognized")
 		}
 		if _, duplicate := seen[item.ID.value]; duplicate {
 			continue
 		}
 		seen[item.ID.value] = struct{}{}
-		summary := domain.TorrentSummary{
-			Ref:         domain.TorrentRef{SiteID: SiteID, RemoteID: item.ID.value},
-			Name:        name,
-			SizeBytes:   byteCount(item.Size),
-			PublishedAt: siteTime(item.CreatedDate),
-		}
-		if canonicalID(item.Category.value) {
-			summary.Category = item.Category.value
-			summary.CategoryName = categoryName(item.Category.value)
-		}
-		if status := item.Status; status != nil {
-			summary.Seeders = count(status.Seeders)
-			summary.Leechers = count(status.Leechers)
-			summary.Snatches = count(status.TimesCompleted)
-			summary.Promotion = promotion(status.Discount.value, siteTime(status.DiscountEndTime))
-		}
 		results = append(results, summary)
 	}
 	return results, nil
+}
+
+// summaryFromItem maps one API torrent object. It refuses an object without a
+// canonical ID and a name; every other field is optional.
+func summaryFromItem(item searchItem) (domain.TorrentSummary, bool) {
+	if !item.ID.set || !canonicalID(item.ID.value) || item.Name == nil {
+		return domain.TorrentSummary{}, false
+	}
+	name, ok := cleanText(*item.Name, 1024)
+	if !ok || name == "" {
+		return domain.TorrentSummary{}, false
+	}
+	summary := domain.TorrentSummary{
+		Ref:         domain.TorrentRef{SiteID: SiteID, RemoteID: item.ID.value},
+		Name:        name,
+		SizeBytes:   byteCount(item.Size),
+		PublishedAt: siteTime(item.CreatedDate),
+	}
+	if canonicalID(item.Category.value) {
+		summary.Category = item.Category.value
+		summary.CategoryName = categoryName(item.Category.value)
+	}
+	if status := item.Status; status != nil {
+		summary.Seeders = count(status.Seeders)
+		summary.Leechers = count(status.Leechers)
+		summary.Snatches = count(status.TimesCompleted)
+		summary.Promotion = promotion(status.Discount.value, siteTime(status.DiscountEndTime))
+	}
+	return summary, true
 }
 
 // promotion maps the API's discount names to traffic factors. An absent

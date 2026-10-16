@@ -47,7 +47,8 @@ before artifact upload; the final assembly checks that all three targets agree
 on version and commit. CI and release calls share `.github/workflows/build.yml`.
 The release controls have standard-library regression tests:
 `python -B -m unittest discover -s scripts/tests -v`.
-See [RELEASING.md](docs/RELEASING.md) for version/tag rules and draft-only delivery.
+See [RELEASING.md](docs/RELEASING.md) for VERSION and CHANGELOG rules and the
+merge-triggered release.
 For a local snapshot, inject `cli.Version` and `cli.Commit` with the same `-X`
 linker flags used by CI, then run the acceptance script with the two binaries
 and matching `--version` / `--commit` values. Mark uncommitted builds as local
