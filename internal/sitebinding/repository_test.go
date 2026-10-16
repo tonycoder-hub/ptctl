@@ -411,3 +411,89 @@ func bindingTestBencode(value any) []byte {
 	encode(value)
 	return output.Bytes()
 }
+
+func TestDirectRouteRecordBytesOmitLinkRequests(t *testing.T) {
+	fixture := newBindingFixture(t, true)
+	raw, err := EncodeRecord(recordFromObservation(fixture.observed.PublicCopy(), fixture.fetch, fixture.artifact), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLimits := `"fetch_limits":{"max_requests":1,"max_response_bytes":8388608,"max_response_header_bytes":65536}`
+	wantUsage := `"fetch_usage":{"requests_attempted":1,"automatic_retries":0,"redirects_followed":0,"response_bytes_read":` + strconv.Itoa(len(fixture.raw)) + `,"response_bytes_known":true}}`
+	if !bytes.Contains(raw, []byte(wantLimits)) || !bytes.Contains(raw, []byte(wantUsage)) || bytes.Contains(raw, []byte("link_request")) {
+		t.Fatalf("direct-route record bytes drifted: %s", raw)
+	}
+	claimed := fixture.fetch
+	claimed.Limits.MaxLinkRequests = 1
+	claimed.Used.LinkRequestsAttempted = 1
+	if fixture.observed.MatchesReceipt(claimed) {
+		t.Fatal("direct-route binding accepted a receipt with a link request")
+	}
+}
+
+func TestLinkedRouteRecordAccountsForLinkRequests(t *testing.T) {
+	store := newStore(t)
+	repository, err := NewRepository(store, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := bindingTestMetafile(true)
+	_, artifact, imported, err := store.Import(context.Background(), bytes.NewReader(raw), metastore.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := domain.TorrentRef{SiteID: "mteam", RemoteID: "12345"}
+	start := time.Date(2026, 10, 16, 2, 3, 4, 0, time.UTC)
+	end := start.Add(time.Second)
+	fetched, err := site.NewLinkedFetchedMetafile(ref, "https://api2.m-team.cc", "mteam.download_by_token.v1", start, end, 2, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := site.NewLinkedMetafileFetchConfig("https://api2.m-team.cc", "mteam.download_by_token.v1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetch := site.MetafileFetchReceipt{
+		Effect: site.MetafileFetchEffect, Ref: ref, Origin: config.Origin, RouteID: config.RouteID,
+		ObservedAtStart: start, ObservedAtEnd: end, Complete: true, Limits: config.DefaultLimits(),
+		Used: site.MetafileFetchUsage{RequestsAttempted: 1, ResponseBytesRead: int64(len(raw)), ResponseBytesKnown: true, LinkRequestsAttempted: 2},
+	}
+	if !fetched.MatchesReceipt(fetch) {
+		t.Fatal("linked fetch did not match its receipt")
+	}
+	observed, err := fetched.BindImported(artifact.MetafileVariantID, imported.BytesConsumed)
+	if err != nil || !observed.MatchesReceipt(fetch) {
+		t.Fatalf("linked binding: err=%v", err)
+	}
+	for name, mutate := range map[string]func(*site.MetafileFetchReceipt){
+		"fewer link requests": func(r *site.MetafileFetchReceipt) { r.Used.LinkRequestsAttempted = 1 },
+		"no link requests":    func(r *site.MetafileFetchReceipt) { r.Used.LinkRequestsAttempted = 0 },
+		"smaller budget":      func(r *site.MetafileFetchReceipt) { r.Limits.MaxLinkRequests = 1 },
+		"budget too large":    func(r *site.MetafileFetchReceipt) { r.Limits.MaxLinkRequests = 3; r.Used.LinkRequestsAttempted = 3 },
+	} {
+		changed := fetch
+		mutate(&changed)
+		if fetched.MatchesReceipt(changed) || observed.MatchesReceipt(changed) {
+			t.Fatalf("%s: receipt accepted", name)
+		}
+	}
+	record := recordFromObservation(observed.PublicCopy(), fetch, artifact)
+	encoded, err := EncodeRecord(record, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"max_link_requests":2`)) || !bytes.Contains(encoded, []byte(`"link_requests_attempted":2`)) {
+		t.Fatalf("linked record lost its link accounting: %s", encoded)
+	}
+	if decoded, err := DecodeRecord(bytes.NewReader(encoded), DefaultLimits()); err != nil || decoded != record {
+		t.Fatalf("DecodeRecord: err=%v", err)
+	}
+	invalid := record
+	invalid.FetchUsage.LinkRequestsAttempted = 3
+	if _, err := EncodeRecord(invalid, DefaultLimits()); !errors.Is(err, ErrInvalidBinding) {
+		t.Fatalf("over-budget record encoded: %v", err)
+	}
+	if recordRef, sealed, err := repository.Seal(context.Background(), observed, fetch, artifact); err != nil || recordRef.ID == "" || sealed.WritesPerformed != 1 {
+		t.Fatalf("Seal: ref=%+v receipt=%+v err=%v", recordRef, sealed, err)
+	}
+}

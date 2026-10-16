@@ -97,8 +97,8 @@ Per-command details are in
 
 | Flag | Used by | Stdin content |
 |---|---|---|
-| `--cookie-stdin` | `site` reads, `site bonus exchange submit` for cookie-only sites, `site metafile fetch` | The complete `Cookie` header value |
-| `--api-key-stdin` | `site status`, `site account`, `site search`, and `site detail` for sites that authenticate with an API key (M-Team) | The site-issued API key |
+| `--cookie-stdin` | `site` reads, `site bonus exchange submit` for cookie-only sites, `site metafile fetch` for cookie sites (TJUPT) | The complete `Cookie` header value |
+| `--api-key-stdin` | `site status`, `site account`, `site search`, `site detail`, and `site metafile fetch` for sites that authenticate with an API key (M-Team) | The site-issued API key |
 | `--password-stdin` | `client` commands, `seed retire` commands that contact a downloader, and `reconcile` with a downloader | The downloader password |
 | `--site-cookie-stdin` | `reconcile report` with a live site observation and no downloader | The complete `Cookie` header value |
 | `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}` |
@@ -142,7 +142,7 @@ to proceed if it no longer matches.
 
 | Flag | Command | Authorizes |
 |---|---|---|
-| `--acknowledge-site-effect` | `site metafile fetch` | One tracker-visible GET of a private metafile into the private store |
+| `--acknowledge-site-effect` | `site metafile fetch` | One tracker-visible GET of a private metafile into the private store, preceded on a linked route (M-Team) by at most two counted requests for a site-issued link |
 | `--acknowledge-bonus-exchange` | `site bonus exchange submit` | At most one bonus-exchange POST after a durable attempt marker |
 | `--acknowledge-state-prune` | `site bonus exchange prune` | Replacing one terminal exchange's records with a tombstone |
 | `--acknowledge-history-forget` | `site bonus exchange forget` | Irreversibly deleting that last historical evidence |

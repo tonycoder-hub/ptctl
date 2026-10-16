@@ -699,11 +699,12 @@ uninitialized staging entries are not counted as committed artifacts.
 metafile artifact:
 
 ```text
-site metafile fetch --cookie-stdin --acknowledge-site-effect
+site metafile fetch (--cookie-stdin | --api-key-stdin) --acknowledge-site-effect
     --metafile-store DIR SITE REMOTE_ID
-    -> validate one site, one remote ID, limits, capability, and store
-    -> read the cookie only after that zero-write preflight succeeds
-    -> send one bounded GET, with no redirect and no retry
+    -> validate one site, one remote ID, limits, capability, auth method, and store
+    -> read the credential only after that zero-write preflight succeeds
+    -> linked routes only: request a site-issued link, bounded by MaxLinkRequests
+    -> send one bounded metafile GET, with no automatic redirect and no retry
     -> strictly validate the complete exact response
     -> publish only through the existing private, no-clobber store primitive
     -> after successful artifact import, publish a sealed historical binding
@@ -715,7 +716,22 @@ mode. The store must already be initialized; fetch never turns an arbitrary
 directory into a store. A site adapter must explicitly declare
 `torrent.metafile.read_effectful`, support the selected stdin authentication
 method, and validate its own remote-ID syntax without credentials. This keeps
-the CLI and report generic when a second site adapter is added.
+the CLI and report generic across site adapters.
+
+Most routes are direct: TJUPT's single cookie-authenticated GET on the site
+origin. M-Team's `mteam.download_by_token.v1` is a linked route, declared with
+`site.NewLinkedMetafileFetchConfig`. Its session first POSTs the API for a
+signed link, pauses for the site's request interval, then GETs that link on a
+fresh credential-free client bound to the link's host. A 3xx answer whose
+target is an HTTPS host under the adapter's own domains is GET once more on
+another such client; any other target, or a second redirect, stops as
+`redirect_rejected` without being contacted. `httpguard.SecretLink` carries the
+signed link and redirect target, redacts them when formatted, and never puts
+them in an error. `MaxRequests` stays one and still counts only the metafile
+GET; the token request and a redirect hop are `LinkRequestsAttempted`, bounded
+by `MaxLinkRequests` (at most two), and `RedirectsFollowed` stays zero because
+no hop is followed by the HTTP stack. The CLI accepts a successful linked fetch
+only when the session made exactly `1 + LinkRequestsAttempted` requests.
 
 The site-to-metafile relation first becomes an invocation-scoped
 `observed_exact_variant` only when the store import explicitly returns a valid
@@ -729,7 +745,9 @@ the report-only observation.
 B2 adds a binding-last `site.metafile.binding.v1` commit marker only after the
 artifact import returns complete success. The sealed record preserves the
 canonical site ref, adapter origin/route, whole-raw artifact link, bounded
-single-request account, and historical observation interval. Its publication
+single-request account, and historical observation interval. A linked route
+adds its bounded link-request account in fields that direct routes omit, so
+TJUPT records keep their exact bytes. Its publication
 and every load jointly verify the record and referenced private artifact in one
 operation-bound physical store session. This is not a two-object transaction:
 an artifact may remain as an unreferenced immutable object if marker publication
@@ -751,8 +769,8 @@ post-commit completion is not confirmed. Request attempts and logical store
 writes are therefore reported separately; neither is inferred from the other
 or from the overall outcome.
 
-Raw response bytes, request and redirect URLs, cookies, announce URLs,
-passkeys, server filenames, object paths, and temporary paths never enter JSON,
+Raw response bytes, request and redirect URLs, site-issued download links,
+cookies, API keys, announce URLs, passkeys, server filenames, object paths, and temporary paths never enter JSON,
 human output, errors, or a side record. The ordinary store-root path disclosure
 remains opt-in. Non-usage failures are reported before the command returns its
 operational or integrity exit; site fetch itself does not use exit `4`.

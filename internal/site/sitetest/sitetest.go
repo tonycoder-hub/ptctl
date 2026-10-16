@@ -287,7 +287,11 @@ func configuredPorts(adapter site.Adapter, descriptor domain.SiteDescriptor, sam
 				}
 				return &portSession{
 					read: func(ctx context.Context, valid bool) readResult {
-						_, receipt, err := session.FetchMetafile(ctx, ref(valid), site.DefaultMetafileFetchLimits())
+						config, err := port.MetafileFetchConfig()
+						if err != nil {
+							return readResult{err: err}
+						}
+						_, receipt, err := session.FetchMetafile(ctx, ref(valid), config.DefaultLimits())
 						return readResult{receipt.StopReason, receipt.Origin, receipt.RouteID, err}
 					},
 					requests: session.RequestsMade,

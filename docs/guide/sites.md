@@ -127,7 +127,9 @@ M-Team reads use a site-issued API key instead of a cookie, passed with
 `--api-key-stdin` under the same stdin-only rules. `status`, `account`,
 `search`, and `detail` each send one read-only POST to M-Team's JSON API and
 never retry; search results add seeders, leechers, promotion, and category-name
-columns. Metafile fetch and bonus commands are not available for M-Team yet,
+columns. `site metafile fetch --api-key-stdin` downloads one `.torrent` into the
+private store through M-Team's signed link, as described in
+[metafiles.md](metafiles.md). Bonus commands are not available for M-Team yet,
 and `reconcile` reads live site detail with a cookie only. Setup, results, and
 error lines are in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md):
 
