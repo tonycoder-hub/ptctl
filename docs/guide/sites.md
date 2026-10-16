@@ -124,16 +124,18 @@ and never loop `site login`. Usage errors exit `2` before any prompt or stdin
 read. A failed login leaves an earlier cookie file untouched.
 
 M-Team reads use a site-issued API key instead of a cookie, passed with
-`--api-key-stdin` under the same stdin-only rules. `status`, `account`, and
-`search` each send one read-only POST to M-Team's JSON API and never retry;
-search results add seeders, leechers, and promotion columns. Detail, metafile
-fetch, and bonus commands are not available for M-Team yet. Setup, results,
-and error lines are in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md):
+`--api-key-stdin` under the same stdin-only rules. `status`, `account`,
+`search`, and `detail` each send one read-only POST to M-Team's JSON API and
+never retry; search results add seeders, leechers, promotion, and category-name
+columns. Metafile fetch and bonus commands are not available for M-Team yet,
+and `reconcile` reads live site detail with a cookie only. Setup, results, and
+error lines are in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md):
 
 ```bash
 printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
 printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
 printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
+printf '%s' "$MTEAM_API_KEY" | ptctl site detail --api-key-stdin mteam REMOTE_ID
 ```
 
 `site account` reads the authenticated `mybonus.php` page and reports the

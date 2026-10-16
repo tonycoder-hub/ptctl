@@ -17,7 +17,7 @@ documents that matter to them.
   each exit code means for each command family.
 - [Features](FEATURES.md): everything implemented today and what is
   deliberately not implemented.
-- [M-Team adapter](MTEAM_ADAPTER.md): creating an API key, the three M-Team
+- [M-Team adapter](MTEAM_ADAPTER.md): creating an API key, the four M-Team
   reads, their error lines, and why download is not supported yet.
 
 ## Contributing code

@@ -4,20 +4,23 @@
 
 M-Team (馒头PT, TP :: mTorrent) is the second experimental site and the first
 that uses a site-issued API key instead of a session cookie. The adapter talks
-only to the official JSON API at `https://api2.m-team.cc` and declares three
+only to the official JSON API at `https://api2.m-team.cc` and declares four
 read capabilities:
 
 - session check (`site status`);
 - account snapshot (`site account`);
-- torrent search (`site search`).
+- torrent search (`site search`), with category names;
+- torrent detail (`site detail`).
 
-Torrent detail and metafile download are not implemented yet; see
-[Not supported yet](#not-supported-yet). The three reads were smoke-tested live
-on 2026-10-16 with a newly created API key: `site status` reported
-`authenticated`, `site account` read the profile, and `site search` returned
-results in both table and JSON output. A creation time the API returned for that
-key matched UTC+8, confirming how [times](#results) are read. The unit tests use
-synthetic responses shaped after the public API.
+Metafile download is not implemented yet; see
+[Not supported yet](#not-supported-yet). The reads were smoke-tested live on
+2026-10-16 with a newly created API key: `site status` reported
+`authenticated`, `site account` read the profile, `site search` returned results
+with category names in both table and JSON output, and `site detail` observed a
+public software torrent and reported `not_found` for an ID with no torrent. A
+creation time the API returned for that key matched UTC+8, confirming how
+[times](#results) are read. The unit tests use synthetic responses shaped after
+the public API.
 
 ## Getting an API key
 
@@ -36,15 +39,16 @@ printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
 printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
 printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
 printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin --output json mteam "Ubuntu"
+printf '%s' "$MTEAM_API_KEY" | ptctl site detail --api-key-stdin mteam REMOTE_ID
 ```
 
 To keep the key out of shell history and your environment, pipe it from a
 password manager instead, for example `op read op://Private/M-Team/api-key |
 ptctl site account --api-key-stdin mteam`.
 
-Without `--api-key-stdin`, `status`, `account`, and `search` fail with a usage
-error before anything is read; `--cookie-stdin` is refused because the adapter
-does not accept cookies.
+Without `--api-key-stdin`, `status`, `account`, `search`, and `detail` fail
+with a usage error before anything is read; `--cookie-stdin` is refused because
+the adapter does not accept cookies.
 
 ## Requests
 
@@ -54,9 +58,12 @@ Each command sends exactly one request and never retries:
 |---|---|---|
 | `site status`, `site account` | `POST /api/member/profile` | an empty `multipart/form-data` form |
 | `site search` | `POST /api/torrent/search` | `{"mode":"normal","keyword":QUERY,"pageNumber":1,"pageSize":50}` |
+| `site detail` | `POST /api/torrent/detail` | a `multipart/form-data` form with the one field `id` |
 
-The API exposes these reads as POST requests. Both endpoints only read; ptctl
-sends no other endpoint. The request uses the same strict transport as every
+The API exposes these reads as POST requests. All three endpoints only read;
+ptctl sends no other endpoint. In particular, `site detail` never calls
+`/api/torrent/viewHits`, which the website's own detail page calls to count a
+view. The request uses the same strict transport as every
 site read:
 
 - HTTPS to the fixed origin only, HTTP/1.1, a fresh connection per command;
@@ -82,11 +89,33 @@ counter that is missing or malformed is left absent rather than guessed, but a
 profile without a username is an error rather than a partial account.
 
 **Search.** The first page of up to 50 results in normal mode. Each row has the
-ref `mteam/ID`, name, size, category ID, publish time, seeders, leechers,
-completed count, and promotion. The table view adds `SEEDERS`, `LEECHERS`, and
-`PROMOTION` columns. A response without a result list, or with any row that has
-no canonical ID or name, fails the whole search instead of returning a partial
-or empty page.
+ref `mteam/ID`, name, size, category ID and name, publish time, seeders,
+leechers, completed count, and promotion. The table view adds `SEEDERS`,
+`LEECHERS`, `PROMOTION`, and, last, `CATEGORY` columns. A response without a
+result list, or with any row that has no canonical ID or name, fails the whole
+search instead of returning a partial or empty page.
+
+**Categories.** JSON keeps the site's category ID in `category` and adds its
+name in `category_name`, for example `"category": "422"` with
+`"category_name": "软件"`. Names are the simplified-Chinese `nameChs` values of
+`/api/torrent/categoryList` as of 2026-10-16, compiled into ptctl so a search
+costs no extra request. A few newer categories carry traditional-script names on
+the site itself (`電子書`, `遊戲`) and are kept verbatim. An ID that is not in the
+table, such as a category the site adds later, keeps its ID and gets no name;
+the table shows `-`.
+
+**Detail.** One torrent's name, size, seeders, leechers, and completed count.
+The answer must echo the requested ID and carry a name, or the read fails as
+`unrecognized_response`; a counter that is missing or malformed is left absent.
+The evidence basis is the same list every detail route reports. For this route,
+`authenticated_torrent_detail_page` means the API accepted the key and answered
+with code `0`, and `exact_remote_id_page_link` means the answer echoed the exact
+requested ID. `DOWNLOAD REFERENCE` is always `false`, because the API answer has
+no download link to observe. An ID with no visible torrent stops as
+`not_found`; the API reports it as code `1` with a fixed message, and only that
+exact pair is read as not found, because the API uses code `1` for other
+refusals too. Live-site reconciliation still reads site detail only with a
+cookie, so it does not support M-Team yet.
 
 **Times.** The API returns times without a zone, such as `2026-10-14
 09:30:00`. ptctl reads them as UTC+8, the site's time zone, and reports them in
@@ -120,6 +149,7 @@ These lines name the cause instead:
 | `site CMD failed: the site host resolved only to private or reserved addresses, ...` | DNS returned only blocked addresses, typically from a proxy using fake-IP DNS (`198.18.0.0/15`, as in Clash or Mihomo fake-IP mode). | Exclude `api2.m-team.cc` from fake-IP (for example with `fake-ip-filter`) or use a resolver that returns real addresses. ptctl never uses a proxy. |
 | `site CMD timed out: context deadline exceeded` | The 45-second deadline passed. | Check connectivity. |
 | `site CMD failed` | Anything else: an unexpected HTTP status such as 403, a response that is not JSON, or an unknown API code. | If it persists with a valid key, open an issue with the command and time. Never include the key. |
+| `site torrent detail read failed` | `site detail` did not observe the torrent. The report's `REQUEST STOP` names the reason, such as `not_found`, `authentication_required`, `rate_limited`, or `unrecognized_response`. | Check the ID and key; wait before trying again after `rate_limited`. |
 
 ## Not supported yet
 
@@ -146,12 +176,8 @@ into the private store. The file contains your passkey, so keep it private:
 ptctl metafile store import --store "$PTCTL_STORE" release.torrent
 ```
 
-**Torrent detail.** `site detail` and live-site reconciliation seal a route
-identity into their records. M-Team detail will be added together with the
-download contract so both get one reviewed, versioned identity. The website's
-detail page reads `/api/torrent/detail`, whose answer includes the info hash,
-and also calls `/api/torrent/viewHits`, which by its name records a view; an
-adapter should send only the first.
+**Reconciliation.** `reconcile` reads live site detail with a cookie only, so
+`--site-ref mteam/ID` is refused. `site detail` works on its own.
 
 **Everything else.** Bonus exchange, RSS, seeding lists, and messages are not
 implemented.

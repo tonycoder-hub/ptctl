@@ -138,7 +138,7 @@ Usage:
   ptctl site status (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
   ptctl site account (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
   ptctl site search (--cookie-stdin | --api-key-stdin) [--output table|json] SITE QUERY...
-  ptctl site detail --cookie-stdin [--output table|json] SITE REMOTE_ID
+  ptctl site detail (--cookie-stdin | --api-key-stdin) [--output table|json] SITE REMOTE_ID
   ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
   ptctl site bonus review --cookie-stdin [--output table|json] SITE OPTION
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION

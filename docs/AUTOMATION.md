@@ -98,7 +98,7 @@ Per-command details are in
 | Flag | Used by | Stdin content |
 |---|---|---|
 | `--cookie-stdin` | `site` reads, `site bonus exchange submit` for cookie-only sites, `site metafile fetch` | The complete `Cookie` header value |
-| `--api-key-stdin` | `site status`, `site account`, and `site search` for sites that authenticate with an API key (M-Team) | The site-issued API key |
+| `--api-key-stdin` | `site status`, `site account`, `site search`, and `site detail` for sites that authenticate with an API key (M-Team) | The site-issued API key |
 | `--password-stdin` | `client` commands, `seed retire` commands that contact a downloader, and `reconcile` with a downloader | The downloader password |
 | `--site-cookie-stdin` | `reconcile report` with a live site observation and no downloader | The complete `Cookie` header value |
 | `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}` |

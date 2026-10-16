@@ -104,11 +104,12 @@ deliberately does not. For step-by-step usage, see the
   cookie is saved to an owner-only file or written to a pipe or owner-only
   stdout, with an optional `site.login` JSON report;
 - an experimental M-Team session check, account snapshot (username, uploaded
-  and downloaded bytes, ratio, and bonus), and first-page torrent search with
-  seeders, leechers, and promotion factors, through one read-only POST per
-  invocation to the official JSON API, authenticated by a site-issued API key
-  read only from stdin, with no redirect, proxy, or retry; M-Team torrent
-  detail and metafile download are not implemented yet;
+  and downloaded bytes, ratio, and bonus), first-page torrent search with
+  seeders, leechers, promotion factors, and category names, and torrent detail
+  for one remote ID, through one read-only POST per invocation to the official
+  JSON API, authenticated by a site-issued API key read only from stdin, with
+  no redirect, proxy, or retry; M-Team metafile download is not implemented
+  yet;
 - qBittorrent and Transmission status and torrent-list reads over HTTPS (or
   explicit numeric loopback HTTP), with passwords accepted only through stdin;
 - read-only reconciliation that can first observe one authenticated live site
