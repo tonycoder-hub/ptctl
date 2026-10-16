@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate existing release tags, assemble checked assets, and create drafts only."""
+"""Decide main-line releases, assemble checked assets, and tag and publish them."""
 import argparse
 import json
 import os
@@ -29,16 +29,60 @@ def version_file(content):
     return release_version(value)
 
 
-def check_tag(tag, expected_commit=None, cwd=None):
-    release_version(tag)
-    commit = git("rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}", cwd=cwd)
-    require(expected_commit is None or commit == expected_commit, "tag moved since validation")
-    # Only main-line releases; no implicit Git tag creation or branch fallback.
+def version_key(value):
+    """Order release versions by SemVer precedence."""
+    release_version(value)
+    core, _, prerelease = value[1:].partition("-")
+    numbers = tuple(int(part) for part in core.split("."))
+    if not prerelease:
+        return numbers, (1,)
+    # Numeric identifiers sort before alphanumeric ones; a shorter list sorts first.
+    return numbers, (0, tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in prerelease.split(".")))
+
+
+def release_notes(changelog, version):
+    """Return the body of the one CHANGELOG.md section headed by version."""
+    lines = changelog.split("\n")
+    starts = [i for i, line in enumerate(lines) if re.fullmatch(r"## " + re.escape(version) + r"( .*)?", line)]
+    require(len(starts) == 1, "CHANGELOG.md needs exactly one section for " + version)
+    end = next((i for i in range(starts[0] + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    body = "\n".join(lines[starts[0] + 1:end]).strip()
+    require(body, "CHANGELOG.md section for " + version + " is empty")
+    return body + "\n"
+
+
+def main_line(commit, cwd=None):
+    """Require a full commit on main whose workflows are main's own."""
+    require(re.fullmatch(r"[0-9a-f]{40}", commit), "full source commit required")
+    # Only main-line releases; no branch fallback.
     subprocess.run(["git", "merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"], cwd=cwd, check=True)
     subprocess.run(["git", "diff", "--quiet", "--no-ext-diff", commit, "refs/remotes/origin/main", "--", ".github/workflows"], cwd=cwd, check=True, capture_output=True)
-    content = subprocess.check_output(["git", "show", f"{commit}:VERSION"], cwd=cwd).decode()
-    require(version_file(content) == tag, "tag and VERSION differ")
-    return {"commit": commit, "version": tag, "channel": "release"}
+
+
+def plan(commit, cwd=None):
+    """Decide whether a main-line commit releases its VERSION.
+
+    A VERSION tagged on an earlier commit is not released again. An untagged
+    one must be newer than every release tag, and either needs release notes.
+    """
+    main_line(commit, cwd)
+    version = version_file(subprocess.check_output(["git", "show", f"{commit}:VERSION"], cwd=cwd).decode())
+    tags = set()
+    for name in git("tag", "--list", "v*", cwd=cwd).splitlines():
+        try:
+            tags.add(release_version(name))
+        except ValueError:
+            continue
+    result = {"commit": commit, "version": version, "channel": "release", "release": "false"}
+    if version in tags:
+        # A tag on this very commit is a rerun that has to finish the release.
+        if git("rev-parse", "--verify", f"refs/tags/{version}^{{commit}}", cwd=cwd) != commit:
+            return result
+    else:
+        require(all(version_key(tag) < version_key(version) for tag in tags), "VERSION must be newer than every release tag")
+    release_notes(subprocess.check_output(["git", "show", f"{commit}:CHANGELOG.md"], cwd=cwd).decode(), version)
+    result["release"] = "true"
+    return result
 
 
 def identity(version, commit, channel):
@@ -89,11 +133,11 @@ def verify_assets(directory, tag, commit):
     return [directory / name for name in sorted(expected)]
 
 
-def gh_json(endpoint, body=None, upload=None):
+def gh_json(endpoint, body=None, upload=None, method="POST"):
     command = ["gh", "api", endpoint, "-H", "X-GitHub-Api-Version: 2022-11-28"]
     payload = None
     if body is not None:
-        command += ["--method", "POST", "--input", "-"]
+        command += ["--method", method, "--input", "-"]
         payload = json.dumps(body)
     if upload is not None:
         command += ["--method", "POST", "-H", "Content-Type: application/octet-stream", "--input", str(upload)]
@@ -127,25 +171,60 @@ def remote_tag(repository, tag):
     raise ValueError("tag chain exceeds limit")
 
 
-def create_draft(repository, tag, commit, assets):
+def find_remote_tag(repository, tag):
+    """Return the commit a remote tag names, or None when no such tag exists."""
+    # matching-refs answers an absent tag with an empty list, so no failure is
+    # ever read as absence.
+    refs = gh_json(f"repos/{repository}/git/matching-refs/tags/{quote(tag, safe='')}")
+    require(isinstance(refs, list), "tag listing response differs")
+    if not any(item.get("ref") == f"refs/tags/{tag}" for item in refs):
+        return None
+    return remote_tag(repository, tag)
+
+
+def create_tag(repository, tag, commit):
+    """Create one annotated tag for commit; never moves an existing tag."""
+    obj = gh_json(f"repos/{repository}/git/tags", body={
+        "tag": tag, "message": "pt cli " + tag, "object": commit, "type": "commit"})
+    require(re.fullmatch(r"[0-9a-f]{40}", str(obj.get("sha"))) and obj.get("tag") == tag
+            and obj.get("object", {}).get("sha") == commit, "tag object response differs")
+    ref = gh_json(f"repos/{repository}/git/refs", body={"ref": f"refs/tags/{tag}", "sha": obj["sha"]})
+    require(ref.get("ref") == f"refs/tags/{tag}" and ref.get("object", {}).get("sha") == obj["sha"], "tag ref response differs")
+
+
+def publish(repository, tag, commit, assets, notes, cwd=None):
+    """Tag a tested main-line commit and publish its release.
+
+    The release is drafted, filled, and checked before it is made public, so a
+    failure at any step leaves at most an unpublished draft.
+    """
     release_version(tag)
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository), "invalid repository")
+    main_line(commit, cwd)
     files = verify_assets(assets, tag, commit)  # All local validation precedes any remote write.
-    require(remote_tag(repository, tag) == commit, "remote tag is missing or moved")
+    prerelease = "-" in tag
     endpoint = f"repos/{repository}/releases"
     require(existing_release(repository, tag) is None,
             "a release already exists; refusing to replace a draft or published release")
+    current = find_remote_tag(repository, tag)
+    if current is None:
+        create_tag(repository, tag, commit)
+    else:
+        # A rerun after a failure past tagging finds its own tag.
+        require(current == commit, "tag already exists on another commit")
+    require(remote_tag(repository, tag) == commit, "remote tag is missing or moved")
     release = gh_json(endpoint, body={
         "tag_name": tag, "target_commitish": commit, "name": "pt cli " + tag,
-        "draft": True, "prerelease": "-" in tag, "make_latest": "false",
-        "body": f"Native tested packages for `{commit}`. Verify SHA256SUMS before use.\n\n"
-                "Review all three platform assets and the successful workflow before manually publishing. "
-                "No code signing or notarization is provided.",
+        "draft": True, "prerelease": prerelease, "make_latest": "false",
+        "generate_release_notes": True,
+        "body": notes.rstrip("\n") + "\n\n---\n\n"
+                f"Native tested packages for `{commit}`. Verify SHA256SUMS before use. "
+                "No code signing or notarization is provided.\n",
     })
     require(release.get("draft") is True and isinstance(release.get("id"), int), "draft creation response differs")
     release_id = release["id"]
-    # No overwrite, automatic retry, deletion, or publish API exists in this helper.
-    # Any partial-upload failure leaves an unpublished draft for manual inspection.
+    # No overwrite, automatic retry, or deletion exists in this helper. Any
+    # partial-upload failure leaves an unpublished draft for manual inspection.
     expected = {}
     for path in files:
         expected[path.name] = "sha256:" + sha256(path.read_bytes())
@@ -158,7 +237,11 @@ def create_draft(repository, tag, commit, assets):
     require(len(remote_assets) == len(expected) and {a["name"]: a.get("digest") for a in remote_assets} == expected
             and all(a.get("state") == "uploaded" for a in remote_assets), "draft asset set differs")
     require(remote_tag(repository, tag) == commit, "remote tag moved during upload; inspect the unpublished draft")
-    return {"draft": True, "url": final["html_url"], "commit": commit, "version": tag}
+    public = gh_json(f"{endpoint}/{release_id}", method="PATCH", body={
+        "draft": False, "make_latest": "false" if prerelease else "true"})
+    require(public.get("draft") is False and public.get("tag_name") == tag and public.get("prerelease") is prerelease
+            and {a["name"]: a.get("digest") for a in public.get("assets", [])} == expected, "published release differs")
+    return {"draft": False, "url": public["html_url"], "commit": commit, "version": tag}
 
 
 def main():
@@ -166,35 +249,39 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     meta = sub.add_parser("identity")
     meta.add_argument("--release-version", default="")
-    tag = sub.add_parser("check-tag")
-    tag.add_argument("--tag", required=True)
-    tag.add_argument("--expected-commit")
+    decide = sub.add_parser("plan")
+    decide.add_argument("--commit", required=True)
     collect = sub.add_parser("assemble")
     for name in ("source", "output"):
         collect.add_argument("--" + name, type=Path, required=True)
     for name in ("version", "commit", "channel"):
         collect.add_argument("--" + name, required=True)
-    draft = sub.add_parser("create-draft")
+    release = sub.add_parser("publish")
     for name in ("repository", "tag", "commit"):
-        draft.add_argument("--" + name, required=True)
-    draft.add_argument("--assets", type=Path, required=True)
+        release.add_argument("--" + name, required=True)
+    for name in ("assets", "changelog"):
+        release.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args()
     if args.command == "identity":
         version = version_file(Path("VERSION").read_bytes().decode())
+        # Every VERSION, released or not yet, carries its release notes.
+        release_notes(Path("CHANGELOG.md").read_bytes().decode(), version)
         commit = git("rev-parse", "HEAD")
         require(not args.release_version or args.release_version == version, "release version differs from source VERSION")
         result = identity(version if args.release_version else version + "+g" + commit[:12], commit,
                           "release" if args.release_version else "ci-preview")
-    elif args.command == "check-tag":
-        result = check_tag(args.tag, args.expected_commit)
+    elif args.command == "plan":
+        result = plan(args.commit)
     elif args.command == "assemble":
         result = assemble(args.source, args.output, args.version, args.commit, args.channel)
     else:
-        result = create_draft(args.repository, args.tag, args.commit, args.assets)
-    if args.command in ("identity", "check-tag") and os.environ.get("GITHUB_OUTPUT"):
+        notes = release_notes(args.changelog.read_bytes().decode(), args.tag)
+        result = publish(args.repository, args.tag, args.commit, args.assets, notes)
+    if args.command in ("identity", "plan") and os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-            for key in ("version", "commit", "channel"):
-                output.write(f"{key}={result[key]}\n")
+            for key in ("version", "commit", "channel", "release"):
+                if key in result:
+                    output.write(f"{key}={result[key]}\n")
     print(json.dumps(result, sort_keys=True))
 
 

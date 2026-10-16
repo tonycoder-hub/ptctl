@@ -35,8 +35,8 @@ complete surface.
 
 ## Current status and write boundaries
 
-> Status: `v0.4.0-alpha` development. Ordinary inspection, downloader reads,
-> content proof, discovery, planning, and reconciliation are intentionally
+> Status: `v0.4.0-alpha.1`, an alpha release. Ordinary inspection, downloader
+> reads, content proof, discovery, planning, and reconciliation are intentionally
 > zero-write. Persistent writes are confined to explicit private-store/index
 > operations, the acknowledged `site metafile fetch`, the separately
 > acknowledged target-root-local `seed materialize run|resume|abandon|prune|forget`

@@ -1,21 +1,26 @@
 # pt cli 发布流程
 
-发布源版本在仓库根目录 `VERSION`，当前是 `v0.4.0-alpha`。CI 预览身份为
-`<VERSION>+g<实际测试提交前12位>`；发布身份必须与已存在的 tag 和该提交的
-`VERSION` 完全一致。接受 `vMAJOR.MINOR.PATCH` 和 `-rc.1`、`-alpha` 等
-SemVer prerelease，不接受发布 tag 的 build metadata 或前导零。
+发布由合入 main 触发，版本号以仓库根目录 `VERSION` 为准。CI 预览身份为
+`<VERSION>+g<实际测试提交前12位>`；发布身份就是该提交的 `VERSION`。接受
+`vMAJOR.MINOR.PATCH` 和 `-rc.1`、`-alpha.1` 等 SemVer prerelease，不接受
+build metadata 或前导零。
 
 ## 维护者操作
 
-1. 通过正常 PR 更新 `VERSION`、说明和代码，检查 CI，再经授权合入 main。
-2. 确认要发布的 main-line commit、版本和授权后，创建并推送该版本的 tag。
-   推荐 annotated tag。此步骤由维护者显式执行，工作流从不创建或移动 tag。
-3. `v*` tag push 自动触发 `release draft`。也可以在 Actions 手动运行它，
-   输入一个已经存在的 tag。手动触发需要此工作流已进入默认分支。
-4. 等待整个 run 成功，再检查 Draft Release 的三个 ZIP、`SHA256SUMS` 和
-   `release-manifest.json`，核对 tag、完整 commit、CI、下载后校验与发行说明。
-5. **公开发布是独立的人工操作**。工作流只创建 draft，不自动发布、不合并 PR，
-   不设置 latest。带 prerelease 后缀的 tag 会标记为 prerelease。
+1. 在一个正常 PR 里把 `VERSION` 改成新版本，并在 `CHANGELOG.md` 里加一节
+   `## <VERSION>`，写这一版的发行说明。新版本必须按 SemVer 高于所有已有的
+   `v*` tag。PR CI 会检查当前 `VERSION` 在 `CHANGELOG.md` 里恰好有一节且非空，
+   缺了就失败。
+2. CI 全绿后合入 main。合入后 `release` 工作流自动运行：三平台测试与构建、
+   创建 annotated tag `<VERSION>`、上传资产并公开发布 Release。
+3. 不改 `VERSION` 的普通合入也会触发 `release`，但只做判定：该版本的 tag
+   已在更早的提交上，于是跳过构建和发布。
+4. 发布说明是 `CHANGELOG.md` 对应一节，后接 GitHub 自动生成的 PR 列表和
+   完整 commit。带 prerelease 后缀（含 `-`）的版本标记为 prerelease，不设为
+   latest；正式版本设为 latest。
+
+不需要手动打 tag；工作流从不移动已有 tag。也可以在 Actions 对 main 手动运行
+`release`，它按同样规则判定当前 main。
 
 ## 构建与验收
 
@@ -44,20 +49,30 @@ Windows 使用 PowerShell `Expand-Archive`；macOS/Linux 使用系统 `unzip`。
 
 ## 权限与失败语义
 
-默认 `contents: read`，仅依赖全部验证成功的最后一个 draft job 使用
+默认 `contents: read`，仅依赖全部验证成功的最后一个 publish job 使用
 `contents: write`。只使用内置 `GITHUB_TOKEN`，checkout 不保留凭据；不要求 PAT。
-tag 必须解析到 main 历史中的提交，且其 `.github/workflows` 与当前 main 一致。
+发布的提交必须在 main 历史中，且其 `.github/workflows` 与当前 main 一致。
 这也避免 GitHub 创建 Release 时对不同工作流版本要求额外 workflow 写权限，
 详见 [GitHub Release API](https://docs.github.com/en/rest/releases/releases#create-a-release)。
-上传前再次读取 tag，上传后再核对，移动或不匹配会失败。
+`release` 工作流串行运行，排队中的较新 run 会取代较早的待运行 run；较新的
+提交只要仍是同一 `VERSION`，就由它发布这一版。
 
-缺失 tag、版本不符、非 main 提交、任一测试失败、构建不一致、缺包、校验失败
-都会阻止 Release 创建。已存在的 draft 或公开 Release 均拒绝覆盖。资产上传
-按新 draft 的 ID 进行，并核对服务端 digest/state；网络中断或部分上传失败时，
-留下未公开的 draft 供维护者检查，不自动重试、删除、替换或公开发布。修复后
-需先人工处理已有的不完整 draft，再 **Re-run all jobs**；不要只重跑个别 job，
-因为资产名包含 run attempt，以免混用不同轮次的包。
+判定在 `plan` 一步完成：`VERSION` 的 tag 在更早的提交上就跳过；没有 tag 时，
+`VERSION` 低于或等于任一已有 tag、缺少发行说明、提交不在 main 上，都会让
+run 失败而不发布。发布按固定顺序写入，任一步失败即停止：
 
-这套流程的接入不等于已经创建正式 tag 或 Release。Release API 写入路径采用
-无网络的模拟回归验证；首次实际 draft 上传仍需在维护者授权的真实 tag 上确认。
-没有代码签名、Windows 签名或 macOS notarization；没有验证真实下载器凭据或任务。
+1. 本地核对 main 历史、三平台资产、清单和全部校验值；
+2. 确认没有同名 Release（含 draft），已存在则拒绝覆盖；
+3. tag 不存在就创建 annotated tag；已存在则必须指向同一提交，否则失败；
+4. 创建 draft，逐个上传资产并核对服务端 digest/state；
+5. 再次读取 tag，确认上传期间没有移动；
+6. 最后才把 draft 公开，并核对公开后的状态和资产。
+
+因此失败最多留下 tag 和一个未公开的 draft，不会有资产不全的公开 Release。
+不自动重试、删除或替换。修复后先人工删除不完整的 draft（tag 保留），再对该
+run **Re-run all jobs**；tag 已在本提交上时会继续完成发布。不要只重跑个别
+job，因为资产名包含 run attempt，以免混用不同轮次的包。
+
+Release API 写入路径采用无网络的模拟回归验证，首次真实运行是
+`v0.4.0-alpha.1`。没有代码签名、Windows 签名或 macOS notarization；没有验证
+真实下载器凭据或任务。
