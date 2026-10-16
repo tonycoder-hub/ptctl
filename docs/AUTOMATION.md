@@ -51,6 +51,7 @@ Every JSON result is a single object on stdout, indented with two spaces:
 |---|---|
 | General | `version` |
 | Site reads | `site.descriptor.list` (`site list`, `site capabilities`), `site.session`, `site.account`, `site.torrent.list`, `site.torrent.detail`, `site.bonus.catalog`, `site.bonus.offer_review` |
+| Site login | `site.login` |
 | Bonus exchange | `site.bonus.exchange.prepare`, `site.bonus.exchange.submit`, `site.bonus.exchange.status`, `site.bonus.exchange.operation_list`, `site.bonus.exchange.prune`, `site.bonus.exchange.forget` |
 | Site metafiles | `site.metafile.fetch`, `site.metafile.binding.list`, `site.metafile.binding.inspect` |
 | Metafiles | `metafile.manifest` (`torrent inspect`), `content.verification` (`torrent verify`), `metafile.store.init`, `metafile.store.import`, `metafile.store.inspect` |
@@ -104,15 +105,22 @@ Per-command details are in
 | `--credential-bundle-stdin` | `site bonus exchange submit` for sites that confirm with the account password (TJUPT) | `{"schema":"ptctl.credentials/v1","site_cookie":"...","site_password":"..."}` |
 | `--credential-bundle-stdin` | `site login` | `{"schema":"ptctl.credentials/v1","site_username":"...","site_password":"...","site_totp":"123456"}`; `site_totp` is optional |
 
-- An interactive terminal on stdin is refused; the secret must be piped.
+- An interactive terminal on stdin is refused; the secret must be piped. The
+  exception is `site login` without `--credential-bundle-stdin`, which is for
+  people: it prompts on the terminal with the password and code hidden, and
+  exits `2` when stdin is not a terminal. Agents always pass the bundle.
 - Single secrets are limited to 64 KiB and the bundle to 128 KiB. The bundle is
   strict JSON: unknown, duplicate, or missing fields are rejected.
 - Site reads, metafile fetch, and reconciliation validate usage, capabilities,
   and local inputs before reading stdin.
 - Credentials stay in memory. They are never persisted, printed, or forwarded
-  in error text. The one exception is the session cookie `site login` issues:
-  it is written to stdout, which must be a pipe or an owner-only file, so the
-  caller decides where it is kept.
+  in error text. The one exception is the session cookie `site login` issues.
+  With `--cookie-file PATH` it is saved to that owner-only file, and
+  `--output json` then reports a `site.login` object with `cookie_file` and
+  `session_expires_at` but not the cookie. With the bundle and no
+  `--cookie-file`, it is written to stdout, which must be a pipe or an
+  owner-only file. Without the bundle, it is saved under the user config
+  directory. `ptctl help login` documents every flag.
 - `ptctl site capabilities SITE` lists the authentication methods a site
   accepts: `cookie_header` takes `--cookie-stdin`, `api_key_header` takes
   `--api-key-stdin`. Omitting the flag names the one the site needs.
