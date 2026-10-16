@@ -170,6 +170,9 @@ func TestOpenTransportFailureIsCountedAndRedacted(t *testing.T) {
 			t.Fatalf("open error leaked %q: %q", secret, err)
 		}
 	}
+	if !strings.Contains(err.Error(), "no response from the RPC endpoint") {
+		t.Fatalf("open error does not say nothing answered: %v", err)
+	}
 }
 
 func TestRejectedHandshakeNamesTheCause(t *testing.T) {

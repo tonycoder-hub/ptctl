@@ -44,6 +44,12 @@ If the downloader refuses the login, the error names the usual cause:
   `rpc-whitelist` does not include the caller (behind Docker that is the bridge
   gateway, not 127.0.0.1) or while its anti-brute-force lock is active.
 
+If nothing answers at all, for example because the downloader is stopped or
+restarting or an SSH tunnel's far end refuses the connection, the error says
+there was no response instead of naming a status. That is a reachability
+problem: check that the downloader is running and the URL is reachable before
+suspecting the password, and avoid retrying blindly toward the ban.
+
 Adopt one exact materialized layout into qBittorrent or Transmission without
 starting it. The default action adds an absent stopped job:
 
