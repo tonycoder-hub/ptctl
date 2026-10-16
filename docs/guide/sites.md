@@ -160,7 +160,8 @@ if the API does not accept it. Scripts save it with `site login --api-key-stdin
 mteam`, or pipe it to a single command with `--api-key-stdin`. `status`,
 `account`, `search`, and `detail` each send one read-only POST to M-Team's JSON
 API and never retry; search results add seeders, leechers, promotion, and
-category-name columns. `site metafile fetch` downloads one `.torrent` into the
+category-name columns, and `search` takes `--page N`, `--mode normal|adult`,
+`--category ID`, and `--free`. `site metafile fetch` downloads one `.torrent` into the
 private store through M-Team's signed link, as described in
 [metafiles.md](metafiles.md). Bonus commands are not available for M-Team yet,
 and `reconcile` reads live site detail with a cookie only. Setup, results, and
@@ -171,6 +172,7 @@ ptctl site login mteam
 ptctl site status mteam
 ptctl site account mteam
 ptctl site search mteam "Ubuntu"
+ptctl site search --page 2 --free mteam "Ubuntu"
 ptctl site detail mteam REMOTE_ID
 printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
 ```

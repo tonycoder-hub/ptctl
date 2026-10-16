@@ -139,7 +139,7 @@ Usage:
   ptctl site logout [--output table|json] SITE
   ptctl site status [--cookie-stdin | --api-key-stdin] [--output table|json] SITE
   ptctl site account [--cookie-stdin | --api-key-stdin] [--output table|json] SITE
-  ptctl site search [--cookie-stdin | --api-key-stdin] [--output table|json] SITE QUERY...
+  ptctl site search [--cookie-stdin | --api-key-stdin] [--page N] [--mode MODE] [--category ID]... [--free] [--output table|json] SITE QUERY...
   ptctl site detail [--cookie-stdin | --api-key-stdin] [--output table|json] SITE REMOTE_ID
   ptctl site bonus-catalog [--cookie-stdin] [--output table|json] SITE
   ptctl site bonus review [--cookie-stdin] [--output table|json] SITE OPTION
