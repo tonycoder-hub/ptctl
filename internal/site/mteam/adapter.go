@@ -7,9 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/site"
@@ -124,32 +122,6 @@ func (a *Adapter) Account(ctx context.Context, credential site.Credential) (doma
 	}
 	profile.ObservedAt = time.Now().UTC()
 	return profile, nil
-}
-
-func (a *Adapter) Search(ctx context.Context, credential site.Credential, query string) ([]domain.TorrentSummary, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, fmt.Errorf("search query is empty")
-	}
-	if len(query) > maxQueryBytes || !utf8.ValidString(query) || hasControlRune(query) {
-		return nil, fmt.Errorf("M-Team search query must be at most %d bytes of printable UTF-8", maxQueryBytes)
-	}
-	body, err := json.Marshal(searchRequest{Mode: "normal", Keyword: query, PageNumber: 1, PageSize: searchPageSize})
-	if err != nil {
-		return nil, fmt.Errorf("encode M-Team search request failed")
-	}
-	data, err := a.call(ctx, credential, searchPath, jsonMediaType, body)
-	if err != nil {
-		return nil, err
-	}
-	return parseSearch(data)
-}
-
-type searchRequest struct {
-	Mode       string `json:"mode"`
-	Keyword    string `json:"keyword"`
-	PageNumber int    `json:"pageNumber"`
-	PageSize   int    `json:"pageSize"`
 }
 
 // call performs exactly one API request on a fresh client and returns the
