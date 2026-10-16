@@ -412,7 +412,7 @@ func (c *Client) postFormOnce(ctx context.Context, relativePath string, query ur
 	req.Header.Set("Accept", accept)
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; explicit-effect-client)")
+	req.Header.Set("User-Agent", explicitEffectUserAgent)
 	c.applyCredential(req)
 	req.Close = true
 	return c.roundTripCapturing(ctx, req, result, maxBody, maxHeaderBytes, classify, capture)
@@ -422,6 +422,17 @@ func (c *Client) postFormOnce(ctx context.Context, relativePath string, query ur
 // expose reads only through POST. The caller supplies the encoded body; it is
 // sent once, never replayed, and never included in a result or diagnostic.
 func (c *Client) PostReadOnce(ctx context.Context, relativePath, contentType string, body []byte, accept string, maxRequestBytes, maxBody, maxHeaderBytes int64) (StrictResponse, error) {
+	return c.postBodyOnce(ctx, relativePath, contentType, body, accept, maxRequestBytes, maxBody, maxHeaderBytes, readOnlyUserAgent)
+}
+
+// PostEffectOnce is PostReadOnce for one acknowledged API write, such as a
+// bonus exchange. It identifies itself as an explicit-effect client, and like
+// every request here it is never retried, replayed, or redirected.
+func (c *Client) PostEffectOnce(ctx context.Context, relativePath, contentType string, body []byte, accept string, maxRequestBytes, maxBody, maxHeaderBytes int64) (StrictResponse, error) {
+	return c.postBodyOnce(ctx, relativePath, contentType, body, accept, maxRequestBytes, maxBody, maxHeaderBytes, explicitEffectUserAgent)
+}
+
+func (c *Client) postBodyOnce(ctx context.Context, relativePath, contentType string, body []byte, accept string, maxRequestBytes, maxBody, maxHeaderBytes int64, userAgent string) (StrictResponse, error) {
 	var result StrictResponse
 	if maxBody <= 0 || maxBody > 32<<20 || maxHeaderBytes <= 0 || maxHeaderBytes > hardMaxResponseHeaders {
 		return result, fmt.Errorf("site response budget is invalid")
@@ -458,7 +469,7 @@ func (c *Client) PostReadOnce(ctx context.Context, relativePath, contentType str
 	req.Header.Set("Accept", accept)
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("User-Agent", readOnlyUserAgent)
+	req.Header.Set("User-Agent", userAgent)
 	c.applyCredential(req)
 	req.Close = true
 	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, nil)
@@ -581,6 +592,8 @@ func linkRedirectTarget(from *url.URL, raw string) (*url.URL, bool) {
 }
 
 const readOnlyUserAgent = "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; conservative-read-only-client)"
+
+const explicitEffectUserAgent = "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; explicit-effect-client)"
 
 func (c *Client) applyCredential(req *http.Request) {
 	if c.credentialValue != "" {

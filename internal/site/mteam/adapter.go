@@ -87,8 +87,11 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 			domain.CapabilityAuthCheck,
 			domain.CapabilityAccountRead,
 			domain.CapabilitySearch,
+			domain.CapabilityBonusRead,
 			domain.CapabilityDetail,
 			domain.CapabilityMetafile,
+			domain.CapabilityBonusReview,
+			domain.CapabilityBonusExchange,
 		},
 	}
 }
@@ -130,6 +133,17 @@ func (a *Adapter) call(ctx context.Context, credential site.Credential, path, co
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	client, err := a.openClient(credential)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	return post(ctx, client, path, contentType, body)
+}
+
+// openClient binds one API client to the key. The client spaces its own
+// requests, so a command that needs several reads makes them all on one.
+func (a *Adapter) openClient(credential site.Credential) (guardedClient, error) {
 	if credential.Method() != domain.AuthMethodAPIKeyHeader {
 		return nil, fmt.Errorf("M-Team requires api_key_header authentication")
 	}
@@ -140,7 +154,10 @@ func (a *Adapter) call(ctx context.Context, credential site.Credential, path, co
 	if err != nil || client == nil {
 		return nil, fmt.Errorf("open M-Team API client failed")
 	}
-	defer client.Close()
+	return client, nil
+}
+
+func post(ctx context.Context, client guardedClient, path, contentType string, body []byte) (json.RawMessage, error) {
 	response, err := client.PostReadOnce(ctx, path, contentType, body, apiAccept, maxRequestBytes, maxResponseBytes, maxResponseHeaderBytes)
 	if err != nil {
 		return nil, requestError(err)

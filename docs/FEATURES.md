@@ -83,7 +83,8 @@ deliberately does not. For step-by-step usage, see the
   remain site claims only;
 - an explicitly acknowledged, durable bonus-exchange state machine (TJUPT
   confirms each exchange with the account password, read with the cookie from
-  one strict stdin bundle and sent in the same single POST):
+  one strict stdin bundle and sent in the same single POST; M-Team exchanges
+  one unit of goods that take no input with the API key alone):
   private reviewed intent, fresh exact-option re-observation, deterministic
   no-clobber attempt marker, at most one non-retried POST, and a separately
   sealed confirmed/rejected/unknown outcome; its credential-free bounded
@@ -111,11 +112,13 @@ deliberately does not. For step-by-step usage, see the
   shown, acknowledgement flags are still required, account passwords are never
   saved, and `site logout SITE` deletes the file;
 - an experimental M-Team session check, account snapshot (username, uploaded
-  and downloaded bytes, ratio, and bonus), first-page torrent search with
-  seeders, leechers, promotion factors, and category names, and torrent detail
-  for one remote ID, through one read-only POST per invocation to the official
-  JSON API, authenticated by a site-issued API key saved by `site login` or
-  piped on stdin, with no redirect, proxy, or retry;
+  and downloaded bytes, ratio, and bonus), torrent search by page, mode,
+  category, and free promotion with seeders, leechers, promotion factors, and
+  category names, torrent detail for one remote ID, and a bonus-shop catalog
+  and exact-goods review, through read-only POSTs to the official JSON API (one
+  per invocation; the catalog reads the balance and the shop on one client),
+  authenticated by a site-issued API key saved by `site login` or piped on
+  stdin, with no redirect, proxy, or retry;
 - an explicitly acknowledged M-Team metafile fetch for one remote ID: one
   token POST for a signed download link, one credential-free GET of that link,
   and at most one further GET only for a redirect to an M-Team HTTPS host, with

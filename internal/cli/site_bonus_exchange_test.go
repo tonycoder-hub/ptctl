@@ -35,12 +35,19 @@ type fakeBonusExchangeAdapter struct {
 	reviews            int
 	submissions        int
 	credential         string
+	credentialMethod   domain.AuthMethod
+	// authMethod is the one method the fake site accepts; empty means cookies.
+	authMethod domain.AuthMethod
 }
 
-func (*fakeBonusExchangeAdapter) Descriptor() domain.SiteDescriptor {
+func (adapter *fakeBonusExchangeAdapter) Descriptor() domain.SiteDescriptor {
+	method := domain.AuthMethodCookieHeader
+	if adapter.authMethod != "" {
+		method = adapter.authMethod
+	}
 	return domain.SiteDescriptor{
 		ID: "fakept", Name: "Fake PT", BaseURL: "https://fake.invalid/", Stability: "test",
-		AuthMethods:  []domain.AuthMethod{domain.AuthMethodCookieHeader},
+		AuthMethods:  []domain.AuthMethod{method},
 		Capabilities: []domain.Capability{domain.CapabilityBonusReview, domain.CapabilityBonusExchange},
 	}
 }
@@ -64,7 +71,7 @@ func (adapter *fakeBonusExchangeAdapter) BonusExchangeConfig() (site.BonusExchan
 
 func (adapter *fakeBonusExchangeAdapter) OpenBonusExchangeSession(ctx context.Context, credential site.Credential) (site.BonusExchangeSession, error) {
 	adapter.opened++
-	adapter.credential = credential.SecretValue()
+	adapter.credential, adapter.credentialMethod = credential.SecretValue(), credential.Method()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -896,7 +903,7 @@ func TestSiteBonusExchangeHelpAndDispatch(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Run([]string{"site", "bonus", "exchange", "help"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), "deterministic at-most-once attempt marker") || !strings.Contains(out.String(), "never chooses a latest operation") ||
 		!strings.Contains(out.String(), "acknowledge-state-prune") || !strings.Contains(out.String(), "acknowledge-history-forget") || !strings.Contains(out.String(), "submission-unknown operations are never pruned") ||
-		!strings.Contains(out.String(), "[--cookie-stdin | --credential-bundle-stdin]") || !strings.Contains(out.String(), "site_password") {
+		!strings.Contains(out.String(), "[--cookie-stdin | --api-key-stdin | --credential-bundle-stdin]") || !strings.Contains(out.String(), "site_password") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()
