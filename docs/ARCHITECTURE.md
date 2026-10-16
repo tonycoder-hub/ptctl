@@ -359,9 +359,20 @@ Capabilities are small and explicit:
 password and optional one-time code, typed at hidden terminal prompts or read
 from one stdin bundle, and returns a verified cookie credential. The CLI saves
 it to an owner-only file, by default under the user config directory, or
-writes it to a non-terminal stdout, and never reads it back on its own. It
-sends one login request and at most one verifying read, never retries, and
-reports a refusal only by a fixed stop reason.
+writes it to a non-terminal stdout. It sends one login request and at most one
+verifying read, never retries, and reports a refusal only by a fixed stop
+reason. For any site, `site login --cookie-stdin` or `--api-key-stdin` (and the
+interactive default of an API-key site) instead checks a supplied credential
+with one status read and saves it only if the read accepts it.
+
+`internal/cli/saved_credentials.go` resolves where each `site` command gets
+its credential: an explicit stdin flag wins, otherwise the command reads the
+owner-only file `site login` saved for the site's default auth method
+(`ptctl/sessions/SITE.cookie` or `SITE.api-key`). The file is located after
+every usage check and read at the same point stdin would have been, so the
+preflight order is unchanged, and an unsafe or malformed file is refused
+without disclosure. `site logout` deletes the files. Adapters still receive
+only a `site.Credential` and cannot tell which source supplied it.
 
 Site-specific form or action writes live under narrow namespaced typed ports
 and durable action schemas. They are not forced into universal fields. The effectful
@@ -405,8 +416,10 @@ non-authoritative.
 `bonus.exchange.submit_effectful` workflow. A site that confirms each exchange
 with the account password, as TJUPT does, implements
 `site.PasswordConfirmedBonusExchangeWriter`: `submit` then reads the cookie and
-password together from one strict `ptctl.credentials/v1` stdin bundle, refuses
-`--cookie-stdin`, and the adapter adds the password to its single POST.
+password together from one strict `ptctl.credentials/v1` stdin bundle, or uses
+the saved cookie and asks for the password with echo off on the terminal before
+its timeout starts. It refuses `--cookie-stdin`, never saves the password, and
+the adapter adds the password to its single POST.
 `prepare` stores one canonical
 private intent containing a random operation ID, the exact reviewed semantic
 ID, canonical site/option/origin/route identifiers, and fixed review/submit
@@ -699,10 +712,11 @@ uninitialized staging entries are not counted as committed artifacts.
 metafile artifact:
 
 ```text
-site metafile fetch (--cookie-stdin | --api-key-stdin) --acknowledge-site-effect
+site metafile fetch [--cookie-stdin | --api-key-stdin] --acknowledge-site-effect
     --metafile-store DIR SITE REMOTE_ID
     -> validate one site, one remote ID, limits, capability, auth method, and store
-    -> read the credential only after that zero-write preflight succeeds
+    -> read the credential, from stdin or the saved file, only after that
+       zero-write preflight succeeds
     -> linked routes only: request a site-issued link, bounded by MaxLinkRequests
     -> send one bounded metafile GET, with no automatic redirect and no retry
     -> strictly validate the complete exact response

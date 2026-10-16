@@ -59,6 +59,8 @@ func jsonKind(data any) string {
 		return "site.bonus.catalog"
 	case siteLoginReport:
 		return "site.login"
+	case siteLogoutReport:
+		return "site.logout"
 	case *metafile.MetaInfo:
 		return "metafile.manifest"
 	case metafileStoreReport:

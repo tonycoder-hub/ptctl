@@ -60,9 +60,6 @@ func (a *app) siteDetail(args []string) error {
 	if *cookieStdin && *apiKeyStdin {
 		return usageError("--cookie-stdin and --api-key-stdin are mutually exclusive")
 	}
-	if !*cookieStdin && !*apiKeyStdin {
-		return usageError("%s is required; credentials are never accepted in argv", requiredCredentialFlag(a.registry, fs.Arg(0)))
-	}
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
 		return usageError("unknown site %q", fs.Arg(0))
@@ -71,12 +68,13 @@ func (a *app) siteDetail(args []string) error {
 	if !descriptor.Supports(domain.CapabilityDetail) {
 		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityDetail)
 	}
-	method, readSecret := domain.AuthMethodCookieHeader, readCredential
-	if *apiKeyStdin {
-		method, readSecret = domain.AuthMethodAPIKeyHeader, readAPIKeyCredential
+	source, err := siteCredentialSourceFor(descriptor, *cookieStdin, *apiKeyStdin)
+	if err != nil {
+		return err
 	}
-	if !descriptor.SupportsAuth(method) {
-		return usageError("site %q does not support %s authentication", descriptor.ID, method)
+	readSecret := readCredential
+	if source.method == domain.AuthMethodAPIKeyHeader {
+		readSecret = readAPIKeyCredential
 	}
 	reader, ok := adapter.(site.TorrentDetailReader)
 	if !ok {
@@ -90,13 +88,16 @@ func (a *app) siteDetail(args []string) error {
 	if err := reader.ValidateTorrentDetailRef(ref); err != nil {
 		return usageError("site detail remote reference is invalid")
 	}
+	if err := source.locateSaved(descriptor.ID); err != nil {
+		return err
+	}
 	limits := site.DefaultTorrentDetailLimits()
 	report := newSiteDetailReport(ref, config, limits)
 
-	credential, err := readSecret(a.stdin)
+	credential, err := a.readSiteCredential(source, readSecret)
 	if err != nil {
 		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "credential.unavailable", Message: "the site credential could not be read"})
-		return a.finishSiteDetail(*output, report, fmt.Errorf("read site credential failed"))
+		return a.finishSiteDetail(*output, report, siteCredentialReadError(source, err))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()

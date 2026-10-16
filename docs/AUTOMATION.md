@@ -95,6 +95,16 @@ Per-command details are in
 
 ## Secrets
 
+`ptctl site login SITE` saves the site credential once: the TJUPT session
+cookie it issues, or the M-Team API key after one status read accepts it.
+Every later `site` command for that site, including `site metafile fetch` and
+`site bonus exchange submit`, then uses the saved credential without a flag.
+An agent saves one without a terminal by piping it,
+`site login --cookie-stdin SITE` or `site login --api-key-stdin SITE`, and
+`ptctl site logout SITE` deletes it. An explicit stdin flag below always takes
+precedence over the saved credential, and a saved credential never stands in
+for an acknowledgement flag.
+
 | Flag | Used by | Stdin content |
 |---|---|---|
 | `--cookie-stdin` | `site` reads, `site bonus exchange submit` for cookie-only sites, `site metafile fetch` for cookie sites (TJUPT) | The complete `Cookie` header value |
@@ -104,26 +114,40 @@ Per-command details are in
 | `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}` |
 | `--credential-bundle-stdin` | `site bonus exchange submit` for sites that confirm with the account password (TJUPT) | `{"schema":"ptctl.credentials/v1","site_cookie":"...","site_password":"..."}` |
 | `--credential-bundle-stdin` | `site login` | `{"schema":"ptctl.credentials/v1","site_username":"...","site_password":"...","site_totp":"123456"}`; `site_totp` is optional |
+| `--cookie-stdin`, `--api-key-stdin` | `site login` | The credential to save; one status read checks it first and nothing is saved when it fails |
 
 - An interactive terminal on stdin is refused; the secret must be piped. The
-  exception is `site login` without `--credential-bundle-stdin`, which is for
-  people: it prompts on the terminal with the password and code hidden, and
-  exits `2` when stdin is not a terminal. Agents always pass the bundle.
+  exception is `site login` without a stdin flag, which is for people: it
+  prompts on the terminal with the password, code, or API key hidden, and
+  exits `2` when stdin is not a terminal. Agents pass the bundle,
+  `--cookie-stdin`, or `--api-key-stdin`. `site bonus exchange submit` with
+  the saved cookie on a site that confirms with the account password (TJUPT)
+  asks for that password the same way, before its timeout starts; agents pass
+  the bundle instead.
 - Single secrets are limited to 64 KiB and the bundle to 128 KiB. The bundle is
   strict JSON: unknown, duplicate, or missing fields are rejected.
 - Site reads, metafile fetch, and reconciliation validate usage, capabilities,
   and local inputs before reading stdin.
-- Credentials stay in memory. They are never persisted, printed, or forwarded
-  in error text. The one exception is the session cookie `site login` issues.
-  With `--cookie-file PATH` it is saved to that owner-only file, and
-  `--output json` then reports a `site.login` object with `cookie_file` and
-  `session_expires_at` but not the cookie. With the bundle and no
-  `--cookie-file`, it is written to stdout, which must be a pipe or an
-  owner-only file. Without the bundle, it is saved under the user config
-  directory. `ptctl help login` documents every flag.
+- Credentials stay in memory. They are never printed or forwarded in error
+  text, and the only one persisted is the site credential `site login` saves.
+  Without the bundle, or with `--cookie-stdin` or `--api-key-stdin`, it goes
+  to `ptctl/sessions/SITE.cookie` or `SITE.api-key` under the user config
+  directory, a plaintext file readable only by its owner. With
+  `--cookie-file PATH` the session cookie is saved to that owner-only file
+  instead, and `--output json` then reports a `site.login` object with
+  `cookie_file` and `session_expires_at` but not the cookie; an API key save
+  reports `api_key_file`. With the bundle and no `--cookie-file`, the cookie
+  is written to stdout, which must be a pipe or an owner-only file, and is not
+  saved. Account and downloader passwords are never saved.
+  `ptctl help login` documents every flag.
+- A saved credential is refused, without being shown, when it is not a
+  regular file, when other users can read it (outside Windows), or when it is
+  not exactly one valid credential line. Sign in again or run
+  `ptctl site logout SITE` to clear it.
 - `ptctl site capabilities SITE` lists the authentication methods a site
   accepts: `cookie_header` takes `--cookie-stdin`, `api_key_header` takes
-  `--api-key-stdin`. Omitting the flag names the one the site needs.
+  `--api-key-stdin`. With neither a flag nor a saved credential the command
+  exits `2` and names both the `site login` command and the flag.
 - A failed ordinary site read prints `site CMD failed`. Adapters that opt in
   (currently M-Team) append one fixed cause after a colon: the credential has
   the wrong format, the site rejected the credential, the site rate limited

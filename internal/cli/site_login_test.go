@@ -345,7 +345,7 @@ func TestSiteLoginPromptsByDefaultAndSavesTheCookieOwnerOnly(t *testing.T) {
 		"Username: ", "Password (hidden): ", "Two-step code (hidden; press Enter if none): ",
 		"site login succeeded: site=fakept username=CanaryUser session_expires=2026-10-22T15:04:33Z requests=2\n",
 		"session cookie saved to " + cookiePath + " (owner-only)\n",
-		"use it with: ",
+		"site commands now use it when no --cookie-stdin is given, for example: ptctl site status fakept\n",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr lacks %q: %q", want, stderr)
