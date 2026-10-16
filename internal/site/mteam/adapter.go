@@ -51,7 +51,9 @@ const (
 // Adapter reads M-Team through one strict POST per command. It never retries,
 // never follows redirects, and never echoes the API key or a response body.
 type Adapter struct {
-	newClient guardedClientFactory
+	newClient     guardedClientFactory
+	newLinkClient linkClientFactory
+	pause         func(context.Context, time.Duration) error
 }
 
 type guardedClient interface {
@@ -73,7 +75,7 @@ func newGuardedClient(baseURL, apiKey string, minInterval time.Duration) (guarde
 }
 
 func New() *Adapter {
-	return &Adapter{newClient: newGuardedClient}
+	return &Adapter{newClient: newGuardedClient, newLinkClient: newLinkClient}
 }
 
 func (a *Adapter) Descriptor() domain.SiteDescriptor {
@@ -88,6 +90,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 			domain.CapabilityAccountRead,
 			domain.CapabilitySearch,
 			domain.CapabilityDetail,
+			domain.CapabilityMetafile,
 		},
 	}
 }

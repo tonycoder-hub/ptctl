@@ -91,6 +91,7 @@ func (a *app) siteMetafileFetch(args []string) error {
 	fs := newFlagSet("site metafile fetch")
 	output := fs.String("output", "table", "table or json")
 	cookieStdin := fs.Bool("cookie-stdin", false, "read the session Cookie header value from stdin")
+	apiKeyStdin := fs.Bool("api-key-stdin", false, "read a site-issued API key from stdin")
 	acknowledge := fs.Bool("acknowledge-site-effect", false, "acknowledge that this GET may be recorded as a torrent download")
 	storeRoot := fs.String("metafile-store", "", "initialized private metafile store root")
 	showAbsolute := fs.Bool("show-absolute-paths", false, "include the absolute store root in output; object paths are never shown")
@@ -103,8 +104,11 @@ func (a *app) siteMetafileFetch(args []string) error {
 	if fs.NArg() != 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
 		return usageError("site metafile fetch requires SITE and REMOTE_ID")
 	}
-	if !*cookieStdin {
-		return usageError("--cookie-stdin is required; credentials are never accepted in argv")
+	if *cookieStdin && *apiKeyStdin {
+		return usageError("--cookie-stdin and --api-key-stdin are mutually exclusive")
+	}
+	if !*cookieStdin && !*apiKeyStdin {
+		return usageError("%s is required; credentials are never accepted in argv", requiredCredentialFlag(a.registry, fs.Arg(0)))
 	}
 	if !*acknowledge {
 		return usageError("--acknowledge-site-effect is required because the GET may be recorded as a torrent download")
@@ -136,8 +140,12 @@ func (a *app) siteMetafileFetch(args []string) error {
 	if !descriptor.Supports(domain.CapabilityMetafile) {
 		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityMetafile)
 	}
-	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
-		return usageError("site %q does not support cookie_header authentication", descriptor.ID)
+	method, readSecret := domain.AuthMethodCookieHeader, readEffectfulSiteCredential
+	if *apiKeyStdin {
+		method, readSecret = domain.AuthMethodAPIKeyHeader, readEffectfulAPIKeyCredential
+	}
+	if !descriptor.SupportsAuth(method) {
+		return usageError("site %q does not support %s authentication", descriptor.ID, method)
 	}
 	fetcher, ok := adapter.(site.MetafileFetcher)
 	if !ok {
@@ -151,6 +159,7 @@ func (a *app) siteMetafileFetch(args []string) error {
 	if err != nil || descriptorOrigin != config.Origin {
 		return fmt.Errorf("site %q has an unsafe metafile-fetch origin", descriptor.ID)
 	}
+	fetchLimits.MaxLinkRequests = config.LinkRequests
 	ref := domain.TorrentRef{SiteID: descriptor.ID, RemoteID: fs.Arg(1)}
 	if err := fetcher.ValidateMetafileRef(ref); err != nil {
 		return usageError("site metafile fetch: invalid SITE/REMOTE_ID")
@@ -166,7 +175,7 @@ func (a *app) siteMetafileFetch(args []string) error {
 	}
 	report.StoreOperation.Store = storeSummary(store.Info(), *showAbsolute)
 
-	credential, err := readEffectfulSiteCredential(a.stdin)
+	credential, err := readSecret(a.stdin)
 	if err != nil {
 		report.Outcome = "blocked"
 		report.Blockers = append(report.Blockers, "credential.read_failed")
@@ -260,9 +269,13 @@ func (a *app) siteMetafileFetch(args []string) error {
 				report.Blockers = append(report.Blockers, "binding.observation_receipt_disagrees")
 				mappedErr = fmt.Errorf("site metafile observation disagrees with its request receipt")
 			} else {
+				basis := "effectful_same_origin_get_for_remote_id"
+				if config.LinkRequests > 0 {
+					basis = "effectful_site_issued_link_get_for_remote_id"
+				}
 				report.Binding = siteMetafileBindingSummary{
 					Status: "observed_exact_variant", EvidenceLevel: "direct_observation",
-					EvidenceBasis: []string{"effectful_same_origin_get_for_remote_id", "complete_bounded_response", "whole_response_sha256_equals_metafile_variant_id"},
+					EvidenceBasis: []string{basis, "complete_bounded_response", "whole_response_sha256_equals_metafile_variant_id"},
 					Observation:   &observation, BlockerCodes: []string{},
 				}
 				observed = binding
@@ -320,18 +333,27 @@ func (a *app) siteMetafileFetch(args []string) error {
 
 func (a *app) siteMetafileFetchHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl site metafile fetch --cookie-stdin --acknowledge-site-effect --metafile-store DIR [flags] SITE REMOTE_ID
+  ptctl site metafile fetch (--cookie-stdin | --api-key-stdin) --acknowledge-site-effect --metafile-store DIR [flags] SITE REMOTE_ID
 
 This command performs one explicitly acknowledged, effectful torrent-metafile GET
 and imports the exact bounded response into an initialized private metafile store.
-It never follows redirects, retries, or prints raw bytes. After a complete
-private-artifact import, it publishes a sealed historical site-to-variant binding
-record in the same store. The response, artifact, and binding durability remain
-separate evidence axes; the binding is not proof of current site state.
+It never retries or prints raw bytes. After a complete private-artifact import,
+it publishes a sealed historical site-to-variant binding record in the same
+store. The response, artifact, and binding durability remain separate evidence
+axes; the binding is not proof of current site state.
+
+Most sites use a direct route: one GET on the site origin, no redirects. A
+linked route (mteam) first asks the site API for a signed one-time download
+link, then GETs it; one redirect is followed only to the site's own HTTPS
+hosts, and the link is never printed or stored. Each link request may count as
+a download on the site, and is reported as a link request.
+
+Credentials (stdin only, one line):
+  --cookie-stdin             session Cookie header value (tjupt)
+  --api-key-stdin            site-issued API key (mteam)
 
 Flags:
   --acknowledge-site-effect  acknowledge that the GET may count as a download
-  --cookie-stdin             read one Cookie header value from stdin
   --max-metafile-bytes N     response byte limit (default 8 MiB; max 32 MiB)
   --metafile-store DIR       initialized private metafile store
   --output table|json        output format
@@ -342,10 +364,21 @@ Flags:
 
 func newSiteMetafileFetchReport(ref domain.TorrentRef, config site.MetafileFetchConfig, fetchLimits site.MetafileFetchLimits, storeLimits metastore.Limits, showAbsolute bool, storeRoot string) siteMetafileFetchReport {
 	storeOperation := failedMetafileStoreReport("metafile.store.import", "write_private_metafile_store", storeLimits, "store.not_attempted", showAbsolute, storeRoot, "")
+	scope := "one_remote_metafile_get"
+	warnings := []string{"the site observation is a direct non-atomic HTTPS observation, not a site signature or proof of current site state", "the private metafile store is permission-isolated, not encrypted"}
+	if config.LinkRequests > 0 {
+		// A linked route asks the site for a signed download link before the
+		// metafile GET. The link is a credential and every hop may be counted.
+		scope = "site_link_requests_then_one_remote_metafile_get"
+		warnings = append(warnings,
+			"the site-issued download link is a credential; it is used once and is never printed or stored",
+			"link requests may count as downloads on the site even when no metafile is returned",
+		)
+	}
 	return siteMetafileFetchReport{
 		kind: "site.metafile.fetch", Outcome: "blocked",
 		Effect:          []string{site.MetafileFetchEffect, "write_private_metafile_store", "write_private_site_metafile_binding"},
-		Acknowledgement: siteMetafileAcknowledgement{Provided: true, Scope: "one_remote_metafile_get"},
+		Acknowledgement: siteMetafileAcknowledgement{Provided: true, Scope: scope},
 		Site:            siteMetafileSiteSummary{Ref: ref, ExpectedOrigin: config.Origin, ExpectedRoute: config.RouteID},
 		Binding:         siteMetafileBindingSummary{Status: "declared_unbound", EvidenceLevel: "declared", EvidenceBasis: []string{"user_supplied_site_reference"}, BlockerCodes: []string{"binding.exact_variant_not_established"}},
 		Persistent: siteMetafilePersistentBinding{
@@ -355,7 +388,7 @@ func newSiteMetafileFetchReport(ref domain.TorrentRef, config site.MetafileFetch
 		Request:        siteMetafileRequestSummary{Status: "not_started", Receipt: site.MetafileFetchReceipt{Effect: site.MetafileFetchEffect, Ref: ref, Origin: config.Origin, RouteID: config.RouteID, Limits: fetchLimits}},
 		StoreOperation: storeOperation,
 		Blockers:       []string{}, Issues: []string{},
-		Warnings: []string{"the site observation is a direct non-atomic HTTPS observation, not a site signature or proof of current site state", "the private metafile store is permission-isolated, not encrypted"},
+		Warnings: warnings,
 	}
 }
 
@@ -479,19 +512,51 @@ func readFetchedMetafile(fetched *site.FetchedMetafile, maxBytes int64) ([]byte,
 }
 
 func readEffectfulSiteCredential(reader io.Reader) (site.Credential, error) {
-	if err := rejectTTYSecret(reader); err != nil {
+	raw, err := readEffectfulSecret(reader)
+	if err != nil {
 		return site.Credential{}, err
+	}
+	return canonicalCookieCredential(raw)
+}
+
+func readEffectfulAPIKeyCredential(reader io.Reader) (site.Credential, error) {
+	raw, err := readEffectfulSecret(reader)
+	if err != nil {
+		return site.Credential{}, err
+	}
+	return canonicalAPIKeyCredential(raw)
+}
+
+// readEffectfulSecret reads one secret line and removes only its final line
+// ending; any other surrounding whitespace is rejected by the canonical check.
+func readEffectfulSecret(reader io.Reader) ([]byte, error) {
+	if err := rejectTTYSecret(reader); err != nil {
+		return nil, err
 	}
 	raw, err := io.ReadAll(io.LimitReader(reader, (64<<10)+3))
 	if err != nil {
-		return site.Credential{}, fmt.Errorf("read site credential failed")
+		return nil, fmt.Errorf("read site credential failed")
 	}
 	if bytes.HasSuffix(raw, []byte("\r\n")) {
 		raw = raw[:len(raw)-2]
 	} else if bytes.HasSuffix(raw, []byte("\n")) {
 		raw = raw[:len(raw)-1]
 	}
-	return canonicalCookieCredential(raw)
+	return raw, nil
+}
+
+// canonicalAPIKeyCredential accepts one API key of visible ASCII with no
+// whitespace at all.
+func canonicalAPIKeyCredential(raw []byte) (site.Credential, error) {
+	if len(raw) == 0 || len(raw) > 64<<10 {
+		return site.Credential{}, fmt.Errorf("site credential is not a canonical API key")
+	}
+	for _, value := range raw {
+		if value <= 0x20 || value > 0x7e {
+			return site.Credential{}, fmt.Errorf("site credential is not a canonical ASCII API key")
+		}
+	}
+	return site.NewAPIKeyCredential(string(raw))
 }
 
 // canonicalCookieCredential accepts one Cookie header value with no
@@ -526,7 +591,8 @@ func validateSuccessfulMetafileFetch(ref domain.TorrentRef, config site.Metafile
 	if fetched == nil || config.Validate() != nil || receipt.Effect != site.MetafileFetchEffect || receipt.Ref != ref || receipt.Origin != config.Origin || receipt.RouteID != config.RouteID || receipt.Limits != limits || receipt.StopReason != "" || !receipt.Complete {
 		return fmt.Errorf("fetch receipt identity is invalid")
 	}
-	if requestsMade != 1 || receipt.Used.RequestsAttempted != 1 || receipt.Used.AutomaticRetries != 0 || receipt.Used.RedirectsFollowed != 0 {
+	links := receipt.Used.LinkRequestsAttempted
+	if links < 0 || links > limits.MaxLinkRequests || requestsMade != 1+links || receipt.Used.RequestsAttempted != 1 || receipt.Used.AutomaticRetries != 0 || receipt.Used.RedirectsFollowed != 0 {
 		return fmt.Errorf("fetch request accounting is invalid")
 	}
 	if receipt.ObservedAtStart.IsZero() || receipt.ObservedAtEnd.IsZero() || receipt.ObservedAtEnd.Before(receipt.ObservedAtStart) {
@@ -550,6 +616,8 @@ func publicMetafileFetchReceipt(ref domain.TorrentRef, config site.MetafileFetch
 			RedirectsFollowed:  boundedFetchCounter(receipt.Used.RedirectsFollowed, limits.MaxRequests+1),
 			ResponseBytesRead:  boundedFetchBytes(receipt.Used.ResponseBytesRead, limits.MaxResponseBytes+1),
 			ResponseBytesKnown: receipt.Used.ResponseBytesKnown && receipt.Used.ResponseBytesRead >= 0 && receipt.Used.ResponseBytesRead <= limits.MaxResponseBytes+1,
+			// Direct routes never make link requests, so this stays omitted.
+			LinkRequestsAttempted: boundedFetchCounter(receipt.Used.LinkRequestsAttempted, limits.MaxLinkRequests+1),
 		},
 		StopReason: publicMetafileStopReason(receipt.StopReason),
 	}
@@ -586,7 +654,7 @@ func boundedFetchBytes(value, maximum int64) int64 {
 
 func publicMetafileStopReason(value string) string {
 	switch value {
-	case "invalid_limits", "invalid_reference", "context_done", "session_closed", "request_budget_exhausted", "request_accounting_invalid", "site_request_failed", "authentication_required", "rate_limited", "redirect_rejected", "http_status_rejected", "empty_response", "challenge_response", "unrecognized_response", "content_type_rejected", "response_authority_invalid", "context_cancelled":
+	case "invalid_limits", "invalid_reference", "context_done", "session_closed", "request_budget_exhausted", "request_accounting_invalid", "site_request_failed", "authentication_required", "not_found", "rate_limited", "redirect_rejected", "http_status_rejected", "empty_response", "challenge_response", "unrecognized_response", "content_type_rejected", "response_authority_invalid", "context_cancelled":
 		return value
 	case "":
 		return ""
@@ -657,7 +725,11 @@ func writeSiteMetafileFetchHuman(out io.Writer, report siteMetafileFetchReport) 
 	if store.Metafile != nil {
 		fmt.Fprintf(w, "METAFILE VERSION\t%s\nPRIVATE\t%t\nMULTI-FILE\t%t\nCONTENT BYTES\t%d\nFILES\t%d\n", terminalSafe(store.Metafile.Version), store.Metafile.Private, store.Metafile.MultiFile, store.Metafile.TotalLength, store.Metafile.FileCount)
 	}
-	fmt.Fprintf(w, "\nREQUEST LIMIT\t%d\nRESPONSE LIMIT\t%d bytes\nHEADER LIMIT\t%d bytes\n", report.Request.Receipt.Limits.MaxRequests, report.Request.Receipt.Limits.MaxResponseBytes, report.Request.Receipt.Limits.MaxResponseHeaderBytes)
+	fmt.Fprintf(w, "\nREQUEST LIMIT\t%d\n", report.Request.Receipt.Limits.MaxRequests)
+	if report.Request.Receipt.Limits.MaxLinkRequests > 0 {
+		fmt.Fprintf(w, "LINK REQUEST LIMIT\t%d\nLINK REQUESTS USED\t%d\n", report.Request.Receipt.Limits.MaxLinkRequests, report.Request.Receipt.Used.LinkRequestsAttempted)
+	}
+	fmt.Fprintf(w, "RESPONSE LIMIT\t%d bytes\nHEADER LIMIT\t%d bytes\n", report.Request.Receipt.Limits.MaxResponseBytes, report.Request.Receipt.Limits.MaxResponseHeaderBytes)
 	if report.Request.Receipt.Used.ResponseBytesKnown {
 		fmt.Fprintf(w, "RESPONSE USED\t%d bytes\n", report.Request.Receipt.Used.ResponseBytesRead)
 	} else {

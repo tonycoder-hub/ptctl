@@ -130,6 +130,7 @@ func (record Record) Validate() error {
 	if record.FetchEffect != site.MetafileFetchEffect || !record.FetchComplete || record.FetchStopReason != "" ||
 		record.FetchUsage.RequestsAttempted != 1 || record.FetchUsage.AutomaticRetries != 0 ||
 		record.FetchUsage.RedirectsFollowed != 0 || !record.FetchUsage.ResponseBytesKnown ||
+		record.FetchUsage.LinkRequestsAttempted < 0 || record.FetchUsage.LinkRequestsAttempted > record.FetchLimits.MaxLinkRequests ||
 		record.FetchUsage.ResponseBytesRead != record.ResponseBytes ||
 		record.ResponseBytes > record.FetchLimits.MaxResponseBytes {
 		return fmt.Errorf("%w: fetch account is invalid", ErrInvalidBinding)

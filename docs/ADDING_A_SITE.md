@@ -138,7 +138,11 @@ preflight from the network:
 - **Opening a session** builds process-local state only. It must reject a
   canceled context and an undeclared auth method without sending anything.
 - **Reading** sends at most one request; `MaxRequests` is fixed at one in the
-  detail, metafile, and bonus-review limits. Each receipt echoes the pinned
+  detail, metafile, and bonus-review limits. The one exception is a linked
+  metafile route, declared with `site.NewLinkedMetafileFetchConfig`: before its
+  one metafile `GET` it may make up to `MaxLinkRequests` (at most two) requests
+  for a site-issued link, counted in `LinkRequestsAttempted`, and must treat
+  that link as a secret (`httpguard.SecretLink`). Each receipt echoes the pinned
   origin and route ID. An invalid input, a done context, or a closed session
   must fail with zero requests. Their stop reasons are `invalid_reference` or
   `invalid_selector`, `context_done` (wrapping `context.Canceled`), and
@@ -255,23 +259,23 @@ and do it in a separate behavior-preserving commit.
 | NexusPHP forks, including TJUPT | Cookie sessions match `cookie_header`, and HTML responses match the existing ports. | Page recognition and parsers for that fork, with synthetic fixtures. Forks differ, so do not assume TJUPT's pages. |
 | Unit3D | Cookie-session web pages fit. | Using its token-authenticated API instead runs into the gaps below. |
 | Gazelle-based trackers | Cookie sessions fit; their JSON responses need a JSON parser rather than HTML recognition. | Where an API key replaces the session cookie, the gaps below apply. |
-| M-Team | Status, account, search, and detail are implemented in `internal/site/mteam` over the JSON API with an API key. | The two-step download: the open gap below. |
+| M-Team | Status, account, search, detail, and the signed-link metafile download are implemented in `internal/site/mteam` over the JSON API with an API key. | Bonus commands and reconciliation: the open gaps below. |
 
 ## Gaps for API-token sites
 
 These are the places that assumed a cookie, HTML, or a single origin. The
-M-Team adapter closed what its four reads needed; the rest is design work for
-whichever pull request first needs it. Each open item changes a public contract
+M-Team adapter closed what its four reads and its download needed; the rest is
+design work for whichever pull request first needs it. Each open item changes a public contract
 or a security control, so it needs its own review.
 
 | Gap | Status | Where | What is left |
 |---|---|---|---|
 | Only one auth method existed | Done | `domain.AuthMethodAPIKeyHeader` (`api_key_header`); `knownAuthMethod` in `internal/site/descriptor.go` | Nothing. |
-| Credential input was cookie-only | Partly done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, and `detail` | `site metafile fetch`, bonus commands, and `reconcile` (`--site-cookie-stdin`, the bundle's `site_cookie`) still take cookies only. |
-| The CLI gated on cookies | Partly done | `siteRead` in `internal/cli/site.go` and `site detail` check the method the caller chose | Four `SupportsAuth(domain.AuthMethodCookieHeader)` checks remain, in `site_bonus.go`, `site_metafile.go`, `site_bonus_exchange.go`, and `reconcile.go`. |
+| Credential input was cookie-only | Partly done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, and `detail`; `site metafile fetch` reads it with `readEffectfulAPIKeyCredential` | Bonus commands and `reconcile` (`--site-cookie-stdin`, the bundle's `site_cookie`) still take cookies only. |
+| The CLI gated on cookies | Partly done | `siteRead` in `internal/cli/site.go`, `site detail`, and `site metafile fetch` check the method the caller chose | Three `SupportsAuth(domain.AuthMethodCookieHeader)` checks remain, in `site_bonus.go`, `site_bonus_exchange.go`, and `reconcile.go`. |
 | The transport only sent `Cookie` | Done | `httpguard.NewWithHeaderCredential` binds one validated, non-reserved header | Nothing. |
 | Redaction did not know the header | Done | `security.Redact` covers `x-api-key` header lines and `apiKey`-style fields | Nothing. |
 | No JSON requests | Done | `httpguard.Client.PostReadOnce`: one bounded, non-replayable POST with no redirect and no retry, covered in the threat model | Nothing for reads. Effectful API calls still need their own acknowledged port. |
-| One origin per site | Done for reads | The API origin is the descriptor `BaseURL` | A download served from another host needs a design decision before that host is contacted. |
-| The download is two requests | Open | `MetafileFetchLimits.MaxRequests` must be exactly one, and the receipt has one route ID | A new port or versioned limits and receipts for token-then-download, an acknowledgement that names both requests, and handling of a signed URL that is itself a secret. See [MTEAM_ADAPTER.md](MTEAM_ADAPTER.md#not-supported-yet). |
+| One origin per site | Done | The API origin is the descriptor `BaseURL`; a signed link and its one redirect may reach only hosts the adapter allowlists (`siteHost` in `internal/site/mteam/metafile.go`), each on a fresh credential-free client | A new site's allowlist needs the same review before its hosts are contacted. |
+| The download is two requests | Done | `site.NewLinkedMetafileFetchConfig` declares a linked route; `MetafileFetchLimits.MaxLinkRequests` and `MetafileFetchUsage.LinkRequestsAttempted` count the requests before the one metafile `GET`, and the sealed record checks them; `httpguard.SecretLink` and `GetLinkOnce` keep the signed URL secret | Nothing. Both fields are omitted for direct routes, so TJUPT records are unchanged. See [MTEAM_ADAPTER.md](MTEAM_ADAPTER.md#metafile-download). |
 | Site-specific CLI text | Done | `detailRouteWarnings` in `internal/cli/site_detail.go` keys the `site detail` warning by route ID; an unlisted route gets only the generic sentence | Add a sentence there when a new detail route has something specific to say. |

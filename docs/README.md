@@ -18,7 +18,7 @@ documents that matter to them.
 - [Features](FEATURES.md): everything implemented today and what is
   deliberately not implemented.
 - [M-Team adapter](MTEAM_ADAPTER.md): creating an API key, the four M-Team
-  reads, their error lines, and why download is not supported yet.
+  reads, the signed-link metafile download, and their error lines.
 
 ## Contributing code
 

@@ -26,7 +26,7 @@ ptctl metafile store inspect \
 Fetch one exact private metafile directly into that initialized store. This is
 an effectful operation: the tracker may record the GET, so the acknowledgement
 must be explicit. All usage, the single remote ID, limits, capability, and
-store assurances are checked before the cookie is read from stdin:
+store assurances are checked before the credential is read from stdin:
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch \
@@ -36,8 +36,21 @@ printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch \
   tjupt REMOTE_ID
 ```
 
-The command performs no torrent-detail lookup and sends at most one GET. It
-follows no redirect, performs no retry, and offers no raw stdout or arbitrary
+M-Team takes its API key instead. Its route first asks the API for a signed
+download link, then GETs it; the link is never printed or stored, and those
+link requests are counted separately (see
+[MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md#metafile-download)):
+
+```bash
+printf '%s' "$MTEAM_API_KEY" | ptctl site metafile fetch \
+  --api-key-stdin \
+  --acknowledge-site-effect \
+  --metafile-store "D:\Private\ptctl-metafiles" \
+  mteam REMOTE_ID
+```
+
+The command performs no torrent-detail lookup and sends at most one metafile
+GET. It follows no redirect on its own, performs no retry, and offers no raw stdout or arbitrary
 destination. The validated response goes through the ordinary exact-byte,
 no-clobber store publication path. Its report may record the invocation-scoped
 `observed_exact_variant` relation only when that store import explicitly
