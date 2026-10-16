@@ -83,7 +83,7 @@ func TestIdentityIsPinned(t *testing.T) {
 	want := domain.SiteDescriptor{
 		ID: "mteam", Name: "M-Team / 馒头PT", BaseURL: "https://api2.m-team.cc/", Stability: "experimental",
 		AuthMethods:  []domain.AuthMethod{domain.AuthMethodAPIKeyHeader},
-		Capabilities: []domain.Capability{domain.CapabilityAuthCheck, domain.CapabilityAccountRead, domain.CapabilitySearch, domain.CapabilityDetail},
+		Capabilities: []domain.Capability{domain.CapabilityAuthCheck, domain.CapabilityAccountRead, domain.CapabilitySearch, domain.CapabilityDetail, domain.CapabilityMetafile},
 	}
 	if got := New().Descriptor(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("descriptor=%#v", got)

@@ -41,6 +41,8 @@ func TestDefaultMetafileFetchLimitsAreBounded(t *testing.T) {
 		{MaxRequests: 1, MaxResponseBytes: 0, MaxResponseHeaderBytes: 1},
 		{MaxRequests: 1, MaxResponseBytes: (32 << 20) + 1, MaxResponseHeaderBytes: 1},
 		{MaxRequests: 1, MaxResponseBytes: 1, MaxResponseHeaderBytes: (64 << 10) + 1},
+		{MaxRequests: 1, MaxResponseBytes: 1, MaxResponseHeaderBytes: 1, MaxLinkRequests: -1},
+		{MaxRequests: 1, MaxResponseBytes: 1, MaxResponseHeaderBytes: 1, MaxLinkRequests: 3},
 	} {
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("invalid limits accepted: %#v", invalid)
@@ -58,9 +60,66 @@ func TestMetafileFetchConfigIsCanonicalAndCredentialFree(t *testing.T) {
 		{Origin: "http://fake.example", RouteID: "fake.download.v1"},
 		{Origin: "https://fake.example/", RouteID: "fake.download.v1"},
 		{Origin: "https://fake.example", RouteID: "cookie=value"},
+		{Origin: "https://fake.example", RouteID: "fake.download.v1", LinkRequests: -1},
+		{Origin: "https://fake.example", RouteID: "fake.download.v1", LinkRequests: 3},
 	} {
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("invalid config accepted: %#v", invalid)
+		}
+	}
+	if config.DefaultLimits() != site.DefaultMetafileFetchLimits() {
+		t.Fatalf("direct route defaults drifted: %#v", config.DefaultLimits())
+	}
+	encoded, err := json.Marshal(struct {
+		Config site.MetafileFetchConfig
+		Limits site.MetafileFetchLimits
+		Used   site.MetafileFetchUsage
+	}{config, config.DefaultLimits(), site.MetafileFetchUsage{RequestsAttempted: 1}})
+	if err != nil || strings.Contains(string(encoded), "link_request") {
+		t.Fatalf("direct route JSON gained link fields: %s err=%v", encoded, err)
+	}
+	linked, err := site.NewLinkedMetafileFetchConfig("https://fake.example", "fake.linked.v1", 2)
+	if err != nil || linked.LinkRequests != 2 || linked.DefaultLimits().MaxLinkRequests != 2 || linked.DefaultLimits().MaxRequests != 1 {
+		t.Fatalf("linked config=%#v err=%v", linked, err)
+	}
+	if _, err := site.NewLinkedMetafileFetchConfig("https://fake.example", "fake.linked.v1", 3); err == nil {
+		t.Fatal("linked config over the link budget accepted")
+	}
+}
+
+func TestLinkedFetchedMetafileMatchesOnlyItsLinkAccount(t *testing.T) {
+	raw := []byte("d4:infod4:name1:xee")
+	ref := domain.TorrentRef{SiteID: "fakept", RemoteID: "42"}
+	start := time.Date(2026, 10, 16, 1, 2, 3, 0, time.UTC)
+	end := start.Add(time.Second)
+	if _, err := site.NewLinkedFetchedMetafile(ref, "https://fake.example", "fake.linked.v1", start, end, 3, raw); err == nil {
+		t.Fatal("link count over the budget accepted")
+	}
+	fetched, err := site.NewLinkedFetchedMetafile(ref, "https://fake.example", "fake.linked.v1", start, end, 1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := site.DefaultMetafileFetchLimits()
+	limits.MaxLinkRequests = 2
+	receipt := site.MetafileFetchReceipt{
+		Effect: site.MetafileFetchEffect, Ref: ref, Origin: "https://fake.example", RouteID: "fake.linked.v1",
+		ObservedAtStart: start, ObservedAtEnd: end, Complete: true, Limits: limits,
+		Used: site.MetafileFetchUsage{RequestsAttempted: 1, ResponseBytesRead: int64(len(raw)), ResponseBytesKnown: true, LinkRequestsAttempted: 1},
+	}
+	if !fetched.MatchesReceipt(receipt) {
+		t.Fatal("linked receipt rejected")
+	}
+	for _, mutate := range []func(*site.MetafileFetchReceipt){
+		func(r *site.MetafileFetchReceipt) { r.Used.LinkRequestsAttempted = 0 },
+		func(r *site.MetafileFetchReceipt) { r.Used.LinkRequestsAttempted = 2 },
+		func(r *site.MetafileFetchReceipt) { r.Limits.MaxLinkRequests = 0 },
+		func(r *site.MetafileFetchReceipt) { r.Used.RequestsAttempted = 2 },
+		func(r *site.MetafileFetchReceipt) { r.Used.RedirectsFollowed = 1 },
+	} {
+		changed := receipt
+		mutate(&changed)
+		if fetched.MatchesReceipt(changed) {
+			t.Fatalf("mismatched receipt accepted: %#v", changed.Used)
 		}
 	}
 }

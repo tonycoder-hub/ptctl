@@ -24,14 +24,22 @@ const (
 	defaultMetafileResponseBytes = int64(8 << 20)
 	hardMetafileResponseBytes    = int64(32 << 20)
 	hardMetafileHeaderBytes      = int64(64 << 10)
+
+	// maxMetafileLinkRequests bounds the site requests a route may make before
+	// the metafile request: asking for a signed link, then one redirect.
+	maxMetafileLinkRequests = 2
 )
 
-// MetafileFetchLimits bounds the sole remote effect and all response material
-// retained by a fetch session. MaxRequests is intentionally fixed at one.
+// MetafileFetchLimits bounds the remote effects and all response material
+// retained by a fetch session. MaxRequests counts the one request that returns
+// the metafile and is intentionally fixed at one. MaxLinkRequests bounds the
+// site requests a linked route makes first to obtain that request's URL; it is
+// zero, and omitted, for a route that fetches the metafile directly.
 type MetafileFetchLimits struct {
 	MaxRequests            int   `json:"max_requests"`
 	MaxResponseBytes       int64 `json:"max_response_bytes"`
 	MaxResponseHeaderBytes int64 `json:"max_response_header_bytes"`
+	MaxLinkRequests        int   `json:"max_link_requests,omitempty"`
 }
 
 func DefaultMetafileFetchLimits() MetafileFetchLimits {
@@ -52,15 +60,24 @@ func (limits MetafileFetchLimits) Validate() error {
 	if limits.MaxResponseHeaderBytes <= 0 || limits.MaxResponseHeaderBytes > hardMetafileHeaderBytes {
 		return fmt.Errorf("metafile response header budget is outside the supported range")
 	}
+	if limits.MaxLinkRequests < 0 || limits.MaxLinkRequests > maxMetafileLinkRequests {
+		return fmt.Errorf("metafile link request budget is outside the supported range")
+	}
 	return nil
 }
 
+// MetafileFetchUsage accounts for one fetch. RequestsAttempted counts the
+// request expected to return the metafile, and LinkRequestsAttempted the
+// requests made before it. RedirectsFollowed stays zero: the transport never
+// follows a redirect, and a linked route that requests a redirect target
+// counts the answered redirect as a link request.
 type MetafileFetchUsage struct {
-	RequestsAttempted  int   `json:"requests_attempted"`
-	AutomaticRetries   int   `json:"automatic_retries"`
-	RedirectsFollowed  int   `json:"redirects_followed"`
-	ResponseBytesRead  int64 `json:"response_bytes_read"`
-	ResponseBytesKnown bool  `json:"response_bytes_known"`
+	RequestsAttempted     int   `json:"requests_attempted"`
+	AutomaticRetries      int   `json:"automatic_retries"`
+	RedirectsFollowed     int   `json:"redirects_followed"`
+	ResponseBytesRead     int64 `json:"response_bytes_read"`
+	ResponseBytesKnown    bool  `json:"response_bytes_known"`
+	LinkRequestsAttempted int   `json:"link_requests_attempted,omitempty"`
 }
 
 // MetafileFetchReceipt is safe to serialize. It contains no response bytes,
@@ -80,14 +97,22 @@ type MetafileFetchReceipt struct {
 
 // MetafileFetchConfig is credential-free adapter provenance. Callers obtain
 // and pin it before reading a credential, then compare every effect receipt to
-// the same canonical origin and stable route identifier.
+// the same canonical origin and stable route identifier. LinkRequests is the
+// most site requests the route makes before the metafile request.
 type MetafileFetchConfig struct {
-	Origin  string `json:"origin"`
-	RouteID string `json:"route_id"`
+	Origin       string `json:"origin"`
+	RouteID      string `json:"route_id"`
+	LinkRequests int    `json:"link_requests,omitempty"`
 }
 
 func NewMetafileFetchConfig(origin, routeID string) (MetafileFetchConfig, error) {
-	config := MetafileFetchConfig{Origin: origin, RouteID: routeID}
+	return NewLinkedMetafileFetchConfig(origin, routeID, 0)
+}
+
+// NewLinkedMetafileFetchConfig is for a route that must first ask the site
+// for the metafile URL, making at most linkRequests requests before it.
+func NewLinkedMetafileFetchConfig(origin, routeID string, linkRequests int) (MetafileFetchConfig, error) {
+	config := MetafileFetchConfig{Origin: origin, RouteID: routeID, LinkRequests: linkRequests}
 	if err := config.Validate(); err != nil {
 		return MetafileFetchConfig{}, err
 	}
@@ -98,7 +123,18 @@ func (config MetafileFetchConfig) Validate() error {
 	if err := validateCanonicalOrigin(config.Origin); err != nil {
 		return err
 	}
+	if config.LinkRequests < 0 || config.LinkRequests > maxMetafileLinkRequests {
+		return fmt.Errorf("metafile link request budget is outside the supported range")
+	}
 	return validateRouteID(config.RouteID)
+}
+
+// DefaultLimits returns DefaultMetafileFetchLimits with the link request
+// budget this route needs.
+func (config MetafileFetchConfig) DefaultLimits() MetafileFetchLimits {
+	limits := DefaultMetafileFetchLimits()
+	limits.MaxLinkRequests = config.LinkRequests
+	return limits
 }
 
 // MetafileRefValidator lets callers reject an adapter-specific remote
@@ -127,14 +163,15 @@ type MetafileFetchSession interface {
 // it from the exact response and consumers can only obtain a fresh reader or
 // bind a completed import to that response digest.
 type FetchedMetafile struct {
-	ref       domain.TorrentRef
-	origin    string
-	routeID   string
-	start     time.Time
-	end       time.Time
-	raw       []byte
-	digest    [sha256.Size]byte
-	authority *fetchAuthority
+	ref          domain.TorrentRef
+	origin       string
+	routeID      string
+	start        time.Time
+	end          time.Time
+	linkRequests int
+	raw          []byte
+	digest       [sha256.Size]byte
+	authority    *fetchAuthority
 }
 
 type fetchAuthority struct{}
@@ -146,10 +183,17 @@ type fetchAuthority struct{}
 // copies during construction are therefore bounded at 16 MiB by default and
 // 64 MiB at the hard ceiling, excluding allocator and transport overhead.
 func NewFetchedMetafile(ref domain.TorrentRef, origin, routeID string, start, end time.Time, raw []byte) (*FetchedMetafile, error) {
+	return NewLinkedFetchedMetafile(ref, origin, routeID, start, end, 0, raw)
+}
+
+// NewLinkedFetchedMetafile is NewFetchedMetafile for a linked route that made
+// linkRequests site requests before the one that returned raw. The receipt
+// must then account for exactly that many link requests.
+func NewLinkedFetchedMetafile(ref domain.TorrentRef, origin, routeID string, start, end time.Time, linkRequests int, raw []byte) (*FetchedMetafile, error) {
 	if err := validatePublicRef(ref); err != nil {
 		return nil, err
 	}
-	if err := (MetafileFetchConfig{Origin: origin, RouteID: routeID}).Validate(); err != nil {
+	if err := (MetafileFetchConfig{Origin: origin, RouteID: routeID, LinkRequests: linkRequests}).Validate(); err != nil {
 		return nil, err
 	}
 	if start.IsZero() || end.IsZero() || end.Before(start) {
@@ -160,14 +204,15 @@ func NewFetchedMetafile(ref domain.TorrentRef, origin, routeID string, start, en
 	}
 	copyOfRaw := bytes.Clone(raw)
 	return &FetchedMetafile{
-		ref:       ref,
-		origin:    origin,
-		routeID:   routeID,
-		start:     start.UTC(),
-		end:       end.UTC(),
-		raw:       copyOfRaw,
-		digest:    sha256.Sum256(copyOfRaw),
-		authority: &fetchAuthority{},
+		ref:          ref,
+		origin:       origin,
+		routeID:      routeID,
+		start:        start.UTC(),
+		end:          end.UTC(),
+		linkRequests: linkRequests,
+		raw:          copyOfRaw,
+		digest:       sha256.Sum256(copyOfRaw),
+		authority:    &fetchAuthority{},
 	}, nil
 }
 
@@ -219,6 +264,7 @@ func (f *FetchedMetafile) MatchesReceipt(receipt MetafileFetchReceipt) bool {
 		receipt.Complete && receipt.StopReason == "" &&
 		receipt.Used.RequestsAttempted == 1 && receipt.Used.AutomaticRetries == 0 &&
 		receipt.Used.RedirectsFollowed == 0 && receipt.Used.ResponseBytesKnown &&
+		receipt.Used.LinkRequestsAttempted == f.linkRequests && f.linkRequests <= receipt.Limits.MaxLinkRequests &&
 		receipt.Used.ResponseBytesRead == int64(len(f.raw)) &&
 		int64(len(f.raw)) <= receipt.Limits.MaxResponseBytes
 }
@@ -278,8 +324,9 @@ func (f *FetchedMetafile) BindImported(variantID string, bytesConsumed int64) (*
 		return nil, err
 	}
 	return &ObservedMetafileBinding{
-		observation: observation,
-		authority:   f.authority,
+		observation:  observation,
+		linkRequests: f.linkRequests,
+		authority:    f.authority,
 	}, nil
 }
 
@@ -292,8 +339,9 @@ func (f FetchedMetafile) MarshalJSON() ([]byte, error) {
 // ObservedMetafileBinding retains process-local authority separately from its
 // serializable DTO. A deserialized public observation cannot regain authority.
 type ObservedMetafileBinding struct {
-	observation domain.SiteMetafileObservation
-	authority   *fetchAuthority
+	observation  domain.SiteMetafileObservation
+	linkRequests int
+	authority    *fetchAuthority
 }
 
 func (binding *ObservedMetafileBinding) PublicCopy() domain.SiteMetafileObservation {
@@ -326,6 +374,7 @@ func (binding *ObservedMetafileBinding) MatchesReceipt(receipt MetafileFetchRece
 		receipt.Complete && receipt.StopReason == "" &&
 		receipt.Used.RequestsAttempted == 1 && receipt.Used.AutomaticRetries == 0 &&
 		receipt.Used.RedirectsFollowed == 0 && receipt.Used.ResponseBytesKnown &&
+		receipt.Used.LinkRequestsAttempted == binding.linkRequests && binding.linkRequests <= receipt.Limits.MaxLinkRequests &&
 		receipt.Used.ResponseBytesRead == observation.ResponseBytes &&
 		observation.ResponseBytes <= receipt.Limits.MaxResponseBytes
 }
