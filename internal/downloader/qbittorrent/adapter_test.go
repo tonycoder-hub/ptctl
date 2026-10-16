@@ -291,8 +291,11 @@ func TestOpenReadSessionErrorRequestCounts(t *testing.T) {
 		if got, ok := downloader.RequestsMadeFromError(openErr); !ok || got != 1 {
 			t.Fatalf("request count=(%d, %t), want (1, true)", got, ok)
 		}
-		if strings.Contains(openErr.Error(), "CANARY-QBIT-PASSWORD") {
-			t.Fatalf("network error leaked credential: %v", openErr)
+		if strings.Contains(openErr.Error(), "CANARY-QBIT-PASSWORD") || strings.Contains(openErr.Error(), endpoint) {
+			t.Fatalf("network error leaked credential or endpoint: %v", openErr)
+		}
+		if !strings.Contains(openErr.Error(), "no response from the WebUI") {
+			t.Fatalf("network error does not say nothing answered: %v", openErr)
 		}
 	})
 

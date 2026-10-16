@@ -294,7 +294,7 @@ func (s *readSession) executeReader(ctx context.Context, body io.Reader, content
 		if contextErr := ctx.Err(); contextErr != nil {
 			return rawHTTPResponse{}, contextErr
 		}
-		return rawHTTPResponse{}, fmt.Errorf("Transmission request failed")
+		return rawHTTPResponse{}, fmt.Errorf("Transmission request failed: no response from the RPC endpoint; check that Transmission is running and reachable at the URL")
 	}
 	defer resp.Body.Close()
 	result := rawHTTPResponse{
