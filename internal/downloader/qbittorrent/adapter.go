@@ -382,7 +382,9 @@ func (s *readSession) login(ctx context.Context, credential downloader.Credentia
 		if contextErr := ctx.Err(); contextErr != nil {
 			return contextErr
 		}
-		return fmt.Errorf("qBittorrent login failed")
+		// Say that nothing answered, so an unreachable WebUI is not mistaken
+		// for rejected credentials and retried toward qBittorrent's ban.
+		return fmt.Errorf("qBittorrent login failed: no response from the WebUI; check that qBittorrent is running and reachable at the URL")
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1025))
