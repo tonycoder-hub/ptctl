@@ -280,11 +280,13 @@ requests and never selected by ref, time, or enumeration. A valid historical
 binding does not upgrade any storage/client/path axis and does not change the
 downloader raw-metafile relation; a mismatch conflicts, while unavailable or
 corrupt authority prevents overall consistency. A bare `--site-ref` remains a
-non-gating declaration. Explicit `--site-cookie-stdin` makes the live detail
-axis gating: failure is incomplete, while success adds only a current site
-claim. With a downloader in the same invocation, one strict bounded
-`--credential-bundle-stdin` object supplies both secrets so stdin is consumed
-exactly once; all credential-free gates run first.
+non-gating declaration. Explicit `--site-live`, `--site-cookie-stdin`, or
+`--site-api-key-stdin` makes the live detail axis gating: failure is
+incomplete, while success adds only a current site claim. `--site-live` reads
+the credential `site login` saved, so with a downloader stdin carries only the
+downloader password. Otherwise, with a downloader in the same invocation, one
+strict bounded `--credential-bundle-stdin` object supplies both secrets so
+stdin is consumed exactly once; all credential-free gates run first.
 
 qBittorrent's generic `hash` is an opaque job key. The adapter derives typed
 claims only from strictly bounded magnet `xt` values: BTIH is 20 bytes and
