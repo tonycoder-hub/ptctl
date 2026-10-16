@@ -54,9 +54,9 @@ capabilities at the edge, not assumptions in the core domain model.
   bonus exchange (confirmed with the account password from a stdin bundle),
   and password login with an optional two-step code that issues the session
   cookie;
-  and an experimental M-Team adapter with session, account, search, and
-  detail reads plus acknowledged metafile fetch through the official API and a
-  site-issued API key.
+  and an experimental M-Team adapter with session, account, search, detail,
+  and bonus reads plus acknowledged metafile fetch and at-most-once bonus
+  exchange through the official API and a site-issued API key.
 - **Downloaders:** qBittorrent and Transmission reads, plus reviewed stopped
   adoption, recheck/start, stop, and keep-data removal of one exact job.
 - **Reconciliation:** one report that keeps site, downloader, metafile, and

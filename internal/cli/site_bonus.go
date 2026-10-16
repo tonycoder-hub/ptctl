@@ -51,11 +51,15 @@ func (a *app) siteBonusReview(args []string) error {
 	fs := newFlagSet("site bonus review")
 	output := fs.String("output", "table", "table or json")
 	cookieStdin := fs.Bool("cookie-stdin", false, "read session Cookie header value from stdin")
+	apiKeyStdin := fs.Bool("api-key-stdin", false, "read a site-issued API key from stdin")
 	if err := fs.Parse(args); err != nil {
 		return usageError("site bonus review: %v", err)
 	}
 	if fs.NArg() != 2 {
 		return usageError("site bonus review requires SITE and OPTION")
+	}
+	if *cookieStdin && *apiKeyStdin {
+		return usageError("--cookie-stdin and --api-key-stdin are mutually exclusive")
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
@@ -68,13 +72,14 @@ func (a *app) siteBonusReview(args []string) error {
 	if !descriptor.Supports(domain.CapabilityBonusReview) {
 		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityBonusReview)
 	}
-	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
-		return usageError("site %q does not support cookie_header authentication", descriptor.ID)
-	}
-	// The site takes cookies, so without the flag this picks its saved cookie.
-	source, err := siteCredentialSourceFor(descriptor, *cookieStdin, false)
+	// Without a flag this picks the credential the site signs in with.
+	source, err := siteCredentialSourceFor(descriptor, *cookieStdin, *apiKeyStdin)
 	if err != nil {
 		return err
+	}
+	readSecret := readCredential
+	if source.method == domain.AuthMethodAPIKeyHeader {
+		readSecret = readAPIKeyCredential
 	}
 	reader, ok := adapter.(site.BonusReviewReader)
 	if !ok {
@@ -97,7 +102,7 @@ func (a *app) siteBonusReview(args []string) error {
 	}
 	report := newSiteBonusReviewReport(descriptor.ID, selector, config, limits)
 
-	credential, err := a.readSiteCredential(source, readCredential)
+	credential, err := a.readSiteCredential(source, readSecret)
 	if err != nil {
 		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "credential.unavailable", Message: "the site credential could not be read"})
 		return a.finishSiteBonusReview(*output, report, siteCredentialReadError(source, err))

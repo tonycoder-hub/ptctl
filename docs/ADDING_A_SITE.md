@@ -269,23 +269,24 @@ and do it in a separate behavior-preserving commit.
 | NexusPHP forks, including TJUPT | Cookie sessions match `cookie_header`, and HTML responses match the existing ports. | Page recognition and parsers for that fork, with synthetic fixtures. Forks differ, so do not assume TJUPT's pages. |
 | Unit3D | Cookie-session web pages fit. | Using its token-authenticated API instead runs into the gaps below. |
 | Gazelle-based trackers | Cookie sessions fit; their JSON responses need a JSON parser rather than HTML recognition. | Where an API key replaces the session cookie, the gaps below apply. |
-| M-Team | Status, account, search, detail, the signed-link metafile download, and live-site reconciliation are implemented in `internal/site/mteam` over the JSON API with an API key. | Bonus commands: the open gaps below. |
+| M-Team | Status, account, search, detail, the bonus shop catalog, review, and exchange, the signed-link metafile download, and live-site reconciliation are implemented in `internal/site/mteam` over the JSON API with an API key. | RSS, seeding lists, and messages are not implemented. |
 
 ## Gaps for API-token sites
 
 These are the places that assumed a cookie, HTML, or a single origin. The
-M-Team adapter closed what its four reads and its download needed; the rest is
+M-Team adapter closed what its reads, its download, and its bonus exchange
+needed; the rest is
 design work for whichever pull request first needs it. Each open item changes a public contract
 or a security control, so it needs its own review.
 
 | Gap | Status | Where | What is left |
 |---|---|---|---|
 | Only one auth method existed | Done | `domain.AuthMethodAPIKeyHeader` (`api_key_header`); `knownAuthMethod` in `internal/site/descriptor.go` | Nothing. |
-| Credential input was cookie-only | Partly done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, and `detail`; `site metafile fetch` reads it with `readEffectfulAPIKeyCredential`; `reconcile` takes `--site-api-key-stdin`, `--site-live`, and the bundle's `site_api_key` | Bonus commands still take cookies only. |
-| The CLI gated on cookies | Partly done | `siteRead` in `internal/cli/site.go`, `site detail`, `site metafile fetch`, and `reconcile` check the method the caller chose | Two `SupportsAuth(domain.AuthMethodCookieHeader)` checks remain, in `site_bonus.go` and `site_bonus_exchange.go`. |
+| Credential input was cookie-only | Done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, `detail`, `bonus-catalog`, and `bonus review`; `site metafile fetch` and `site bonus exchange submit` read it with `readEffectfulAPIKeyCredential`; `reconcile` takes `--site-api-key-stdin`, `--site-live`, and the bundle's `site_api_key` | Nothing. The `--credential-bundle-stdin` of `site bonus exchange submit` still carries a cookie, because only TJUPT confirms an exchange with the password. |
+| The CLI gated on cookies | Done | Every site command picks the method with `siteCredentialSourceFor` and checks that the site supports it | Nothing. |
 | The transport only sent `Cookie` | Done | `httpguard.NewWithHeaderCredential` binds one validated, non-reserved header | Nothing. |
 | Redaction did not know the header | Done | `security.Redact` covers `x-api-key` header lines and `apiKey`-style fields | Nothing. |
-| No JSON requests | Done | `httpguard.Client.PostReadOnce`: one bounded, non-replayable POST with no redirect and no retry, covered in the threat model | Nothing for reads. Effectful API calls still need their own acknowledged port. |
+| No JSON requests | Done | `httpguard.Client.PostReadOnce`: one bounded, non-replayable POST with no redirect and no retry, covered in the threat model; `PostEffectOnce` sends the same POST for an acknowledged write, such as the M-Team bonus exchange, and says so in its `User-Agent` | Nothing. |
 | One origin per site | Done | The API origin is the descriptor `BaseURL`; a signed link and its one redirect may reach only hosts the adapter allowlists (`siteHost` in `internal/site/mteam/metafile.go`), each on a fresh credential-free client | A new site's allowlist needs the same review before its hosts are contacted. |
 | The download is two requests | Done | `site.NewLinkedMetafileFetchConfig` declares a linked route; `MetafileFetchLimits.MaxLinkRequests` and `MetafileFetchUsage.LinkRequestsAttempted` count the requests before the one metafile `GET`, and the sealed record checks them; `httpguard.SecretLink` and `GetLinkOnce` keep the signed URL secret | Nothing. Both fields are omitted for direct routes, so TJUPT records are unchanged. See [MTEAM_ADAPTER.md](MTEAM_ADAPTER.md#metafile-download). |
 | Site-specific CLI text | Done | `detailRouteWarnings` in `internal/cli/site_detail.go` keys the `site detail` warning by route ID; an unlisted route gets only the generic sentence | Add a sentence there when a new detail route has something specific to say. |

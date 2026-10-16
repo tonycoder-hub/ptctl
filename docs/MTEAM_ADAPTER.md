@@ -5,15 +5,19 @@
 M-Team (馒头PT, TP :: mTorrent) is the second experimental site and the first
 that uses a site-issued API key instead of a session cookie. The adapter talks
 only to M-Team's own hosts, starting at the official JSON API at
-`https://api2.m-team.cc`, and declares four reads and one acknowledged
-download:
+`https://api2.m-team.cc`, and declares six reads and two acknowledged
+effects:
 
 - session check (`site status`);
 - account snapshot (`site account`);
 - torrent search (`site search`), with category names;
 - torrent detail (`site detail`);
+- bonus shop catalog (`site bonus-catalog`) and one-offer review (`site bonus
+  review`);
 - metafile download (`site metafile fetch`), which is tracker-visible and needs
-  `--acknowledge-site-effect`; see [Metafile download](#metafile-download).
+  `--acknowledge-site-effect`; see [Metafile download](#metafile-download);
+- bonus exchange (`site bonus exchange submit`), which spends bonus and needs
+  `--acknowledge-bonus-exchange`; see [Bonus shop](#bonus-shop).
 
 The reads were smoke-tested live on 2026-10-16 with a newly created API key:
 `site status` reported `authenticated`, `site account` read the profile, `site
@@ -51,6 +55,8 @@ ptctl site search mteam "Ubuntu"
 ptctl site search --output json mteam "Ubuntu"
 ptctl site search --page 2 --category 419,439 --free mteam "Ubuntu"
 ptctl site detail mteam REMOTE_ID
+ptctl site bonus-catalog mteam
+ptctl site bonus review mteam OPTION
 ptctl site metafile fetch --acknowledge-site-effect --metafile-store "$PTCTL_STORE" mteam REMOTE_ID
 ```
 
@@ -76,16 +82,19 @@ sent. `--cookie-stdin` is refused because the adapter does not accept cookies.
 
 ## Requests
 
-Each read sends exactly one request and never retries (the download takes more;
-see [Metafile download](#metafile-download)):
+Each read sends exactly one request and never retries, except `bonus-catalog`,
+which sends two on one connection (the download takes more; see [Metafile
+download](#metafile-download)):
 
 | Command | Request | Body |
 |---|---|---|
 | `site status`, `site account` | `POST /api/member/profile` | an empty `multipart/form-data` form |
 | `site search` | `POST /api/torrent/search` | `{"mode":"normal","keyword":QUERY,"pageNumber":1,"pageSize":50}`; the options below add `categories` and `discount` and change `mode` and `pageNumber` |
 | `site detail` | `POST /api/torrent/detail` | a `multipart/form-data` form with the one field `id` |
+| `site bonus-catalog` | `POST /api/member/profile`, then `POST /api/mall/list` | an empty `multipart/form-data` form each |
+| `site bonus review` | `POST /api/mall/list` | an empty `multipart/form-data` form |
 
-The API exposes these reads as POST requests. All three endpoints only read;
+The API exposes these reads as POST requests. All five endpoints only read;
 the reads send no other endpoint. In particular, `site detail` never calls
 `/api/torrent/viewHits`, which the website's own detail page calls to count a
 view. The request uses the same strict transport as every
@@ -273,9 +282,66 @@ with `site_api_key` in place of `site_cookie`. The read is the one
 `/api/torrent/detail` request above; it never asks for a signed download link.
 See [Reconciliation](guide/reconcile.md).
 
+## Bonus shop
+
+M-Team sells goods for bonus (魔力值) in its shop (商城). `site bonus-catalog
+mteam` reads the balance from the profile and the goods from `/api/mall/list`,
+one row per goods ID. The option is the goods ID; the columns are the name, the
+goods type, the price, and a status:
+
+| Goods type | Example | Status |
+|---|---|---|
+| `UPLOAD` | 上传量, priced per GB | `available` |
+| `INVITE` | an invitation | `available` |
+| `TITLE`, `GLOBAL_FREE_SINGLE`, `GLOBAL_FREE_POOL` | a custom title, a site-wide free promotion | `available, requires input` |
+| any other type, such as `INVITE_BUY_BONUS` | selling an invitation back | `unknown` |
+
+Goods the shop marks off the shelf (`shelf` is `NO`) are `disabled`; goods
+with any other shelf value, or limited to some roles, are `unknown`. The name is the
+simplified-Chinese name the API returns (which the site sometimes writes in
+traditional script), else the traditional or English one. A shop answer that is
+empty, repeats a goods ID, or holds goods without a canonical ID, type, name, or
+price fails the whole catalog instead of returning a partial one.
+
+`site bonus review mteam OPTION` reads the shop once more and reports one goods
+item as an offer review (route `mteam.mall_list_review.v1`). The balance is not
+part of the review, so the review ID changes only when the goods item does,
+such as when its price changes. The review accounting maps the JSON answer onto
+the shared limits: each goods item counts as one form, each of its members as
+one field, and each JSON token as one token.
+
+**Exchange.** `site bonus exchange submit` follows the same prepare, submit,
+and status workflow as TJUPT (see [the sites guide](guide/sites.md)), with the
+saved API key and no password. After one fresh review it sends one
+`POST /api/mall/exchange` (route `mteam.mall_exchange_post.v1`) with the form
+fields `goodsId` and `num`, where `num` is always `1`: one unit, so one GB of
+upload credit or one invitation. Only goods that are `available` and need no
+input can be exchanged; for the rest the fresh review stops as
+`submission_form_unavailable` and nothing is sent. The POST identifies itself
+as an explicit-effect client in its `User-Agent`. The answer is read as:
+
+| Answer | Outcome | `SUBMISSION STOP` |
+|---|---|---|
+| API code `0` | `confirmed` | none |
+| HTTP 401, or API code `401` | `rejected` | `server_authentication_rejected` |
+| HTTP 429, or API code `4` | `rejected` | `server_rate_limited` |
+| Any other API code, such as too little bonus or a shop limit | `rejected` | `server_refused` |
+| Any other status, a body that is not JSON, or a cut-off answer | `unknown` | `submission_response_unrecognized` |
+
+A rejected exchange spends nothing. An `unknown` one may have spent bonus, is
+never retried, and is checked on the site's own bonus log. The shop's own
+limits, such as the upload-credit cap tied to share ratio, are enforced by the
+site, not by ptctl.
+
+**Live check.** On 2026-10-16 `site bonus-catalog` and `site bonus review mteam
+1` were run live: the catalog listed the six goods above with the balance, and
+the review completed in one request. `site bonus exchange submit` has not been
+run live, because the test account's balance was below the cheapest goods
+item; it is covered by synthetic tests only.
+
 ## Not supported yet
 
-Bonus exchange, RSS, seeding lists, and messages are not implemented.
+RSS, seeding lists, and messages are not implemented.
 
 ## Fixtures
 

@@ -85,6 +85,42 @@ func TestPostReadOnceSendsOneNonReplayableRead(t *testing.T) {
 	}
 }
 
+func TestPostEffectOnceSendsOneWriteAsAnEffectClient(t *testing.T) {
+	const key = "KEY-CANARY"
+	const payload = "--b\r\nContent-Disposition: form-data; name=\"goodsId\"\r\n\r\n1\r\n--b--\r\n"
+	calls := 0
+	client := headerCredentialTestClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.Method != http.MethodPost || request.URL.Path != "/api/mall/exchange" || request.Header.Get("X-Api-Key") != key ||
+			request.Header.Get("Content-Type") != "multipart/form-data; boundary=b" ||
+			request.Header.Get("User-Agent") != explicitEffectUserAgent || !request.Close || request.GetBody != nil || string(body) != payload {
+			t.Fatalf("unexpected effect POST: request=%#v body=%q", request, body)
+		}
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        http.Header{"Content-Type": {"application/json"}},
+			Body:          io.NopCloser(strings.NewReader(`{"code":"0"}`)),
+			ContentLength: 12,
+		}, nil
+	}), "X-Api-Key", key)
+	response, err := client.PostEffectOnce(context.Background(), "api/mall/exchange", "multipart/form-data; boundary=b", []byte(payload), "application/json", 1024, 1024, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || client.RequestsMade() != 1 || response.StatusCode != http.StatusOK || string(response.Body) != `{"code":"0"}` ||
+		response.RequestBytes != int64(len(payload)) || !response.ResponseBytesKnown {
+		t.Fatalf("calls=%d requests=%d response=%#v", calls, client.RequestsMade(), response)
+	}
+	// Invalid input is refused before any request, as for PostReadOnce.
+	if _, err := client.PostEffectOnce(context.Background(), "api/mall/exchange", "", []byte(payload), "application/json", 1024, 1024, 1024); err == nil || client.RequestsMade() != 1 {
+		t.Fatalf("err=%v requests=%d", err, client.RequestsMade())
+	}
+}
+
 func TestPostReadOnceRejectsInvalidInputBeforeAnyRequest(t *testing.T) {
 	tests := []struct {
 		name        string
