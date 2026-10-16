@@ -107,9 +107,6 @@ func (a *app) siteMetafileFetch(args []string) error {
 	if *cookieStdin && *apiKeyStdin {
 		return usageError("--cookie-stdin and --api-key-stdin are mutually exclusive")
 	}
-	if !*cookieStdin && !*apiKeyStdin {
-		return usageError("%s is required; credentials are never accepted in argv", requiredCredentialFlag(a.registry, fs.Arg(0)))
-	}
 	if !*acknowledge {
 		return usageError("--acknowledge-site-effect is required because the GET may be recorded as a torrent download")
 	}
@@ -140,12 +137,13 @@ func (a *app) siteMetafileFetch(args []string) error {
 	if !descriptor.Supports(domain.CapabilityMetafile) {
 		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityMetafile)
 	}
-	method, readSecret := domain.AuthMethodCookieHeader, readEffectfulSiteCredential
-	if *apiKeyStdin {
-		method, readSecret = domain.AuthMethodAPIKeyHeader, readEffectfulAPIKeyCredential
+	source, err := siteCredentialSourceFor(descriptor, *cookieStdin, *apiKeyStdin)
+	if err != nil {
+		return err
 	}
-	if !descriptor.SupportsAuth(method) {
-		return usageError("site %q does not support %s authentication", descriptor.ID, method)
+	readSecret := readEffectfulSiteCredential
+	if source.method == domain.AuthMethodAPIKeyHeader {
+		readSecret = readEffectfulAPIKeyCredential
 	}
 	fetcher, ok := adapter.(site.MetafileFetcher)
 	if !ok {
@@ -164,6 +162,9 @@ func (a *app) siteMetafileFetch(args []string) error {
 	if err := fetcher.ValidateMetafileRef(ref); err != nil {
 		return usageError("site metafile fetch: invalid SITE/REMOTE_ID")
 	}
+	if err := source.locateSaved(descriptor.ID); err != nil {
+		return err
+	}
 
 	report := newSiteMetafileFetchReport(ref, config, fetchLimits, storeLimits, *showAbsolute, *storeRoot)
 	store, err := metastore.Open(*storeRoot)
@@ -175,11 +176,11 @@ func (a *app) siteMetafileFetch(args []string) error {
 	}
 	report.StoreOperation.Store = storeSummary(store.Info(), *showAbsolute)
 
-	credential, err := readSecret(a.stdin)
+	credential, err := a.readSiteCredential(source, readSecret)
 	if err != nil {
 		report.Outcome = "blocked"
 		report.Blockers = append(report.Blockers, "credential.read_failed")
-		return a.finishSiteMetafileFetch(*output, report, fmt.Errorf("read site credential failed"))
+		return a.finishSiteMetafileFetch(*output, report, siteCredentialReadError(source, err))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -333,7 +334,7 @@ func (a *app) siteMetafileFetch(args []string) error {
 
 func (a *app) siteMetafileFetchHelp() {
 	fmt.Fprint(a.stdout, `Usage:
-  ptctl site metafile fetch (--cookie-stdin | --api-key-stdin) --acknowledge-site-effect --metafile-store DIR [flags] SITE REMOTE_ID
+  ptctl site metafile fetch [--cookie-stdin | --api-key-stdin] --acknowledge-site-effect --metafile-store DIR [flags] SITE REMOTE_ID
 
 This command performs one explicitly acknowledged, effectful torrent-metafile GET
 and imports the exact bounded response into an initialized private metafile store.
@@ -348,9 +349,10 @@ link, then GETs it; one redirect is followed only to the site's own HTTPS
 hosts, and the link is never printed or stored. Each link request may count as
 a download on the site, and is reported as a link request.
 
-Credentials (stdin only, one line):
+Credentials: the one 'ptctl site login SITE' saved, or one line on stdin:
   --cookie-stdin             session Cookie header value (tjupt)
   --api-key-stdin            site-issued API key (mteam)
+A saved credential never stands in for --acknowledge-site-effect.
 
 Flags:
   --acknowledge-site-effect  acknowledge that the GET may count as a download

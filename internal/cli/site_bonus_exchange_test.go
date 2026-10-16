@@ -323,7 +323,8 @@ func TestSiteBonusExchangeCredentialFlagsMatchTheSite(t *testing.T) {
 		{password, []string{"--cookie-stdin"}, `site "fakept" confirms bonus exchange with the account password; submit requires --credential-bundle-stdin`},
 		{cookieOnly, []string{"--credential-bundle-stdin"}, `site "fakept" bonus exchange takes only --cookie-stdin`},
 		{password, []string{"--cookie-stdin", "--credential-bundle-stdin"}, "accepts --cookie-stdin or --credential-bundle-stdin, not both"},
-		{cookieOnly, nil, "requires --cookie-stdin and --acknowledge-bonus-exchange"},
+		{cookieOnly, nil, "no saved session cookie for site \"fakept\"; run 'ptctl site login fakept' first, or pipe one with --cookie-stdin"},
+		{password, nil, `site "fakept" confirms bonus exchange with the account password; without a terminal to ask for it, submit requires --credential-bundle-stdin`},
 	}
 	for _, test := range tests {
 		reader := &trackingReader{}
@@ -895,7 +896,7 @@ func TestSiteBonusExchangeHelpAndDispatch(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Run([]string{"site", "bonus", "exchange", "help"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), "deterministic at-most-once attempt marker") || !strings.Contains(out.String(), "never chooses a latest operation") ||
 		!strings.Contains(out.String(), "acknowledge-state-prune") || !strings.Contains(out.String(), "acknowledge-history-forget") || !strings.Contains(out.String(), "submission-unknown operations are never pruned") ||
-		!strings.Contains(out.String(), "(--cookie-stdin | --credential-bundle-stdin)") || !strings.Contains(out.String(), "site_password") {
+		!strings.Contains(out.String(), "[--cookie-stdin | --credential-bundle-stdin]") || !strings.Contains(out.String(), "site_password") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 	out.Reset()

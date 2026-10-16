@@ -183,18 +183,21 @@ states the price and asks for the password; the balance does not change. The
 same POST with `passwd` completes the exchange in one step.
 
 The adapter is therefore a `site.PasswordConfirmedBonusExchangeWriter`.
-`site bonus exchange submit ... tjupt OPTION` requires
-`--credential-bundle-stdin` with strict JSON on stdin:
+`site bonus exchange submit ... tjupt OPTION` uses the cookie `site login`
+saved and asks for the account password with echo off on the terminal, before
+the timeout starts. Scripts and agents pass `--credential-bundle-stdin` with
+strict JSON on stdin instead:
 
 ```json
 {"schema":"ptctl.credentials/v1","site_cookie":"...","site_password":"..."}
 ```
 
 `--cookie-stdin` is refused as usage for TJUPT before the store or stdin is
-touched, and a cookie-only session cannot be opened. The password must be valid
-UTF-8 without control characters and at most 1024 bytes. It stays in memory as
-an `AccountPassword`, which formats as `[REDACTED]`; it is never placed in argv,
-persisted, or printed.
+touched, as is the saved cookie when stdin is not a terminal, and a cookie-only
+session cannot be opened. The password must be valid UTF-8 without control
+characters and at most 1024 bytes. It stays in memory as an `AccountPassword`,
+which formats as `[REDACTED]`; it is never placed in argv, persisted, or
+printed.
 
 The workflow is otherwise the generic one: a fresh review GET, an exact-option
 rebind against the review ID, a durable attempt marker, and at most one POST.
@@ -241,23 +244,30 @@ The generic workflow is described in
 ## Authentication
 
 The adapter does not bypass CAPTCHA/Cloudflare or read browser cookie stores.
-A caller provides the complete Cookie header value through stdin for one
-process, either copied from a browser session or issued by `site login`
-([below](#login)):
+It receives the complete Cookie header value from the CLI, which takes it from
+the cookie `site login` saved ([below](#login)) or, with `--cookie-stdin`, from
+stdin for one process:
 
 ```bash
+ptctl site login tjupt
+ptctl site status tjupt
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
 ```
 
-The value is held in memory and not persisted. Direct interactive terminal
-input is refused to avoid echoing secrets; callers must use a pipe. A future credential provider
-must use an OS keyring or an audited pipe-based helper; plaintext fallback will
-not be automatic.
+A browser cookie can be saved the same way with
+`printf '%s' "$TJUPT_COOKIE" | ptctl site login --cookie-stdin tjupt`, which
+saves it only after one status read accepts it. The saved cookie is a
+plaintext owner-only file under the user config directory, refused when it is
+not a regular owner-only file holding one valid cookie line, and deleted by
+`ptctl site logout tjupt`; see the
+[threat model](THREAT_MODEL.md#saved-site-credentials). Direct interactive
+terminal input to `--cookie-stdin` is refused to avoid echoing secrets; it
+takes a pipe.
 
 For ordinary `site status`, `site account`, `site search`, and
 `site bonus-catalog`, the CLI validates output mode, the selected adapter's
 capability and cookie authentication declaration, the corresponding typed
-port, and a nonblank search query where relevant before it reads stdin.
+port, and a nonblank search query where relevant before it reads the credential.
 Adapter runtime errors are exposed only as fixed safe diagnostics, with typed
 context cancellation or deadline causes preserved; raw cookie, request, and
 response details do not cross the CLI boundary.

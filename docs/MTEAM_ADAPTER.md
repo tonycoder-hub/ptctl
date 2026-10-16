@@ -34,26 +34,44 @@ leaks.
 
 ## Usage
 
-The key is read only from stdin. Interactive terminal input is refused, the key
-is never accepted as an argument, and it is never written to disk or printed:
+Save the key once. `site login mteam` asks for it with echo off, checks it with
+one status read (`POST /api/member/profile`), and saves it only if the API
+accepts it:
 
 ```bash
-printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
-printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
-printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
-printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin --output json mteam "Ubuntu"
-printf '%s' "$MTEAM_API_KEY" | ptctl site detail --api-key-stdin mteam REMOTE_ID
-printf '%s' "$MTEAM_API_KEY" | ptctl site metafile fetch --api-key-stdin \
-  --acknowledge-site-effect --metafile-store "$PTCTL_STORE" mteam REMOTE_ID
+ptctl site login mteam
 ```
 
-To keep the key out of shell history and your environment, pipe it from a
-password manager instead, for example `op read op://Private/M-Team/api-key |
-ptctl site account --api-key-stdin mteam`.
+After that, every M-Team command uses the saved key:
 
-Without `--api-key-stdin`, every M-Team command fails with a usage error before
-anything is read; `--cookie-stdin` is refused because the adapter does not
-accept cookies.
+```bash
+ptctl site status mteam
+ptctl site account mteam
+ptctl site search mteam "Ubuntu"
+ptctl site search --output json mteam "Ubuntu"
+ptctl site detail mteam REMOTE_ID
+ptctl site metafile fetch --acknowledge-site-effect --metafile-store "$PTCTL_STORE" mteam REMOTE_ID
+```
+
+The key is saved in plaintext to `<user config dir>/ptctl/sessions/mteam.api-key`
+(on macOS `~/Library/Application Support`, on Linux `$XDG_CONFIG_HOME` or
+`~/.config`, on Windows `%AppData%`). The file is owner-only, in an owner-only
+directory, and ptctl refuses to use it if group or other users can read it or
+if it is a symlink. `ptctl site logout mteam` deletes it; revoke the key on the
+M-Team page as well if it may have leaked. The key is never accepted as an
+argument and never printed.
+
+Scripts and agents can save the key without a terminal, or skip saving and pipe
+it to one command. A piped key always takes precedence over the saved one:
+
+```bash
+ptctl site login --api-key-stdin --output json mteam < "$API_KEY_FILE"
+op read op://Private/M-Team/api-key | ptctl site account --api-key-stdin mteam
+```
+
+Without a saved key and without `--api-key-stdin`, an M-Team command fails with
+a usage error that names `ptctl site login mteam`, before anything is read or
+sent. `--cookie-stdin` is refused because the adapter does not accept cookies.
 
 ## Requests
 
@@ -151,6 +169,8 @@ These lines name the cause instead:
 |---|---|---|
 | `site CMD failed: the credential read from stdin does not have the format this site uses` | The key contains spaces, non-ASCII characters, or is too long. | Copy the token again. Leading and trailing whitespace is already trimmed. |
 | `site CMD failed: the site rejected the credential` | The API refused the key (`account` and `search`; `status` reports `unauthenticated` instead). | Check that the token is current, or create a new one. |
+| `site login stopped: login_credentials_rejected` | `site login mteam` checked the key and the API did not accept it. Nothing was saved. | Copy the token again, or create a new one. |
+| `refusing to use saved API key PATH because other users can access it; ...` | The saved key file is readable by group or other users. | Run `chmod 600 PATH`, or sign in again with `ptctl site login mteam`. |
 | `site CMD failed: the site rate limited the request; ...` | HTTP 429 or API code `4`. | Wait before trying again. ptctl never retries. |
 | `site CMD failed: the site host resolved only to private or reserved addresses, ...` | DNS returned only blocked addresses, typically from a proxy using fake-IP DNS (`198.18.0.0/15`, as in Clash or Mihomo fake-IP mode). | Exclude `api2.m-team.cc` from fake-IP (for example with `fake-ip-filter`) or use a resolver that returns real addresses. ptctl never uses a proxy. |
 | `site CMD timed out: context deadline exceeded` | The 45-second deadline passed. | Check connectivity. |

@@ -73,7 +73,7 @@ The complete inventory, including what is deliberately not implemented, is in
 |---|---|---|
 | Zero-write | `torrent inspect/verify`, `storage probe/map`, `seed discover/plan`, `client status/list`, ordinary `site` reads and `site bonus review`, `reconcile report`, and every `plan`, `status`, `list`, and `inspect` subcommand | None. Reads can still update atime, hydrate offline placeholders, or be recorded by the remote side. |
 | Private store | `metafile store init/import`, `storage profile create`, `storage index refresh/refresh-discover`, `reconcile refresh-report`, `site bonus exchange prepare` | The explicit command itself. Owner-only and no-clobber; not encrypted. |
-| Tracker-visible | `site metafile fetch` (one GET; on M-Team, a token POST and the signed-link GET, plus at most one redirect hop), `site bonus exchange submit` (at most one POST), `site login` (one POST and one verifying GET) | `--acknowledge-site-effect`, `--acknowledge-bonus-exchange`; `site login` is the command itself, with the cookie saved only to an owner-only file or a pipe |
+| Tracker-visible | `site metafile fetch` (one GET; on M-Team, a token POST and the signed-link GET, plus at most one redirect hop), `site bonus exchange submit` (at most one POST), `site login` (TJUPT: one POST and one verifying GET; an API key: one status read) | `--acknowledge-site-effect`, `--acknowledge-bonus-exchange`; `site login` is the command itself, with the credential saved only to an owner-only file or a pipe. A saved credential never stands in for an acknowledgement flag. |
 | Target filesystem | `seed materialize run/resume/abandon` | `--acknowledge-filesystem-write`, `--acknowledge-abandon` |
 | Downloader | `client adopt/activate/stop/remove run/resume` | `--acknowledge-client-add`, `--acknowledge-client-recheck`, `--acknowledge-client-stop`, `--acknowledge-client-removal`; repeats, re-adds, and observation-only adoption have their own flags |
 | Source deletion | `seed retire run/resume`, `seed retire parent-cleanup run/resume` | `--acknowledge-source-deletion`, `--acknowledge-empty-parent-removal` |
@@ -124,27 +124,31 @@ ptctl site list
 ptctl site capabilities tjupt
 ```
 
-Check a site session. The complete `Cookie` header value is read only from
-stdin; interactive TTY input is refused, and the cookie is never persisted:
+Sign in to a site once. After that, every site command uses the saved
+credential, so no credential flag is needed:
+
+```bash
+ptctl site login tjupt     # username, hidden password, and two-step code
+ptctl site login mteam     # paste the API key (hidden)
+ptctl site status tjupt
+ptctl site search mteam "Ubuntu"
+ptctl site detail mteam REMOTE_ID
+```
+
+TJUPT's login sends one sign-in request and saves the session cookie it
+issues; the password is never saved. M-Team uses an API key from
+控制台 → 实验室 → 建立存取令牌; `site login mteam` checks it with one status read
+before saving it. Both are saved in plaintext to an owner-only file under the
+user config directory, and `ptctl site logout SITE` deletes it. Scripts and
+agents can still pipe a credential for a single command instead, which always
+takes precedence over the saved one:
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
-```
-
-For TJUPT, `ptctl site login tjupt` can issue that cookie instead: it prompts
-for the username, the hidden password, and the two-step code, then saves the
-cookie to an owner-only file and prints its path. Scripts and agents use
-`--credential-bundle-stdin`; see `ptctl help login` and
-[Site reads and bonus exchange](docs/guide/sites.md).
-
-M-Team uses an API key from 控制台 → 实验室 → 建立存取令牌 instead of a cookie,
-with the same stdin-only rules:
-
-```bash
 printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
-printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
-printf '%s' "$MTEAM_API_KEY" | ptctl site detail --api-key-stdin mteam REMOTE_ID
 ```
+
+See `ptctl help login` and [Site reads and bonus exchange](docs/guide/sites.md).
 
 From there, the [command guide](docs/guide/README.md) walks through storing
 metafiles, proving content, materializing a layout, handing it to a downloader,
@@ -172,7 +176,9 @@ A private `.torrent` is secret-bearing because its announce URL often contains
 a personal passkey. Site cookies, site API keys, and downloader credentials are
 also secrets,
 while filesystem reads can update atime, hydrate cloud placeholders, or incur
-network cost. `ptctl` keeps credentials in memory, rejects secret arguments,
+network cost. `ptctl` rejects secret arguments, keeps credentials in memory
+except the one site credential `site login` saves owner-only (and `site
+logout` deletes), never saves account or downloader passwords,
 emits no request bodies, blocks cross-origin/downgrade redirects, never retries
 site reads, bounds network and filesystem work, hides private store/object and
 discovery/reconciliation absolute paths by default, never exposes materialize

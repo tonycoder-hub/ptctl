@@ -536,8 +536,8 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 	if *cookieStdin && *bundleStdin {
 		return usageError("site bonus exchange submit accepts --cookie-stdin or --credential-bundle-stdin, not both")
 	}
-	if (!*cookieStdin && !*bundleStdin) || !*acknowledge {
-		return usageError("site bonus exchange submit requires --cookie-stdin and --acknowledge-bonus-exchange")
+	if !*acknowledge {
+		return usageError("site bonus exchange submit requires --acknowledge-bonus-exchange")
 	}
 	if err := validateOutput(*output); err != nil {
 		return err
@@ -557,11 +557,32 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 		return err
 	}
 	passwordWriter, needsPassword := writer.(site.PasswordConfirmedBonusExchangeWriter)
-	if needsPassword && !*bundleStdin {
+	if needsPassword && *cookieStdin {
 		return usageError("site %q confirms bonus exchange with the account password; submit requires --credential-bundle-stdin", descriptor.ID)
 	}
 	if !needsPassword && *bundleStdin {
 		return usageError("site %q bonus exchange takes only --cookie-stdin", descriptor.ID)
+	}
+	// Without a flag the saved cookie is used, and a site that confirms with
+	// the account password asks for it, hidden, on this terminal.
+	source := siteCredentialSource{method: domain.AuthMethodCookieHeader, saved: !*cookieStdin && !*bundleStdin}
+	var terminal promptTerminal
+	if source.saved && needsPassword {
+		var ok bool
+		if terminal, ok = a.promptTerminal(); !ok {
+			return usageError("site %q confirms bonus exchange with the account password; without a terminal to ask for it, submit requires --credential-bundle-stdin", descriptor.ID)
+		}
+	}
+	if err := source.locateSaved(descriptor.ID); err != nil {
+		return err
+	}
+	// The password is asked for before the timeout starts, so typing it does
+	// not use up the time the review and submission have.
+	var savedPassword site.AccountPassword
+	if terminal != nil {
+		if savedPassword, err = a.askBonusExchangePassword(terminal, descriptor); err != nil {
+			return err
+		}
 	}
 	report := newSiteBonusExchangeReport("site.bonus.exchange.submit", descriptor.ID, fs.Arg(1), *expectedReview, config)
 	report.Effect = []string{site.BonusReviewReadEffect, bonusexchange.ReserveEffect, site.BonusExchangeSubmitEffect, bonusexchange.OutcomeEffect}
@@ -615,19 +636,30 @@ func (a *app) siteBonusExchangeSubmit(args []string) error {
 
 	var siteSession site.BonusExchangeSession
 	if needsPassword {
-		credential, password, readErr := readBonusExchangeCredentialBundle(a.stdin)
+		var credential site.Credential
+		var password site.AccountPassword
+		var readErr error
+		if source.saved {
+			credential, readErr = a.readSiteCredential(source, nil)
+			password = savedPassword
+		} else {
+			credential, password, readErr = readBonusExchangeCredentialBundle(a.stdin)
+			if readErr != nil {
+				readErr = fmt.Errorf("read site credential failed")
+			}
+		}
 		if readErr != nil {
 			_ = stateSession.Close()
 			addBonusExchangeBlocker(&report, "credential.read_failed", "the site credential could not be read")
-			return a.finishSiteBonusExchange(*output, report, fmt.Errorf("read site credential failed"))
+			return a.finishSiteBonusExchange(*output, report, readErr)
 		}
 		siteSession, err = passwordWriter.OpenPasswordConfirmedBonusExchangeSession(ctx, credential, password)
 	} else {
-		credential, readErr := readEffectfulSiteCredential(a.stdin)
+		credential, readErr := a.readSiteCredential(source, readEffectfulSiteCredential)
 		if readErr != nil {
 			_ = stateSession.Close()
 			addBonusExchangeBlocker(&report, "credential.read_failed", "the site credential could not be read")
-			return a.finishSiteBonusExchange(*output, report, fmt.Errorf("read site credential failed"))
+			return a.finishSiteBonusExchange(*output, report, siteCredentialReadError(source, readErr))
 		}
 		siteSession, err = writer.OpenBonusExchangeSession(ctx, credential)
 	}
@@ -1286,7 +1318,7 @@ func bonusRecordID(ref *metastore.RecordRef) string {
 func (a *app) siteBonusExchangeHelp() {
 	fmt.Fprint(a.stdout, `Usage:
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
-  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID (--cookie-stdin | --credential-bundle-stdin) --acknowledge-bonus-exchange [--output table|json] SITE OPTION
+  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID [--cookie-stdin | --credential-bundle-stdin] --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
   ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]
@@ -1297,10 +1329,13 @@ the production adapter before reading stdin, performs one fresh bounded review,
 durably publishes a deterministic at-most-once attempt marker, and only then
 may submit the exact opaque form once. There are no redirects or retries.
 
-A site that confirms each exchange with the account password, such as TJUPT,
-requires --credential-bundle-stdin instead of --cookie-stdin. Pipe strict JSON
-containing schema "ptctl.credentials/v1", site_cookie, and site_password. The
-password is added to that single POST only; it is never stored or printed.
+Without a credential flag, submit uses the session cookie 'ptctl site login
+SITE' saved. A site that confirms each exchange with the account password, such
+as TJUPT, then asks for the password on this terminal with echo off. Scripts
+pipe credentials instead: --cookie-stdin for a cookie alone, or, for a site
+that needs the password, --credential-bundle-stdin with strict JSON containing
+schema "ptctl.credentials/v1", site_cookie, and site_password. The password is
+added to that single POST only; it is never stored or printed.
 
 After the POST, a bounded local finalization interval may persist the exact
 adapter observation even if the network context ended. If no durable outcome
