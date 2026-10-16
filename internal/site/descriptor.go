@@ -76,15 +76,16 @@ func knownAuthMethod(method domain.AuthMethod) bool {
 // typed port an adapter must implement for it. Adding a capability means
 // adding a domain constant, a port interface, and one entry here.
 var capabilityPorts = map[domain.Capability]func(Adapter) bool{
-	domain.CapabilityAuthCheck:     func(a Adapter) bool { _, ok := a.(AuthChecker); return ok },
-	domain.CapabilityAccountRead:   func(a Adapter) bool { _, ok := a.(AccountReader); return ok },
-	domain.CapabilitySearch:        func(a Adapter) bool { _, ok := a.(TorrentSearcher); return ok },
-	domain.CapabilityBonusRead:     func(a Adapter) bool { _, ok := a.(BonusCatalogReader); return ok },
-	domain.CapabilityDetail:        func(a Adapter) bool { _, ok := a.(TorrentDetailReader); return ok },
-	domain.CapabilityMetafile:      func(a Adapter) bool { _, ok := a.(MetafileFetcher); return ok },
-	domain.CapabilityBonusReview:   func(a Adapter) bool { _, ok := a.(BonusReviewReader); return ok },
-	domain.CapabilityBonusExchange: func(a Adapter) bool { _, ok := a.(BonusExchangeWriter); return ok },
-	domain.CapabilityLogin:         func(a Adapter) bool { _, ok := a.(SessionLoginer); return ok },
+	domain.CapabilityAuthCheck:       func(a Adapter) bool { _, ok := a.(AuthChecker); return ok },
+	domain.CapabilityAccountRead:     func(a Adapter) bool { _, ok := a.(AccountReader); return ok },
+	domain.CapabilitySearch:          func(a Adapter) bool { _, ok := a.(TorrentSearcher); return ok },
+	domain.CapabilityBonusRead:       func(a Adapter) bool { _, ok := a.(BonusCatalogReader); return ok },
+	domain.CapabilityDetail:          func(a Adapter) bool { _, ok := a.(TorrentDetailReader); return ok },
+	domain.CapabilityMetafile:        func(a Adapter) bool { _, ok := a.(MetafileFetcher); return ok },
+	domain.CapabilityBonusReview:     func(a Adapter) bool { _, ok := a.(BonusReviewReader); return ok },
+	domain.CapabilityBonusExchange:   func(a Adapter) bool { _, ok := a.(BonusExchangeWriter); return ok },
+	domain.CapabilityLogin:           func(a Adapter) bool { _, ok := a.(SessionLoginer); return ok },
+	domain.CapabilityAccountTorrents: func(a Adapter) bool { _, ok := a.(AccountTorrentLister); return ok },
 }
 
 // KnownCapabilities returns every capability that has a typed port, in a
@@ -100,6 +101,7 @@ func KnownCapabilities() []domain.Capability {
 		domain.CapabilityBonusReview,
 		domain.CapabilityBonusExchange,
 		domain.CapabilityLogin,
+		domain.CapabilityAccountTorrents,
 	}
 }
 

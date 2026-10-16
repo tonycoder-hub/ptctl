@@ -55,7 +55,7 @@ capabilities at the edge, not assumptions in the core domain model.
   and password login with an optional two-step code that issues the session
   cookie;
   and an experimental M-Team adapter with session, account, search, detail,
-  and bonus reads plus acknowledged metafile fetch and at-most-once bonus
+  own-torrent-list, and bonus reads plus acknowledged metafile fetch and at-most-once bonus
   exchange through the official API and a site-issued API key.
 - **Downloaders:** qBittorrent and Transmission reads, plus reviewed stopped
   adoption, recheck/start, stop, and keep-data removal of one exact job.

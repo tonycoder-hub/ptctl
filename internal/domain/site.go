@@ -25,6 +25,8 @@ const (
 	CapabilityBonusRead     Capability = "bonus.catalog.read"
 	CapabilityBonusReview   Capability = "bonus.offer.review"
 	CapabilityBonusExchange Capability = "bonus.exchange.submit_effectful"
+	// CapabilityAccountTorrents lists the account's own torrents by state.
+	CapabilityAccountTorrents Capability = "account.torrents.read"
 )
 
 type SiteDescriptor struct {
@@ -140,6 +142,54 @@ type Promotion struct {
 	UploadFactor   string     `json:"upload_factor"`
 	DownloadFactor string     `json:"download_factor"`
 	EndsAt         *time.Time `json:"ends_at,omitempty"`
+}
+
+// AccountTorrentState names one of the account's own torrent lists.
+type AccountTorrentState string
+
+const (
+	AccountTorrentsSeeding    AccountTorrentState = "seeding"
+	AccountTorrentsLeeching   AccountTorrentState = "leeching"
+	AccountTorrentsCompleted  AccountTorrentState = "completed"
+	AccountTorrentsIncomplete AccountTorrentState = "incomplete"
+	AccountTorrentsUploaded   AccountTorrentState = "uploaded"
+)
+
+// AccountTrafficScope says what span of time an AccountTorrent's traffic
+// covers.
+type AccountTrafficScope string
+
+const (
+	// AccountTrafficTotal is the account's whole history with the torrent.
+	AccountTrafficTotal AccountTrafficScope = "account_total"
+	// AccountTrafficCurrentSession is what the account's client reported for
+	// the session it is running now.
+	AccountTrafficCurrentSession AccountTrafficScope = "current_session"
+)
+
+// AccountTorrent is one row of the account's own torrent list. The traffic
+// fields are the site's claim for this account and torrent, in bytes actually
+// transferred; they are not the promotion-adjusted amounts that count toward
+// the ratio. TrafficScope says which span they cover and is absent when the
+// row has no traffic.
+type AccountTorrent struct {
+	Torrent         TorrentSummary      `json:"torrent"`
+	TrafficScope    AccountTrafficScope `json:"traffic_scope,omitempty"`
+	UploadedBytes   *int64              `json:"uploaded_bytes,omitempty"`
+	DownloadedBytes *int64              `json:"downloaded_bytes,omitempty"`
+	SeedTimeSeconds *int64              `json:"seed_time_seconds,omitempty"`
+	LastActionAt    *time.Time          `json:"last_action_at,omitempty"`
+}
+
+// AccountTorrentList is one page of one of the account's own torrent lists.
+type AccountTorrentList struct {
+	SiteID     string              `json:"site_id"`
+	State      AccountTorrentState `json:"state"`
+	Page       int                 `json:"page"`
+	TotalPages *int                `json:"total_pages,omitempty"`
+	Total      *int                `json:"total,omitempty"`
+	Torrents   []AccountTorrent    `json:"torrents"`
+	ObservedAt time.Time           `json:"observed_at"`
 }
 
 // BonusCatalogRow intentionally preserves site-defined columns. Bonus shop

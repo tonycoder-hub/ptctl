@@ -14,7 +14,7 @@ and issues.
 | [Metafiles and the private store](metafiles.md) | `torrent inspect`, `metafile store`, `site metafile fetch`, sealed site bindings, and stored-metafile selectors |
 | [Storage profiles and indexes](storage.md) | `storage profile`, `storage index`, `reconcile refresh-report`, snapshot-backed discovery, and explicit source selection |
 | [Verify, discover, plan, and materialize](verify-and-materialize.md) | `torrent verify`, `seed discover`, `seed plan`, and `seed materialize` |
-| [Site reads and bonus exchange](sites.md) | `site status`, `account`, `search`, `detail`, `bonus-catalog`, `site bonus review`, and `site bonus exchange` |
+| [Site reads and bonus exchange](sites.md) | `site status`, `account`, `search`, `torrents`, `detail`, `bonus-catalog`, `site bonus review`, and `site bonus exchange` |
 | [Downloader reads, path mapping, and adoption](downloader.md) | `storage map`, `client status`, `client list`, and `client adopt` |
 | [Client activation, stop, and removal](client-lifecycle.md) | `client activate`, `client stop`, and `client remove` |
 | [Source retirement and parent cleanup](source-retirement.md) | `seed retire` and `seed retire parent-cleanup` |

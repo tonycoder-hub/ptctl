@@ -5,13 +5,15 @@
 M-Team (馒头PT, TP :: mTorrent) is the second experimental site and the first
 that uses a site-issued API key instead of a session cookie. The adapter talks
 only to M-Team's own hosts, starting at the official JSON API at
-`https://api2.m-team.cc`, and declares six reads and two acknowledged
+`https://api2.m-team.cc`, and declares seven reads and two acknowledged
 effects:
 
 - session check (`site status`);
 - account snapshot (`site account`);
 - torrent search (`site search`), with category names;
 - torrent detail (`site detail`);
+- the account's own torrent lists (`site torrents`): seeding, leeching,
+  completed, incomplete, and uploaded;
 - bonus shop catalog (`site bonus-catalog`) and one-offer review (`site bonus
   review`);
 - metafile download (`site metafile fetch`), which is tracker-visible and needs
@@ -55,6 +57,8 @@ ptctl site search mteam "Ubuntu"
 ptctl site search --output json mteam "Ubuntu"
 ptctl site search --page 2 --category 419,439 --free mteam "Ubuntu"
 ptctl site detail mteam REMOTE_ID
+ptctl site torrents mteam
+ptctl site torrents --state completed --page 2 mteam
 ptctl site bonus-catalog mteam
 ptctl site bonus review mteam OPTION
 ptctl site metafile fetch --acknowledge-site-effect --metafile-store "$PTCTL_STORE" mteam REMOTE_ID
@@ -82,19 +86,20 @@ sent. `--cookie-stdin` is refused because the adapter does not accept cookies.
 
 ## Requests
 
-Each read sends exactly one request and never retries, except `bonus-catalog`,
-which sends two on one connection (the download takes more; see [Metafile
-download](#metafile-download)):
+Each read sends exactly one request and never retries, except `torrents` and
+`bonus-catalog`, which send two on one connection (the download takes more; see
+[Metafile download](#metafile-download)):
 
 | Command | Request | Body |
 |---|---|---|
 | `site status`, `site account` | `POST /api/member/profile` | an empty `multipart/form-data` form |
 | `site search` | `POST /api/torrent/search` | `{"mode":"normal","keyword":QUERY,"pageNumber":1,"pageSize":50}`; the options below add `categories` and `discount` and change `mode` and `pageNumber` |
 | `site detail` | `POST /api/torrent/detail` | a `multipart/form-data` form with the one field `id` |
+| `site torrents` | `POST /api/member/profile`, then `POST /api/member/getUserTorrentList` | an empty `multipart/form-data` form, then `{"userid":ID,"type":STATE,"pageNumber":N,"pageSize":50}` |
 | `site bonus-catalog` | `POST /api/member/profile`, then `POST /api/mall/list` | an empty `multipart/form-data` form each |
 | `site bonus review` | `POST /api/mall/list` | an empty `multipart/form-data` form |
 
-The API exposes these reads as POST requests. All five endpoints only read;
+The API exposes these reads as POST requests. All six endpoints only read;
 the reads send no other endpoint. In particular, `site detail` never calls
 `/api/torrent/viewHits`, which the website's own detail page calls to count a
 view. The request uses the same strict transport as every
@@ -163,6 +168,46 @@ no download link to observe. An ID with no visible torrent stops as
 exact pair is read as not found, because the API uses code `1` for other
 refusals too. Live-site reconciliation reads the same detail, as described
 in [Reconciliation](#reconciliation).
+
+**Own torrents.** `site torrents` reads one page of up to 50 of the account's
+own torrents, by default the first page of the seeding list. The list needs
+the account's numeric ID, so the command first reads the profile and then the
+list, on one connection; the ID is never printed.
+
+| Option | API field | Accepts |
+|---|---|---|
+| `--state STATE` | `type` | `seeding` (default), `leeching`, `completed`, `incomplete`, or `uploaded` |
+| `--page N` | `pageNumber` | 1 to 1000 |
+
+A page past the last one is empty; an empty list shows its page without a
+page count in the table. An invalid state or page is a usage error
+(exit 2) before the key is read or any request is sent.
+
+Each row has the torrent fields that search reports, plus the account's
+traffic, seed time, and last action. Traffic is in bytes actually transferred,
+not the promotion-adjusted amounts that count toward the ratio, and comes from
+one of two sources, named by `traffic_scope` in JSON and `TRAFFIC` in the
+table:
+
+| `traffic_scope` | Table | Source | Covers |
+|---|---|---|---|
+| `account_total` | `total` | the snatch record (`uploadedReal`, `downloadedReal`) | the account's whole history with the torrent |
+| `current_session` | `session` | the current peer (`uploaded`, `downloaded`) | what the running client reported for its current session |
+
+The snatch record wins when the API sends both, and the two are never mixed in
+one row. Seed time comes only from the snatch record, in seconds. In the live
+check the seeding list carried only the current peer, so its traffic was
+`session` and its seed time was absent, while the completed list carried the
+snatch record. The peer's IP addresses, peer ID, and client name are in the
+API answer but are never decoded, so they cannot reach the output. A response
+without a list, or with any row that has no recognizable torrent, fails the
+whole page; a torrent repeated on one page is kept once.
+
+**Live check.** On 2026-10-16 and 2026-10-17 `site torrents mteam` and `site
+torrents --state completed --output json mteam` were run live with a saved key,
+two requests each. The seeding list first held five torrents with `session`
+traffic and later was empty; the completed list held five torrents, all
+`account_total` with a seed time. No output held the key or a peer address.
 
 **Times.** The API returns times without a zone, such as `2026-10-14
 09:30:00`. ptctl reads them as UTC+8, the site's time zone, and reports them in
@@ -341,7 +386,13 @@ item; it is covered by synthetic tests only.
 
 ## Not supported yet
 
-RSS, seeding lists, and messages are not implemented.
+- **Messages.** The API refuses message reads with an API key: `msg/search`
+  answers code `401` with "Full authentication is required", so messages need
+  a browser login that ptctl does not hold. Two counter endpoints do answer,
+  but what they count cannot be checked against readable messages, so ptctl
+  does not report them.
+- **RSS.** An RSS link carries its own signed, rotating secret; ptctl does not
+  create, print, or store one.
 
 ## Fixtures
 

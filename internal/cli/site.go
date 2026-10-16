@@ -23,7 +23,7 @@ func (a *app) site(args []string) error {
 		return a.siteList(args[1:])
 	case "capabilities":
 		return a.siteCapabilities(args[1:])
-	case "status", "account", "search", "bonus-catalog":
+	case "status", "account", "search", "bonus-catalog", "torrents":
 		return a.siteRead(args[0], args[1:])
 	case "detail":
 		return a.siteDetail(args[1:])
@@ -128,6 +128,11 @@ func (a *app) siteRead(command string, args []string) error {
 		fs.Var((*categoryListFlag)(&searchOptions.Categories), "category", "keep only this site category ID; repeat or separate with commas")
 		fs.BoolVar(&searchOptions.FreeOnly, "free", false, "keep only torrents whose download is not counted")
 	}
+	torrentQuery := site.AccountTorrentQuery{State: domain.AccountTorrentsSeeding}
+	if command == "torrents" {
+		fs.Var((*accountTorrentStateFlag)(&torrentQuery.State), "state", "list to read: seeding, leeching, completed, incomplete, or uploaded (default seeding)")
+		fs.IntVar(&torrentQuery.Page, "page", 0, "result page, from 1 (default: the first page)")
+	}
 	if err := fs.Parse(args); err != nil {
 		return usageError("site %s: %v", command, err)
 	}
@@ -155,6 +160,7 @@ func (a *app) siteRead(command string, args []string) error {
 		"account":       domain.CapabilityAccountRead,
 		"search":        domain.CapabilitySearch,
 		"bonus-catalog": domain.CapabilityBonusRead,
+		"torrents":      domain.CapabilityAccountTorrents,
 	}[command]
 	descriptor := adapter.Descriptor()
 	if !descriptor.Supports(capability) {
@@ -225,6 +231,22 @@ func (a *app) siteRead(command string, args []string) error {
 			return reader.BonusCatalog(ctx, credential)
 		}
 		warnings = append(warnings, "catalog is read-only; this command never submits purchase or redemption forms")
+	case "torrents":
+		lister, ok := adapter.(site.AccountTorrentLister)
+		if !ok {
+			return fmt.Errorf("site %q declares %q but does not implement its typed port", descriptor.ID, capability)
+		}
+		pageSet := false
+		fs.Visit(func(flag *flag.Flag) { pageSet = pageSet || flag.Name == "page" })
+		if pageSet && torrentQuery.Page < 1 {
+			return usageError("--page must be 1 or more")
+		}
+		if err := lister.ValidateAccountTorrentQuery(torrentQuery); err != nil {
+			return usageError("%v", err)
+		}
+		read = func(ctx context.Context, credential site.Credential) (any, error) {
+			return lister.AccountTorrents(ctx, credential, torrentQuery)
+		}
 	default:
 		return usageError("unknown site read command %q", command)
 	}
@@ -328,6 +350,23 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 			}
 			fmt.Fprintf(w, "%s\t%s\n", terminalSafe(selector), terminalSafe(strings.Join(row.Columns, " | ")))
 		}
+	case "torrents":
+		list := data.(domain.AccountTorrentList)
+		page := fmt.Sprint(list.Page)
+		// An empty list has zero pages; "1 of 0" would read as an error.
+		if list.TotalPages != nil && *list.TotalPages > 0 {
+			page += fmt.Sprintf(" of %d", *list.TotalPages)
+		}
+		fmt.Fprintf(w, "STATE\t%s\nPAGE\t%s\n", terminalSafe(string(list.State)), page)
+		if list.Total != nil {
+			fmt.Fprintf(w, "TOTAL\t%d\n", *list.Total)
+		}
+		fmt.Fprintln(w, "REF\tNAME\tSIZE\tTRAFFIC\tUPLOADED\tDOWNLOADED\tSEED TIME\tLAST ACTION")
+		for _, item := range list.Torrents {
+			fmt.Fprintf(w, "%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", terminalSafe(item.Torrent.Ref.SiteID), terminalSafe(item.Torrent.Ref.RemoteID),
+				terminalSafe(item.Torrent.Name), searchSize(item.Torrent), trafficScope(item.TrafficScope),
+				optionalBytes(item.UploadedBytes), optionalBytes(item.DownloadedBytes), seedTime(item.SeedTimeSeconds), optionalTime(item.LastActionAt))
+		}
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -400,6 +439,68 @@ func promotionLabel(promotion *domain.Promotion) string {
 		label += " until " + promotion.EndsAt.UTC().Format(time.RFC3339)
 	}
 	return label
+}
+
+func optionalBytes(value *int64) string {
+	if value == nil {
+		return "-"
+	}
+	return humanBytes(*value)
+}
+
+func optionalTime(value *time.Time) string {
+	if value == nil {
+		return "-"
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+// trafficScope names the span a row's traffic covers: "total" for the
+// account's whole history, "session" for the client's running session.
+func trafficScope(scope domain.AccountTrafficScope) string {
+	switch scope {
+	case domain.AccountTrafficTotal:
+		return "total"
+	case domain.AccountTrafficCurrentSession:
+		return "session"
+	case "":
+		return "-"
+	}
+	return "unknown"
+}
+
+// seedTime renders whole seconds as days, hours, and minutes, for example
+// "2d 3h 4m"; anything under a minute prints "0m".
+func seedTime(seconds *int64) string {
+	if seconds == nil {
+		return "-"
+	}
+	minutes := *seconds / 60
+	days, hours := minutes/(24*60), minutes/60%24
+	minutes %= 60
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
+	case hours > 0:
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
+// accountTorrentStateFlag accepts only the lists the CLI names, so a typo is
+// a usage error before any site is consulted.
+type accountTorrentStateFlag domain.AccountTorrentState
+
+func (state *accountTorrentStateFlag) String() string { return string(*state) }
+
+func (state *accountTorrentStateFlag) Set(value string) error {
+	switch parsed := domain.AccountTorrentState(value); parsed {
+	case domain.AccountTorrentsSeeding, domain.AccountTorrentsLeeching, domain.AccountTorrentsCompleted,
+		domain.AccountTorrentsIncomplete, domain.AccountTorrentsUploaded:
+		*state = accountTorrentStateFlag(parsed)
+		return nil
+	}
+	return fmt.Errorf("state must be seeding, leeching, completed, incomplete, or uploaded")
 }
 
 // categoryListFlag collects site category IDs from repeated or

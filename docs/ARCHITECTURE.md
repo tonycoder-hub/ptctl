@@ -79,7 +79,8 @@ internal/reconcile
 
 internal/site
     optional AuthChecker / AccountReader / TorrentSearcher /
-    BonusCatalogReader / BonusReviewReader ports and a capability-gated
+    BonusCatalogReader / BonusReviewReader / AccountTorrentLister ports and
+    a capability-gated
     effectful metafile port
         |-- httpguard   the only HTTP client site adapters use
         |-- mteam       M-Team JSON API reads with an API key
@@ -356,6 +357,7 @@ Capabilities are small and explicit:
 - `bonus.offer.review`
 - `bonus.exchange.submit_effectful`
 - `auth.login_effectful`
+- `account.torrents.read`
 
 `auth.login_effectful` (`site.SessionLoginer`) signs in with an account
 password and optional one-time code, typed at hidden terminal prompts or read
