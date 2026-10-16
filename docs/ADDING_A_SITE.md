@@ -262,7 +262,7 @@ and do it in a separate behavior-preserving commit.
 | NexusPHP forks, including TJUPT | Cookie sessions match `cookie_header`, and HTML responses match the existing ports. | Page recognition and parsers for that fork, with synthetic fixtures. Forks differ, so do not assume TJUPT's pages. |
 | Unit3D | Cookie-session web pages fit. | Using its token-authenticated API instead runs into the gaps below. |
 | Gazelle-based trackers | Cookie sessions fit; their JSON responses need a JSON parser rather than HTML recognition. | Where an API key replaces the session cookie, the gaps below apply. |
-| M-Team | Status, account, search, detail, and the signed-link metafile download are implemented in `internal/site/mteam` over the JSON API with an API key. | Bonus commands and reconciliation: the open gaps below. |
+| M-Team | Status, account, search, detail, the signed-link metafile download, and live-site reconciliation are implemented in `internal/site/mteam` over the JSON API with an API key. | Bonus commands: the open gaps below. |
 
 ## Gaps for API-token sites
 
@@ -274,8 +274,8 @@ or a security control, so it needs its own review.
 | Gap | Status | Where | What is left |
 |---|---|---|---|
 | Only one auth method existed | Done | `domain.AuthMethodAPIKeyHeader` (`api_key_header`); `knownAuthMethod` in `internal/site/descriptor.go` | Nothing. |
-| Credential input was cookie-only | Partly done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, and `detail`; `site metafile fetch` reads it with `readEffectfulAPIKeyCredential` | Bonus commands and `reconcile` (`--site-cookie-stdin`, the bundle's `site_cookie`) still take cookies only. |
-| The CLI gated on cookies | Partly done | `siteRead` in `internal/cli/site.go`, `site detail`, and `site metafile fetch` check the method the caller chose | Three `SupportsAuth(domain.AuthMethodCookieHeader)` checks remain, in `site_bonus.go`, `site_bonus_exchange.go`, and `reconcile.go`. |
+| Credential input was cookie-only | Partly done | `--api-key-stdin` and `readAPIKeyCredential` in `internal/cli` serve `site status`, `account`, `search`, and `detail`; `site metafile fetch` reads it with `readEffectfulAPIKeyCredential`; `reconcile` takes `--site-api-key-stdin`, `--site-live`, and the bundle's `site_api_key` | Bonus commands still take cookies only. |
+| The CLI gated on cookies | Partly done | `siteRead` in `internal/cli/site.go`, `site detail`, `site metafile fetch`, and `reconcile` check the method the caller chose | Two `SupportsAuth(domain.AuthMethodCookieHeader)` checks remain, in `site_bonus.go` and `site_bonus_exchange.go`. |
 | The transport only sent `Cookie` | Done | `httpguard.NewWithHeaderCredential` binds one validated, non-reserved header | Nothing. |
 | Redaction did not know the header | Done | `security.Redact` covers `x-api-key` header lines and `apiKey`-style fields | Nothing. |
 | No JSON requests | Done | `httpguard.Client.PostReadOnce`: one bounded, non-replayable POST with no redirect and no retry, covered in the threat model | Nothing for reads. Effectful API calls still need their own acknowledged port. |

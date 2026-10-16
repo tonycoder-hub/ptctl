@@ -34,7 +34,17 @@ func readReconciliationCredentialBundle(reader io.Reader, username string) (site
 	if values["schema"] != reconciliationCredentialSchema {
 		return site.Credential{}, downloader.Credential{}, fmt.Errorf("reconciliation credential bundle schema is unsupported")
 	}
-	siteCredential, err := site.NewCookieCredential(values["site_cookie"])
+	cookie, hasCookie := values["site_cookie"]
+	apiKey, hasAPIKey := values["site_api_key"]
+	if hasCookie == hasAPIKey {
+		return site.Credential{}, downloader.Credential{}, fmt.Errorf("reconciliation credential bundle is invalid")
+	}
+	var siteCredential site.Credential
+	if hasCookie {
+		siteCredential, err = site.NewCookieCredential(cookie)
+	} else {
+		siteCredential, err = canonicalAPIKeyCredential([]byte(apiKey))
+	}
 	if err != nil {
 		return site.Credential{}, downloader.Credential{}, fmt.Errorf("reconciliation site credential is invalid")
 	}
@@ -77,8 +87,11 @@ func readBonusExchangeCredentialBundle(reader io.Reader) (site.Credential, site.
 	return siteCredential, password, nil
 }
 
+// decodeReconciliationCredentialBundle decodes the bundle of a live site and
+// downloader reconciliation. The site credential is site_cookie or
+// site_api_key; the caller requires exactly one.
 func decodeReconciliationCredentialBundle(raw []byte) (map[string]string, error) {
-	return decodeCredentialBundle(raw, "schema", "site_cookie", "downloader_password")
+	return decodeCredentialBundleOptional(raw, []string{"schema", "downloader_password"}, []string{"site_cookie", "site_api_key"})
 }
 
 // decodeCredentialBundle strictly decodes one JSON object whose keys are

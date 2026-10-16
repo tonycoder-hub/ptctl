@@ -72,7 +72,7 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 		fmt.Fprintln(fs.Output(), "The report can observe one live site detail page before bracketing optional downloader reads around an explicitly selected exact-layout source or bounded storage discovery. It performs zero writes. Exact --source proves only that selected layout, not filesystem-wide uniqueness. The materialize selector requires one explicit operation and reviewed plan ID, then proves its current exact final namespace before immediately repeating ordinary exact-source verification; these are sequential non-atomic observations. Optional adoption selectors read one canonical terminal client-adoption journal or retained tombstone—whether created by stopped add or observation-only existing-job adoption—and bind its historical completion to the already requested current exact typed job claim without another client request; downloader job incarnation remains unobservable. Optional activation selectors similarly bind one canonical terminal activation journal to the current bracket and, when adoption is also selected, must share that adoption lineage. Optional stop selectors require that activation lineage, read one canonical attributed terminal stop journal or complete retention tombstone before credentials, and bind it to a current exact stopped job in the same bracket without another request; an unknown stop response remains causality-unproven. Optional removal selectors instead require activation, read one canonical terminal keep-data removal journal or retained tombstone, and bind its attributed completion to typed job absence in the existing two-read client bracket. Optional retirement selectors read one canonical terminal source-retirement journal and twice reobserve its exact retired names absent under explicit source roots. Optional parent-cleanup selectors additionally require that retirement proof, read one canonical terminal cleanup journal, and twice reobserve the exact removed parent names absent; a retained cleanup tombstone is historical only and cannot restore path authority. Adoption and removal are mutually exclusive because their current-job predicates conflict; stop and removal are mutually exclusive because their predicates require current presence versus absence; removal and source-retirement terminal modes are also mutually exclusive in this slice. A live detail page is only a current site claim for the remote ID; it cannot expose or prove the private metafile variant, and host/client path comparison remains lexical only.")
 		fmt.Fprintln(fs.Output(), "With --client-file-layout=auto, an eligible multi-file torrent adds at most two bounded file-list reads for one unique exact downloader job. The reads bracket storage proof, share the command timeout, and are never retried.")
 		fmt.Fprintln(fs.Output(), "")
-		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. Exact stopped adoption and reviewed existing-job recheck/start support both built-in drivers; Transmission mutation authority is v1-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID --site-cookie-stdin. When both are requested, replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie, and downloader_password.")
+		fmt.Fprintln(fs.Output(), "Client-only reads use --driver qbittorrent|transmission --url URL --username USER --password-stdin. Exact stopped adoption and reviewed existing-job recheck/start support both built-in drivers; Transmission mutation authority is v1-only. Site-detail-only reads use --site-ref SITE/REMOTE_ID with --site-live, which uses the credential 'ptctl site login' saved for the site, or with --site-cookie-stdin or --site-api-key-stdin. When both are requested, add --site-live to the client group, or replace both secret flags with --credential-bundle-stdin and pipe strict JSON containing schema, site_cookie or site_api_key, and downloader_password.")
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Flags:")
 		fs.PrintDefaults()
@@ -113,7 +113,9 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 	username := fs.String("username", "", "downloader username; part of the optional client group")
 	passwordStdin := fs.Bool("password-stdin", false, "read downloader password from stdin; part of the optional client group")
 	siteCookieStdin := fs.Bool("site-cookie-stdin", false, "read a site Cookie header from stdin and observe --site-ref live")
-	credentialBundleStdin := fs.Bool("credential-bundle-stdin", false, "read strict JSON containing site_cookie and downloader_password when live site and client reads are both requested")
+	siteAPIKeyStdin := fs.Bool("site-api-key-stdin", false, "read a site API key from stdin and observe --site-ref live")
+	siteLive := fs.Bool("site-live", false, "observe --site-ref live with the credential 'ptctl site login' saved for the site")
+	credentialBundleStdin := fs.Bool("credential-bundle-stdin", false, "read strict JSON containing site_cookie or site_api_key, and downloader_password, when live site and client reads are both requested")
 	clientFileLayout := fs.String("client-file-layout", "auto", "multi-file downloader layout reads: auto or off; requires the client group when explicit")
 	clientFileDefaults := downloader.DefaultJobFileLedgerLimits()
 	maxClientFiles := fs.Int("max-client-files", clientFileDefaults.MaxFiles, "maximum downloader files read for the one exact job; requires the client group when explicit")
@@ -382,12 +384,18 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 	for _, name := range append(append([]string{}, clientConnectionFlagNames...), "password-stdin", "credential-bundle-stdin") {
 		clientRequested = clientRequested || explicit[name]
 	}
-	siteDetailRequested := explicit["site-cookie-stdin"] || explicit["credential-bundle-stdin"]
-	if explicit["password-stdin"] && !*passwordStdin || explicit["site-cookie-stdin"] && !*siteCookieStdin || explicit["credential-bundle-stdin"] && !*credentialBundleStdin {
+	siteDetailRequested := explicit["site-cookie-stdin"] || explicit["site-api-key-stdin"] || explicit["site-live"] || explicit["credential-bundle-stdin"]
+	if explicit["password-stdin"] && !*passwordStdin || explicit["site-cookie-stdin"] && !*siteCookieStdin || explicit["site-api-key-stdin"] && !*siteAPIKeyStdin || explicit["credential-bundle-stdin"] && !*credentialBundleStdin {
 		return usageError("secret stdin flags cannot be explicitly disabled")
+	}
+	if explicit["site-live"] && !*siteLive {
+		return usageError("--site-live cannot be explicitly disabled")
 	}
 	if explicit["credential-bundle-stdin"] && (explicit["password-stdin"] || explicit["site-cookie-stdin"]) {
 		return usageError("--credential-bundle-stdin is mutually exclusive with --password-stdin and --site-cookie-stdin")
+	}
+	if countTrue(explicit["site-cookie-stdin"], explicit["site-api-key-stdin"], explicit["site-live"], explicit["credential-bundle-stdin"]) > 1 {
+		return usageError("--site-cookie-stdin, --site-api-key-stdin, --site-live, and --credential-bundle-stdin are mutually exclusive")
 	}
 	if clientRequested {
 		missing := make([]string, 0, len(clientConnectionFlagNames))
@@ -406,15 +414,18 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 			return usageError("the optional client group requires non-empty --url and --username")
 		}
 		if siteDetailRequested {
-			if !explicit["credential-bundle-stdin"] {
-				return usageError("combined live site and downloader reads require --credential-bundle-stdin")
+			if !explicit["credential-bundle-stdin"] && !explicit["site-live"] {
+				return usageError("combined live site and downloader reads require --credential-bundle-stdin, or --site-live with --password-stdin")
+			}
+			if explicit["site-live"] && !explicit["password-stdin"] {
+				return usageError("combined --site-live and downloader reads require --password-stdin")
 			}
 		} else if !explicit["password-stdin"] {
 			return usageError("client-only reconciliation requires --password-stdin")
 		}
 	}
-	if siteDetailRequested && !clientRequested && !explicit["site-cookie-stdin"] {
-		return usageError("site-detail-only reconciliation requires --site-cookie-stdin")
+	if siteDetailRequested && !clientRequested && !explicit["site-cookie-stdin"] && !explicit["site-api-key-stdin"] && !explicit["site-live"] {
+		return usageError("site-detail-only reconciliation requires --site-cookie-stdin, --site-api-key-stdin, or --site-live")
 	}
 	clientFileFlagNames := []string{"client-file-layout", "max-client-files", "max-client-file-path-bytes", "max-client-file-response-bytes"}
 	for _, name := range clientFileFlagNames {
@@ -545,14 +556,30 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 	}
 	var siteDetailReader site.TorrentDetailReader
 	var siteDetailConfig site.TorrentDetailConfig
+	var siteDetailDescriptor domain.SiteDescriptor
+	var siteSource siteCredentialSource
 	if siteDetailRequested {
 		adapter, ok := a.registry.Get(siteRef.SiteID)
 		if !ok {
 			return usageError("live site detail adapter is unavailable")
 		}
 		descriptor := adapter.Descriptor()
-		if !descriptor.Supports(domain.CapabilityDetail) || !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
+		siteDetailDescriptor = descriptor
+		// The bundle names its credential kind inside stdin, so it needs only
+		// one kind the site accepts here and the exact kind after the read.
+		bundleAuth := descriptor.SupportsAuth(domain.AuthMethodCookieHeader) || descriptor.SupportsAuth(domain.AuthMethodAPIKeyHeader)
+		if !descriptor.Supports(domain.CapabilityDetail) || explicit["site-cookie-stdin"] && !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) || explicit["credential-bundle-stdin"] && !bundleAuth {
 			return usageError("site %q does not support authenticated torrent detail reads", descriptor.ID)
+		}
+		siteSource = siteCredentialSource{method: domain.AuthMethodCookieHeader}
+		switch {
+		case explicit["site-api-key-stdin"]:
+			siteSource.method = domain.AuthMethodAPIKeyHeader
+		case explicit["site-live"]:
+			siteSource = siteCredentialSource{method: defaultSiteAuthMethod(descriptor), saved: true}
+		}
+		if !explicit["credential-bundle-stdin"] && !descriptor.SupportsAuth(siteSource.method) {
+			return usageError("site %q does not support %s authentication", descriptor.ID, siteSource.method)
 		}
 		siteDetailReader, ok = adapter.(site.TorrentDetailReader)
 		if !ok {
@@ -564,6 +591,9 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 		}
 		if err := siteDetailReader.ValidateTorrentDetailRef(*siteRef); err != nil {
 			return usageError("live site detail reference is invalid")
+		}
+		if err := siteSource.locateSaved(descriptor.ID); err != nil {
+			return err
 		}
 	}
 	meta, err := loadMetafileInput(context.Background(), input)
@@ -908,10 +938,20 @@ func (a *app) reconcileReportMode(args []string, refreshIndex bool) error {
 	var clientCredential downloader.Credential
 	if prerequisiteGatesPassed {
 		switch {
+		case siteDetailRequested && clientRequested && siteSource.saved:
+			// The saved site credential leaves stdin to the downloader password.
+			if siteCredential, err = a.readSiteCredential(siteSource, nil); err == nil {
+				clientCredential, err = readDownloaderCredential(a.stdin, *username)
+			}
 		case siteDetailRequested && clientRequested:
 			siteCredential, clientCredential, err = readReconciliationCredentialBundle(a.stdin, *username)
+			if err == nil && !siteDetailDescriptor.SupportsAuth(siteCredential.Method()) {
+				err = usageError("site %q does not support %s authentication", siteDetailDescriptor.ID, siteCredential.Method())
+			}
+		case siteDetailRequested && siteSource.method == domain.AuthMethodAPIKeyHeader:
+			siteCredential, err = a.readSiteCredential(siteSource, readAPIKeyCredential)
 		case siteDetailRequested:
-			siteCredential, err = readCredential(a.stdin)
+			siteCredential, err = a.readSiteCredential(siteSource, readCredential)
 		case clientRequested:
 			clientCredential, err = readDownloaderCredential(a.stdin, *username)
 		}
