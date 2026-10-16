@@ -55,7 +55,8 @@ capabilities at the edge, not assumptions in the core domain model.
   and password login with an optional two-step code that issues the session
   cookie;
   and an experimental M-Team adapter with session, account, search, and
-  detail reads through the official API and a site-issued API key.
+  detail reads plus acknowledged metafile fetch through the official API and a
+  site-issued API key.
 - **Downloaders:** qBittorrent and Transmission reads, plus reviewed stopped
   adoption, recheck/start, stop, and keep-data removal of one exact job.
 - **Reconciliation:** one report that keeps site, downloader, metafile, and
@@ -72,7 +73,7 @@ The complete inventory, including what is deliberately not implemented, is in
 |---|---|---|
 | Zero-write | `torrent inspect/verify`, `storage probe/map`, `seed discover/plan`, `client status/list`, ordinary `site` reads and `site bonus review`, `reconcile report`, and every `plan`, `status`, `list`, and `inspect` subcommand | None. Reads can still update atime, hydrate offline placeholders, or be recorded by the remote side. |
 | Private store | `metafile store init/import`, `storage profile create`, `storage index refresh/refresh-discover`, `reconcile refresh-report`, `site bonus exchange prepare` | The explicit command itself. Owner-only and no-clobber; not encrypted. |
-| Tracker-visible | `site metafile fetch` (one GET), `site bonus exchange submit` (at most one POST), `site login` (one POST and one verifying GET) | `--acknowledge-site-effect`, `--acknowledge-bonus-exchange`; `site login` is the command itself, with the cookie saved only to an owner-only file or a pipe |
+| Tracker-visible | `site metafile fetch` (one GET; on M-Team, a token POST and the signed-link GET, plus at most one redirect hop), `site bonus exchange submit` (at most one POST), `site login` (one POST and one verifying GET) | `--acknowledge-site-effect`, `--acknowledge-bonus-exchange`; `site login` is the command itself, with the cookie saved only to an owner-only file or a pipe |
 | Target filesystem | `seed materialize run/resume/abandon` | `--acknowledge-filesystem-write`, `--acknowledge-abandon` |
 | Downloader | `client adopt/activate/stop/remove run/resume` | `--acknowledge-client-add`, `--acknowledge-client-recheck`, `--acknowledge-client-stop`, `--acknowledge-client-removal`; repeats, re-adds, and observation-only adoption have their own flags |
 | Source deletion | `seed retire run/resume`, `seed retire parent-cleanup run/resume` | `--acknowledge-source-deletion`, `--acknowledge-empty-parent-removal` |

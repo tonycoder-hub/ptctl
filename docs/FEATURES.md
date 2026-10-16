@@ -108,8 +108,13 @@ deliberately does not. For step-by-step usage, see the
   seeders, leechers, promotion factors, and category names, and torrent detail
   for one remote ID, through one read-only POST per invocation to the official
   JSON API, authenticated by a site-issued API key read only from stdin, with
-  no redirect, proxy, or retry; M-Team metafile download is not implemented
-  yet;
+  no redirect, proxy, or retry;
+- an explicitly acknowledged M-Team metafile fetch for one remote ID: one
+  token POST for a signed download link, one credential-free GET of that link,
+  and at most one further GET only for a redirect to an M-Team HTTPS host, with
+  the link treated as a secret that is never printed or stored, the link
+  requests counted separately from the one metafile GET, and the same strict
+  validation and private-store publication as TJUPT;
 - qBittorrent and Transmission status and torrent-list reads over HTTPS (or
   explicit numeric loopback HTTP), with passwords accepted only through stdin;
 - read-only reconciliation that can first observe one authenticated live site

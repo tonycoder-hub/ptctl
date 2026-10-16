@@ -25,12 +25,24 @@ type fakeMetafileFetchAdapter struct {
 	lastCredential   string
 	forcedFetchError error
 	configError      error
+	// linked makes the fake an API-key site whose route spends linkRequests
+	// before the metafile GET; requestSkew misreports the session total.
+	linked       bool
+	linkRequests int
+	requestSkew  int
+}
+
+func (adapter *fakeMetafileFetchAdapter) authMethod() domain.AuthMethod {
+	if adapter.linked {
+		return domain.AuthMethodAPIKeyHeader
+	}
+	return domain.AuthMethodCookieHeader
 }
 
 func (adapter *fakeMetafileFetchAdapter) Descriptor() domain.SiteDescriptor {
 	return domain.SiteDescriptor{
 		ID: "fakept", Name: "Fake PT", BaseURL: "https://fake.invalid/", Stability: "test",
-		AuthMethods:  []domain.AuthMethod{domain.AuthMethodCookieHeader},
+		AuthMethods:  []domain.AuthMethod{adapter.authMethod()},
 		Capabilities: []domain.Capability{domain.CapabilityMetafile},
 	}
 }
@@ -46,6 +58,9 @@ func (adapter *fakeMetafileFetchAdapter) MetafileFetchConfig() (site.MetafileFet
 	if adapter.configError != nil {
 		return site.MetafileFetchConfig{}, adapter.configError
 	}
+	if adapter.linked {
+		return site.NewLinkedMetafileFetchConfig("https://fake.invalid", "fake.download_by_id.v1", 2)
+	}
 	return site.NewMetafileFetchConfig("https://fake.invalid", "fake.download_by_id.v1")
 }
 
@@ -53,19 +68,21 @@ func (adapter *fakeMetafileFetchAdapter) OpenMetafileFetchSession(ctx context.Co
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if credential.Method() != domain.AuthMethodCookieHeader {
+	if credential.Method() != adapter.authMethod() {
 		return nil, fmt.Errorf("wrong auth")
 	}
 	adapter.opened++
 	adapter.lastCredential = credential.SecretValue()
-	return &fakeMetafileFetchSession{raw: bytes.Clone(adapter.raw), forcedError: adapter.forcedFetchError}, nil
+	return &fakeMetafileFetchSession{raw: bytes.Clone(adapter.raw), forcedError: adapter.forcedFetchError, linkRequests: adapter.linkRequests, requestSkew: adapter.requestSkew}, nil
 }
 
 type fakeMetafileFetchSession struct {
-	raw         []byte
-	forcedError error
-	requests    int
-	closed      bool
+	raw          []byte
+	forcedError  error
+	requests     int
+	closed       bool
+	linkRequests int
+	requestSkew  int
 }
 
 func (session *fakeMetafileFetchSession) FetchMetafile(ctx context.Context, ref domain.TorrentRef, limits site.MetafileFetchLimits) (*site.FetchedMetafile, site.MetafileFetchReceipt, error) {
@@ -84,15 +101,16 @@ func (session *fakeMetafileFetchSession) FetchMetafile(ctx context.Context, ref 
 		receipt.StopReason = "request_budget_exhausted"
 		return nil, receipt, fmt.Errorf("request budget exhausted")
 	}
-	session.requests++
+	session.requests += 1 + session.linkRequests
 	receipt.Used.RequestsAttempted = 1
+	receipt.Used.LinkRequestsAttempted = session.linkRequests
 	if session.forcedError != nil {
 		receipt.ObservedAtEnd = time.Now().UTC()
 		receipt.StopReason = "site.synthetic_failure"
 		return nil, receipt, session.forcedError
 	}
 	end := time.Now().UTC()
-	fetched, err := site.NewFetchedMetafile(ref, receipt.Origin, receipt.RouteID, start, end, session.raw)
+	fetched, err := site.NewLinkedFetchedMetafile(ref, receipt.Origin, receipt.RouteID, start, end, session.linkRequests, session.raw)
 	if err != nil {
 		return nil, receipt, err
 	}
@@ -103,7 +121,9 @@ func (session *fakeMetafileFetchSession) FetchMetafile(ctx context.Context, ref 
 	return fetched, receipt, nil
 }
 
-func (session *fakeMetafileFetchSession) RequestsMade() int { return session.requests }
+func (session *fakeMetafileFetchSession) RequestsMade() int {
+	return session.requests + session.requestSkew
+}
 func (session *fakeMetafileFetchSession) Close() error {
 	session.closed = true
 	return nil
@@ -174,6 +194,10 @@ func TestSiteMetafileFetchStoresExactVariantAndHidesSecrets(t *testing.T) {
 	assertJSONArray(t, "fetch issues", envelope.Data.Issues)
 	assertJSONArray(t, "fetch warnings", envelope.Data.Warnings)
 	assertJSONStringsExclude(t, out.Bytes(), storeRoot, name, passkey, cookie, "announce?passkey")
+	if strings.Contains(out.String(), "link_request") || !strings.Contains(out.String(), `"scope": "one_remote_metafile_get"`) ||
+		!strings.Contains(out.String(), `"effectful_same_origin_get_for_remote_id"`) || len(envelope.Data.Warnings) == 0 || strings.Contains(string(envelope.Data.Warnings), "link") {
+		t.Fatalf("direct route report changed: %s", out.String())
+	}
 
 	out.Reset()
 	a = &app{stdin: strings.NewReader(cookie + "\n"), stdout: &out, stderr: &errOut, registry: site.NewRegistry(adapter)}
@@ -350,7 +374,7 @@ func TestSiteMetafileFetchHumanReportOrdersBlockersBeforeEvidence(t *testing.T) 
 	blockers := strings.Index(text, "BLOCKERS")
 	siteSection := strings.Index(text, "REMOTE ID")
 	storeSection := strings.Index(text, "STORE OUTCOME")
-	if blockers < 0 || siteSection < blockers || storeSection < siteSection || !strings.Contains(text, "OBSERVED VARIANT") || !strings.Contains(text, "AUTOMATIC RETRIES") || !strings.Contains(text, "PERSISTENT BINDING") || !strings.Contains(text, "RECORD ID") {
+	if blockers < 0 || siteSection < blockers || storeSection < siteSection || !strings.Contains(text, "OBSERVED VARIANT") || !strings.Contains(text, "AUTOMATIC RETRIES") || !strings.Contains(text, "PERSISTENT BINDING") || !strings.Contains(text, "RECORD ID") || strings.Contains(text, "LINK REQUEST") {
 		t.Fatalf("unclear human report: %s", text)
 	}
 	for _, secret := range []string{storeRoot, name, passkey, cookie} {
@@ -368,6 +392,155 @@ func TestEffectfulSiteCredentialIsCanonicalASCII(t *testing.T) {
 	for _, value := range []string{" a=1\n", "a=1 \n", "a=1\n\n", "a=\u00a0\n", "\n"} {
 		if _, err := readEffectfulSiteCredential(strings.NewReader(value)); err == nil {
 			t.Fatalf("unsafe credential accepted: %q", value)
+		}
+	}
+}
+
+func TestEffectfulAPIKeyCredentialIsCanonicalASCII(t *testing.T) {
+	for _, value := range []string{"KEY-CANARY-1", "KEY-CANARY-1\n", "KEY-CANARY-1\r\n"} {
+		credential, err := readEffectfulAPIKeyCredential(strings.NewReader(value))
+		if err != nil || credential.Method() != domain.AuthMethodAPIKeyHeader || credential.SecretValue() != "KEY-CANARY-1" {
+			t.Fatalf("canonical API key %q rejected: %v", value, err)
+		}
+	}
+	for _, value := range []string{"", "\n", " KEY\n", "KEY \n", "K EY\n", "KEY\t\n", "KEY\n\n", "KEY \n"} {
+		if _, err := readEffectfulAPIKeyCredential(strings.NewReader(value)); err == nil {
+			t.Fatalf("unsafe API key accepted: %q", value)
+		}
+	}
+}
+
+func TestSiteMetafileFetchLinkedRouteAccountsForLinkRequests(t *testing.T) {
+	const (
+		name    = "LINKED-NAME-CANARY.bin"
+		passkey = "LINKED-PASSKEY-CANARY"
+		key     = "LINKED-API-KEY-CANARY"
+	)
+	for _, links := range []int{1, 2} {
+		t.Run(strconv.Itoa(links), func(t *testing.T) {
+			storeRoot := filepath.Join(physicalCLITempDir(t), "LINKED-STORE-PATH-CANARY")
+			if _, _, err := metastore.Init(storeRoot); err != nil {
+				t.Fatal(err)
+			}
+			adapter := &fakeMetafileFetchAdapter{raw: sitePrivateTrackerMetafile(name, []byte("x"), passkey), linked: true, linkRequests: links}
+			var out bytes.Buffer
+			a := &app{stdin: strings.NewReader(key + "\n"), stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+			if err := a.siteMetafileFetch([]string{"--api-key-stdin", "--acknowledge-site-effect", "--metafile-store", storeRoot, "--output", "json", "fakept", "42"}); err != nil {
+				t.Fatalf("linked fetch failed: %v stdout=%s", err, out.String())
+			}
+			if adapter.opened != 1 || adapter.lastCredential != key {
+				t.Fatalf("unexpected session: opened=%d", adapter.opened)
+			}
+			var envelope struct {
+				Data struct {
+					Outcome         string `json:"outcome"`
+					Acknowledgement struct {
+						Scope string `json:"scope"`
+					} `json:"acknowledgement"`
+					Binding struct {
+						Status        string   `json:"status"`
+						EvidenceBasis []string `json:"evidence_basis"`
+					} `json:"binding"`
+					Persistent struct {
+						Outcome string `json:"outcome"`
+					} `json:"persistent_binding"`
+					Request struct {
+						RequestsMade int                       `json:"requests_made"`
+						Redirects    int                       `json:"redirects"`
+						Receipt      site.MetafileFetchReceipt `json:"receipt"`
+					} `json:"request"`
+					Warnings []string `json:"warnings"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			data := envelope.Data
+			if data.Outcome != "stored" || data.Persistent.Outcome != "stored" || data.Binding.Status != "observed_exact_variant" ||
+				data.Acknowledgement.Scope != "site_link_requests_then_one_remote_metafile_get" ||
+				len(data.Binding.EvidenceBasis) == 0 || data.Binding.EvidenceBasis[0] != "effectful_site_issued_link_get_for_remote_id" ||
+				data.Request.RequestsMade != 1+links || data.Request.Redirects != 0 ||
+				data.Request.Receipt.Limits.MaxLinkRequests != 2 || data.Request.Receipt.Used.LinkRequestsAttempted != links ||
+				data.Request.Receipt.Used.RequestsAttempted != 1 || !strings.Contains(strings.Join(data.Warnings, "\n"), "download link is a credential") {
+				t.Fatalf("unexpected linked report: %s", out.String())
+			}
+			assertJSONStringsExclude(t, out.Bytes(), storeRoot, name, passkey, key, "announce?passkey")
+
+			out.Reset()
+			a = &app{stdin: strings.NewReader(key + "\n"), stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+			if err := a.siteMetafileFetch([]string{"--api-key-stdin", "--acknowledge-site-effect", "--metafile-store", storeRoot, "fakept", "42"}); err != nil {
+				t.Fatal(err)
+			}
+			if text := out.String(); !strings.Contains(text, "LINK REQUEST LIMIT  2\n") || !strings.Contains(text, "LINK REQUESTS USED  "+strconv.Itoa(links)+"\n") ||
+				strings.Contains(text, key) || strings.Contains(text, passkey) {
+				t.Fatalf("unexpected linked human report: %s", text)
+			}
+		})
+	}
+}
+
+func TestSiteMetafileFetchLinkedRouteRejectsInconsistentAccounts(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		linkRequests int
+		skew         int
+	}{
+		{name: "uncounted link request", linkRequests: 1, skew: -1},
+		{name: "unreported request", linkRequests: 1, skew: 1},
+		{name: "link request over budget", linkRequests: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storeRoot := filepath.Join(physicalCLITempDir(t), "store")
+			if _, _, err := metastore.Init(storeRoot); err != nil {
+				t.Fatal(err)
+			}
+			adapter := &fakeMetafileFetchAdapter{raw: sitePrivateTrackerMetafile("x.bin", []byte("x"), "INCONSISTENT-CANARY"), linked: true, linkRequests: test.linkRequests, requestSkew: test.skew}
+			var out bytes.Buffer
+			a := &app{stdin: strings.NewReader("KEY\n"), stdout: &out, stderr: ioDiscard{}, registry: site.NewRegistry(adapter)}
+			if err := a.siteMetafileFetch([]string{"--api-key-stdin", "--acknowledge-site-effect", "--metafile-store", storeRoot, "--output", "json", "fakept", "42"}); err == nil {
+				t.Fatalf("inconsistent account accepted: %s", out.String())
+			}
+			if !strings.Contains(out.String(), `"outcome": "blocked"`) || strings.Contains(out.String(), "observed_exact_variant") || strings.Contains(out.String(), `"writes_performed": 1`) {
+				t.Fatalf("inconsistent account was published: %s", out.String())
+			}
+		})
+	}
+}
+
+func TestSiteMetafileFetchNamesAndChecksTheCredentialFlagBeforeReadingIt(t *testing.T) {
+	missingStore := filepath.Join(physicalCLITempDir(t), "missing-store")
+	flags := []string{"--acknowledge-site-effect", "--metafile-store", missingStore}
+	for _, test := range []struct {
+		adapter *fakeMetafileFetchAdapter
+		args    []string
+		want    string
+	}{
+		{adapter: &fakeMetafileFetchAdapter{linked: true}, args: []string{"fakept", "42"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
+		{adapter: &fakeMetafileFetchAdapter{linked: true}, args: []string{"--cookie-stdin", "fakept", "42"}, want: `site "fakept" does not support cookie_header authentication`},
+		{adapter: &fakeMetafileFetchAdapter{}, args: []string{"fakept", "42"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{adapter: &fakeMetafileFetchAdapter{}, args: []string{"--api-key-stdin", "fakept", "42"}, want: `site "fakept" does not support api_key_header authentication`},
+		{adapter: &fakeMetafileFetchAdapter{}, args: []string{"--cookie-stdin", "--api-key-stdin", "fakept", "42"}, want: "--cookie-stdin and --api-key-stdin are mutually exclusive"},
+	} {
+		secret := &trackingReader{}
+		application := &app{stdin: secret, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, registry: site.NewRegistry(test.adapter)}
+		if err := application.siteMetafileFetch(append(append([]string{}, flags...), test.args...)); err == nil || err.Error() != test.want || secret.read || test.adapter.opened != 0 {
+			t.Fatalf("args=%q err=%v secretRead=%t", test.args, err, secret.read)
+		}
+	}
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"mteam", "1"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
+		{args: []string{"tjupt", "1"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{args: []string{"--api-key-stdin", "tjupt", "1"}, want: `site "tjupt" does not support api_key_header authentication`},
+		{args: []string{"--cookie-stdin", "mteam", "1"}, want: `site "mteam" does not support cookie_header authentication`},
+	} {
+		secret := &trackingReader{}
+		var out, errOut bytes.Buffer
+		args := append(append([]string{"site", "metafile", "fetch"}, flags...), test.args...)
+		if code := Run(args, secret, &out, &errOut); code != 2 || out.Len() != 0 || secret.read || !strings.Contains(errOut.String(), test.want) {
+			t.Fatalf("args=%q code=%d stdout=%q stderr=%q secretRead=%t", test.args, code, out.String(), errOut.String(), secret.read)
 		}
 	}
 }

@@ -48,7 +48,8 @@ const mteamDescriptorJSON = `    {
         "auth.check",
         "account.read",
         "torrent.search",
-        "torrent.detail"
+        "torrent.detail",
+        "torrent.metafile.read_effectful"
       ]
     }`
 
@@ -67,7 +68,7 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 		{args: []string{"site", "capabilities", "--output", "json", "mteam"}, want: descriptorListJSON(mteamDescriptorJSON)},
 		{args: []string{"site", "list"}, want: "" +
 			"ID     NAME           STABILITY     BASE URL                 CAPABILITIES\n" +
-			"mteam  M-Team / 馒头PT  experimental  https://api2.m-team.cc/  4\n" +
+			"mteam  M-Team / 馒头PT  experimental  https://api2.m-team.cc/  5\n" +
 			"tjupt  TJUPT / 北洋园PT  experimental  https://www.tjupt.org/   9\n"},
 		{args: []string{"site", "capabilities", "tjupt"}, want: "" +
 			"SITE   KIND        VALUE\n" +
@@ -87,7 +88,8 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 			"mteam  capability  auth.check\n" +
 			"mteam  capability  account.read\n" +
 			"mteam  capability  torrent.search\n" +
-			"mteam  capability  torrent.detail\n"},
+			"mteam  capability  torrent.detail\n" +
+			"mteam  capability  torrent.metafile.read_effectful\n"},
 	}
 	for _, test := range tests {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {

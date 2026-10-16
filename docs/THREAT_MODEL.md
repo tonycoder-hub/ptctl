@@ -111,8 +111,16 @@ forwarding cookies or API keys. A local proxy that answers DNS with fake-IP
 addresses (`198.18.0.0/15`) therefore makes site reads fail closed; the CLI
 names that cause instead of dialing the proxy.
 
-The effectful metafile fetch is stricter: it rejects every redirect so that one
-acknowledgement cannot expand into another tracker-visible request. The report
+The effectful metafile fetch is stricter. A direct route, such as TJUPT's,
+rejects every redirect so that one acknowledgement cannot expand into another
+tracker-visible request. A linked route, such as M-Team's, declares its extra
+requests up front: the acknowledgement scope names them and `MaxLinkRequests`
+bounds them at two. Its site-issued link and at most one redirect target are
+contacted only over HTTPS on the default port at a host under the adapter's own
+registrable domains, each through a fresh credential-free client bound to that
+host, so the API key never reaches it and the DNS checks above still apply. The
+link is a bearer credential: `httpguard.SecretLink` redacts it when formatted
+and keeps it out of errors, reports, and records. The report
 accounts for whether the sole transport attempt started even when DNS, TLS, or
 response processing later fails; it never derives a zero request count merely
 from an error.
@@ -139,9 +147,12 @@ with echo turned off before each prompt appears (input typed ahead of a prompt
 can still be echoed), restores echo if interrupted, and saves the cookie under the
 user config directory, which no command reads back implicitly; a terminal is
 accepted only there, never with `--credential-bundle-stdin`.
-The M-Team adapter sends at most one bounded POST per command to one of two
-read-only JSON API endpoints (`member/profile` and `torrent/search`), with a
-non-replayable body of at most 16 KiB, and never retries. HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
+The M-Team adapter's reads send at most one bounded POST per command to one of
+three read-only JSON API endpoints (`member/profile`, `torrent/search`, and
+`torrent/detail`), with a non-replayable body of at most 16 KiB, and never
+retry. Its metafile fetch sends one token POST, waits three seconds, and then
+makes at most two GETs as described above; the site's per-torrent daily
+download limit and burst refusals stop it as `rate_limited`. HTTP 429 is terminal. There is no cross-process limiter in the alpha, so
 callers must not loop or parallelize site commands. There is no Cloudflare or
 CAPTCHA bypass.
 
@@ -222,9 +233,11 @@ journals may retain bytes. After final marker removal the program has no basis
 to claim earlier success, so later absence is unattributed. Neither protocol
 coordinates a cloned or rolled-back store history.
 
-`site metafile fetch` is scoped to one validated remote ID and one GET. It does
-not perform a preceding detail lookup, follow a redirect, retry, or fan out to
-related IDs.
+`site metafile fetch` is scoped to one validated remote ID and one metafile GET.
+A linked route adds at most two counted link requests before it (for M-Team,
+the token POST and one allowlisted redirect hop). It does not perform a
+preceding detail lookup, let the HTTP stack follow a redirect, retry, or fan
+out to related IDs.
 
 A live reconciliation may first use one independent, bounded site-detail GET.
 It then opens one audited read-only downloader session and performs two bounded
@@ -1472,9 +1485,10 @@ The B1 site metafile fetch crosses two independent boundaries. The tracker may
 record its passkey-bearing GET, so the command requires an explicit
 site-effect acknowledgement scoped to one site reference. All usage, limits,
 the one remote ID, capability, authentication method, and initialized store's
-privacy/no-clobber assurances are validated before the cookie is read from
-stdin. It then sends at most one bounded GET, with no detail lookup, redirect,
-or retry, and passes the bounded exact response directly to the existing
+privacy/no-clobber assurances are validated before the cookie or API key is
+read from stdin. It then sends at most one bounded metafile GET, preceded on a
+linked route by at most `MaxLinkRequests` bounded link requests, with no detail
+lookup, automatic redirect, or retry, and passes the bounded exact response directly to the existing
 no-clobber store primitive, which requires strict validation before publication.
 
 The invocation-only `observed_exact_variant` relation records the exact store
@@ -1486,7 +1500,7 @@ has returned the valid exact reference, a later durability or post-publication
 failure does not erase the observation, but the observation still does not
 prove durability. Request accounting, logical store writes, and durability
 assurance remain separate even on failure. No raw response, request URL,
-cookie, announce material, object or temporary path may be written to stdout,
+site-issued download link, cookie, API key, announce material, object or temporary path may be written to stdout,
 reports, errors, or an arbitrary destination.
 
 Only after a fully successful artifact import may the command publish a sealed

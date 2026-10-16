@@ -96,6 +96,12 @@ func NewWithHeaderCredential(baseURL, header, value string, minInterval time.Dur
 	return newClient(baseURL, name, value, minInterval)
 }
 
+// NewWithoutCredential binds no credential. It is for a URL whose own signed
+// query authorizes the request, such as a download link a site API issued.
+func NewWithoutCredential(baseURL string, minInterval time.Duration) (*Client, error) {
+	return newClient(baseURL, "", "", minInterval)
+}
+
 // reservedHeaders are set by the client itself or frame the message, so a
 // credential header must never replace them.
 var reservedHeaders = map[string]bool{
@@ -456,6 +462,122 @@ func (c *Client) PostReadOnce(ctx context.Context, relativePath, contentType str
 	c.applyCredential(req)
 	req.Close = true
 	return c.roundTrip(ctx, req, result, maxBody, maxHeaderBytes, nil)
+}
+
+// SecretLink is one exact absolute HTTPS URL whose query carries authority,
+// such as a signed download link. It formats as redacted and holds the URL
+// behind a pointer, so formatting a struct that holds a SecretLink prints an
+// address rather than the URL. Never print, log, or store its URL.
+type SecretLink struct {
+	value *url.URL
+}
+
+const maxSecretLinkBytes = 4096
+
+// NewSecretLink parses raw as an absolute HTTPS URL without user info or a
+// fragment. The query is kept exactly as given.
+func NewSecretLink(raw string) (SecretLink, error) {
+	if raw == "" || len(raw) > maxSecretLinkBytes || !asciiHeaderValue(raw) || strings.ContainsAny(raw, " \\") {
+		return SecretLink{}, fmt.Errorf("site link is invalid")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !validSecretLink(parsed) {
+		return SecretLink{}, fmt.Errorf("site link is invalid")
+	}
+	return SecretLink{value: parsed}, nil
+}
+
+func validSecretLink(link *url.URL) bool {
+	return link != nil && link.Scheme == "https" && link.Opaque == "" && link.Host != "" && link.Hostname() != "" &&
+		link.User == nil && link.Fragment == "" && link.RawFragment == "" && link.RawPath == "" && !link.ForceQuery
+}
+
+// URL returns a copy that the caller may inspect but must keep secret.
+func (link SecretLink) URL() *url.URL {
+	if link.value == nil {
+		return nil
+	}
+	copyOfLink := *link.value
+	return &copyOfLink
+}
+
+func (link SecretLink) IsZero() bool { return link.value == nil }
+
+func (link SecretLink) String() string   { return "[REDACTED]" }
+func (link SecretLink) GoString() string { return "httpguard.SecretLink{[REDACTED]}" }
+
+// GetLinkOnce performs one non-following, non-retrying GET of an exact link on
+// this client's own origin; the query is sent verbatim. For a redirect with one
+// absolute or relative HTTPS Location that approve accepts, it also returns the
+// target as a SecretLink. The redirect is never followed, and neither the link
+// nor the Location appears in the result or an error.
+func (c *Client) GetLinkOnce(ctx context.Context, link SecretLink, accept string, maxBody, maxHeaderBytes int64, approve func(*url.URL) bool) (StrictResponse, SecretLink, error) {
+	var result StrictResponse
+	if maxBody <= 0 || maxBody > 32<<20 || maxHeaderBytes <= 0 || maxHeaderBytes > hardMaxResponseHeaders {
+		return result, SecretLink{}, fmt.Errorf("site response budget is invalid")
+	}
+	if accept == "" || !asciiHeaderValue(accept) {
+		return result, SecretLink{}, fmt.Errorf("site accept header is invalid")
+	}
+	target := link.URL()
+	if !validSecretLink(target) {
+		return result, SecretLink{}, fmt.Errorf("site link is invalid")
+	}
+	if !strings.EqualFold(target.Hostname(), c.base.Hostname()) || effectivePort(target) != effectivePort(c.base) {
+		return result, SecretLink{}, fmt.Errorf("site request escaped configured origin")
+	}
+	if err := c.wait(ctx); err != nil {
+		return result, SecretLink{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, SecretLink{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return result, SecretLink{}, fmt.Errorf("build site request failed")
+	}
+	req.Header.Set("Accept", accept)
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("User-Agent", readOnlyUserAgent)
+	c.applyCredential(req)
+	req.Close = true
+	var next SecretLink
+	capture := func(resp *http.Response) error {
+		if approve == nil || resp.StatusCode < 300 || resp.StatusCode > 399 {
+			return nil
+		}
+		locations := resp.Header.Values("Location")
+		if len(locations) != 1 {
+			return nil
+		}
+		if location, ok := linkRedirectTarget(target, locations[0]); ok && approve(SecretLink{value: location}.URL()) {
+			next = SecretLink{value: location}
+		}
+		return nil
+	}
+	response, err := c.roundTripCapturing(ctx, req, result, maxBody, maxHeaderBytes, nil, capture)
+	if err != nil {
+		return response, SecretLink{}, err
+	}
+	return response, next, nil
+}
+
+// linkRedirectTarget resolves one Location against the link it answered. Any
+// HTTPS host is returned; the caller's approve function decides which host may
+// be contacted next.
+func linkRedirectTarget(from *url.URL, raw string) (*url.URL, bool) {
+	if raw == "" || len(raw) > maxSecretLinkBytes || !asciiHeaderValue(raw) || strings.ContainsAny(raw, " \\") {
+		return nil, false
+	}
+	ref, err := url.Parse(raw)
+	if err != nil || ref.User != nil || ref.Fragment != "" || ref.RawPath != "" {
+		return nil, false
+	}
+	target := from.ResolveReference(ref)
+	if !validSecretLink(target) {
+		return nil, false
+	}
+	return target, true
 }
 
 const readOnlyUserAgent = "ptctl/0.1 (+https://github.com/tonycoder-hub/ptctl; conservative-read-only-client)"
