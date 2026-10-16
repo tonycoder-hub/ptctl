@@ -285,17 +285,23 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 		fmt.Fprintf(w, "BONUS\t%s\nOBSERVED\t%s\n", terminalSafe(valueOrUnknown(account.Bonus)), account.ObservedAt.Format(time.RFC3339))
 	case "search":
 		items := data.([]domain.TorrentSummary)
+		// Category names come last so the leading columns keep their places.
+		categoryHeader, category := "", func(domain.TorrentSummary) string { return "" }
+		if reportsCategoryName(items) {
+			categoryHeader = "\tCATEGORY"
+			category = func(item domain.TorrentSummary) string { return "\t" + terminalSafe(valueOrDash(item.CategoryName)) }
+		}
 		if !reportsSwarmOrPromotion(items) {
-			fmt.Fprintln(w, "REF\tNAME\tSIZE")
+			fmt.Fprintln(w, "REF\tNAME\tSIZE"+categoryHeader)
 			for _, item := range items {
-				fmt.Fprintf(w, "%s/%s\t%s\t%s\n", terminalSafe(item.Ref.SiteID), terminalSafe(item.Ref.RemoteID), terminalSafe(item.Name), searchSize(item))
+				fmt.Fprintf(w, "%s/%s\t%s\t%s%s\n", terminalSafe(item.Ref.SiteID), terminalSafe(item.Ref.RemoteID), terminalSafe(item.Name), searchSize(item), category(item))
 			}
 			break
 		}
-		fmt.Fprintln(w, "REF\tNAME\tSIZE\tSEEDERS\tLEECHERS\tPROMOTION")
+		fmt.Fprintln(w, "REF\tNAME\tSIZE\tSEEDERS\tLEECHERS\tPROMOTION"+categoryHeader)
 		for _, item := range items {
-			fmt.Fprintf(w, "%s/%s\t%s\t%s\t%s\t%s\t%s\n", terminalSafe(item.Ref.SiteID), terminalSafe(item.Ref.RemoteID), terminalSafe(item.Name), searchSize(item),
-				optionalCount(item.Seeders), optionalCount(item.Leechers), terminalSafe(promotionLabel(item.Promotion)))
+			fmt.Fprintf(w, "%s/%s\t%s\t%s\t%s\t%s\t%s%s\n", terminalSafe(item.Ref.SiteID), terminalSafe(item.Ref.RemoteID), terminalSafe(item.Name), searchSize(item),
+				optionalCount(item.Seeders), optionalCount(item.Leechers), terminalSafe(promotionLabel(item.Promotion)), category(item))
 		}
 	case "bonus-catalog":
 		catalog := data.(domain.BonusCatalog)
@@ -322,6 +328,17 @@ func writeSiteHuman(out io.Writer, command string, data any, warnings []string) 
 func reportsSwarmOrPromotion(items []domain.TorrentSummary) bool {
 	for _, item := range items {
 		if item.Seeders != nil || item.Leechers != nil || item.Promotion != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// reportsCategoryName decides whether the search table grows a CATEGORY
+// column. Sites whose adapters report only category IDs keep their layout.
+func reportsCategoryName(items []domain.TorrentSummary) bool {
+	for _, item := range items {
+		if item.CategoryName != "" {
 			return true
 		}
 	}

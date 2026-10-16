@@ -47,6 +47,7 @@ func (a *app) siteDetail(args []string) error {
 	fs := newFlagSet("site detail")
 	output := fs.String("output", "table", "table or json")
 	cookieStdin := fs.Bool("cookie-stdin", false, "read session Cookie header value from stdin")
+	apiKeyStdin := fs.Bool("api-key-stdin", false, "read a site-issued API key from stdin")
 	if err := fs.Parse(args); err != nil {
 		return usageError("site detail: %v", err)
 	}
@@ -56,8 +57,11 @@ func (a *app) siteDetail(args []string) error {
 	if err := validateOutput(*output); err != nil {
 		return err
 	}
-	if !*cookieStdin {
-		return usageError("--cookie-stdin is required; credentials are never accepted in argv")
+	if *cookieStdin && *apiKeyStdin {
+		return usageError("--cookie-stdin and --api-key-stdin are mutually exclusive")
+	}
+	if !*cookieStdin && !*apiKeyStdin {
+		return usageError("%s is required; credentials are never accepted in argv", requiredCredentialFlag(a.registry, fs.Arg(0)))
 	}
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
@@ -67,8 +71,12 @@ func (a *app) siteDetail(args []string) error {
 	if !descriptor.Supports(domain.CapabilityDetail) {
 		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityDetail)
 	}
-	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
-		return usageError("site %q does not support cookie_header authentication", descriptor.ID)
+	method, readSecret := domain.AuthMethodCookieHeader, readCredential
+	if *apiKeyStdin {
+		method, readSecret = domain.AuthMethodAPIKeyHeader, readAPIKeyCredential
+	}
+	if !descriptor.SupportsAuth(method) {
+		return usageError("site %q does not support %s authentication", descriptor.ID, method)
 	}
 	reader, ok := adapter.(site.TorrentDetailReader)
 	if !ok {
@@ -85,7 +93,7 @@ func (a *app) siteDetail(args []string) error {
 	limits := site.DefaultTorrentDetailLimits()
 	report := newSiteDetailReport(ref, config, limits)
 
-	credential, err := readCredential(a.stdin)
+	credential, err := readSecret(a.stdin)
 	if err != nil {
 		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "credential.unavailable", Message: "the site credential could not be read"})
 		return a.finishSiteDetail(*output, report, fmt.Errorf("read site credential failed"))
@@ -152,9 +160,24 @@ func newSiteDetailReport(ref domain.TorrentRef, config site.TorrentDetailConfig,
 		Blockers: []siteDetailFinding{},
 		Warnings: []string{
 			"site detail fields are live site claims, not metafile identity or storage-content proof",
-			"the single request is tracker-visible; the TJUPT route deliberately omits the view-counting hit parameter",
+			detailRequestWarning(config.RouteID),
 		},
 	}
+}
+
+// detailRouteWarnings say how each built-in detail route keeps its single
+// request from counting as a page view. A route missing here gets only the
+// generic line, never another site's claim.
+var detailRouteWarnings = map[string]string{
+	"tjupt.details_by_id_no_hit.v1": "the single request is tracker-visible; the TJUPT route deliberately omits the view-counting hit parameter",
+	"mteam.torrent_detail_api.v1":   "the single request is tracker-visible; the M-Team route never calls the separate view-counting endpoint",
+}
+
+func detailRequestWarning(routeID string) string {
+	if warning, ok := detailRouteWarnings[routeID]; ok {
+		return warning
+	}
+	return "the single request is tracker-visible"
 }
 
 func validateSuccessfulTorrentDetail(ref domain.TorrentRef, config site.TorrentDetailConfig, limits site.TorrentDetailLimits, observed *site.ObservedTorrentDetail, receipt site.TorrentDetailReceipt, requestsMade int) error {

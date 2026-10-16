@@ -238,3 +238,94 @@ func TestSiteSearchTableAddsSwarmAndPromotionColumnsOnlyWhenReported(t *testing.
 		}
 	}
 }
+
+func TestSiteSearchTableAddsACategoryColumnOnlyWhenNamed(t *testing.T) {
+	size := int64(3 << 30)
+	seeders := 12
+	tests := []struct {
+		results []domain.TorrentSummary
+		want    string
+	}{
+		{results: []domain.TorrentSummary{
+			{Ref: domain.TorrentRef{SiteID: "api-key-test", RemoteID: "1"}, Name: "Movie", SizeBytes: &size, Seeders: &seeders, Category: "401", CategoryName: "电影/SD"},
+			{Ref: domain.TorrentRef{SiteID: "api-key-test", RemoteID: "2"}, Name: "New", Category: "999"},
+		}, want: "" +
+			"REF             NAME   SIZE      SEEDERS  LEECHERS  PROMOTION  CATEGORY\n" +
+			"api-key-test/1  Movie  3.00 GiB  12       -         unknown    电影/SD\n" +
+			"api-key-test/2  New    unknown   -        -         unknown    -\n"},
+		{results: []domain.TorrentSummary{
+			{Ref: domain.TorrentRef{SiteID: "api-key-test", RemoteID: "1"}, Name: "Plain", SizeBytes: &size, CategoryName: "软件"},
+		}, want: "" +
+			"REF             NAME   SIZE      CATEGORY\n" +
+			"api-key-test/1  Plain  3.00 GiB  软件\n"},
+		{results: []domain.TorrentSummary{
+			{Ref: domain.TorrentRef{SiteID: "api-key-test", RemoteID: "1"}, Name: "Unnamed", SizeBytes: &size, Category: "401"},
+		}, want: "" +
+			"REF             NAME     SIZE\n" +
+			"api-key-test/1  Unnamed  3.00 GiB\n"},
+	}
+	for _, test := range tests {
+		var out bytes.Buffer
+		application := &app{stdin: strings.NewReader(apiKeyCanary), stdout: &out, stderr: &bytes.Buffer{}, registry: site.NewRegistry(&apiKeySiteAdapter{results: test.results})}
+		if err := application.siteRead("search", []string{"--api-key-stdin", "api-key-test", "query"}); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != test.want {
+			t.Fatalf("stdout:\n%s\nwant:\n%s", out.String(), test.want)
+		}
+	}
+}
+
+func TestSiteDetailSendsAPIKeyFromStdin(t *testing.T) {
+	adapter := successfulFakeTorrentDetail(t)
+	adapter.authMethod = domain.AuthMethodAPIKeyHeader
+	var out, errOut bytes.Buffer
+	application := &app{stdin: strings.NewReader(apiKeyCanary + "\n"), stdout: &out, stderr: &errOut, registry: site.NewRegistry(adapter)}
+	if err := application.siteDetail([]string{"--api-key-stdin", "--output", "json", "fakept", "42"}); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.opened != 1 || adapter.credential != apiKeyCanary || errOut.Len() != 0 || strings.Contains(out.String(), "CANARY") ||
+		!strings.Contains(out.String(), `"outcome": "observed"`) || !strings.Contains(out.String(), `"the single request is tracker-visible"`) {
+		t.Fatalf("opened=%d credential=%q stdout=%s stderr=%q", adapter.opened, adapter.credential, out.String(), errOut.String())
+	}
+}
+
+func TestSiteDetailNamesAndChecksTheCredentialFlagBeforeReadingIt(t *testing.T) {
+	apiKeyOnly := func() site.Adapter {
+		adapter := successfulFakeTorrentDetail(t)
+		adapter.authMethod = domain.AuthMethodAPIKeyHeader
+		return adapter
+	}
+	for _, test := range []struct {
+		adapter site.Adapter
+		args    []string
+		want    string
+	}{
+		{adapter: apiKeyOnly(), args: []string{"fakept", "42"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
+		{adapter: apiKeyOnly(), args: []string{"--cookie-stdin", "fakept", "42"}, want: `site "fakept" does not support cookie_header authentication`},
+		{adapter: successfulFakeTorrentDetail(t), args: []string{"fakept", "42"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{adapter: successfulFakeTorrentDetail(t), args: []string{"--api-key-stdin", "fakept", "42"}, want: `site "fakept" does not support api_key_header authentication`},
+		{adapter: successfulFakeTorrentDetail(t), args: []string{"--cookie-stdin", "--api-key-stdin", "fakept", "42"}, want: "--cookie-stdin and --api-key-stdin are mutually exclusive"},
+	} {
+		secret := &trackingReader{}
+		application := &app{stdin: secret, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, registry: site.NewRegistry(test.adapter)}
+		if err := application.siteDetail(test.args); err == nil || err.Error() != test.want || secret.read {
+			t.Fatalf("args=%q err=%v secretRead=%t", test.args, err, secret.read)
+		}
+	}
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"site", "detail", "mteam", "1"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
+		{args: []string{"site", "detail", "tjupt", "1"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{args: []string{"site", "detail", "--api-key-stdin", "tjupt", "1"}, want: `site "tjupt" does not support api_key_header authentication`},
+		{args: []string{"site", "detail", "--cookie-stdin", "mteam", "1"}, want: `site "mteam" does not support cookie_header authentication`},
+	} {
+		secret := &trackingReader{}
+		var out, errOut bytes.Buffer
+		if code := Run(test.args, secret, &out, &errOut); code != 2 || out.Len() != 0 || secret.read || !strings.Contains(errOut.String(), test.want) {
+			t.Fatalf("args=%q code=%d stdout=%q stderr=%q secretRead=%t", test.args, code, out.String(), errOut.String(), secret.read)
+		}
+	}
+}
