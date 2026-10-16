@@ -12,9 +12,12 @@ read capabilities:
 - torrent search (`site search`).
 
 Torrent detail and metafile download are not implemented yet; see
-[Not supported yet](#not-supported-yet). The adapter has not had a credentialed
-live smoke test in this repository; its tests use synthetic responses shaped
-after the public API.
+[Not supported yet](#not-supported-yet). The three reads were smoke-tested live
+on 2026-10-16 with a newly created API key: `site status` reported
+`authenticated`, `site account` read the profile, and `site search` returned
+results in both table and JSON output. A creation time the API returned for that
+key matched UTC+8, confirming how [times](#results) are read. The unit tests use
+synthetic responses shaped after the public API.
 
 ## Getting an API key
 
@@ -145,7 +148,10 @@ ptctl metafile store import --store "$PTCTL_STORE" release.torrent
 
 **Torrent detail.** `site detail` and live-site reconciliation seal a route
 identity into their records. M-Team detail will be added together with the
-download contract so both get one reviewed, versioned identity.
+download contract so both get one reviewed, versioned identity. The website's
+detail page reads `/api/torrent/detail`, whose answer includes the info hash,
+and also calls `/api/torrent/viewHits`, which by its name records a view; an
+adapter should send only the first.
 
 **Everything else.** Bonus exchange, RSS, seeding lists, and messages are not
 implemented.
