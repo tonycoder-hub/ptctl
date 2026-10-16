@@ -20,9 +20,10 @@ func (a *app) helpTopic(args []string) error {
 
 pt cli does not search your home/project directories for configuration or credentials.
 There is no --config file or saved downloader-login profile. The one thing
-saved by default is the session cookie from an interactive 'pt site login',
-under the user config directory; no command reads it back automatically
-(see 'pt help login').
+saved is the site credential from 'pt site login': a session cookie or API key
+in an owner-only file under the user config directory. Site commands use it
+when no --cookie-stdin or --api-key-stdin flag is given, and 'pt site logout'
+deletes it (see 'pt help login').
 
 Downloader reads:
   --driver qbittorrent|transmission  (default: qbittorrent)
@@ -77,6 +78,8 @@ Details: pt help reconcile report | pt help config
 `)
 	case "login", "site login":
 		fmt.Fprint(a.stdout, siteLoginHelp)
+	case "logout", "site logout":
+		fmt.Fprint(a.stdout, siteLogoutHelp)
 	case "version":
 		return a.version([]string{"--help"})
 	case "torrent inspect":

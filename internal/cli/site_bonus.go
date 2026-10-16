@@ -60,9 +60,6 @@ func (a *app) siteBonusReview(args []string) error {
 	if err := validateOutput(*output); err != nil {
 		return err
 	}
-	if !*cookieStdin {
-		return usageError("--cookie-stdin is required; credentials are never accepted in argv")
-	}
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
 		return usageError("unknown site %q", fs.Arg(0))
@@ -73,6 +70,11 @@ func (a *app) siteBonusReview(args []string) error {
 	}
 	if !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
 		return usageError("site %q does not support cookie_header authentication", descriptor.ID)
+	}
+	// The site takes cookies, so without the flag this picks its saved cookie.
+	source, err := siteCredentialSourceFor(descriptor, *cookieStdin, false)
+	if err != nil {
+		return err
 	}
 	reader, ok := adapter.(site.BonusReviewReader)
 	if !ok {
@@ -90,12 +92,15 @@ func (a *app) siteBonusReview(args []string) error {
 	if err := limits.Validate(); err != nil {
 		return usageError("site bonus review limits are invalid")
 	}
+	if err := source.locateSaved(descriptor.ID); err != nil {
+		return err
+	}
 	report := newSiteBonusReviewReport(descriptor.ID, selector, config, limits)
 
-	credential, err := readCredential(a.stdin)
+	credential, err := a.readSiteCredential(source, readCredential)
 	if err != nil {
 		report.Blockers = append(report.Blockers, siteDetailFinding{Code: "credential.unavailable", Message: "the site credential could not be read"})
-		return a.finishSiteBonusReview(*output, report, fmt.Errorf("read site credential failed"))
+		return a.finishSiteBonusReview(*output, report, siteCredentialReadError(source, err))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()

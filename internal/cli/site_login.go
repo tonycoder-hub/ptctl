@@ -23,35 +23,50 @@ const siteLoginTimeout = 45 * time.Second
 const siteLoginHelp = `Usage:
   pt site login [--cookie-file PATH] [--session-days N] [--output table|json] SITE
   pt site login --credential-bundle-stdin [--cookie-file PATH] [--session-days N] [--output table|json] SITE
+  pt site login (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
 
-Signs in to SITE with the account password and saves a new session cookie for
-the --cookie-stdin commands. Sites that list the auth.login_effectful
-capability support it; see 'pt site capabilities SITE'.
+Signs in to SITE once, so the site commands work without a credential flag.
+After it, for example:
+  pt site status SITE
+  pt site search SITE QUERY
+Each site command uses the saved credential unless --cookie-stdin or
+--api-key-stdin pipes one in; an explicit flag always wins. 'pt site logout
+SITE' deletes the saved credential.
 
-By default the command prompts on this terminal for the username, the
-password, and the two-step code (press Enter if the account has none). The
-password and code are not shown as you type. It sends one login request, then
-one read that confirms the new session, and never retries. The cookie is saved,
-readable only by you, to
+Sites that list the auth.login_effectful capability (TJUPT) sign in with the
+account password. By default the command prompts on this terminal for the
+username, the password, and the two-step code (press Enter if the account has
+none). The password and code are not shown as you type. It sends one login
+request, then one read that confirms the new session, and never retries. The
+session cookie is saved, readable only by you, to
   <user config dir>/ptctl/sessions/SITE.cookie
-and the exact path is printed. Nothing reads that file automatically; pass it
-on stdin, for example:
-  pt site status --cookie-stdin SITE < PATH
+and the exact path is printed. The password itself is never saved.
+
+Sites without a password login (M-Team) prompt for their API key instead, with
+echo off, check it with one session read, and save it, readable only by you,
+to
+  <user config dir>/ptctl/sessions/SITE.api-key
+The same works for a session cookie you already have, with --cookie-stdin.
+The saved file holds the credential in plain text; anyone who can read your
+account's files can use it.
 
 Failed logins count toward the site's lockout (TJUPT blocks the IP after ten),
 so never run login in a loop.
 
 Flags:
   --cookie-file PATH
-      Save the cookie to PATH instead. PATH is replaced atomically and is
-      readable only by you; its directory must already exist.
+      Password login only: save the cookie to PATH instead. PATH is replaced
+      atomically and is readable only by you; its directory must already
+      exist. Site commands do not read PATH by themselves; pipe it with
+      --cookie-stdin.
   --session-days N
-      Session length in days, one the site offers; an invalid value lists them.
-      The default is the site's own default (TJUPT: 7).
+      Password login only: session length in days, one the site offers; an
+      invalid value lists them. The default is the site's own default
+      (TJUPT: 7).
   --output table|json
       json prints a site.login report on stdout with site_id, username,
-      session_days, session_expires_at, cookie_file, and requests_attempted.
-      It never contains the cookie.
+      session_days, session_expires_at, cookie_file or api_key_file, and
+      requests_attempted. It never contains the credential.
   --credential-bundle-stdin
       For scripts and agents: read the credentials from stdin as one strict
       JSON object instead of prompting:
@@ -61,40 +76,52 @@ Flags:
       terminal on stdin is refused. Without --cookie-file the cookie, and
       nothing else, is written to stdout, which must be a pipe or an
       owner-only file, and --output json is refused.
+  --cookie-stdin, --api-key-stdin
+      For scripts and agents: read the session cookie or API key to save from
+      stdin instead of prompting. A terminal on stdin is refused.
 
-Agent example, with no secret in any argv:
+Agent examples, with no secret in any argv:
   jq -n --arg user "$SITE_USER" --rawfile password "$PASSWORD_FILE" \
         --rawfile totp <(op item get "$OP_ITEM" --otp) \
      '{schema: "ptctl.credentials/v1", site_username: $user,
        site_password: ($password | rtrimstr("\n")),
        site_totp: ($totp | rtrimstr("\n"))}' |
     pt site login --credential-bundle-stdin --cookie-file "$COOKIE_FILE" --output json tjupt
+  pt site login --api-key-stdin --output json mteam < "$API_KEY_FILE"
 
 Exit status:
-  0  Logged in. Text output reports the account, the expiry, and the cookie
+  0  Logged in. Text output reports the account, the expiry, and the saved
      file on stderr.
   1  "site login stopped: REASON", where REASON is one of
-       login_credentials_rejected   the site refused the username or password
+       login_credentials_rejected   the site refused the username or password,
+                                    or the cookie or API key to save
        login_two_factor_required    the account needs a two-step code
        login_two_factor_rejected    the code was wrong or expired
        login_response_unrecognized  the site answered with an unknown page
-       login_session_unverified     the new cookie did not show the same account
+       login_session_unverified     the new cookie did not show the same
+                                    account, or the site's answer did not
+                                    confirm the cookie or API key to save
        login_request_failed         the request failed; the site may still
                                     have counted the attempt
      The line may end with "(the site reports N login attempts left before it
      blocks this IP)". Other failures print "site login failed" with an
-     optional ": CAUSE".
+     optional ": CAUSE". Nothing is saved after a failure.
   2  Usage error. Nothing was read or sent.
 `
 
 // siteLoginReport is the --output json result of a verified login. It says
 // where the session cookie went and never contains the cookie itself.
+// A password login always has a session length and, in json mode, a cookie
+// file, so omitempty never drops either from its report. Saving an existing
+// credential has no session length and names an api_key_file instead of a
+// cookie_file for an API key.
 type siteLoginReport struct {
 	SiteID            string     `json:"site_id"`
 	Username          string     `json:"username"`
-	SessionDays       int        `json:"session_days"`
+	SessionDays       int        `json:"session_days,omitempty"`
 	SessionExpiresAt  *time.Time `json:"session_expires_at,omitempty"`
-	CookieFile        string     `json:"cookie_file"`
+	CookieFile        string     `json:"cookie_file,omitempty"`
+	APIKeyFile        string     `json:"api_key_file,omitempty"`
 	RequestsAttempted int        `json:"requests_attempted"`
 }
 
@@ -106,6 +133,8 @@ type siteLoginReport struct {
 func (a *app) siteLogin(args []string) error {
 	fs := newFlagSet("site login")
 	bundleStdin := fs.Bool("credential-bundle-stdin", false, "read a ptctl.credentials/v1 bundle with site_username, site_password, and optional site_totp from stdin instead of prompting")
+	cookieStdin := fs.Bool("cookie-stdin", false, "save a Cookie header value read from stdin, after one verifying read, instead of signing in with the password")
+	apiKeyStdin := fs.Bool("api-key-stdin", false, "save a site-issued API key read from stdin, after one verifying read, instead of prompting for it")
 	cookieFile := fs.String("cookie-file", "", "save the session cookie to this owner-only file")
 	sessionDays := fs.Int("session-days", 0, "session length in days; must be one the site offers (default: the site's default)")
 	output := fs.String("output", "table", "table or json")
@@ -122,6 +151,9 @@ func (a *app) siteLogin(args []string) error {
 	if err := validateOutput(*output); err != nil {
 		return err
 	}
+	if countTrue(*bundleStdin, *cookieStdin, *apiKeyStdin) > 1 {
+		return usageError("site login accepts only one of --credential-bundle-stdin, --cookie-stdin, and --api-key-stdin")
+	}
 	if *bundleStdin && *cookieFile == "" && *output == "json" {
 		return usageError("--output json needs --cookie-file, because --credential-bundle-stdin otherwise writes the session cookie to stdout")
 	}
@@ -130,6 +162,12 @@ func (a *app) siteLogin(args []string) error {
 		return usageError("unknown site %q", fs.Arg(0))
 	}
 	descriptor := adapter.Descriptor()
+	if *cookieStdin || *apiKeyStdin || (!*bundleStdin && !descriptor.Supports(domain.CapabilityLogin)) {
+		if *cookieFile != "" || *sessionDays != 0 {
+			return usageError("--cookie-file and --session-days apply only to a password login")
+		}
+		return a.siteSaveCredential(adapter, descriptor, *cookieStdin, *apiKeyStdin, *output)
+	}
 	if !descriptor.Supports(domain.CapabilityLogin) {
 		return usageError("site %q does not declare capability %q", descriptor.ID, domain.CapabilityLogin)
 	}
@@ -213,11 +251,128 @@ func (a *app) siteLogin(args []string) error {
 	}
 	fmt.Fprintf(a.stderr, "site login succeeded: site=%s username=%s session_expires=%s requests=%d\n",
 		terminalSafe(descriptor.ID), terminalSafe(result.Username), expires, result.RequestsAttempted)
-	if pending != nil {
+	if pending != nil && defaultDestination {
+		fmt.Fprintf(a.stderr, "session cookie saved to %s (owner-only)\nsite commands now use it when no --cookie-stdin is given, for example: ptctl site status %s\n",
+			terminalSafe(destination), terminalSafe(descriptor.ID))
+	} else if pending != nil {
 		fmt.Fprintf(a.stderr, "session cookie saved to %s (owner-only)\nuse it with: %s\n",
 			terminalSafe(destination), terminalSafe(cookieUseHint(descriptor.ID, destination)))
 	}
 	return nil
+}
+
+// siteSaveCredential verifies a cookie or API key the user already has with
+// one session read, then saves it where site commands find it. It prompts on
+// the terminal with echo off unless --cookie-stdin or --api-key-stdin pipes
+// the credential in.
+func (a *app) siteSaveCredential(adapter site.Adapter, descriptor domain.SiteDescriptor, cookieStdin, apiKeyStdin bool, output string) error {
+	source, err := siteCredentialSourceFor(descriptor, cookieStdin, apiKeyStdin)
+	if err != nil {
+		return err
+	}
+	label, flagName := savedCredentialLabel(source.method), credentialStdinFlag(source.method)
+	if !descriptor.Supports(domain.CapabilityAuthCheck) {
+		return usageError("site %q cannot verify a saved credential because it does not declare capability %q", descriptor.ID, domain.CapabilityAuthCheck)
+	}
+	checker, ok := adapter.(site.AuthChecker)
+	if !ok {
+		return fmt.Errorf("site %q declares %q but does not implement its typed port", descriptor.ID, domain.CapabilityAuthCheck)
+	}
+	prompt := !cookieStdin && !apiKeyStdin
+	var terminal promptTerminal
+	if prompt {
+		if terminal, ok = a.promptTerminal(); !ok {
+			return usageError("site login prompts on an interactive terminal; without one, pipe the %s with %s", label, flagName)
+		}
+	}
+	destination, err := savedCredentialPath(descriptor.ID, source.method)
+	if err == nil {
+		destination, err = filepath.Abs(destination)
+	}
+	if err != nil {
+		return usageError("no user config directory for the saved %s", label)
+	}
+	if info, err := os.Lstat(destination); err == nil && !info.Mode().IsRegular() {
+		return usageError("refusing to replace saved %s %s because it is not a regular file", label, destination)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return usageError("inspect saved %s %s failed", label, destination)
+	}
+
+	var credential site.Credential
+	if prompt {
+		fmt.Fprintf(a.stderr, "Saving the %s for %s; one read checks it first.\n", label, terminalSafe(descriptor.Name))
+		question := "Cookie header value (hidden): "
+		if source.method == domain.AuthMethodAPIKeyHeader {
+			question = "API key (hidden): "
+		}
+		value, readErr := terminal.ReadSecret(func() { fmt.Fprint(a.stderr, question) })
+		fmt.Fprintln(a.stderr)
+		if readErr != nil {
+			return loginPromptError(readErr)
+		}
+		value = strings.TrimSpace(value)
+		if source.method == domain.AuthMethodAPIKeyHeader {
+			credential, err = canonicalAPIKeyCredential([]byte(value))
+		} else {
+			credential, err = canonicalCookieCredential([]byte(value))
+		}
+	} else if source.method == domain.AuthMethodAPIKeyHeader {
+		credential, err = readEffectfulAPIKeyCredential(a.stdin)
+	} else {
+		credential, err = readEffectfulSiteCredential(a.stdin)
+	}
+	if err != nil {
+		return err
+	}
+	pending, err := prepareSessionCookieFile(destination, true)
+	if err != nil {
+		return err
+	}
+	defer pending.discard()
+
+	ctx, cancel := context.WithTimeout(context.Background(), siteLoginTimeout)
+	defer cancel()
+	status, err := checker.CheckSession(ctx, credential)
+	if err != nil {
+		for _, cause := range []error{site.ErrCredentialMalformed, site.ErrCredentialRejected} {
+			if errors.Is(err, cause) {
+				return fmt.Errorf("site login failed: %v", cause)
+			}
+		}
+		return siteLoginPublicError(ctx, err)
+	}
+	switch status.State {
+	case domain.AuthenticationAuthenticated:
+	case domain.AuthenticationUnauthenticated:
+		return fmt.Errorf("site login stopped: %s", site.LoginCredentialsRejected)
+	default:
+		return fmt.Errorf("site login stopped: %s", site.LoginSessionUnverified)
+	}
+	if err := pending.commit(credential.SecretValue()); err != nil {
+		return err
+	}
+	if output == "json" {
+		report := siteLoginReport{SiteID: descriptor.ID, Username: status.Username, RequestsAttempted: 1}
+		if source.method == domain.AuthMethodAPIKeyHeader {
+			report.APIKeyFile = destination
+		} else {
+			report.CookieFile = destination
+		}
+		return writeJSON(a.stdout, report, nil)
+	}
+	fmt.Fprintf(a.stderr, "site login succeeded: site=%s username=%s requests=1\n%s saved to %s (owner-only)\nsite commands now use it when no %s is given, for example: ptctl site status %s\n",
+		terminalSafe(descriptor.ID), terminalSafe(status.Username), label, terminalSafe(destination), flagName, terminalSafe(descriptor.ID))
+	return nil
+}
+
+func countTrue(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
 }
 
 // promptLoginCredentials asks for the username with echo, then for the
@@ -270,7 +425,7 @@ func checkSessionCookiePath(path string, explicit bool) (string, error) {
 	info, err := os.Lstat(resolved)
 	switch {
 	case err == nil && !info.Mode().IsRegular():
-		return "", fmt.Errorf("refusing to replace %s with a session cookie: it is not a regular file", resolved)
+		return "", fmt.Errorf("refusing to replace %s with a session cookie because it is not a regular file", resolved)
 	case err != nil && !errors.Is(err, os.ErrNotExist):
 		return "", fmt.Errorf("inspect session cookie file %s failed", resolved)
 	}
@@ -445,4 +600,84 @@ func knownLoginStopReason(reason string) bool {
 		return true
 	}
 	return false
+}
+
+const siteLogoutHelp = `Usage:
+  pt site logout [--output table|json] SITE
+
+Deletes the session cookie or API key 'pt site login' saved for SITE, so site
+commands stop using it. Nothing is sent to the site: a session cookie stays
+valid on the site until it expires, and an API key stays valid until you
+revoke it in the site's own settings. A file saved elsewhere with
+--cookie-file is not touched.
+
+Exit status:
+  0  The saved credential was deleted, or there was none.
+  1  A saved credential path is not a regular file, or it could not be deleted.
+  2  Usage error. Nothing was deleted.
+`
+
+// siteLogoutReport is the --output json result of site logout.
+type siteLogoutReport struct {
+	SiteID       string   `json:"site_id"`
+	RemovedFiles []string `json:"removed_files"`
+}
+
+// siteLogout deletes the credentials 'site login' saved for one site. It
+// never contacts the site.
+func (a *app) siteLogout(args []string) error {
+	fs := newFlagSet("site logout")
+	output := fs.String("output", "table", "table or json")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(a.stdout, siteLogoutHelp)
+			return nil
+		}
+		return usageError("site logout: %v", err)
+	}
+	if fs.NArg() != 1 {
+		return usageError("site logout requires exactly one SITE")
+	}
+	if err := validateOutput(*output); err != nil {
+		return err
+	}
+	adapter, ok := a.registry.Get(fs.Arg(0))
+	if !ok {
+		return usageError("unknown site %q", fs.Arg(0))
+	}
+	descriptor := adapter.Descriptor()
+	report := siteLogoutReport{SiteID: descriptor.ID, RemovedFiles: []string{}}
+	for _, method := range []domain.AuthMethod{domain.AuthMethodCookieHeader, domain.AuthMethodAPIKeyHeader} {
+		path, err := savedCredentialPath(descriptor.ID, method)
+		if err != nil {
+			return usageError("no user config directory for saved credentials")
+		}
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect saved %s %s failed", savedCredentialLabel(method), path)
+		}
+		// A symlink is deleted itself, never the file it points to.
+		if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("refusing to delete saved %s %s because it is not a regular file", savedCredentialLabel(method), path)
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("delete saved %s %s failed", savedCredentialLabel(method), path)
+		}
+		report.RemovedFiles = append(report.RemovedFiles, path)
+		if *output != "json" {
+			fmt.Fprintf(a.stderr, "deleted saved %s %s\n", savedCredentialLabel(method), terminalSafe(path))
+		}
+	}
+	if *output == "json" {
+		return writeJSON(a.stdout, report, nil)
+	}
+	if len(report.RemovedFiles) == 0 {
+		fmt.Fprintf(a.stderr, "no saved credential for site %s\n", terminalSafe(descriptor.ID))
+		return nil
+	}
+	fmt.Fprintln(a.stderr, "nothing was sent to the site; a session cookie stays valid there until it expires, and an API key until you revoke it")
+	return nil
 }

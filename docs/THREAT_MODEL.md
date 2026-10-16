@@ -145,8 +145,39 @@ Without a cookie file it goes only to a pipe or an owner-only stdout file. The
 interactive default reads the password and one-time code from the terminal
 with echo turned off before each prompt appears (input typed ahead of a prompt
 can still be echoed), restores echo if interrupted, and saves the cookie under the
-user config directory, which no command reads back implicitly; a terminal is
-accepted only there, never with `--credential-bundle-stdin`.
+user config directory; a terminal is accepted only there, never with
+`--credential-bundle-stdin`. `site login --cookie-stdin` or
+`--api-key-stdin` saves a piped credential to the same place, and the
+interactive default for an API-key site (M-Team) reads the key with echo off;
+either way one status read must accept the credential before it replaces an
+earlier one. See [Saved site credentials](#saved-site-credentials).
+
+### Saved site credentials
+
+So that one sign-in serves every later command, `site login` keeps the site
+credential at rest: `ptctl/sessions/SITE.cookie` or `SITE.api-key` under the
+user config directory, a plaintext file of mode `0600` in a `0700` directory,
+written through an owner-only temporary file and renamed into place. Every
+`site` command for that site, including metafile fetch and bonus exchange
+submit, reads it when no stdin credential flag is given; an explicit flag
+always wins. This is a deliberate trade: anyone who can read the file as the
+user, or any process the user runs, can act as the user on that site until the
+session expires or the key is revoked. An M-Team API key does not expire on its
+own, so its file is worth more than a TJUPT session cookie.
+
+The read side refuses, without showing the content, a path that is a symlink
+or not a regular file, a file whose mode grants any group or other access
+(outside Windows, where the user profile's ACL governs), a file that changes
+between open and stat, and content that is not exactly one valid credential
+line within the single-secret limit. The location and all other usage checks
+are settled before the file is read, so a missing file is a usage error that
+contacts no site. A saved credential never stands in for an acknowledgement
+flag. `ptctl site logout SITE` deletes the saved files for the site, removing a
+symlink rather than its target and refusing a directory; it does not end the
+session or revoke the key on the site. Account and downloader passwords are
+never saved. The file is not encrypted; an OS keyring or credential helper
+remains future work (see
+[Known gaps](#known-gaps-before-broader-mutation-support)).
 The M-Team adapter's reads send at most one bounded POST per command to one of
 three read-only JSON API endpoints (`member/profile`, `torrent/search`, and
 `torrent/detail`), with a non-replayable body of at most 16 KiB, and never
@@ -191,9 +222,12 @@ and is never used to justify another automatic request.
 
 A site that confirms exchanges with the account password (TJUPT) widens the
 secret surface to that password, so its handling is narrower than the cookie's.
-It is read only from the strict stdin bundle after every local check, never
-from argv or a terminal, and lives in a type whose formatting is
-`[REDACTED]`. The adapter appends it as one `passwd` field to the single POST;
+It is never saved and never read from argv. With `--credential-bundle-stdin`
+it is read from the strict bundle after every local check. With the saved
+cookie and stdin on a terminal, it is read with echo off after the usage and
+acknowledgement checks and before the timeout starts; without a terminal, the
+command exits `2` before any request and names the bundle. Either way it
+lives in a type whose formatting is `[REDACTED]`. The adapter appends it as one `passwd` field to the single POST;
 the encoded body is never logged, and receipts count only the reviewed form's
 bytes so the password length is not disclosed. A fresh form that already
 carries a `passwd` control is refused before the attempt marker rather than

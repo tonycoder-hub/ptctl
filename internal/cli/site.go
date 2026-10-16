@@ -28,6 +28,8 @@ func (a *app) site(args []string) error {
 		return a.siteDetail(args[1:])
 	case "login":
 		return a.siteLogin(args[1:])
+	case "logout":
+		return a.siteLogout(args[1:])
 	case "bonus":
 		if len(args) >= 2 {
 			switch args[1] {
@@ -133,9 +135,6 @@ func (a *app) siteRead(command string, args []string) error {
 	if *cookieStdin && *apiKeyStdin {
 		return usageError("--cookie-stdin and --api-key-stdin are mutually exclusive")
 	}
-	if !*cookieStdin && !*apiKeyStdin {
-		return usageError("%s is required; credentials are never accepted in argv", requiredCredentialFlag(a.registry, fs.Arg(0)))
-	}
 	adapter, ok := a.registry.Get(fs.Arg(0))
 	if !ok {
 		return usageError("unknown site %q", fs.Arg(0))
@@ -153,12 +152,13 @@ func (a *app) siteRead(command string, args []string) error {
 	if !descriptor.Supports(capability) {
 		return usageError("site %q does not declare capability %q", descriptor.ID, capability)
 	}
-	method, readSecret := domain.AuthMethodCookieHeader, readCredential
-	if *apiKeyStdin {
-		method, readSecret = domain.AuthMethodAPIKeyHeader, readAPIKeyCredential
+	source, err := siteCredentialSourceFor(descriptor, *cookieStdin, *apiKeyStdin)
+	if err != nil {
+		return err
 	}
-	if !descriptor.SupportsAuth(method) {
-		return usageError("site %q does not support %s authentication", descriptor.ID, method)
+	readSecret := readCredential
+	if source.method == domain.AuthMethodAPIKeyHeader {
+		readSecret = readAPIKeyCredential
 	}
 	var read func(context.Context, site.Credential) (any, error)
 	var warnings []string
@@ -203,7 +203,10 @@ func (a *app) siteRead(command string, args []string) error {
 	default:
 		return usageError("unknown site read command %q", command)
 	}
-	credential, err := readSecret(a.stdin)
+	if err := source.locateSaved(descriptor.ID); err != nil {
+		return err
+	}
+	credential, err := a.readSiteCredential(source, readSecret)
 	if err != nil {
 		return err
 	}
@@ -234,19 +237,6 @@ func siteReadPublicError(ctx context.Context, command string, err error) error {
 		}
 	}
 	return fmt.Errorf("site %s failed", command)
-}
-
-// requiredCredentialFlag names the stdin flag a site's read commands need. A
-// site that only accepts API keys gets --api-key-stdin; every other site, and
-// an unknown one, keeps the original --cookie-stdin message.
-func requiredCredentialFlag(registry *site.Registry, id string) string {
-	if adapter, ok := registry.Get(id); ok {
-		descriptor := adapter.Descriptor()
-		if descriptor.SupportsAuth(domain.AuthMethodAPIKeyHeader) && !descriptor.SupportsAuth(domain.AuthMethodCookieHeader) {
-			return "--api-key-stdin"
-		}
-	}
-	return "--cookie-stdin"
 }
 
 func writeSiteHuman(out io.Writer, command string, data any, warnings []string) error {

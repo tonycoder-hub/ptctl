@@ -26,11 +26,12 @@ ptctl metafile store inspect \
 Fetch one exact private metafile directly into that initialized store. This is
 an effectful operation: the tracker may record the GET, so the acknowledgement
 must be explicit. All usage, the single remote ID, limits, capability, and
-store assurances are checked before the credential is read from stdin:
+store assurances are checked before the credential is read. The command uses
+the credential `ptctl site login` saved for the site; a saved credential never
+stands in for `--acknowledge-site-effect`:
 
 ```bash
-printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch \
-  --cookie-stdin \
+ptctl site metafile fetch \
   --acknowledge-site-effect \
   --metafile-store "D:\Private\ptctl-metafiles" \
   tjupt REMOTE_ID
@@ -42,11 +43,18 @@ link requests are counted separately (see
 [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md#metafile-download)):
 
 ```bash
-printf '%s' "$MTEAM_API_KEY" | ptctl site metafile fetch \
-  --api-key-stdin \
+ptctl site metafile fetch \
   --acknowledge-site-effect \
   --metafile-store "D:\Private\ptctl-metafiles" \
   mteam REMOTE_ID
+```
+
+A script that does not keep a saved credential pipes it to this one command
+instead, with `--cookie-stdin` for TJUPT or `--api-key-stdin` for M-Team:
+
+```bash
+printf '%s' "$TJUPT_COOKIE" | ptctl site metafile fetch --cookie-stdin \
+  --acknowledge-site-effect --metafile-store "D:\Private\ptctl-metafiles" tjupt REMOTE_ID
 ```
 
 The command performs no torrent-detail lookup and sends at most one metafile
