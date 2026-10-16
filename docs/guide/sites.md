@@ -35,33 +35,73 @@ seeders, leechers, snatches, and promotion when the results table has its
 usual shape; otherwise a result keeps only its name and size.
 
 Instead of copying the cookie out of a browser, `site login` can sign in with
-the account password and write a new session cookie for the commands above.
-It takes one strict `ptctl.credentials/v1` bundle on stdin with
-`site_username`, `site_password`, and, for an account with two-step
-verification, the current one-time code in `site_totp`. Stdout must be a pipe
-or an owner-only file: the command refuses a terminal, a device, or a file
-other users can read. One way to build the bundle without putting a secret in
-argv, here with the 1Password CLI supplying the code:
+the account password and save a new session cookie for the commands above.
+Run it in a terminal and answer the prompts:
+
+```console
+$ ptctl site login tjupt
+Signing in to TJUPT / 北洋园PT with one login request; failed logins count toward the site's lockout.
+Username: alice
+Password (hidden):
+Two-step code (hidden; press Enter if none):
+site login succeeded: site=tjupt username=alice session_expires=2026-10-23T08:00:00Z requests=2
+session cookie saved to /home/alice/.config/ptctl/sessions/tjupt.cookie (owner-only)
+use it with: ptctl site status --cookie-stdin tjupt < '/home/alice/.config/ptctl/sessions/tjupt.cookie'
+```
+
+The password and the two-step code are not echoed. Press Enter at the code
+prompt when the account has no two-step verification; spaces inside a code are
+ignored. Ctrl+C at a prompt quits without sending anything. The cookie is saved
+to `ptctl/sessions/SITE.cookie` under the user config directory (`~/.config` on
+Linux, `~/Library/Application Support` on macOS, `%AppData%` on Windows),
+readable only by you, and replaced atomically by the next login. No command
+reads it automatically; pass it on stdin as the last line shows.
+`--cookie-file PATH` saves it somewhere else, and `--session-days` picks the
+session length the site offers (TJUPT: 1, 7, 14, 30, or 90; default 7).
+`ptctl help login` describes every flag.
+
+Scripts and agents pass the credentials instead with `--credential-bundle-stdin`,
+as one strict `ptctl.credentials/v1` bundle on stdin: `site_username`,
+`site_password`, and, for an account with two-step verification, the current
+one-time code in `site_totp`. A terminal on stdin is then refused. With
+`--cookie-file` the cookie goes to that file and `--output json` reports a
+`site.login` object, without the cookie, on stdout. Without `--cookie-file` the
+cookie line and nothing else goes to stdout, which must be a pipe or an
+owner-only file, and `--output json` is refused. One way to build the bundle
+without putting a secret in argv, here with the 1Password CLI supplying the
+code:
 
 ```bash
-(umask 077
- jq -n --arg user "$TJUPT_USER" \
-   --rawfile password "$PASSWORD_FILE" \
-   --rawfile totp <(op item get "$TJUPT_ITEM" --otp) \
-   '{schema: "ptctl.credentials/v1",
-     site_username: $user,
-     site_password: ($password | rtrimstr("\n")),
-     site_totp: ($totp | rtrimstr("\n"))}' | \
-   ptctl site login --credential-bundle-stdin tjupt > "$COOKIE_FILE")
+jq -n --arg user "$TJUPT_USER" \
+  --rawfile password "$PASSWORD_FILE" \
+  --rawfile totp <(op item get "$TJUPT_ITEM" --otp) \
+  '{schema: "ptctl.credentials/v1",
+    site_username: $user,
+    site_password: ($password | rtrimstr("\n")),
+    site_totp: ($totp | rtrimstr("\n"))}' | \
+  ptctl site login --credential-bundle-stdin --cookie-file "$COOKIE_FILE" --output json tjupt
 
 ptctl site status --cookie-stdin tjupt < "$COOKIE_FILE"
 ```
 
-Leave out `site_totp` when the account has no two-step verification.
-`--session-days` picks the session length the site offers (TJUPT: 1, 7, 14, 30,
-or 90; default 7). On success, stdout holds only the cookie line and stderr
-reports `site login succeeded: site=tjupt username=... session_expires=...
-requests=2`.
+```json
+{
+  "schema": "ptctl.dev/v1",
+  "kind": "site.login",
+  "data": {
+    "site_id": "tjupt",
+    "username": "alice",
+    "session_days": 7,
+    "session_expires_at": "2026-10-23T08:00:00Z",
+    "cookie_file": "/home/alice/tjupt.cookie",
+    "requests_attempted": 2
+  }
+}
+```
+
+Leave out `site_totp` when the account has no two-step verification. In text
+mode, stderr reports `site login succeeded: site=tjupt username=...
+session_expires=... requests=2` and, with a cookie file, where it was saved.
 
 Login sends one POST and never retries. If the site issues a session cookie,
 ptctl waits two seconds and makes one read with it, and keeps the cookie only
@@ -71,7 +111,7 @@ if that read shows the same signed-in account. Otherwise it exits `1` with
 | Reason | Meaning |
 |---|---|
 | `login_credentials_rejected` | The site refused the username or password. |
-| `login_two_factor_required` | The account needs a one-time code and the bundle had none. |
+| `login_two_factor_required` | The account needs a one-time code and none was given. |
 | `login_two_factor_rejected` | The one-time code was wrong or expired. |
 | `login_response_unrecognized` | The site answered with a page ptctl does not recognize. |
 | `login_session_unverified` | A cookie was issued, but the verifying read did not show the same signed-in account. The cookie is discarded. |
@@ -80,7 +120,8 @@ if that read shows the same signed-in account. Otherwise it exits `1` with
 TJUPT blocks the client IP after ten failed logins. When the page states how
 many attempts are left, the error line ends with `(the site reports N login
 attempts left before it blocks this IP)`. Fix the input before trying again,
-and never loop `site login`. Usage errors exit `2` before stdin is read.
+and never loop `site login`. Usage errors exit `2` before any prompt or stdin
+read. A failed login leaves an earlier cookie file untouched.
 
 M-Team reads use a site-issued API key instead of a cookie, passed with
 `--api-key-stdin` under the same stdin-only rules. `status`, `account`, and

@@ -19,7 +19,10 @@ func (a *app) helpTopic(args []string) error {
 		fmt.Fprint(a.stdout, `Configuration (explicit inputs; no automatic discovery)
 
 pt cli does not search your home/project directories for configuration or credentials.
-There is no --config file or saved downloader-login profile.
+There is no --config file or saved downloader-login profile. The one thing
+saved by default is the session cookie from an interactive 'pt site login',
+under the user config directory; no command reads it back automatically
+(see 'pt help login').
 
 Downloader reads:
   --driver qbittorrent|transmission  (default: qbittorrent)
@@ -72,6 +75,8 @@ report is read-only. The separate refresh-report command writes a storage-index 
 
 Details: pt help reconcile report | pt help config
 `)
+	case "login", "site login":
+		fmt.Fprint(a.stdout, siteLoginHelp)
 	case "version":
 		return a.version([]string{"--help"})
 	case "torrent inspect":
@@ -85,7 +90,7 @@ Details: pt help reconcile report | pt help config
 	case "reconcile report":
 		return a.reconcileCommand([]string{"report", "--help"})
 	default:
-		return usageError("unknown help topic; use torrent, client, reconcile, config, version, or 'pt help' for the complete command list")
+		return usageError("unknown help topic; use torrent, client, reconcile, login, config, version, or 'pt help' for the complete command list")
 	}
 	return nil
 }

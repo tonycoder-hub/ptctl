@@ -96,11 +96,13 @@ deliberately does not. For step-by-step usage, see the
 - an explicitly acknowledged TJUPT metafile fetch for one remote ID, using one
   bounded GET with no redirect or retry and publishing the strictly validated
   exact response only into an initialized private metafile store;
-- TJUPT password login with an optional six-digit two-step code from one strict
-  stdin bundle: one non-retried login POST, recognized refusal pages reported
-  as fixed stop reasons with the site's remaining-attempts count, and one
-  verifying read that must name the same account before the new session cookie
-  is written to a pipe or owner-only stdout;
+- TJUPT password login with an optional six-digit two-step code, typed at
+  hidden terminal prompts by default or passed as one strict stdin bundle by
+  scripts and agents: one non-retried login POST, recognized refusal pages
+  reported as fixed stop reasons with the site's remaining-attempts count, and
+  one verifying read that must name the same account before the new session
+  cookie is saved to an owner-only file or written to a pipe or owner-only
+  stdout, with an optional `site.login` JSON report;
 - an experimental M-Team session check, account snapshot (username, uploaded
   and downloaded bytes, ratio, and bonus), and first-page torrent search with
   seeders, leechers, and promotion factors, through one read-only POST per
