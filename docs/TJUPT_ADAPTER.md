@@ -370,7 +370,7 @@ may include promotion decoration; names, peer counts, size, snatches, and
 links are site claims. It is not a metafile identity, proof of the site's current private
 variant, a site signature, or storage-content proof, and it is not persisted.
 The typed port returns opaque process-local authority. An explicitly
-requested `reconcile report --site-ref tjupt/ID --site-cookie-stdin` may consume
+requested `reconcile report --site-ref tjupt/ID --site-live` (or `--site-cookie-stdin`) may consume
 that authority in the same invocation, but only to record that the selected
 remote-ID page was observed; JSON replay cannot recreate it and it never proves
 which private `.torrent` variant the site currently serves.
@@ -464,7 +464,9 @@ only and cannot upgrade incomplete storage/client/path axes or make the
 downloader's raw private metafile observable.
 
 When live site detail and a read-only downloader are requested together,
-reconciliation requires `--credential-bundle-stdin` and accepts exactly:
+`--site-live --password-stdin` uses the saved cookie and pipes only the
+downloader password. Without a saved cookie, reconciliation requires
+`--credential-bundle-stdin` and accepts exactly:
 
 ```json
 {"schema":"ptctl.credentials/v1","site_cookie":"SID=...","downloader_password":"..."}

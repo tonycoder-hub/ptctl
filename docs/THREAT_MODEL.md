@@ -160,7 +160,8 @@ user config directory, a plaintext file of mode `0600` in a `0700` directory,
 written through an owner-only temporary file and renamed into place. Every
 `site` command for that site, including metafile fetch and bonus exchange
 submit, reads it when no stdin credential flag is given; an explicit flag
-always wins. This is a deliberate trade: anyone who can read the file as the
+always wins. `reconcile report` reads it only with an explicit `--site-live`,
+after every credential-free gate has passed. This is a deliberate trade: anyone who can read the file as the
 user, or any process the user runs, can act as the user on that site until the
 session expires or the key is revoked. An M-Team API key does not expire on its
 own, so its file is worth more than a TJUPT session cookie.

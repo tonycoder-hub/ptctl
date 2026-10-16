@@ -338,17 +338,28 @@ metafile binding. Neither read adapter exposes the raw private metafile through
 its ledger, so `metafile_variant_relation` remains `unobservable` even when
 typed infohashes agree.
 
-To observe that remote ID live without a downloader, add
-`--site-cookie-stdin`. To observe both the site and a downloader in one command,
-use `--credential-bundle-stdin` instead of the two single-secret flags and pipe
-one bounded strict JSON object:
+To observe that remote ID live without a downloader, add `--site-live`. It
+uses the credential `ptctl site login SITE` saved for the site, so nothing is
+read from stdin; this is the simplest form, and the one M-Team uses with its
+saved API key. A script that keeps the secret itself pipes it instead, with
+`--site-cookie-stdin` for a cookie site (TJUPT) or `--site-api-key-stdin` for
+an API-key site (M-Team).
+
+To observe both the site and a downloader in one command, add `--site-live`
+next to `--password-stdin`: the saved site credential leaves stdin to the
+downloader password. Without a saved credential, use
+`--credential-bundle-stdin` instead of the two single-secret flags and pipe
+one bounded strict JSON object with either `site_cookie` or `site_api_key`:
 
 ```json
 {"schema":"ptctl.credentials/v1","site_cookie":"SID=...","downloader_password":"..."}
+{"schema":"ptctl.credentials/v1","site_api_key":"...","downloader_password":"..."}
 ```
 
-Unknown, duplicate, missing, trailing, oversized, invalid-UTF-8, and unpaired
-surrogate input is rejected. All adapter capability/origin/ref, metafile,
+The four site sources are mutually exclusive. A bundle with both site fields
+or neither, and unknown, duplicate, missing, trailing, oversized,
+invalid-UTF-8, and unpaired surrogate input, is rejected. A site credential
+of a method the site does not accept is a usage error before any request. All adapter capability/origin/ref, metafile,
 store, storage-profile, mapping, endpoint, and budget checks finish before this
 stdin is read. The site detail request runs first. Its opaque same-invocation
 authority adds only a current remote-ID site claim to `site_metafile`; the
