@@ -54,8 +54,8 @@ capabilities at the edge, not assumptions in the core domain model.
   bonus exchange (confirmed with the account password from a stdin bundle),
   and password login with an optional two-step code that issues the session
   cookie;
-  and an experimental M-Team adapter with session, account, and search reads
-  through the official API and a site-issued API key.
+  and an experimental M-Team adapter with session, account, search, and
+  detail reads through the official API and a site-issued API key.
 - **Downloaders:** qBittorrent and Transmission reads, plus reviewed stopped
   adoption, recheck/start, stop, and keep-data removal of one exact job.
 - **Reconciliation:** one report that keeps site, downloader, metafile, and
@@ -142,6 +142,7 @@ with the same stdin-only rules:
 ```bash
 printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
 printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
+printf '%s' "$MTEAM_API_KEY" | ptctl site detail --api-key-stdin mteam REMOTE_ID
 ```
 
 From there, the [command guide](docs/guide/README.md) walks through storing

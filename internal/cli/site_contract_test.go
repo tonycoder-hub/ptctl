@@ -7,6 +7,8 @@ import (
 
 	"github.com/tonycoder-hub/ptctl/internal/domain"
 	"github.com/tonycoder-hub/ptctl/internal/site"
+	"github.com/tonycoder-hub/ptctl/internal/site/mteam"
+	"github.com/tonycoder-hub/ptctl/internal/site/tjupt"
 )
 
 // These tests pin the exact public output of credential-free site discovery
@@ -45,7 +47,8 @@ const mteamDescriptorJSON = `    {
       "capabilities": [
         "auth.check",
         "account.read",
-        "torrent.search"
+        "torrent.search",
+        "torrent.detail"
       ]
     }`
 
@@ -64,7 +67,7 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 		{args: []string{"site", "capabilities", "--output", "json", "mteam"}, want: descriptorListJSON(mteamDescriptorJSON)},
 		{args: []string{"site", "list"}, want: "" +
 			"ID     NAME           STABILITY     BASE URL                 CAPABILITIES\n" +
-			"mteam  M-Team / 馒头PT  experimental  https://api2.m-team.cc/  3\n" +
+			"mteam  M-Team / 馒头PT  experimental  https://api2.m-team.cc/  4\n" +
 			"tjupt  TJUPT / 北洋园PT  experimental  https://www.tjupt.org/   9\n"},
 		{args: []string{"site", "capabilities", "tjupt"}, want: "" +
 			"SITE   KIND        VALUE\n" +
@@ -83,7 +86,8 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 			"mteam  auth        api_key_header\n" +
 			"mteam  capability  auth.check\n" +
 			"mteam  capability  account.read\n" +
-			"mteam  capability  torrent.search\n"},
+			"mteam  capability  torrent.search\n" +
+			"mteam  capability  torrent.detail\n"},
 	}
 	for _, test := range tests {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
@@ -100,16 +104,24 @@ func TestBuiltinSiteDiscoveryOutputIsStable(t *testing.T) {
 }
 
 func TestSiteDetailWarningsAreStable(t *testing.T) {
-	config, err := site.NewTorrentDetailConfig("https://fake.invalid", "fake.details_by_id.v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	report := newSiteDetailReport(domain.TorrentRef{SiteID: "fakept", RemoteID: "42"}, config, site.DefaultTorrentDetailLimits())
-	want := []string{
-		"site detail fields are live site claims, not metafile identity or storage-content proof",
-		"the single request is tracker-visible; the TJUPT route deliberately omits the view-counting hit parameter",
-	}
-	if strings.Join(report.Warnings, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("warnings=%q", report.Warnings)
+	for _, test := range []struct {
+		origin, routeID, want string
+	}{
+		{tjupt.DetailOrigin, tjupt.DetailRouteID, "the single request is tracker-visible; the TJUPT route deliberately omits the view-counting hit parameter"},
+		{mteam.DetailOrigin, mteam.DetailRouteID, "the single request is tracker-visible; the M-Team route never calls the separate view-counting endpoint"},
+		{"https://fake.invalid", "fake.details_by_id.v1", "the single request is tracker-visible"},
+	} {
+		config, err := site.NewTorrentDetailConfig(test.origin, test.routeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report := newSiteDetailReport(domain.TorrentRef{SiteID: "fakept", RemoteID: "42"}, config, site.DefaultTorrentDetailLimits())
+		want := []string{
+			"site detail fields are live site claims, not metafile identity or storage-content proof",
+			test.want,
+		}
+		if strings.Join(report.Warnings, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("%s warnings=%q", test.routeID, report.Warnings)
+		}
 	}
 }

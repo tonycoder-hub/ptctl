@@ -37,6 +37,8 @@ func (f *fakeClient) PostReadOnce(_ context.Context, path, contentType string, b
 	return f.response, f.err
 }
 
+func (f *fakeClient) RequestsMade() int { return len(f.calls) }
+
 func (f *fakeClient) Close() error {
 	f.closed = true
 	return nil
@@ -81,7 +83,7 @@ func TestIdentityIsPinned(t *testing.T) {
 	want := domain.SiteDescriptor{
 		ID: "mteam", Name: "M-Team / 馒头PT", BaseURL: "https://api2.m-team.cc/", Stability: "experimental",
 		AuthMethods:  []domain.AuthMethod{domain.AuthMethodAPIKeyHeader},
-		Capabilities: []domain.Capability{domain.CapabilityAuthCheck, domain.CapabilityAccountRead, domain.CapabilitySearch},
+		Capabilities: []domain.Capability{domain.CapabilityAuthCheck, domain.CapabilityAccountRead, domain.CapabilitySearch, domain.CapabilityDetail},
 	}
 	if got := New().Descriptor(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("descriptor=%#v", got)
@@ -276,7 +278,7 @@ func TestSearchSendsOneJSONQueryAndMapsRows(t *testing.T) {
 	want := []domain.TorrentSummary{
 		{
 			Ref: domain.TorrentRef{SiteID: "mteam", RemoteID: "900001"}, Name: "Canary.Movie.2026.1080p", SizeBytes: i64(8589934592),
-			Seeders: i(12), Leechers: i(3), Snatches: i(45), Category: "401",
+			Seeders: i(12), Leechers: i(3), Snatches: i(45), Category: "401", CategoryName: "电影/SD",
 			PublishedAt: at(time.Date(2026, 10, 1, 12, 30, 0, 0, time.UTC)),
 			Promotion:   &domain.Promotion{UploadFactor: "1", DownloadFactor: "0", EndsAt: at(time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC))},
 		},
