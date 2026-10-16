@@ -138,8 +138,8 @@ requested ID. `DOWNLOAD REFERENCE` is always `false`, because the API answer has
 no download link to observe. An ID with no visible torrent stops as
 `not_found`; the API reports it as code `1` with a fixed message, and only that
 exact pair is read as not found, because the API uses code `1` for other
-refusals too. Live-site reconciliation still reads site detail only with a
-cookie, so it does not support M-Team yet.
+refusals too. Live-site reconciliation reads the same detail, as described
+in [Reconciliation](#reconciliation).
 
 **Times.** The API returns times without a zone, such as `2026-10-14
 09:30:00`. ptctl reads them as UTC+8, the site's time zone, and reports them in
@@ -248,13 +248,20 @@ private store instead. The file contains your passkey, so keep it private:
 ptctl metafile store import --store "$PTCTL_STORE" release.torrent
 ```
 
+## Reconciliation
+
+`reconcile report --site-ref mteam/ID --site-live` adds the live detail read
+to a reconciliation report with the saved API key, and reads nothing from
+stdin. With a downloader in the same command, add `--password-stdin` and pipe
+only the downloader password. A script that keeps the key itself pipes it with
+`--site-api-key-stdin`, or, with a downloader, uses `--credential-bundle-stdin`
+with `site_api_key` in place of `site_cookie`. The read is the one
+`/api/torrent/detail` request above; it never asks for a signed download link.
+See [Reconciliation](guide/reconcile.md).
+
 ## Not supported yet
 
-**Reconciliation.** `reconcile` reads live site detail with a cookie only, so
-`--site-ref mteam/ID` is refused. `site detail` works on its own.
-
-**Everything else.** Bonus exchange, RSS, seeding lists, and messages are not
-implemented.
+Bonus exchange, RSS, seeding lists, and messages are not implemented.
 
 ## Fixtures
 

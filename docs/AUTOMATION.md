@@ -101,7 +101,9 @@ Every later `site` command for that site, including `site metafile fetch` and
 `site bonus exchange submit`, then uses the saved credential without a flag.
 An agent saves one without a terminal by piping it,
 `site login --cookie-stdin SITE` or `site login --api-key-stdin SITE`, and
-`ptctl site logout SITE` deletes it. An explicit stdin flag below always takes
+`ptctl site logout SITE` deletes it. `reconcile report` uses the saved
+credential when given `--site-live`, and then reads only the downloader
+password from stdin. An explicit stdin flag below always takes
 precedence over the saved credential, and a saved credential never stands in
 for an acknowledgement flag.
 
@@ -110,8 +112,9 @@ for an acknowledgement flag.
 | `--cookie-stdin` | `site` reads, `site bonus exchange submit` for cookie-only sites, `site metafile fetch` for cookie sites (TJUPT) | The complete `Cookie` header value |
 | `--api-key-stdin` | `site status`, `site account`, `site search`, `site detail`, and `site metafile fetch` for sites that authenticate with an API key (M-Team) | The site-issued API key |
 | `--password-stdin` | `client` commands, `seed retire` commands that contact a downloader, and `reconcile` with a downloader | The downloader password |
-| `--site-cookie-stdin` | `reconcile report` with a live site observation and no downloader | The complete `Cookie` header value |
-| `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}` |
+| `--site-cookie-stdin` | `reconcile report` with a live site observation and no downloader, on a cookie site (TJUPT) | The complete `Cookie` header value |
+| `--site-api-key-stdin` | `reconcile report` with a live site observation and no downloader, on an API-key site (M-Team) | The site-issued API key |
+| `--credential-bundle-stdin` | `reconcile report` with both a live site observation and a downloader | `{"schema":"ptctl.credentials/v1","site_cookie":"...","downloader_password":"..."}`, or `site_api_key` in place of `site_cookie` |
 | `--credential-bundle-stdin` | `site bonus exchange submit` for sites that confirm with the account password (TJUPT) | `{"schema":"ptctl.credentials/v1","site_cookie":"...","site_password":"..."}` |
 | `--credential-bundle-stdin` | `site login` | `{"schema":"ptctl.credentials/v1","site_username":"...","site_password":"...","site_totp":"123456"}`; `site_totp` is optional |
 | `--cookie-stdin`, `--api-key-stdin` | `site login` | The credential to save; one status read checks it first and nothing is saved when it fails |
