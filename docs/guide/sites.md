@@ -4,24 +4,36 @@
 
 > Fetching an exact private metafile from a site (`site metafile fetch`) and auditing its sealed bindings are described with the private store in [metafiles.md](metafiles.md). The page-level TJUPT contract is in [TJUPT_ADAPTER.md](../TJUPT_ADAPTER.md), and M-Team is covered in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md).
 
-Read TJUPT without putting a cookie in shell history. Stdin must contain the
-complete `Cookie` header value from a session you control. Interactive TTY
-secret input is refused. Do not paste the value into issues, logs, or chat.
-For ordinary `status`, `account`, `search`, and `bonus-catalog` reads, output
-mode, site/capability/authentication support, the declared typed port, and a
-nonblank search query where applicable are all validated before stdin is read.
-Runtime adapter failures are reduced to fixed public diagnostics; cancellation
-and deadlines remain distinguishable, but cookie or response text is never
-forwarded.
+Sign in once with `site login`, then run site commands without any credential
+flag. Each command uses the credential `site login` saved for that site:
+
+```bash
+ptctl site login tjupt
+ptctl site status tjupt
+ptctl site account tjupt
+ptctl site search tjupt "Ubuntu"
+ptctl site detail tjupt REMOTE_ID
+ptctl site bonus-catalog tjupt
+ptctl site bonus review tjupt OPTION
+```
+
+Scripts and agents can instead pipe the complete `Cookie` header value from a
+session they control on stdin with `--cookie-stdin`; an explicit flag always
+takes precedence over the saved credential. Interactive TTY input is refused
+for `--cookie-stdin`. Do not paste the value into issues, logs, or chat:
 
 ```bash
 printf '%s' "$TJUPT_COOKIE" | ptctl site status --cookie-stdin tjupt
-printf '%s' "$TJUPT_COOKIE" | ptctl site account --cookie-stdin tjupt
-printf '%s' "$TJUPT_COOKIE" | ptctl site search --cookie-stdin tjupt "Ubuntu"
-printf '%s' "$TJUPT_COOKIE" | ptctl site detail --cookie-stdin tjupt REMOTE_ID
-printf '%s' "$TJUPT_COOKIE" | ptctl site bonus-catalog --cookie-stdin tjupt
-printf '%s' "$TJUPT_COOKIE" | ptctl site bonus review --cookie-stdin tjupt OPTION
 ```
+
+For ordinary `status`, `account`, `search`, and `bonus-catalog` reads, output
+mode, site/capability/authentication support, the declared typed port, and a
+nonblank search query where applicable are all validated before a credential
+is read. Without a saved credential and without a flag, a command exits `2`
+with `no saved session cookie for site "tjupt"; run 'ptctl site login tjupt'
+first, or pipe one with --cookie-stdin`. Runtime adapter failures are reduced
+to fixed public diagnostics; cancellation and deadlines remain
+distinguishable, but cookie or response text is never forwarded.
 
 Each read-only TJUPT command above performs at most one bounded GET and never
 retries. Do not loop or parallelize site reads. `site detail` also refuses redirects and sends
@@ -34,9 +46,8 @@ TJUPT search results also carry the category ID, publish time (in UTC),
 seeders, leechers, snatches, and promotion when the results table has its
 usual shape; otherwise a result keeps only its name and size.
 
-Instead of copying the cookie out of a browser, `site login` can sign in with
-the account password and save a new session cookie for the commands above.
-Run it in a terminal and answer the prompts:
+`site login tjupt` signs in with the account password and saves a new session
+cookie for the commands above. Run it in a terminal and answer the prompts:
 
 ```console
 $ ptctl site login tjupt
@@ -46,19 +57,32 @@ Password (hidden):
 Two-step code (hidden; press Enter if none):
 site login succeeded: site=tjupt username=alice session_expires=2026-10-23T08:00:00Z requests=2
 session cookie saved to /home/alice/.config/ptctl/sessions/tjupt.cookie (owner-only)
-use it with: ptctl site status --cookie-stdin tjupt < '/home/alice/.config/ptctl/sessions/tjupt.cookie'
+site commands now use it when no --cookie-stdin is given, for example: ptctl site status tjupt
 ```
 
-The password and the two-step code are not echoed. Press Enter at the code
-prompt when the account has no two-step verification; spaces inside a code are
-ignored. Ctrl+C at a prompt quits without sending anything. The cookie is saved
-to `ptctl/sessions/SITE.cookie` under the user config directory (`~/.config` on
-Linux, `~/Library/Application Support` on macOS, `%AppData%` on Windows),
-readable only by you, and replaced atomically by the next login. No command
-reads it automatically; pass it on stdin as the last line shows.
-`--cookie-file PATH` saves it somewhere else, and `--session-days` picks the
-session length the site offers (TJUPT: 1, 7, 14, 30, or 90; default 7).
-`ptctl help login` describes every flag.
+The password and the two-step code are not echoed, and the password is never
+saved. Press Enter at the code prompt when the account has no two-step
+verification; spaces inside a code are ignored. Ctrl+C at a prompt quits
+without sending anything. The cookie is saved in plaintext to
+`ptctl/sessions/SITE.cookie` under the user config directory (`~/.config` or
+`$XDG_CONFIG_HOME` on Linux, `~/Library/Application Support` on macOS,
+`%AppData%` on Windows), in an owner-only file inside an owner-only directory,
+and replaced atomically by the next login. Site commands refuse to use the
+saved file if group or other users can read it, if it is a symlink or not a
+regular file, or if its content is not one canonical value. `ptctl site logout
+tjupt` deletes it without contacting the site; the session stays valid on the
+site until it expires.
+
+`--cookie-file PATH` saves the cookie somewhere else instead, and then prints
+how to pipe it with `--cookie-stdin`; commands do not read a file saved there
+automatically. `--session-days` picks the session length the site offers
+(TJUPT: 1, 7, 14, 30, or 90; default 7). `ptctl help login` describes every
+flag.
+
+A cookie copied from a browser can be saved the same way. `site login
+--cookie-stdin SITE` (or, at a terminal, `site login SITE` for a site without a
+password login) checks it with one `site status` read and saves it only if that
+read shows a signed-in account.
 
 Scripts and agents pass the credentials instead with `--credential-bundle-stdin`,
 as one strict `ptctl.credentials/v1` bundle on stdin: `site_username`,
@@ -123,21 +147,32 @@ attempts left before it blocks this IP)`. Fix the input before trying again,
 and never loop `site login`. Usage errors exit `2` before any prompt or stdin
 read. A failed login leaves an earlier cookie file untouched.
 
-M-Team reads use a site-issued API key instead of a cookie, passed with
-`--api-key-stdin` under the same stdin-only rules. `status`, `account`,
-`search`, and `detail` each send one read-only POST to M-Team's JSON API and
-never retry; search results add seeders, leechers, promotion, and category-name
-columns. `site metafile fetch --api-key-stdin` downloads one `.torrent` into the
+When `site login` saves a cookie or API key you already have, its one check
+read uses the same reasons: `login_credentials_rejected` when the site reports
+the credential is not signed in, and `login_session_unverified` when the read
+cannot tell. Nothing is saved after either, and an earlier saved credential is
+kept.
+
+M-Team uses a site-issued API key instead of a cookie. `site login mteam` asks
+for it with echo off, checks it with one status read, and saves it to
+`ptctl/sessions/mteam.api-key` with the same owner-only rules; nothing is saved
+if the API does not accept it. Scripts save it with `site login --api-key-stdin
+mteam`, or pipe it to a single command with `--api-key-stdin`. `status`,
+`account`, `search`, and `detail` each send one read-only POST to M-Team's JSON
+API and never retry; search results add seeders, leechers, promotion, and
+category-name columns. `site metafile fetch` downloads one `.torrent` into the
 private store through M-Team's signed link, as described in
 [metafiles.md](metafiles.md). Bonus commands are not available for M-Team yet,
 and `reconcile` reads live site detail with a cookie only. Setup, results, and
 error lines are in [MTEAM_ADAPTER.md](../MTEAM_ADAPTER.md):
 
 ```bash
+ptctl site login mteam
+ptctl site status mteam
+ptctl site account mteam
+ptctl site search mteam "Ubuntu"
+ptctl site detail mteam REMOTE_ID
 printf '%s' "$MTEAM_API_KEY" | ptctl site status --api-key-stdin mteam
-printf '%s' "$MTEAM_API_KEY" | ptctl site account --api-key-stdin mteam
-printf '%s' "$MTEAM_API_KEY" | ptctl site search --api-key-stdin mteam "Ubuntu"
-printf '%s' "$MTEAM_API_KEY" | ptctl site detail --api-key-stdin mteam REMOTE_ID
 ```
 
 `site account` reads the authenticated `mybonus.php` page and reports the
@@ -163,10 +198,14 @@ deliberately non-authoritative; the separate exchange workflow therefore
 fetches a fresh page, reproduces the reviewed semantics, and crosses an
 explicit acknowledgement and recovery boundary.
 
-TJUPT confirms each exchange with the account password, so its `submit` takes
-the cookie and password together as one strict JSON bundle on stdin
-(`--credential-bundle-stdin`) and refuses `--cookie-stdin`; see the TJUPT
-example below. A site that needs only the cookie takes `--cookie-stdin`.
+TJUPT confirms each exchange with the account password. Without a credential
+flag, its `submit` uses the saved session cookie and asks for the password on
+the terminal with echo off; the password is used for that one exchange and
+never saved. Scripts pass the cookie and password together as one strict JSON
+bundle on stdin (`--credential-bundle-stdin`), and `--cookie-stdin` is refused;
+see the TJUPT example below. A site that needs only the cookie uses the saved
+cookie, or takes `--cookie-stdin`. A saved credential never stands in for
+`--acknowledge-bonus-exchange`.
 
 To cross that boundary, first initialize a private state store (the same
 versioned owner-only store format used by metafile artifacts), review the exact
@@ -175,8 +214,7 @@ option, and prepare a local intent from the review ID:
 ```bash
 ptctl metafile store init --store "$PTCTL_STATE"
 
-printf '%s' "$SITE_COOKIE" | \
-  ptctl site bonus review --cookie-stdin --output json SITE OPTION
+ptctl site bonus review --output json SITE OPTION
 
 ptctl site bonus exchange prepare \
   --state-store "$PTCTL_STATE" \
@@ -189,14 +227,12 @@ Submitting requires that exact record, the same site/option/review selectors,
 and a separate acknowledgement:
 
 ```bash
-printf '%s' "$SITE_COOKIE" | \
-  ptctl site bonus exchange submit \
-    --state-store "$PTCTL_STATE" \
-    --intent-record INTENT_RECORD_ID \
-    --expect-review-id REVIEW_ID \
-    --cookie-stdin \
-    --acknowledge-bonus-exchange \
-    SITE OPTION
+ptctl site bonus exchange submit \
+  --state-store "$PTCTL_STATE" \
+  --intent-record INTENT_RECORD_ID \
+  --expect-review-id REVIEW_ID \
+  --acknowledge-bonus-exchange \
+  SITE OPTION
 
 ptctl site bonus exchange status \
   --state-store "$PTCTL_STATE" \
@@ -218,9 +254,9 @@ ptctl site bonus exchange forget \
   --acknowledge-history-forget
 ```
 
-For TJUPT, replace the `submit` stdin and flag with the bundle. One way to
-build it without putting either secret in argv, assuming each is kept in its
-own owner-only file:
+At a terminal, TJUPT's `submit` then asks for the account password. A script
+replaces that prompt with the bundle. One way to build it without putting
+either secret in argv, assuming each is kept in its own owner-only file:
 
 ```bash
 jq -n --rawfile cookie "$COOKIE_FILE" --rawfile password "$PASSWORD_FILE" \

@@ -515,9 +515,9 @@ func TestSiteMetafileFetchNamesAndChecksTheCredentialFlagBeforeReadingIt(t *test
 		args    []string
 		want    string
 	}{
-		{adapter: &fakeMetafileFetchAdapter{linked: true}, args: []string{"fakept", "42"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
+		{adapter: &fakeMetafileFetchAdapter{linked: true}, args: []string{"fakept", "42"}, want: "no saved API key for site \"fakept\"; run 'ptctl site login fakept' first, or pipe one with --api-key-stdin"},
 		{adapter: &fakeMetafileFetchAdapter{linked: true}, args: []string{"--cookie-stdin", "fakept", "42"}, want: `site "fakept" does not support cookie_header authentication`},
-		{adapter: &fakeMetafileFetchAdapter{}, args: []string{"fakept", "42"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{adapter: &fakeMetafileFetchAdapter{}, args: []string{"fakept", "42"}, want: "no saved session cookie for site \"fakept\"; run 'ptctl site login fakept' first, or pipe one with --cookie-stdin"},
 		{adapter: &fakeMetafileFetchAdapter{}, args: []string{"--api-key-stdin", "fakept", "42"}, want: `site "fakept" does not support api_key_header authentication`},
 		{adapter: &fakeMetafileFetchAdapter{}, args: []string{"--cookie-stdin", "--api-key-stdin", "fakept", "42"}, want: "--cookie-stdin and --api-key-stdin are mutually exclusive"},
 	} {
@@ -531,8 +531,8 @@ func TestSiteMetafileFetchNamesAndChecksTheCredentialFlagBeforeReadingIt(t *test
 		args []string
 		want string
 	}{
-		{args: []string{"mteam", "1"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
-		{args: []string{"tjupt", "1"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{args: []string{"mteam", "1"}, want: "no saved API key for site \"mteam\"; run 'ptctl site login mteam' first, or pipe one with --api-key-stdin"},
+		{args: []string{"tjupt", "1"}, want: "no saved session cookie for site \"tjupt\"; run 'ptctl site login tjupt' first, or pipe one with --cookie-stdin"},
 		{args: []string{"--api-key-stdin", "tjupt", "1"}, want: `site "tjupt" does not support api_key_header authentication`},
 		{args: []string{"--cookie-stdin", "mteam", "1"}, want: `site "mteam" does not support cookie_header authentication`},
 	} {

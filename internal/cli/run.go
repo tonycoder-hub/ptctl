@@ -135,19 +135,21 @@ Usage:
   ptctl site capabilities [--output table|json] [SITE]
   ptctl site login [--cookie-file PATH] [--session-days N] [--output table|json] SITE
   ptctl site login --credential-bundle-stdin [--cookie-file PATH] [--session-days N] [--output table|json] SITE
-  ptctl site status (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
-  ptctl site account (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
-  ptctl site search (--cookie-stdin | --api-key-stdin) [--output table|json] SITE QUERY...
-  ptctl site detail (--cookie-stdin | --api-key-stdin) [--output table|json] SITE REMOTE_ID
-  ptctl site bonus-catalog --cookie-stdin [--output table|json] SITE
-  ptctl site bonus review --cookie-stdin [--output table|json] SITE OPTION
+  ptctl site login (--cookie-stdin | --api-key-stdin) [--output table|json] SITE
+  ptctl site logout [--output table|json] SITE
+  ptctl site status [--cookie-stdin | --api-key-stdin] [--output table|json] SITE
+  ptctl site account [--cookie-stdin | --api-key-stdin] [--output table|json] SITE
+  ptctl site search [--cookie-stdin | --api-key-stdin] [--output table|json] SITE QUERY...
+  ptctl site detail [--cookie-stdin | --api-key-stdin] [--output table|json] SITE REMOTE_ID
+  ptctl site bonus-catalog [--cookie-stdin] [--output table|json] SITE
+  ptctl site bonus review [--cookie-stdin] [--output table|json] SITE OPTION
   ptctl site bonus exchange prepare --state-store DIR --expect-review-id ID [--output table|json] SITE OPTION
-  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID (--cookie-stdin | --credential-bundle-stdin) --acknowledge-bonus-exchange [--output table|json] SITE OPTION
+  ptctl site bonus exchange submit --state-store DIR --intent-record RECORD_ID --expect-review-id ID [--cookie-stdin | --credential-bundle-stdin] --acknowledge-bonus-exchange [--output table|json] SITE OPTION
   ptctl site bonus exchange status --state-store DIR --intent-record RECORD_ID [--output table|json]
   ptctl site bonus exchange list --state-store DIR [--max-operations N] [--output table|json]
   ptctl site bonus exchange prune --state-store DIR --intent-record RECORD_ID --operation-id ID --acknowledge-state-prune [--output table|json]
   ptctl site bonus exchange forget --state-store DIR --retention-record RECORD_ID --operation-id ID --acknowledge-history-forget [--output table|json]
-  ptctl site metafile fetch (--cookie-stdin | --api-key-stdin) --acknowledge-site-effect --metafile-store DIR [--output table|json] SITE REMOTE_ID
+  ptctl site metafile fetch [--cookie-stdin | --api-key-stdin] --acknowledge-site-effect --metafile-store DIR [--output table|json] SITE REMOTE_ID
   ptctl site metafile binding list --metafile-store DIR [--output table|json]
   ptctl site metafile binding inspect --metafile-store DIR [--output table|json] RECORD_ID
 
@@ -221,8 +223,8 @@ Usage:
 
 Safety defaults:
   * Ordinary site reads are one bounded request per invocation: a GET, or a read-only POST for JSON API sites such as M-Team. Bonus exchange is one fresh GET plus at most one acknowledged POST after a durable marker. Site requests are never automatically retried.
-  * Session cookies and site API keys are accepted only through stdin and are never persisted; the one exception is the cookie site login obtains, which it saves where it says.
-  * Site login prompts on the terminal with the password and one-time code hidden, or reads them from stdin with --credential-bundle-stdin; it sends one login request plus one verifying read, never retries, and saves the new session cookie only to an owner-only file or a non-terminal stdout. See 'pt help login'.
+  * Credentials are never accepted in argv. Site commands use the session cookie or API key that site login saved for the site, in an owner-only file under the user config directory, unless --cookie-stdin or --api-key-stdin pipes one in; site logout deletes the saved file. Downloader passwords and account passwords are never saved.
+  * Site login prompts on the terminal with every secret hidden, or reads from stdin with --credential-bundle-stdin, --cookie-stdin, or --api-key-stdin; it sends one login request plus one verifying read (or only the verifying read for a cookie or API key), never retries, and saves only after that read succeeds. See 'pt help login'.
   * .torrent tracker URLs are reduced to origins; passkeys are never printed.
   * The metafile store preserves exact private bytes with owner-only access and atomic no-clobber commits.
   * v1, v2, and hybrid verification use exact content proofs; names and sizes are not proof.

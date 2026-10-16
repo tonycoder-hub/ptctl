@@ -70,15 +70,15 @@ func TestSiteReadSendsAPIKeyFromStdin(t *testing.T) {
 	}
 }
 
-func TestSiteReadNamesTheCredentialFlagASiteNeeds(t *testing.T) {
+func TestSiteReadWithoutAFlagNamesTheSavedCredentialASiteNeeds(t *testing.T) {
 	tests := []struct {
 		args []string
 		want string
 	}{
-		{args: []string{"site", "status", "mteam"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
-		{args: []string{"site", "search", "mteam", "query"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
-		{args: []string{"site", "status", "tjupt"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
-		{args: []string{"site", "account", "unknown-site"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{args: []string{"site", "status", "mteam"}, want: "no saved API key for site \"mteam\"; run 'ptctl site login mteam' first, or pipe one with --api-key-stdin"},
+		{args: []string{"site", "search", "mteam", "query"}, want: "no saved API key for site \"mteam\"; run 'ptctl site login mteam' first, or pipe one with --api-key-stdin"},
+		{args: []string{"site", "status", "tjupt"}, want: "no saved session cookie for site \"tjupt\"; run 'ptctl site login tjupt' first, or pipe one with --cookie-stdin"},
+		{args: []string{"site", "account", "unknown-site"}, want: `unknown site "unknown-site"`},
 		{args: []string{"site", "status", "--cookie-stdin", "--api-key-stdin", "mteam"}, want: "--cookie-stdin and --api-key-stdin are mutually exclusive"},
 	}
 	for _, test := range tests {
@@ -301,9 +301,9 @@ func TestSiteDetailNamesAndChecksTheCredentialFlagBeforeReadingIt(t *testing.T) 
 		args    []string
 		want    string
 	}{
-		{adapter: apiKeyOnly(), args: []string{"fakept", "42"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
+		{adapter: apiKeyOnly(), args: []string{"fakept", "42"}, want: "no saved API key for site \"fakept\"; run 'ptctl site login fakept' first, or pipe one with --api-key-stdin"},
 		{adapter: apiKeyOnly(), args: []string{"--cookie-stdin", "fakept", "42"}, want: `site "fakept" does not support cookie_header authentication`},
-		{adapter: successfulFakeTorrentDetail(t), args: []string{"fakept", "42"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{adapter: successfulFakeTorrentDetail(t), args: []string{"fakept", "42"}, want: "no saved session cookie for site \"fakept\"; run 'ptctl site login fakept' first, or pipe one with --cookie-stdin"},
 		{adapter: successfulFakeTorrentDetail(t), args: []string{"--api-key-stdin", "fakept", "42"}, want: `site "fakept" does not support api_key_header authentication`},
 		{adapter: successfulFakeTorrentDetail(t), args: []string{"--cookie-stdin", "--api-key-stdin", "fakept", "42"}, want: "--cookie-stdin and --api-key-stdin are mutually exclusive"},
 	} {
@@ -317,8 +317,8 @@ func TestSiteDetailNamesAndChecksTheCredentialFlagBeforeReadingIt(t *testing.T) 
 		args []string
 		want string
 	}{
-		{args: []string{"site", "detail", "mteam", "1"}, want: "--api-key-stdin is required; credentials are never accepted in argv"},
-		{args: []string{"site", "detail", "tjupt", "1"}, want: "--cookie-stdin is required; credentials are never accepted in argv"},
+		{args: []string{"site", "detail", "mteam", "1"}, want: "no saved API key for site \"mteam\"; run 'ptctl site login mteam' first, or pipe one with --api-key-stdin"},
+		{args: []string{"site", "detail", "tjupt", "1"}, want: "no saved session cookie for site \"tjupt\"; run 'ptctl site login tjupt' first, or pipe one with --cookie-stdin"},
 		{args: []string{"site", "detail", "--api-key-stdin", "tjupt", "1"}, want: `site "tjupt" does not support api_key_header authentication`},
 		{args: []string{"site", "detail", "--cookie-stdin", "mteam", "1"}, want: `site "mteam" does not support cookie_header authentication`},
 	} {

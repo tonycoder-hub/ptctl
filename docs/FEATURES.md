@@ -103,12 +103,19 @@ deliberately does not. For step-by-step usage, see the
   one verifying read that must name the same account before the new session
   cookie is saved to an owner-only file or written to a pipe or owner-only
   stdout, with an optional `site.login` JSON report;
+- saved site credentials: `site login SITE` keeps the TJUPT session cookie, or
+  an M-Team API key once one status read accepts it, in an owner-only file
+  under the user config directory, so later `site` commands, metafile fetch,
+  and bonus exchange submit need no credential flag; an explicit stdin flag
+  takes precedence, an unsafe or malformed file is refused without being
+  shown, acknowledgement flags are still required, account passwords are never
+  saved, and `site logout SITE` deletes the file;
 - an experimental M-Team session check, account snapshot (username, uploaded
   and downloaded bytes, ratio, and bonus), first-page torrent search with
   seeders, leechers, promotion factors, and category names, and torrent detail
   for one remote ID, through one read-only POST per invocation to the official
-  JSON API, authenticated by a site-issued API key read only from stdin, with
-  no redirect, proxy, or retry;
+  JSON API, authenticated by a site-issued API key saved by `site login` or
+  piped on stdin, with no redirect, proxy, or retry;
 - an explicitly acknowledged M-Team metafile fetch for one remote ID: one
   token POST for a signed download link, one credential-free GET of that link,
   and at most one further GET only for a redirect to an M-Team HTTPS host, with

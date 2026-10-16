@@ -40,8 +40,11 @@ flowchart LR
 `internal/site/sites` is the only place the CLI learns which sites exist. For
 each command, the CLI looks up the adapter by site ID, checks that the
 descriptor declares the capability and the auth method, asserts the typed port,
-and only then reads the credential from stdin. Adapters never see filesystem
-handles, stores, or downloader state.
+and only then reads the credential, from stdin when a flag names it or else
+from the file `site login` saved (`internal/cli/saved_credentials.go`). A new
+site gets both sources and `site login --cookie-stdin|--api-key-stdin` without
+CLI changes. Adapters never see filesystem handles, stores, or downloader
+state.
 
 ## Step by step
 
