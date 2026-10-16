@@ -56,6 +56,7 @@ type Adapter struct {
 
 type guardedClient interface {
 	PostReadOnce(context.Context, string, string, []byte, string, int64, int64, int64) (httpguard.StrictResponse, error)
+	RequestsMade() int
 	Close() error
 }
 
@@ -86,6 +87,7 @@ func (a *Adapter) Descriptor() domain.SiteDescriptor {
 			domain.CapabilityAuthCheck,
 			domain.CapabilityAccountRead,
 			domain.CapabilitySearch,
+			domain.CapabilityDetail,
 		},
 	}
 }

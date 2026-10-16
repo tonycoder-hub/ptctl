@@ -23,12 +23,21 @@ type fakeTorrentDetailAdapter struct {
 	closeErr   error
 	opened     int
 	credential string
+	// authMethod is the one method the fake declares; empty means a cookie.
+	authMethod domain.AuthMethod
 }
 
-func (*fakeTorrentDetailAdapter) Descriptor() domain.SiteDescriptor {
+func (adapter *fakeTorrentDetailAdapter) method() domain.AuthMethod {
+	if adapter.authMethod == "" {
+		return domain.AuthMethodCookieHeader
+	}
+	return adapter.authMethod
+}
+
+func (adapter *fakeTorrentDetailAdapter) Descriptor() domain.SiteDescriptor {
 	return domain.SiteDescriptor{
 		ID: "fakept", Name: "Fake PT", BaseURL: "https://fake.invalid/", Stability: "test",
-		AuthMethods:  []domain.AuthMethod{domain.AuthMethodCookieHeader},
+		AuthMethods:  []domain.AuthMethod{adapter.method()},
 		Capabilities: []domain.Capability{domain.CapabilityDetail},
 	}
 }
@@ -55,7 +64,7 @@ func (adapter *fakeTorrentDetailAdapter) OpenTorrentDetailSession(ctx context.Co
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if credential.Method() != domain.AuthMethodCookieHeader || credential.SecretValue() == "" {
+	if credential.Method() != adapter.method() || credential.SecretValue() == "" {
 		return nil, fmt.Errorf("invalid credential")
 	}
 	adapter.credential = credential.SecretValue()

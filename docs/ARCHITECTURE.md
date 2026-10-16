@@ -533,6 +533,15 @@ invocation to show that the selected remote-ID page was observed. It does not
 bind the site ID to a whole-raw metafile variant, cannot replace the historical
 exact fetch binding, and cannot upgrade any local or downloader evidence axis.
 
+The M-Team route `mteam.torrent_detail_api.v1` is the second implementation
+of the same port. It authenticates with the API key header and sends one
+bounded multipart `POST /api/torrent/detail` carrying only the ID, never the
+separate view-counting endpoint the website also calls. It accepts only a code
+`0` JSON answer that echoes the exact ID and has a name, and never reports a
+download reference. The CLI picks its warning sentence by route ID, so each
+route states its own no-counter choice. Reconciliation still opens detail
+sessions with a cookie only, so it does not consume this route yet.
+
 Downloader ledgers expose normalized capabilities separately:
 algorithm-tagged infohashes, content paths, raw metafiles, and indexed job
 files. Both built-in read adapters declare indexed job files only when they can

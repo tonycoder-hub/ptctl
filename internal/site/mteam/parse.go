@@ -146,6 +146,7 @@ func parseSearch(data json.RawMessage) ([]domain.TorrentSummary, error) {
 		}
 		if canonicalID(item.Category.value) {
 			summary.Category = item.Category.value
+			summary.CategoryName = categoryName(item.Category.value)
 		}
 		if status := item.Status; status != nil {
 			summary.Seeders = count(status.Seeders)

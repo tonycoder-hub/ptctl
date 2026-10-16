@@ -107,15 +107,18 @@ type SiteMetafileObservation struct {
 }
 
 type TorrentSummary struct {
-	Ref         TorrentRef `json:"ref"`
-	Name        string     `json:"name"`
-	SizeBytes   *int64     `json:"size_bytes,omitempty"`
-	Seeders     *int       `json:"seeders,omitempty"`
-	Leechers    *int       `json:"leechers,omitempty"`
-	Snatches    *int       `json:"snatches,omitempty"`
-	Category    string     `json:"category,omitempty"`
-	PublishedAt *time.Time `json:"published_at,omitempty"`
-	Promotion   *Promotion `json:"promotion,omitempty"`
+	Ref       TorrentRef `json:"ref"`
+	Name      string     `json:"name"`
+	SizeBytes *int64     `json:"size_bytes,omitempty"`
+	Seeders   *int       `json:"seeders,omitempty"`
+	Leechers  *int       `json:"leechers,omitempty"`
+	Snatches  *int       `json:"snatches,omitempty"`
+	Category  string     `json:"category,omitempty"`
+	// CategoryName is the site's display name for Category, when the adapter
+	// knows it. Category stays the stable site-assigned identifier.
+	CategoryName string     `json:"category_name,omitempty"`
+	PublishedAt  *time.Time `json:"published_at,omitempty"`
+	Promotion    *Promotion `json:"promotion,omitempty"`
 }
 
 // TorrentDetail is a bounded, public projection of one authenticated site
